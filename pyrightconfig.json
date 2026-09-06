@@ -1,0 +1,15 @@
+{
+  "executionEnvironments": [
+    {
+      "root": "spike",
+      "venvPath": "spike",
+      "venv": ".venv",
+      "reportMissingImports": "error"
+    },
+    {
+      "root": "backend",
+      "venvPath": "backend",
+      "venv": ".venv"
+    }
+  ]
+}
