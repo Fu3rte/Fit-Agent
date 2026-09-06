@@ -16,7 +16,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from pydantic_ai import RunContext  # noqa: E402
+from pydantic_ai import (
+    RunContext,  # noqa: E402  # pyright: ignore[reportMissingImports]  # venv 内依赖：运行时+主 LSP 均已验证
+)
 
 from spike_lib.fee_guard import StopSpike  # noqa: E402
 from spike_lib.ledger import PersistentFeeGuard  # noqa: E402
@@ -47,7 +49,9 @@ def _wire_request_view(req) -> dict:
         "url": req.url,
         "raw_bytes_len": len(req.raw),
         "body": req.body,
-        "wire_messages_elements_bytes": [m.decode("utf-8") for m in req.wire_elements("messages")],
+        "wire_messages_elements_bytes": [
+            m.decode("utf-8") for m in req.wire_elements("messages")
+        ],
         "wire_tools_array_bytes": req.wire_array("tools").decode("utf-8"),
     }
 
@@ -82,6 +86,7 @@ def _fee_view(guard: PersistentFeeGuard) -> dict:
 def _write_evidence(phase: str, payload: dict) -> Path:
     EVIDENCE_DIR.mkdir(parents=True, exist_ok=True)
     out = EVIDENCE_DIR / f"{phase}.json"
+    # pi-lens-ignore: python-path-traversal
     out.write_text(json.dumps(payload, ensure_ascii=False, indent=1), encoding="utf-8")
     return out
 
@@ -95,7 +100,11 @@ class _Phase:
         self.captured: list = []
         self.timeline: list[str] = []
         self.chunk1_hook: Callable[[], None] | None = None  # 首 chunk 同步取消钩子
-        self.payload: dict = {"phase": phase, "model_requested": model, "started_at": _now()}
+        self.payload: dict = {
+            "phase": phase,
+            "model_requested": model,
+            "started_at": _now(),
+        }
         self.api_key = read_api_key_from_env()  # 缺失即拒绝（不显示值）
         self.guard = PersistentFeeGuard(LEDGER_PATH)
 
@@ -126,20 +135,28 @@ class _Phase:
             self.payload.update(extra)
         out = _write_evidence(self.phase, self.payload)
         print(f"[{self.phase}] evidence -> {out}")
-        print(f"[{self.phase}] settled=${self.guard.settled_usd} reserved=${self.guard.reserved_usd} "
-              f"calls={len(self.guard.calls)} stopped={self.guard.stopped}")
+        print(
+            f"[{self.phase}] settled=${self.guard.settled_usd} reserved=${self.guard.reserved_usd} "
+            f"calls={len(self.guard.calls)} stopped={self.guard.stopped}"
+        )
         return out
 
 
 def _prefix_checks(r1a, r1b, r2a) -> dict:
     """字节级前缀稳定检查（真实 wire 字节，非再序列化）：
     r1a=run1 请求1，r1b=run1 工具往返请求2，r2a=run2 追加请求1。"""
-    m1a, m1b, m2a = r1a.wire_elements("messages"), r1b.wire_elements("messages"), r2a.wire_elements("messages")
+    m1a, m1b, m2a = (
+        r1a.wire_elements("messages"),
+        r1b.wire_elements("messages"),
+        r2a.wire_elements("messages"),
+    )
     return {
         "resident_layer_byte_stable": m1a[0] == m1b[0] == m2a[0],
         "tool_roundtrip_prefix_byte_stable": m1a[:2] == m1b[:2],
         "append_prefix_byte_stable": m1b[:4] == m2a[:4],
-        "tools_schema_byte_stable": r1a.wire_array("tools") == r1b.wire_array("tools") == r2a.wire_array("tools"),
+        "tools_schema_byte_stable": r1a.wire_array("tools")
+        == r1b.wire_array("tools")
+        == r2a.wire_array("tools"),
         "message_counts": {"r1a": len(m1a), "r1b": len(m1b), "r2a": len(m2a)},
     }
 
@@ -149,11 +166,18 @@ async def flash_regression() -> None:
     error: str | None = None
     try:
         agent = phase.build_agent(tools=[lookup_equipment])
-        res1 = await agent.run("必须调用工具 lookup_equipment 查询 barbell 的可用性，然后用一句话回答。")
-        res2 = await agent.run("继续：把上一条结果压缩成不超过二十字的结论。", message_history=res1.all_messages())
+        res1 = await agent.run(
+            "必须调用工具 lookup_equipment 查询 barbell 的可用性，然后用一句话回答。"
+        )
+        res2 = await agent.run(
+            "继续：把上一条结果压缩成不超过二十字的结论。",
+            message_history=res1.all_messages(),
+        )
         n_before_cancel = len(phase.captured)
         if len(phase.captured) < 3:
-            raise RuntimeError(f"预期至少 3 个 wire 请求（工具往返+追加），实际 {len(phase.captured)}")
+            raise RuntimeError(
+                f"预期至少 3 个 wire 请求（工具往返+追加），实际 {len(phase.captured)}"
+            )
         checks = _prefix_checks(phase.captured[0], phase.captured[1], phase.captured[2])
         for name in (
             "resident_layer_byte_stable",
@@ -175,7 +199,9 @@ async def flash_regression() -> None:
         phase.chunk1_hook = _cancel_on_first_chunk
         harness_holder["h"] = RunHarness(phase.build_agent())
         outcome = await harness_holder["h"].run(
-            "请用大约一百字说明深蹲的常见注意事项。", timeline=phase.timeline, stream=True
+            "请用大约一百字说明深蹲的常见注意事项。",
+            timeline=phase.timeline,
+            stream=True,
         )
         no_subsequent = len(phase.captured) == n_before_cancel + 1
         last = phase.guard.calls[-1]
@@ -195,7 +221,9 @@ async def flash_regression() -> None:
         }
         for name, ok in cancel_checks.items():
             if not ok:
-                raise AssertionError(f"真实流式取消语义检查失败：{name}；check={cancel_check}")
+                raise AssertionError(
+                    f"真实流式取消语义检查失败：{name}；check={cancel_check}"
+                )
         phase.payload["prefix_checks"] = checks
         phase.payload["cancel_check"] = cancel_check
         phase.payload["run2_output_len"] = len(res2.output or "")
@@ -220,8 +248,12 @@ async def smoke(model: str, phase_name: str) -> None:
         result = await agent.run("文本冒烟：请用一句话说明什么是器械训练。")
         last = phase.guard.calls[-1]
         if last.settled_usd is None:
-            raise AssertionError(f"{phase_name}: 最终调用未结算（usage 缺失或身份异常）：note={last.note}")
-        phase.finish({"output_preview": (result.output or "")[:200], "final_note": last.note})
+            raise AssertionError(
+                f"{phase_name}: 最终调用未结算（usage 缺失或身份异常）：note={last.note}"
+            )
+        phase.finish(
+            {"output_preview": (result.output or "")[:200], "final_note": last.note}
+        )
     except BaseException as exc:
         error = f"{type(exc).__name__}: {exc}"
         raise
@@ -239,7 +271,9 @@ def main() -> None:
     phases = {
         "flash-regression": lambda: asyncio.run(flash_regression()),
         "pro-smoke": lambda: asyncio.run(smoke("deepseek-v4-pro", "pro-smoke")),
-        "vision-smoke": lambda: asyncio.run(smoke("deepseek-v4-flash-vision-exp", "vision-smoke")),
+        "vision-smoke": lambda: asyncio.run(
+            smoke("deepseek-v4-flash-vision-exp", "vision-smoke")
+        ),
     }
     if phase not in phases:
         raise SystemExit(f"用法: real_spike.py {' | '.join(phases)}")

@@ -11,7 +11,9 @@ from spike_lib.ledger import LedgerCorrupt, LedgerLocked, PersistentFeeGuard
 
 FLASH = "deepseek-v4-flash"
 PRO = "deepseek-v4-pro"
-OFF_PEAK = __import__("datetime").datetime(2026, 9, 6, 12, 0, tzinfo=__import__("datetime").timezone.utc)
+OFF_PEAK = __import__("datetime").datetime(
+    2026, 9, 6, 12, 0, tzinfo=__import__("datetime").timezone.utc
+)
 
 
 def _read_state(path):
@@ -38,7 +40,11 @@ def test_settle_persisted_across_restart(tmp_path):
     path = tmp_path / "ledger.json"
     g = PersistentFeeGuard(path)
     res = g.reserve(FLASH, input_tokens_reserve=10_000)
-    usage = {"prompt_tokens": 1000, "completion_tokens": 10, "prompt_cache_hit_tokens": 0}
+    usage = {
+        "prompt_tokens": 1000,
+        "completion_tokens": 10,
+        "prompt_cache_hit_tokens": 0,
+    }
     cost = g.settle(res, usage, now_utc=OFF_PEAK, model=FLASH)
     g.close()
     g2 = PersistentFeeGuard(path)
@@ -115,8 +121,18 @@ def test_corrupt_json_refuses_and_does_not_overwrite(tmp_path):
         lambda s: s.update(settled_usd="-1.0"),
         lambda s: s.update(settled_usd=0.5),  # JSON 数值：非十进制字符串，拒绝
         lambda s: s.update(reserved_usd="abc"),
-        lambda s: s.update(calls=[{"model": "deepseek-v4-not-real", "reserved_usd": "0", "settled_usd": None,
-                                  "usage_raw": None, "expected_min_usd": None, "note": None}]),
+        lambda s: s.update(
+            calls=[
+                {
+                    "model": "deepseek-v4-not-real",
+                    "reserved_usd": "0",
+                    "settled_usd": None,
+                    "usage_raw": None,
+                    "expected_min_usd": None,
+                    "note": None,
+                }
+            ]
+        ),
         lambda s: s.update(calls=[{"model": FLASH}]),
         lambda s: s.update(stopped=123),
         lambda s: s.update(settled_usd="9.9", reserved_usd="0.5"),  # 加载即超硬顶
@@ -126,16 +142,34 @@ def test_valid_json_wrong_shape_refuses(tmp_path, mutation):
     path = tmp_path / "ledger.json"
     g = FeeGuard()
     res = g.reserve(FLASH, input_tokens_reserve=1000)
-    g.settle(res, {"prompt_tokens": 10, "completion_tokens": 1, "prompt_cache_hit_tokens": 0},
-             now_utc=OFF_PEAK, model=FLASH)
-    path.write_text(json.dumps({
-        "version": 1,
-        "settled_usd": str(g.settled_usd),
-        "reserved_usd": "0",
-        "stopped": None,
-        "calls": [{"model": FLASH, "reserved_usd": str(res.usd), "settled_usd": str(g.settled_usd),
-                   "usage_raw": {"prompt_tokens": 10}, "expected_min_usd": None, "note": None}],
-    }, ensure_ascii=False), encoding="utf-8")
+    g.settle(
+        res,
+        {"prompt_tokens": 10, "completion_tokens": 1, "prompt_cache_hit_tokens": 0},
+        now_utc=OFF_PEAK,
+        model=FLASH,
+    )
+    path.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "settled_usd": str(g.settled_usd),
+                "reserved_usd": "0",
+                "stopped": None,
+                "calls": [
+                    {
+                        "model": FLASH,
+                        "reserved_usd": str(res.usd),
+                        "settled_usd": str(g.settled_usd),
+                        "usage_raw": {"prompt_tokens": 10},
+                        "expected_min_usd": None,
+                        "note": None,
+                    }
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
     state = _read_state(path)
     mutation(state)
     path.write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
@@ -168,12 +202,22 @@ def test_anomaly_window_survives_restart(tmp_path):
     g = PersistentFeeGuard(path)
     for _ in range(9):
         res = g.reserve(FLASH, input_tokens_reserve=1000)
-        g.settle(res, {"prompt_tokens": 0, "completion_tokens": 0}, now_utc=OFF_PEAK, model=FLASH)
+        g.settle(
+            res,
+            {"prompt_tokens": 0, "completion_tokens": 0},
+            now_utc=OFF_PEAK,
+            model=FLASH,
+        )
     g.close()
     g2 = PersistentFeeGuard(path)
     res10 = g2.reserve(FLASH, input_tokens_reserve=1000)
     with pytest.raises(StopSpike, match="费用为 0"):
-        g2.settle(res10, {"prompt_tokens": 0, "completion_tokens": 0}, now_utc=OFF_PEAK, model=FLASH)
+        g2.settle(
+            res10,
+            {"prompt_tokens": 0, "completion_tokens": 0},
+            now_utc=OFF_PEAK,
+            model=FLASH,
+        )
     g2.close()
     g3 = PersistentFeeGuard(path)
     assert g3.stopped is not None and "费用为 0" in g3.stopped  # 停止位已持久化
@@ -185,7 +229,9 @@ def test_threshold_auto_stop_persisted_on_settle(tmp_path):
     g = PersistentFeeGuard(path)
     res = g.reserve(PRO, input_tokens_reserve=3_900_000)  # 一次跨过 $5 自动停
     with pytest.raises(StopSpike, match="自动停"):
-        g.settle(res, None, now_utc=OFF_PEAK, model=PRO)  # usage 缺失 → 预留保留 → 自动停
+        g.settle(
+            res, None, now_utc=OFF_PEAK, model=PRO
+        )  # usage 缺失 → 预留保留 → 自动停
     g.close()
     g2 = PersistentFeeGuard(path)
     assert g2.stopped is not None and "自动停" in g2.stopped
@@ -200,8 +246,16 @@ def test_settle_validation_failure_persisted(tmp_path):
     g = PersistentFeeGuard(path)
     res = g.reserve(FLASH, input_tokens_reserve=10_000)
     with pytest.raises(StopSpike):
-        g.settle(res, {"prompt_tokens": 1000, "completion_tokens": 5, "prompt_cache_hit_tokens": "700"},
-                 now_utc=OFF_PEAK, model=FLASH)
+        g.settle(
+            res,
+            {
+                "prompt_tokens": 1000,
+                "completion_tokens": 5,
+                "prompt_cache_hit_tokens": "700",
+            },
+            now_utc=OFF_PEAK,
+            model=FLASH,
+        )
     g.close()
     g2 = PersistentFeeGuard(path)
     assert g2.stopped is not None

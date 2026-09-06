@@ -10,7 +10,8 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
-import httpx2 as httpx
+# pi-lens-ignore: reportMissingImports（venv 内依赖；真 pyright 三种 cwd 实测 0 error，见会话记录）
+import httpx2 as httpx  # pyright: ignore[reportMissingImports]  # venv 内依赖：运行时+主 LSP 均已验证
 
 
 @dataclass
@@ -25,42 +26,58 @@ class CapturedRequest:
         """顶层数组 key 的逐元素原始字节切片（未重排、未再序列化）。"""
         from spike_lib.guard_transport import CapturedWireRequest
 
-        return CapturedWireRequest(url=self.url, body=self.body, raw=self.raw).wire_elements(key)
+        return CapturedWireRequest(
+            url=self.url, body=self.body, raw=self.raw
+        ).wire_elements(key)
 
     def wire_array(self, key: str) -> bytes:
         from spike_lib.guard_transport import CapturedWireRequest
 
-        return CapturedWireRequest(url=self.url, body=self.body, raw=self.raw).wire_array(key)
+        return CapturedWireRequest(
+            url=self.url, body=self.body, raw=self.raw
+        ).wire_array(key)
 
     # ---- 规范化比较（仅作语义辅助证据，不能替代 wire 字节证据）----
     def canonical(self, *keys: str) -> bytes:
         payload = self.body
         for key in keys:
             payload = payload[key]
-        return json.dumps(payload, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode()
+        return json.dumps(
+            payload, sort_keys=True, ensure_ascii=False, separators=(",", ":")
+        ).encode()
 
     def message_prefix(self, n: int) -> list[bytes]:
         """逐元素规范化前 n 条消息（辅助证据）。"""
         return [
-            json.dumps(m, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode()
+            json.dumps(
+                m, sort_keys=True, ensure_ascii=False, separators=(",", ":")
+            ).encode()
             for m in self.body["messages"][:n]
         ]
 
 
-def _completion_response(model: str | None, content: str, usage: dict[str, Any]) -> dict[str, Any]:
+def _completion_response(
+    model: str | None, content: str, usage: dict[str, Any]
+) -> dict[str, Any]:
     return {
         "id": "chatcmpl-spike",
         "object": "chat.completion",
         "created": 0,
         "model": model,
         "choices": [
-            {"index": 0, "message": {"role": "assistant", "content": content}, "finish_reason": "stop"}
+            {
+                "index": 0,
+                "message": {"role": "assistant", "content": content},
+                "finish_reason": "stop",
+            }
         ],
         "usage": usage,
     }
 
 
-def _tool_call_response(model: str | None, call_id: str, name: str, arguments: str, usage: dict[str, Any]) -> dict[str, Any]:
+def _tool_call_response(
+    model: str | None, call_id: str, name: str, arguments: str, usage: dict[str, Any]
+) -> dict[str, Any]:
     return {
         "id": "chatcmpl-spike",
         "object": "chat.completion",
@@ -73,7 +90,11 @@ def _tool_call_response(model: str | None, call_id: str, name: str, arguments: s
                     "role": "assistant",
                     "content": None,
                     "tool_calls": [
-                        {"id": call_id, "type": "function", "function": {"name": name, "arguments": arguments}}
+                        {
+                            "id": call_id,
+                            "type": "function",
+                            "function": {"name": name, "arguments": arguments},
+                        }
                     ],
                 },
                 "finish_reason": "tool_calls",
@@ -137,17 +158,37 @@ class ScriptedTransport:
 
     async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
         raw = request.content
-        body = json.loads(raw.decode("utf-8"))
-        self.captured.append(CapturedRequest(method=request.method, url=str(request.url), body=body, raw=raw))
+        try:
+            body = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            # 桩 transport 收到非法 wire 请求体 = 测试装置 bug，显式失败而非静默崩渣。
+            raise AssertionError(
+                f"ScriptedTransport: wire 请求体非法 JSON（{type(exc).__name__}）"
+            ) from exc
+        self.captured.append(
+            CapturedRequest(
+                method=request.method, url=str(request.url), body=body, raw=raw
+            )
+        )
         self._event("model_request")
         if not self.script:
-            raise AssertionError("ScriptedTransport: 脚本已耗尽，仍有请求到达（可能是取消后继续调用）")
+            raise AssertionError(
+                "ScriptedTransport: 脚本已耗尽，仍有请求到达（可能是取消后继续调用）"
+            )
         item = self.script.pop(0)
         if isinstance(item, Exception):
             raise item
         status = item.get("status", 200)
         if status != 200:
-            return httpx.Response(status, json={"error": {"message": item.get("error_message", "spike scripted error"), "type": "spike_error"}})
+            return httpx.Response(
+                status,
+                json={
+                    "error": {
+                        "message": item.get("error_message", "spike scripted error"),
+                        "type": "spike_error",
+                    }
+                },
+            )
         # 响应身份：默认回显请求 model；测试可用 item["model"] 覆盖（含缺失：item["omit_model"]=True）。
         model = body["model"]
         if item.get("model") is not None:
@@ -155,36 +196,68 @@ class ScriptedTransport:
         if item.get("omit_model"):
             model = None
         usage = item["usage"]
-        if body.get("stream") is True:
+        if body.get("stream"):
             return self._sse_response(model, item, usage)
         if "tool_call" in item:
             tc = item["tool_call"]
-            response = _tool_call_response(model, tc["id"], tc["name"], tc["arguments"], usage)
+            response = _tool_call_response(
+                model, tc["id"], tc["name"], tc["arguments"], usage
+            )
         else:
             response = _completion_response(model, item.get("content", "ok"), usage)
         if model is None:
             response.pop("model", None)
         return httpx.Response(200, json=response)
 
-    def _sse_response(self, model: str | None, item: dict[str, Any], usage: dict[str, Any]) -> httpx.Response:
+    def _sse_response(
+        self, model: str | None, item: dict[str, Any], usage: dict[str, Any]
+    ) -> httpx.Response:
         content = item.get("content", "ok")
         tool_call = item.get("tool_call")
-        chunk_count = item.get("sse_chunks", 3)  # 内容拆成多 chunk，保证"首 chunk 后取消"可测
+        chunk_count = item.get(
+            "sse_chunks", 3
+        )  # 内容拆成多 chunk，保证"首 chunk 后取消"可测
         chunks: list[dict[str, Any]] = []
-        base: dict[str, Any] = {"id": "chatcmpl-spike", "object": "chat.completion.chunk", "created": 0}
+        base: dict[str, Any] = {
+            "id": "chatcmpl-spike",
+            "object": "chat.completion.chunk",
+            "created": 0,
+        }
         if model is not None:
             base["model"] = model
 
-        def _add(delta: dict[str, Any], finish: str | None = None, with_usage: bool = False) -> None:
-            chunk = {**base, "choices": [{"index": 0, "delta": delta, "finish_reason": finish}]}
+        def _add(
+            delta: dict[str, Any], finish: str | None = None, with_usage: bool = False
+        ) -> None:
+            chunk = {
+                **base,
+                "choices": [{"index": 0, "delta": delta, "finish_reason": finish}],
+            }
             if with_usage:
                 chunk["usage"] = usage
             chunks.append(chunk)
 
         _add({"role": "assistant"})
         if tool_call is not None:
-            _add({"tool_calls": [{"index": 0, "id": tool_call["id"], "type": "function", "function": {"name": tool_call["name"], "arguments": ""}}]})
-            _add({"tool_calls": [{"index": 0, "function": {"arguments": tool_call["arguments"]}}]})
+            _add(
+                {
+                    "tool_calls": [
+                        {
+                            "index": 0,
+                            "id": tool_call["id"],
+                            "type": "function",
+                            "function": {"name": tool_call["name"], "arguments": ""},
+                        }
+                    ]
+                }
+            )
+            _add(
+                {
+                    "tool_calls": [
+                        {"index": 0, "function": {"arguments": tool_call["arguments"]}}
+                    ]
+                }
+            )
             finish = "tool_calls"
         else:
             # 内容均分为 chunk_count 个 delta chunk
@@ -200,5 +273,8 @@ class ScriptedTransport:
         return httpx.Response(
             200,
             headers={"content-type": "text/event-stream"},
-            stream=_ScriptedStream([line.encode("utf-8") for line in lines], item.get("chunk_delay", self.chunk_delay)),
+            stream=_ScriptedStream(
+                [line.encode("utf-8") for line in lines],
+                item.get("chunk_delay", self.chunk_delay),
+            ),
         )

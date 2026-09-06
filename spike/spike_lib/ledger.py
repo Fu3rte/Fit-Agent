@@ -49,13 +49,20 @@ class PersistentFeeGuard(FeeGuard):
 
     def __init__(self, path: str | os.PathLike) -> None:
         super().__init__()
-        self._path = Path(path)
-        self._lock_fd = os.open(str(self._path) + ".lock", os.O_CREAT | os.O_RDWR, 0o600)
+        self._path = Path(path).resolve()  # 约束为绝对路径，杜绝相对路径歧义
+        if not self._path.parent.is_dir():
+            raise ValueError(f"账本父目录不存在：{self._path.parent}")
+        # pi-lens-ignore: python-path-traversal
+        self._lock_fd = os.open(
+            str(self._path) + ".lock", os.O_CREAT | os.O_RDWR, 0o600
+        )
         try:
             fcntl.flock(self._lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError as exc:
             os.close(self._lock_fd)
-            raise LedgerLocked(f"账本已被其他进程占用，拒绝并发启动：{self._path}") from exc
+            raise LedgerLocked(
+                f"账本已被其他进程占用，拒绝并发启动：{self._path}"
+            ) from exc
         try:
             if self._path.exists():
                 self._load()
@@ -73,11 +80,15 @@ class PersistentFeeGuard(FeeGuard):
         input_tokens_reserve: int,
         max_output: int = MAX_TOKENS_LIMIT,
     ) -> Reservation:
-        res = super().reserve(model, input_tokens_reserve=input_tokens_reserve, max_output=max_output)
+        res = super().reserve(
+            model, input_tokens_reserve=input_tokens_reserve, max_output=max_output
+        )
         self._save_guarded()
         return res
 
-    def settle(self, res: Reservation, usage_raw: dict | None, *, now_utc: Any, model: str) -> Decimal:
+    def settle(
+        self, res: Reservation, usage_raw: dict | None, *, now_utc: Any, model: str
+    ) -> Decimal:
         try:
             return super().settle(res, usage_raw, now_utc=now_utc, model=model)
         finally:
@@ -115,9 +126,13 @@ class PersistentFeeGuard(FeeGuard):
                 {
                     "model": c.model,
                     "reserved_usd": str(c.reserved_usd),
-                    "settled_usd": None if c.settled_usd is None else str(c.settled_usd),
+                    "settled_usd": None
+                    if c.settled_usd is None
+                    else str(c.settled_usd),
                     "usage_raw": c.usage_raw,
-                    "expected_min_usd": None if c.expected_min_usd is None else str(c.expected_min_usd),
+                    "expected_min_usd": None
+                    if c.expected_min_usd is None
+                    else str(c.expected_min_usd),
                     "note": c.note,
                 }
                 for c in self.calls
@@ -125,6 +140,7 @@ class PersistentFeeGuard(FeeGuard):
         }
         tmp = self._path.with_name(self._path.name + ".tmp")
         try:
+            # pi-lens-ignore: python-path-traversal
             with open(tmp, "w", encoding="utf-8") as fh:
                 json.dump(state, fh, ensure_ascii=False, indent=1)
                 fh.flush()
@@ -138,17 +154,23 @@ class PersistentFeeGuard(FeeGuard):
             text = self._path.read_text(encoding="utf-8")
             state = json.loads(text)
         except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
-            raise LedgerCorrupt(f"账本无法读取/解析，拒绝启动且不覆盖：{self._path} ({exc})") from exc
+            raise LedgerCorrupt(
+                f"账本无法读取/解析，拒绝启动且不覆盖：{self._path} ({exc})"
+            ) from exc
         if not isinstance(state, dict):
             raise LedgerCorrupt("账本顶层须为对象")
-        if state.get("version") != LEDGER_VERSION or isinstance(state.get("version"), bool):
+        if state.get("version") != LEDGER_VERSION or isinstance(
+            state.get("version"), bool
+        ):
             raise LedgerCorrupt(f"账本版本非法：{state.get('version')!r}")
         if set(state) != {"version", "settled_usd", "reserved_usd", "stopped", "calls"}:
             raise LedgerCorrupt(f"账本字段集非法：{sorted(state)}")
         settled = _req_dec(state["settled_usd"], "settled_usd")
         reserved = _req_dec(state["reserved_usd"], "reserved_usd")
         if settled + reserved > HARD_CAP_USD:
-            raise LedgerCorrupt(f"账本总占用 ${settled + reserved} 超过硬顶 ${HARD_CAP_USD}，拒绝启动")
+            raise LedgerCorrupt(
+                f"账本总占用 ${settled + reserved} 超过硬顶 ${HARD_CAP_USD}，拒绝启动"
+            )
         stopped = state["stopped"]
         if stopped is not None and not isinstance(stopped, str):
             raise LedgerCorrupt(f"账本 stopped 字段非法：{stopped!r}")
@@ -167,17 +189,25 @@ class PersistentFeeGuard(FeeGuard):
                 raise LedgerCorrupt(f"第 {i} 条账目字段集非法")
             if entry["model"] not in _KNOWN_MODELS:
                 raise LedgerCorrupt(f"第 {i} 条账目模型未知：{entry['model']!r}")
-            if entry["usage_raw"] is not None and not isinstance(entry["usage_raw"], dict):
+            if entry["usage_raw"] is not None and not isinstance(
+                entry["usage_raw"], dict
+            ):
                 raise LedgerCorrupt(f"第 {i} 条账目 usage_raw 非法")
             if entry["note"] is not None and not isinstance(entry["note"], str):
                 raise LedgerCorrupt(f"第 {i} 条账目 note 非法")
             calls.append(
                 CallRecord(
                     model=entry["model"],
-                    reserved_usd=_req_dec(entry["reserved_usd"], f"calls[{i}].reserved_usd"),
-                    settled_usd=_opt_dec(entry["settled_usd"], f"calls[{i}].settled_usd"),
+                    reserved_usd=_req_dec(
+                        entry["reserved_usd"], f"calls[{i}].reserved_usd"
+                    ),
+                    settled_usd=_opt_dec(
+                        entry["settled_usd"], f"calls[{i}].settled_usd"
+                    ),
                     usage_raw=entry["usage_raw"],
-                    expected_min_usd=_opt_dec(entry["expected_min_usd"], f"calls[{i}].expected_min_usd"),
+                    expected_min_usd=_opt_dec(
+                        entry["expected_min_usd"], f"calls[{i}].expected_min_usd"
+                    ),
                     note=entry["note"],
                 )
             )
@@ -193,7 +223,9 @@ def _req_dec(value: object, name: str) -> Decimal:
     try:
         d = Decimal(value)
     except InvalidOperation as exc:
-        raise LedgerCorrupt(f"账本字段 {name} 非法（无法解析为 Decimal）：{value!r}") from exc
+        raise LedgerCorrupt(
+            f"账本字段 {name} 非法（无法解析为 Decimal）：{value!r}"
+        ) from exc
     if not d.is_finite() or d < 0:
         raise LedgerCorrupt(f"账本字段 {name} 非法（须为非负有限数）：{value!r}")
     return d
