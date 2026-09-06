@@ -1,0 +1,197 @@
+{
+  "captured": [
+    {
+      "url": "https://api.deepseek.com/chat/completions",
+      "raw_bytes_len": 538,
+      "body": {
+        "messages": [
+          {
+            "role": "system",
+            "content": "常驻层：你是 Fit-Agent 计划助手。常驻层：你是 Fit-Agent 计划助手。"
+          },
+          {
+            "role": "user",
+            "content": "查看器械 barbell"
+          }
+        ],
+        "model": "deepseek-v4-flash",
+        "max_completion_tokens": 256,
+        "stream": false,
+        "tool_choice": "auto",
+        "tools": [
+          {
+            "type": "function",
+            "function": {
+              "name": "lookup_equipment",
+              "description": "查询器械可用性。",
+              "parameters": {
+                "additionalProperties": false,
+                "properties": {
+                  "equipment_name": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "equipment_name"
+                ],
+                "type": "object"
+              },
+              "strict": true
+            }
+          }
+        ]
+      },
+      "wire_messages_elements_bytes": [
+        "{\"role\":\"system\",\"content\":\"常驻层：你是 Fit-Agent 计划助手。常驻层：你是 Fit-Agent 计划助手。\"}",
+        "{\"role\":\"user\",\"content\":\"查看器械 barbell\"}"
+      ],
+      "wire_tools_array_bytes": "[{\"type\":\"function\",\"function\":{\"name\":\"lookup_equipment\",\"description\":\"查询器械可用性。\",\"parameters\":{\"additionalProperties\":false,\"properties\":{\"equipment_name\":{\"type\":\"string\"}},\"required\":[\"equipment_name\"],\"type\":\"object\"},\"strict\":true}}]"
+    },
+    {
+      "url": "https://api.deepseek.com/chat/completions",
+      "raw_bytes_len": 772,
+      "body": {
+        "messages": [
+          {
+            "role": "system",
+            "content": "常驻层：你是 Fit-Agent 计划助手。常驻层：你是 Fit-Agent 计划助手。"
+          },
+          {
+            "role": "user",
+            "content": "查看器械 barbell"
+          },
+          {
+            "role": "assistant",
+            "content": null,
+            "tool_calls": [
+              {
+                "id": "c1",
+                "type": "function",
+                "function": {
+                  "name": "lookup_equipment",
+                  "arguments": "{\"equipment_name\":\"barbell\"}"
+                }
+              }
+            ]
+          },
+          {
+            "role": "tool",
+            "tool_call_id": "c1",
+            "content": "barbell: available"
+          }
+        ],
+        "model": "deepseek-v4-flash",
+        "max_completion_tokens": 256,
+        "stream": false,
+        "tool_choice": "auto",
+        "tools": [
+          {
+            "type": "function",
+            "function": {
+              "name": "lookup_equipment",
+              "description": "查询器械可用性。",
+              "parameters": {
+                "additionalProperties": false,
+                "properties": {
+                  "equipment_name": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "equipment_name"
+                ],
+                "type": "object"
+              },
+              "strict": true
+            }
+          }
+        ]
+      },
+      "wire_messages_elements_bytes": [
+        "{\"role\":\"system\",\"content\":\"常驻层：你是 Fit-Agent 计划助手。常驻层：你是 Fit-Agent 计划助手。\"}",
+        "{\"role\":\"user\",\"content\":\"查看器械 barbell\"}",
+        "{\"role\":\"assistant\",\"content\":null,\"tool_calls\":[{\"id\":\"c1\",\"type\":\"function\",\"function\":{\"name\":\"lookup_equipment\",\"arguments\":\"{\\\"equipment_name\\\":\\\"barbell\\\"}\"}}]}",
+        "{\"role\":\"tool\",\"tool_call_id\":\"c1\",\"content\":\"barbell: available\"}"
+      ],
+      "wire_tools_array_bytes": "[{\"type\":\"function\",\"function\":{\"name\":\"lookup_equipment\",\"description\":\"查询器械可用性。\",\"parameters\":{\"additionalProperties\":false,\"properties\":{\"equipment_name\":{\"type\":\"string\"}},\"required\":[\"equipment_name\"],\"type\":\"object\"},\"strict\":true}}]"
+    },
+    {
+      "url": "https://api.deepseek.com/chat/completions",
+      "raw_bytes_len": 845,
+      "body": {
+        "messages": [
+          {
+            "role": "system",
+            "content": "常驻层：你是 Fit-Agent 计划助手。常驻层：你是 Fit-Agent 计划助手。"
+          },
+          {
+            "role": "user",
+            "content": "查看器械 barbell"
+          },
+          {
+            "role": "assistant",
+            "content": null,
+            "tool_calls": [
+              {
+                "id": "c1",
+                "type": "function",
+                "function": {
+                  "name": "lookup_equipment",
+                  "arguments": "{\"equipment_name\":\"barbell\"}"
+                }
+              }
+            ]
+          },
+          {
+            "role": "tool",
+            "tool_call_id": "c1",
+            "content": "barbell: available"
+          },
+          {
+            "role": "assistant",
+            "content": "done"
+          },
+          {
+            "role": "user",
+            "content": "继续"
+          }
+        ],
+        "model": "deepseek-v4-flash",
+        "max_completion_tokens": 256,
+        "stream": false,
+        "tool_choice": "auto",
+        "tools": [
+          {
+            "type": "function",
+            "function": {
+              "name": "lookup_equipment",
+              "description": "查询器械可用性。",
+              "parameters": {
+                "additionalProperties": false,
+                "properties": {
+                  "equipment_name": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "equipment_name"
+                ],
+                "type": "object"
+              },
+              "strict": true
+            }
+          }
+        ]
+      },
+      "wire_messages_elements_bytes": [
+        "{\"role\":\"system\",\"content\":\"常驻层：你是 Fit-Agent 计划助手。常驻层：你是 Fit-Agent 计划助手。\"}",
+        "{\"role\":\"user\",\"content\":\"查看器械 barbell\"}",
+        "{\"role\":\"assistant\",\"content\":null,\"tool_calls\":[{\"id\":\"c1\",\"type\":\"function\",\"function\":{\"name\":\"lookup_equipment\",\"arguments\":\"{\\\"equipment_name\\\":\\\"barbell\\\"}\"}}]}",
+        "{\"role\":\"tool\",\"tool_call_id\":\"c1\",\"content\":\"barbell: available\"}",
+        "{\"role\":\"assistant\",\"content\":\"done\"}",
+        "{\"role\":\"user\",\"content\":\"继续\"}"
+      ],
+      "wire_tools_array_bytes": "[{\"type\":\"function\",\"function\":{\"name\":\"lookup_equipment\",\"description\":\"查询器械可用性。\",\"parameters\":{\"additionalProperties\":false,\"properties\":{\"equipment_name\":{\"type\":\"string\"}},\"required\":[\"equipment_name\"],\"type\":\"object\"},\"strict\":true}}]"
+    }
+  ]
+}

@@ -1,0 +1,6 @@
+{
+  "venvPath": ".",
+  "venv": ".venv",
+  "include": ["spike_lib", "tests", "scripts"],
+  "reportMissingImports": "error"
+}

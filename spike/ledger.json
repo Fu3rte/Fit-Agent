@@ -1,0 +1,184 @@
+{
+ "version": 1,
+ "settled_usd": "0.001655300",
+ "reserved_usd": "0E-8",
+ "stopped": null,
+ "calls": [
+  {
+   "model": "deepseek-v4-flash",
+   "reserved_usd": "0.00051040",
+   "settled_usd": "0.000139040",
+   "usage_raw": {
+    "prompt_tokens": 407,
+    "completion_tokens": 75,
+    "total_tokens": 482,
+    "prompt_tokens_details": {
+     "cached_tokens": 0
+    },
+    "completion_tokens_details": {
+     "reasoning_tokens": 24
+    },
+    "prompt_cache_hit_tokens": 0,
+    "prompt_cache_miss_tokens": 407
+   },
+   "expected_min_usd": "0.000003374",
+   "note": null
+  },
+  {
+   "model": "deepseek-v4-flash",
+   "reserved_usd": "0.00061424",
+   "settled_usd": "0.000033048",
+   "usage_raw": {
+    "prompt_tokens": 498,
+    "completion_tokens": 8,
+    "total_tokens": 506,
+    "prompt_tokens_details": {
+     "cached_tokens": 384
+    },
+    "completion_tokens_details": {
+     "reasoning_tokens": 0
+    },
+    "prompt_cache_hit_tokens": 384,
+    "prompt_cache_miss_tokens": 114
+   },
+   "expected_min_usd": "0.000003542",
+   "note": null
+  },
+  {
+   "model": "deepseek-v4-flash",
+   "reserved_usd": "0.00065648",
+   "settled_usd": "0.000090028",
+   "usage_raw": {
+    "prompt_tokens": 523,
+    "completion_tokens": 86,
+    "total_tokens": 609,
+    "prompt_tokens_details": {
+     "cached_tokens": 384
+    },
+    "completion_tokens_details": {
+     "reasoning_tokens": 79
+    },
+    "prompt_cache_hit_tokens": 384,
+    "prompt_cache_miss_tokens": 139
+   },
+   "expected_min_usd": "0.000004263",
+   "note": null
+  },
+  {
+   "model": "deepseek-v4-flash",
+   "reserved_usd": "0.00044660",
+   "settled_usd": null,
+   "usage_raw": null,
+   "expected_min_usd": null,
+   "note": "stream_aborted:RuntimeError"
+  },
+  {
+   "model": "deepseek-v4-flash",
+   "reserved_usd": "0.00051040",
+   "settled_usd": "0.000057908",
+   "usage_raw": {
+    "prompt_tokens": 407,
+    "completion_tokens": 76,
+    "total_tokens": 483,
+    "prompt_tokens_details": {
+     "cached_tokens": 384
+    },
+    "completion_tokens_details": {
+     "reasoning_tokens": 25
+    },
+    "prompt_cache_hit_tokens": 384,
+    "prompt_cache_miss_tokens": 23
+   },
+   "expected_min_usd": "0.000003381",
+   "note": null
+  },
+  {
+   "model": "deepseek-v4-flash",
+   "reserved_usd": "0.00061556",
+   "settled_usd": "0.000033268",
+   "usage_raw": {
+    "prompt_tokens": 499,
+    "completion_tokens": 8,
+    "total_tokens": 507,
+    "prompt_tokens_details": {
+     "cached_tokens": 384
+    },
+    "completion_tokens_details": {
+     "reasoning_tokens": 0
+    },
+    "prompt_cache_hit_tokens": 384,
+    "prompt_cache_miss_tokens": 115
+   },
+   "expected_min_usd": "0.000003549",
+   "note": null
+  },
+  {
+   "model": "deepseek-v4-flash",
+   "reserved_usd": "0.00065780",
+   "settled_usd": "0.000073748",
+   "usage_raw": {
+    "prompt_tokens": 524,
+    "completion_tokens": 61,
+    "total_tokens": 585,
+    "prompt_tokens_details": {
+     "cached_tokens": 384
+    },
+    "completion_tokens_details": {
+     "reasoning_tokens": 56
+    },
+    "prompt_cache_hit_tokens": 384,
+    "prompt_cache_miss_tokens": 140
+   },
+   "expected_min_usd": "0.000004095",
+   "note": null
+  },
+  {
+   "model": "deepseek-v4-flash",
+   "reserved_usd": "0.00044660",
+   "settled_usd": null,
+   "usage_raw": null,
+   "expected_min_usd": null,
+   "note": "stream_aborted:RuntimeError"
+  },
+  {
+   "model": "deepseek-v4-pro",
+   "reserved_usd": "0.00131340",
+   "settled_usd": "0.000284460",
+   "usage_raw": {
+    "prompt_tokens": 119,
+    "completion_tokens": 104,
+    "total_tokens": 223,
+    "prompt_tokens_details": {
+     "cached_tokens": 0
+    },
+    "completion_tokens_details": {
+     "reasoning_tokens": 75
+    },
+    "prompt_cache_hit_tokens": 0,
+    "prompt_cache_miss_tokens": 119
+   },
+   "expected_min_usd": "0.000004906",
+   "note": null
+  },
+  {
+   "model": "deepseek-v4-flash-vision-exp",
+   "reserved_usd": "0.00044044",
+   "settled_usd": "0.000050600",
+   "usage_raw": {
+    "prompt_tokens": 119,
+    "completion_tokens": 37,
+    "total_tokens": 156,
+    "prompt_tokens_details": {
+     "cached_tokens": 0
+    },
+    "completion_tokens_details": {
+     "reasoning_tokens": 13
+    },
+    "prompt_cache_hit_tokens": 0,
+    "prompt_cache_miss_tokens": 119
+   },
+   "expected_min_usd": "0.000001092",
+   "note": null
+  }
+ ]
+}

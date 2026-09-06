@@ -1,0 +1,489 @@
+{
+ "phase": "flash-regression",
+ "model_requested": "deepseek-v4-flash",
+ "started_at": "2026-09-06T15:05:29.078137+00:00",
+ "prefix_checks": {
+  "resident_layer_byte_stable": true,
+  "tool_roundtrip_prefix_byte_stable": true,
+  "append_prefix_byte_stable": true,
+  "tools_schema_byte_stable": true,
+  "message_counts": {
+   "r1a": 2,
+   "r1b": 4,
+   "r2a": 6
+  }
+ },
+ "cancel_check": {
+  "status": "cancelled",
+  "events_tail": [
+   "slot_released"
+  ],
+  "last_record_note": "stream_aborted:RuntimeError",
+  "wire_request_count_before_cancel": 3,
+  "wire_request_count_final": 4,
+  "cancelled_status": true,
+  "no_subsequent_wire_request": true,
+  "reservation_retained_not_zero": true,
+  "slot_released_in_timeline": true
+ },
+ "run2_output_len": 5,
+ "finished_at": "2026-09-06T15:05:32.281773+00:00",
+ "events": [
+  "model_request",
+  "reserved:392",
+  "chunk:1",
+  "identity_ok",
+  "settled",
+  "model_request",
+  "reserved:631",
+  "chunk:1",
+  "identity_ok",
+  "settled",
+  "model_request",
+  "reserved:727",
+  "chunk:1",
+  "identity_ok",
+  "settled",
+  "model_request",
+  "reserved:247",
+  "chunk:1",
+  "stream_aborted:RuntimeError",
+  "slot_released"
+ ],
+ "wire_requests": [
+  {
+   "url": "https://api.deepseek.com/chat/completions",
+   "raw_bytes_len": 611,
+   "body": {
+    "messages": [
+     {
+      "role": "system",
+      "content": "常驻层：你是 Fit-Agent 计划助手。常驻层：你是 Fit-Agent 计划助手。"
+     },
+     {
+      "role": "user",
+      "content": "必须调用工具 lookup_equipment 查询 barbell 的可用性，然后用一句话回答。"
+     }
+    ],
+    "model": "deepseek-v4-flash",
+    "max_completion_tokens": 256,
+    "stream": false,
+    "tool_choice": "auto",
+    "tools": [
+     {
+      "type": "function",
+      "function": {
+       "name": "lookup_equipment",
+       "description": "查询器械可用性。",
+       "parameters": {
+        "additionalProperties": false,
+        "properties": {
+         "equipment_name": {
+          "type": "string"
+         }
+        },
+        "required": [
+         "equipment_name"
+        ],
+        "type": "object"
+       },
+       "strict": true
+      }
+     }
+    ]
+   },
+   "wire_messages_elements_bytes": [
+    "{\"role\":\"system\",\"content\":\"常驻层：你是 Fit-Agent 计划助手。常驻层：你是 Fit-Agent 计划助手。\"}",
+    "{\"role\":\"user\",\"content\":\"必须调用工具 lookup_equipment 查询 barbell 的可用性，然后用一句话回答。\"}"
+   ],
+   "wire_tools_array_bytes": "[{\"type\":\"function\",\"function\":{\"name\":\"lookup_equipment\",\"description\":\"查询器械可用性。\",\"parameters\":{\"additionalProperties\":false,\"properties\":{\"equipment_name\":{\"type\":\"string\"}},\"required\":[\"equipment_name\"],\"type\":\"object\"},\"strict\":true}}]"
+  },
+  {
+   "url": "https://api.deepseek.com/chat/completions",
+   "raw_bytes_len": 1036,
+   "body": {
+    "messages": [
+     {
+      "role": "system",
+      "content": "常驻层：你是 Fit-Agent 计划助手。常驻层：你是 Fit-Agent 计划助手。"
+     },
+     {
+      "role": "user",
+      "content": "必须调用工具 lookup_equipment 查询 barbell 的可用性，然后用一句话回答。"
+     },
+     {
+      "role": "assistant",
+      "reasoning_content": "The user wants me to call lookup_equipment with equipment_name \"barbell\" and then answer in one sentence.",
+      "content": null,
+      "tool_calls": [
+       {
+        "id": "call_00_KxqqVbsM5Y5qFUSUbksR2419",
+        "type": "function",
+        "function": {
+         "name": "lookup_equipment",
+         "arguments": "{\"equipment_name\": \"barbell\"}"
+        }
+       }
+      ]
+     },
+     {
+      "role": "tool",
+      "tool_call_id": "call_00_KxqqVbsM5Y5qFUSUbksR2419",
+      "content": "barbell: available"
+     }
+    ],
+    "model": "deepseek-v4-flash",
+    "max_completion_tokens": 256,
+    "stream": false,
+    "tool_choice": "auto",
+    "tools": [
+     {
+      "type": "function",
+      "function": {
+       "name": "lookup_equipment",
+       "description": "查询器械可用性。",
+       "parameters": {
+        "additionalProperties": false,
+        "properties": {
+         "equipment_name": {
+          "type": "string"
+         }
+        },
+        "required": [
+         "equipment_name"
+        ],
+        "type": "object"
+       },
+       "strict": true
+      }
+     }
+    ]
+   },
+   "wire_messages_elements_bytes": [
+    "{\"role\":\"system\",\"content\":\"常驻层：你是 Fit-Agent 计划助手。常驻层：你是 Fit-Agent 计划助手。\"}",
+    "{\"role\":\"user\",\"content\":\"必须调用工具 lookup_equipment 查询 barbell 的可用性，然后用一句话回答。\"}",
+    "{\"role\":\"assistant\",\"reasoning_content\":\"The user wants me to call lookup_equipment with equipment_name \\\"barbell\\\" and then answer in one sentence.\",\"content\":null,\"tool_calls\":[{\"id\":\"call_00_KxqqVbsM5Y5qFUSUbksR2419\",\"type\":\"function\",\"function\":{\"name\":\"lookup_equipment\",\"arguments\":\"{\\\"equipment_name\\\": \\\"barbell\\\"}\"}}]}",
+    "{\"role\":\"tool\",\"tool_call_id\":\"call_00_KxqqVbsM5Y5qFUSUbksR2419\",\"content\":\"barbell: available\"}"
+   ],
+   "wire_tools_array_bytes": "[{\"type\":\"function\",\"function\":{\"name\":\"lookup_equipment\",\"description\":\"查询器械可用性。\",\"parameters\":{\"additionalProperties\":false,\"properties\":{\"equipment_name\":{\"type\":\"string\"}},\"required\":[\"equipment_name\"],\"type\":\"object\"},\"strict\":true}}]"
+  },
+  {
+   "url": "https://api.deepseek.com/chat/completions",
+   "raw_bytes_len": 1188,
+   "body": {
+    "messages": [
+     {
+      "role": "system",
+      "content": "常驻层：你是 Fit-Agent 计划助手。常驻层：你是 Fit-Agent 计划助手。"
+     },
+     {
+      "role": "user",
+      "content": "必须调用工具 lookup_equipment 查询 barbell 的可用性，然后用一句话回答。"
+     },
+     {
+      "role": "assistant",
+      "reasoning_content": "The user wants me to call lookup_equipment with equipment_name \"barbell\" and then answer in one sentence.",
+      "content": null,
+      "tool_calls": [
+       {
+        "id": "call_00_KxqqVbsM5Y5qFUSUbksR2419",
+        "type": "function",
+        "function": {
+         "name": "lookup_equipment",
+         "arguments": "{\"equipment_name\": \"barbell\"}"
+        }
+       }
+      ]
+     },
+     {
+      "role": "tool",
+      "tool_call_id": "call_00_KxqqVbsM5Y5qFUSUbksR2419",
+      "content": "barbell: available"
+     },
+     {
+      "role": "assistant",
+      "content": "barbell 当前可用。"
+     },
+     {
+      "role": "user",
+      "content": "继续：把上一条结果压缩成不超过二十字的结论。"
+     }
+    ],
+    "model": "deepseek-v4-flash",
+    "max_completion_tokens": 256,
+    "stream": false,
+    "tool_choice": "auto",
+    "tools": [
+     {
+      "type": "function",
+      "function": {
+       "name": "lookup_equipment",
+       "description": "查询器械可用性。",
+       "parameters": {
+        "additionalProperties": false,
+        "properties": {
+         "equipment_name": {
+          "type": "string"
+         }
+        },
+        "required": [
+         "equipment_name"
+        ],
+        "type": "object"
+       },
+       "strict": true
+      }
+     }
+    ]
+   },
+   "wire_messages_elements_bytes": [
+    "{\"role\":\"system\",\"content\":\"常驻层：你是 Fit-Agent 计划助手。常驻层：你是 Fit-Agent 计划助手。\"}",
+    "{\"role\":\"user\",\"content\":\"必须调用工具 lookup_equipment 查询 barbell 的可用性，然后用一句话回答。\"}",
+    "{\"role\":\"assistant\",\"reasoning_content\":\"The user wants me to call lookup_equipment with equipment_name \\\"barbell\\\" and then answer in one sentence.\",\"content\":null,\"tool_calls\":[{\"id\":\"call_00_KxqqVbsM5Y5qFUSUbksR2419\",\"type\":\"function\",\"function\":{\"name\":\"lookup_equipment\",\"arguments\":\"{\\\"equipment_name\\\": \\\"barbell\\\"}\"}}]}",
+    "{\"role\":\"tool\",\"tool_call_id\":\"call_00_KxqqVbsM5Y5qFUSUbksR2419\",\"content\":\"barbell: available\"}",
+    "{\"role\":\"assistant\",\"content\":\"barbell 当前可用。\"}",
+    "{\"role\":\"user\",\"content\":\"继续：把上一条结果压缩成不超过二十字的结论。\"}"
+   ],
+   "wire_tools_array_bytes": "[{\"type\":\"function\",\"function\":{\"name\":\"lookup_equipment\",\"description\":\"查询器械可用性。\",\"parameters\":{\"additionalProperties\":false,\"properties\":{\"equipment_name\":{\"type\":\"string\"}},\"required\":[\"equipment_name\"],\"type\":\"object\"},\"strict\":true}}]"
+  },
+  {
+   "url": "https://api.deepseek.com/chat/completions",
+   "raw_bytes_len": 329,
+   "body": {
+    "messages": [
+     {
+      "role": "system",
+      "content": "常驻层：你是 Fit-Agent 计划助手。常驻层：你是 Fit-Agent 计划助手。"
+     },
+     {
+      "role": "user",
+      "content": "请用大约一百字说明深蹲的常见注意事项。"
+     }
+    ],
+    "model": "deepseek-v4-flash",
+    "max_completion_tokens": 256,
+    "stream": true,
+    "stream_options": {
+     "include_usage": true
+    }
+   },
+   "wire_messages_elements_bytes": [
+    "{\"role\":\"system\",\"content\":\"常驻层：你是 Fit-Agent 计划助手。常驻层：你是 Fit-Agent 计划助手。\"}",
+    "{\"role\":\"user\",\"content\":\"请用大约一百字说明深蹲的常见注意事项。\"}"
+   ],
+   "wire_tools_array_bytes": ""
+  }
+ ],
+ "fee_ledger": {
+  "settled_usd": "0.001320240",
+  "reserved_usd": "0E-8",
+  "stopped": null,
+  "calls_count": 8
+ },
+ "usage_views": [
+  {
+   "call_index": 1,
+   "model_response_identity": "deepseek-v4-flash",
+   "note": null,
+   "settled_usd": "0.000139040",
+   "reserved_usd": "0.00051040",
+   "usage_raw": {
+    "prompt_tokens": 407,
+    "completion_tokens": 75,
+    "total_tokens": 482,
+    "prompt_tokens_details": {
+     "cached_tokens": 0
+    },
+    "completion_tokens_details": {
+     "reasoning_tokens": 24
+    },
+    "prompt_cache_hit_tokens": 0,
+    "prompt_cache_miss_tokens": 407
+   },
+   "usage_normalized": {
+    "prompt_tokens": 407,
+    "completion_tokens": 75,
+    "cache_read": 0,
+    "cache_read_explicit": true,
+    "cache_read_source": "prompt_cache_hit_tokens",
+    "cache_write": null,
+    "raw_hit": 0,
+    "raw_miss": 407,
+    "dual_source_consistent": true
+   }
+  },
+  {
+   "call_index": 2,
+   "model_response_identity": "deepseek-v4-flash",
+   "note": null,
+   "settled_usd": "0.000033048",
+   "reserved_usd": "0.00061424",
+   "usage_raw": {
+    "prompt_tokens": 498,
+    "completion_tokens": 8,
+    "total_tokens": 506,
+    "prompt_tokens_details": {
+     "cached_tokens": 384
+    },
+    "completion_tokens_details": {
+     "reasoning_tokens": 0
+    },
+    "prompt_cache_hit_tokens": 384,
+    "prompt_cache_miss_tokens": 114
+   },
+   "usage_normalized": {
+    "prompt_tokens": 498,
+    "completion_tokens": 8,
+    "cache_read": 384,
+    "cache_read_explicit": true,
+    "cache_read_source": "prompt_cache_hit_tokens",
+    "cache_write": null,
+    "raw_hit": 384,
+    "raw_miss": 114,
+    "dual_source_consistent": true
+   }
+  },
+  {
+   "call_index": 3,
+   "model_response_identity": "deepseek-v4-flash",
+   "note": null,
+   "settled_usd": "0.000090028",
+   "reserved_usd": "0.00065648",
+   "usage_raw": {
+    "prompt_tokens": 523,
+    "completion_tokens": 86,
+    "total_tokens": 609,
+    "prompt_tokens_details": {
+     "cached_tokens": 384
+    },
+    "completion_tokens_details": {
+     "reasoning_tokens": 79
+    },
+    "prompt_cache_hit_tokens": 384,
+    "prompt_cache_miss_tokens": 139
+   },
+   "usage_normalized": {
+    "prompt_tokens": 523,
+    "completion_tokens": 86,
+    "cache_read": 384,
+    "cache_read_explicit": true,
+    "cache_read_source": "prompt_cache_hit_tokens",
+    "cache_write": null,
+    "raw_hit": 384,
+    "raw_miss": 139,
+    "dual_source_consistent": true
+   }
+  },
+  {
+   "call_index": 4,
+   "model_response_identity": "deepseek-v4-flash",
+   "note": "stream_aborted:RuntimeError",
+   "settled_usd": null,
+   "reserved_usd": "0.00044660",
+   "usage_raw": null,
+   "usage_normalized": null
+  },
+  {
+   "call_index": 5,
+   "model_response_identity": "deepseek-v4-flash",
+   "note": null,
+   "settled_usd": "0.000057908",
+   "reserved_usd": "0.00051040",
+   "usage_raw": {
+    "prompt_tokens": 407,
+    "completion_tokens": 76,
+    "total_tokens": 483,
+    "prompt_tokens_details": {
+     "cached_tokens": 384
+    },
+    "completion_tokens_details": {
+     "reasoning_tokens": 25
+    },
+    "prompt_cache_hit_tokens": 384,
+    "prompt_cache_miss_tokens": 23
+   },
+   "usage_normalized": {
+    "prompt_tokens": 407,
+    "completion_tokens": 76,
+    "cache_read": 384,
+    "cache_read_explicit": true,
+    "cache_read_source": "prompt_cache_hit_tokens",
+    "cache_write": null,
+    "raw_hit": 384,
+    "raw_miss": 23,
+    "dual_source_consistent": true
+   }
+  },
+  {
+   "call_index": 6,
+   "model_response_identity": "deepseek-v4-flash",
+   "note": null,
+   "settled_usd": "0.000033268",
+   "reserved_usd": "0.00061556",
+   "usage_raw": {
+    "prompt_tokens": 499,
+    "completion_tokens": 8,
+    "total_tokens": 507,
+    "prompt_tokens_details": {
+     "cached_tokens": 384
+    },
+    "completion_tokens_details": {
+     "reasoning_tokens": 0
+    },
+    "prompt_cache_hit_tokens": 384,
+    "prompt_cache_miss_tokens": 115
+   },
+   "usage_normalized": {
+    "prompt_tokens": 499,
+    "completion_tokens": 8,
+    "cache_read": 384,
+    "cache_read_explicit": true,
+    "cache_read_source": "prompt_cache_hit_tokens",
+    "cache_write": null,
+    "raw_hit": 384,
+    "raw_miss": 115,
+    "dual_source_consistent": true
+   }
+  },
+  {
+   "call_index": 7,
+   "model_response_identity": "deepseek-v4-flash",
+   "note": null,
+   "settled_usd": "0.000073748",
+   "reserved_usd": "0.00065780",
+   "usage_raw": {
+    "prompt_tokens": 524,
+    "completion_tokens": 61,
+    "total_tokens": 585,
+    "prompt_tokens_details": {
+     "cached_tokens": 384
+    },
+    "completion_tokens_details": {
+     "reasoning_tokens": 56
+    },
+    "prompt_cache_hit_tokens": 384,
+    "prompt_cache_miss_tokens": 140
+   },
+   "usage_normalized": {
+    "prompt_tokens": 524,
+    "completion_tokens": 61,
+    "cache_read": 384,
+    "cache_read_explicit": true,
+    "cache_read_source": "prompt_cache_hit_tokens",
+    "cache_write": null,
+    "raw_hit": 384,
+    "raw_miss": 140,
+    "dual_source_consistent": true
+   }
+  },
+  {
+   "call_index": 8,
+   "model_response_identity": "deepseek-v4-flash",
+   "note": "stream_aborted:RuntimeError",
+   "settled_usd": null,
+   "reserved_usd": "0.00044660",
+   "usage_raw": null,
+   "usage_normalized": null
+  }
+ ]
+}
