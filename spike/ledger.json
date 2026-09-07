@@ -1,6 +1,6 @@
 {
  "version": 1,
- "settled_usd": "0.001655300",
+ "settled_usd": "0.002436300",
  "reserved_usd": "0E-8",
  "stopped": null,
  "calls": [
@@ -178,6 +178,62 @@
     "prompt_cache_miss_tokens": 119
    },
    "expected_min_usd": "0.000001092",
+   "note": null
+  },
+  {
+   "model": "deepseek-v4-flash",
+   "reserved_usd": "0.00027852",
+   "settled_usd": null,
+   "usage_raw": null,
+   "expected_min_usd": null,
+   "note": "stream_aborted:RuntimeError"
+  },
+  {
+   "model": "deepseek-v4-flash",
+   "reserved_usd": "0.00027852",
+   "settled_usd": null,
+   "usage_raw": null,
+   "expected_min_usd": null,
+   "note": "stream_aborted:RuntimeError"
+  },
+  {
+   "model": "deepseek-v4-flash",
+   "reserved_usd": "0.00027852",
+   "settled_usd": "0.000117480",
+   "usage_raw": {
+    "prompt_tokens": 120,
+    "completion_tokens": 49,
+    "total_tokens": 169,
+    "prompt_tokens_details": {
+     "cached_tokens": 0
+    },
+    "completion_tokens_details": {
+     "reasoning_tokens": 9
+    },
+    "prompt_cache_hit_tokens": 0,
+    "prompt_cache_miss_tokens": 120
+   },
+   "expected_min_usd": "0.000001183",
+   "note": null
+  },
+  {
+   "model": "deepseek-v4-flash",
+   "reserved_usd": "0.00043296",
+   "settled_usd": "0.000106480",
+   "usage_raw": {
+    "prompt_tokens": 116,
+    "completion_tokens": 42,
+    "total_tokens": 158,
+    "prompt_tokens_details": {
+     "cached_tokens": 0
+    },
+    "completion_tokens_details": {
+     "reasoning_tokens": 40
+    },
+    "prompt_cache_hit_tokens": 0,
+    "prompt_cache_miss_tokens": 116
+   },
+   "expected_min_usd": "0.000001106",
    "note": null
   }
  ]

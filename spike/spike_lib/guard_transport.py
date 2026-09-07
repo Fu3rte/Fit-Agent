@@ -15,7 +15,7 @@ import math
 from collections.abc import Callable
 from typing import Any
 
-import httpx2 as httpx
+import httpx2 as httpx  # pyright: ignore[reportMissingImports]  # venv 内依赖：运行时+真 pyright 均可解析；仅扫描器 import 误报
 
 from spike_lib.fee_guard import (
     MAX_TOKENS_LIMIT,
@@ -75,16 +75,24 @@ class FeeGuardTransport(httpx.AsyncBaseTransport):
         try:
             body = json.loads(raw.decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-            raise StopSpike(f"wire 请求体非法 JSON，停止：{type(exc).__name__}") from exc
+            raise StopSpike(
+                f"wire 请求体非法 JSON，停止：{type(exc).__name__}"
+            ) from exc
         if self._captured is not None:
-            self._captured.append(CapturedWireRequest(url=str(request.url), body=body, raw=raw))
+            self._captured.append(
+                CapturedWireRequest(url=str(request.url), body=body, raw=raw)
+            )
         self._event("model_request")
 
         # wire 约束（预留前强制）：输出上限必须显式且 ≤ 256；模型必须已知。
         # OpenAI SDK 3.x / pydantic-ai 发送新字段 max_completion_tokens；兼容旧字段 max_tokens。
         max_tokens = body.get("max_tokens")
         max_completion_tokens = body.get("max_completion_tokens")
-        if max_tokens is not None and max_completion_tokens is not None and max_tokens != max_completion_tokens:
+        if (
+            max_tokens is not None
+            and max_completion_tokens is not None
+            and max_tokens != max_completion_tokens
+        ):
             raise StopSpike(
                 f"wire 请求输出上限字段冲突 max_tokens={max_tokens!r} vs max_completion_tokens={max_completion_tokens!r}，拒绝发出"
             )
@@ -106,7 +114,9 @@ class FeeGuardTransport(httpx.AsyncBaseTransport):
         self._serial_released = False
         try:
             bound = estimate_input_tokens_upper_bound(body)
-            res = self._guard.reserve(req_model, input_tokens_reserve=bound, max_output=output_limit)
+            res = self._guard.reserve(
+                req_model, input_tokens_reserve=bound, max_output=output_limit
+            )
             self._event(f"reserved:{bound}")
             try:
                 response = await self._inner.handle_async_request(request)
@@ -130,7 +140,9 @@ class FeeGuardTransport(httpx.AsyncBaseTransport):
                 now_fn=self._now_fn,
             )
             # 流的收尾（finish/abort/aclose）负责释放锁；此处不再释放。
-            return httpx.Response(response.status_code, headers=response.headers, stream=billed)
+            return httpx.Response(
+                response.status_code, headers=response.headers, stream=billed
+            )
         except BaseException:
             # handle_async_request 自身异常（reserve 失败等）：确保锁不泄漏。
             self._release_serial()
@@ -229,12 +241,16 @@ class CapturedWireRequest:
         payload = self.body
         for key in keys:
             payload = payload[key]
-        return json.dumps(payload, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode()
+        return json.dumps(
+            payload, sort_keys=True, ensure_ascii=False, separators=(",", ":")
+        ).encode()
 
     def message_prefix(self, n: int) -> list[bytes]:
         """逐元素规范化前 n 条消息（辅助证据）。"""
         return [
-            json.dumps(m, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode()
+            json.dumps(
+                m, sort_keys=True, ensure_ascii=False, separators=(",", ":")
+            ).encode()
             for m in self.body["messages"][:n]
         ]
 
@@ -279,12 +295,26 @@ class _BillingStream(httpx.AsyncByteStream):
             raise
 
     async def aclose(self) -> None:
+        # 消费方读完内容后主动关闭流（pydantic-ai 文本流自然结束路径）≠ 取消：
+        # 若缓冲已含完整身份 + usage（末尾 usage chunk 已被消费），按自然结束同等结算；
+        # 否则（截断/中途关闭）走 abort，预留全额保留。
         try:
             aclose = getattr(self._inner, "aclose", None)
             if aclose is not None:
                 await aclose()
         finally:
+            if not self._finished:
+                self._finish_or_abort()
+
+    def _finish_or_abort(self) -> None:
+        """aclose 收尾判定：缓冲可解析出身份+usage 即按完整结算；否则按截断 abort 保留预留。
+        真正的取消在 __aiter__ 内以 CancelledError 先走 _abort（_finished 置位），
+        后续 aclose 到此为 no-op，不会把已取消的流误结算。"""
+        model, usage = _parse_response_identity_and_usage(self._buf, self._content_type)
+        if usage is None or model is None:
             self._abort(RuntimeError("stream closed before completion"))
+        else:
+            self._finish()
 
     # ---- 收尾 ----
     def _finish(self) -> None:
@@ -292,7 +322,9 @@ class _BillingStream(httpx.AsyncByteStream):
             return
         self._finished = True
         try:
-            model, usage = _parse_response_identity_and_usage(self._buf, self._content_type)
+            model, usage = _parse_response_identity_and_usage(
+                self._buf, self._content_type
+            )
             if model is None:
                 self._on_event("identity_missing")
                 self._guard.stop("响应缺少 model 身份，停止；预留保留人工核查")
@@ -344,7 +376,9 @@ def _official_aliases() -> dict[str, str]:
     return OFFICIAL_VERSION_ALIASES
 
 
-def _parse_response_identity_and_usage(buf: bytes, content_type: str) -> tuple[str | None, dict | None]:
+def _parse_response_identity_and_usage(
+    buf: bytes, content_type: str
+) -> tuple[str | None, dict | None]:
     """从收尾缓冲解析响应 model 身份与原始 usage（wire 级，未经框架归一）。"""
     text = buf.decode("utf-8", errors="replace")
     if "text/event-stream" in content_type:
@@ -375,4 +409,6 @@ def _parse_response_identity_and_usage(buf: bytes, content_type: str) -> tuple[s
         return None, None
     model = data.get("model") if isinstance(data, dict) else None
     usage = data.get("usage") if isinstance(data, dict) else None
-    return (model if isinstance(model, str) else None), (usage if isinstance(usage, dict) else None)
+    return (model if isinstance(model, str) else None), (
+        usage if isinstance(usage, dict) else None
+    )

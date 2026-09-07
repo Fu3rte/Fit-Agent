@@ -1,0 +1,436 @@
+{
+ "phase": "stream-complete",
+ "model_requested": "deepseek-v4-flash",
+ "started_at": "2026-09-07T03:38:15.717483+00:00",
+ "finished_at": "2026-09-07T03:38:18.314445+00:00",
+ "events": [
+  "model_request",
+  "reserved:249",
+  "chunk:1",
+  "chunk:2",
+  "chunk:3",
+  "chunk:4",
+  "chunk:5",
+  "chunk:6",
+  "chunk:7",
+  "chunk:8",
+  "chunk:9",
+  "chunk:10",
+  "chunk:11",
+  "chunk:12",
+  "chunk:13",
+  "chunk:14",
+  "chunk:15",
+  "chunk:16",
+  "chunk:17",
+  "chunk:18",
+  "chunk:19",
+  "chunk:20",
+  "chunk:21",
+  "chunk:22",
+  "chunk:23",
+  "chunk:24",
+  "chunk:25",
+  "chunk:26",
+  "chunk:27",
+  "identity_ok",
+  "settled"
+ ],
+ "wire_requests": [
+  {
+   "url": "https://api.deepseek.com/chat/completions",
+   "raw_bytes_len": 332,
+   "body": {
+    "messages": [
+     {
+      "role": "system",
+      "content": "常驻层：你是 Fit-Agent 计划助手。常驻层：你是 Fit-Agent 计划助手。"
+     },
+     {
+      "role": "user",
+      "content": "流式冒烟：请用一句话说明什么是器械训练。"
+     }
+    ],
+    "model": "deepseek-v4-flash",
+    "max_completion_tokens": 128,
+    "stream": true,
+    "stream_options": {
+     "include_usage": true
+    }
+   },
+   "wire_messages_elements_bytes": [
+    "{\"role\":\"system\",\"content\":\"常驻层：你是 Fit-Agent 计划助手。常驻层：你是 Fit-Agent 计划助手。\"}",
+    "{\"role\":\"user\",\"content\":\"流式冒烟：请用一句话说明什么是器械训练。\"}"
+   ],
+   "wire_tools_array_bytes": ""
+  }
+ ],
+ "fee_ledger": {
+  "settled_usd": "0.002329820",
+  "reserved_usd": "0E-8",
+  "stopped": null,
+  "calls_count": 13
+ },
+ "usage_views": [
+  {
+   "call_index": 1,
+   "model_response_identity": "deepseek-v4-flash",
+   "note": null,
+   "settled_usd": "0.000139040",
+   "reserved_usd": "0.00051040",
+   "usage_raw": {
+    "prompt_tokens": 407,
+    "completion_tokens": 75,
+    "total_tokens": 482,
+    "prompt_tokens_details": {
+     "cached_tokens": 0
+    },
+    "completion_tokens_details": {
+     "reasoning_tokens": 24
+    },
+    "prompt_cache_hit_tokens": 0,
+    "prompt_cache_miss_tokens": 407
+   },
+   "usage_normalized": {
+    "prompt_tokens": 407,
+    "completion_tokens": 75,
+    "cache_read": 0,
+    "cache_read_explicit": true,
+    "cache_read_source": "prompt_cache_hit_tokens",
+    "cache_write": null,
+    "raw_hit": 0,
+    "raw_miss": 407,
+    "dual_source_consistent": true
+   }
+  },
+  {
+   "call_index": 2,
+   "model_response_identity": "deepseek-v4-flash",
+   "note": null,
+   "settled_usd": "0.000033048",
+   "reserved_usd": "0.00061424",
+   "usage_raw": {
+    "prompt_tokens": 498,
+    "completion_tokens": 8,
+    "total_tokens": 506,
+    "prompt_tokens_details": {
+     "cached_tokens": 384
+    },
+    "completion_tokens_details": {
+     "reasoning_tokens": 0
+    },
+    "prompt_cache_hit_tokens": 384,
+    "prompt_cache_miss_tokens": 114
+   },
+   "usage_normalized": {
+    "prompt_tokens": 498,
+    "completion_tokens": 8,
+    "cache_read": 384,
+    "cache_read_explicit": true,
+    "cache_read_source": "prompt_cache_hit_tokens",
+    "cache_write": null,
+    "raw_hit": 384,
+    "raw_miss": 114,
+    "dual_source_consistent": true
+   }
+  },
+  {
+   "call_index": 3,
+   "model_response_identity": "deepseek-v4-flash",
+   "note": null,
+   "settled_usd": "0.000090028",
+   "reserved_usd": "0.00065648",
+   "usage_raw": {
+    "prompt_tokens": 523,
+    "completion_tokens": 86,
+    "total_tokens": 609,
+    "prompt_tokens_details": {
+     "cached_tokens": 384
+    },
+    "completion_tokens_details": {
+     "reasoning_tokens": 79
+    },
+    "prompt_cache_hit_tokens": 384,
+    "prompt_cache_miss_tokens": 139
+   },
+   "usage_normalized": {
+    "prompt_tokens": 523,
+    "completion_tokens": 86,
+    "cache_read": 384,
+    "cache_read_explicit": true,
+    "cache_read_source": "prompt_cache_hit_tokens",
+    "cache_write": null,
+    "raw_hit": 384,
+    "raw_miss": 139,
+    "dual_source_consistent": true
+   }
+  },
+  {
+   "call_index": 4,
+   "model_response_identity": "deepseek-v4-flash",
+   "note": "stream_aborted:RuntimeError",
+   "settled_usd": null,
+   "reserved_usd": "0.00044660",
+   "usage_raw": null,
+   "usage_normalized": null
+  },
+  {
+   "call_index": 5,
+   "model_response_identity": "deepseek-v4-flash",
+   "note": null,
+   "settled_usd": "0.000057908",
+   "reserved_usd": "0.00051040",
+   "usage_raw": {
+    "prompt_tokens": 407,
+    "completion_tokens": 76,
+    "total_tokens": 483,
+    "prompt_tokens_details": {
+     "cached_tokens": 384
+    },
+    "completion_tokens_details": {
+     "reasoning_tokens": 25
+    },
+    "prompt_cache_hit_tokens": 384,
+    "prompt_cache_miss_tokens": 23
+   },
+   "usage_normalized": {
+    "prompt_tokens": 407,
+    "completion_tokens": 76,
+    "cache_read": 384,
+    "cache_read_explicit": true,
+    "cache_read_source": "prompt_cache_hit_tokens",
+    "cache_write": null,
+    "raw_hit": 384,
+    "raw_miss": 23,
+    "dual_source_consistent": true
+   }
+  },
+  {
+   "call_index": 6,
+   "model_response_identity": "deepseek-v4-flash",
+   "note": null,
+   "settled_usd": "0.000033268",
+   "reserved_usd": "0.00061556",
+   "usage_raw": {
+    "prompt_tokens": 499,
+    "completion_tokens": 8,
+    "total_tokens": 507,
+    "prompt_tokens_details": {
+     "cached_tokens": 384
+    },
+    "completion_tokens_details": {
+     "reasoning_tokens": 0
+    },
+    "prompt_cache_hit_tokens": 384,
+    "prompt_cache_miss_tokens": 115
+   },
+   "usage_normalized": {
+    "prompt_tokens": 499,
+    "completion_tokens": 8,
+    "cache_read": 384,
+    "cache_read_explicit": true,
+    "cache_read_source": "prompt_cache_hit_tokens",
+    "cache_write": null,
+    "raw_hit": 384,
+    "raw_miss": 115,
+    "dual_source_consistent": true
+   }
+  },
+  {
+   "call_index": 7,
+   "model_response_identity": "deepseek-v4-flash",
+   "note": null,
+   "settled_usd": "0.000073748",
+   "reserved_usd": "0.00065780",
+   "usage_raw": {
+    "prompt_tokens": 524,
+    "completion_tokens": 61,
+    "total_tokens": 585,
+    "prompt_tokens_details": {
+     "cached_tokens": 384
+    },
+    "completion_tokens_details": {
+     "reasoning_tokens": 56
+    },
+    "prompt_cache_hit_tokens": 384,
+    "prompt_cache_miss_tokens": 140
+   },
+   "usage_normalized": {
+    "prompt_tokens": 524,
+    "completion_tokens": 61,
+    "cache_read": 384,
+    "cache_read_explicit": true,
+    "cache_read_source": "prompt_cache_hit_tokens",
+    "cache_write": null,
+    "raw_hit": 384,
+    "raw_miss": 140,
+    "dual_source_consistent": true
+   }
+  },
+  {
+   "call_index": 8,
+   "model_response_identity": "deepseek-v4-flash",
+   "note": "stream_aborted:RuntimeError",
+   "settled_usd": null,
+   "reserved_usd": "0.00044660",
+   "usage_raw": null,
+   "usage_normalized": null
+  },
+  {
+   "call_index": 9,
+   "model_response_identity": "deepseek-v4-pro",
+   "note": null,
+   "settled_usd": "0.000284460",
+   "reserved_usd": "0.00131340",
+   "usage_raw": {
+    "prompt_tokens": 119,
+    "completion_tokens": 104,
+    "total_tokens": 223,
+    "prompt_tokens_details": {
+     "cached_tokens": 0
+    },
+    "completion_tokens_details": {
+     "reasoning_tokens": 75
+    },
+    "prompt_cache_hit_tokens": 0,
+    "prompt_cache_miss_tokens": 119
+   },
+   "usage_normalized": {
+    "prompt_tokens": 119,
+    "completion_tokens": 104,
+    "cache_read": 0,
+    "cache_read_explicit": true,
+    "cache_read_source": "prompt_cache_hit_tokens",
+    "cache_write": null,
+    "raw_hit": 0,
+    "raw_miss": 119,
+    "dual_source_consistent": true
+   }
+  },
+  {
+   "call_index": 10,
+   "model_response_identity": "deepseek-v4-flash-vision-exp",
+   "note": null,
+   "settled_usd": "0.000050600",
+   "reserved_usd": "0.00044044",
+   "usage_raw": {
+    "prompt_tokens": 119,
+    "completion_tokens": 37,
+    "total_tokens": 156,
+    "prompt_tokens_details": {
+     "cached_tokens": 0
+    },
+    "completion_tokens_details": {
+     "reasoning_tokens": 13
+    },
+    "prompt_cache_hit_tokens": 0,
+    "prompt_cache_miss_tokens": 119
+   },
+   "usage_normalized": {
+    "prompt_tokens": 119,
+    "completion_tokens": 37,
+    "cache_read": 0,
+    "cache_read_explicit": true,
+    "cache_read_source": "prompt_cache_hit_tokens",
+    "cache_write": null,
+    "raw_hit": 0,
+    "raw_miss": 119,
+    "dual_source_consistent": true
+   }
+  },
+  {
+   "call_index": 11,
+   "model_response_identity": "deepseek-v4-flash",
+   "note": "stream_aborted:RuntimeError",
+   "settled_usd": null,
+   "reserved_usd": "0.00027852",
+   "usage_raw": null,
+   "usage_normalized": null
+  },
+  {
+   "call_index": 12,
+   "model_response_identity": "deepseek-v4-flash",
+   "note": "stream_aborted:RuntimeError",
+   "settled_usd": null,
+   "reserved_usd": "0.00027852",
+   "usage_raw": null,
+   "usage_normalized": null
+  },
+  {
+   "call_index": 13,
+   "model_response_identity": "deepseek-v4-flash",
+   "note": null,
+   "settled_usd": "0.000117480",
+   "reserved_usd": "0.00027852",
+   "usage_raw": {
+    "prompt_tokens": 120,
+    "completion_tokens": 49,
+    "total_tokens": 169,
+    "prompt_tokens_details": {
+     "cached_tokens": 0
+    },
+    "completion_tokens_details": {
+     "reasoning_tokens": 9
+    },
+    "prompt_cache_hit_tokens": 0,
+    "prompt_cache_miss_tokens": 120
+   },
+   "usage_normalized": {
+    "prompt_tokens": 120,
+    "completion_tokens": 49,
+    "cache_read": 0,
+    "cache_read_explicit": true,
+    "cache_read_source": "prompt_cache_hit_tokens",
+    "cache_write": null,
+    "raw_hit": 0,
+    "raw_miss": 120,
+    "dual_source_consistent": true
+   }
+  }
+ ],
+ "stream_complete_check": {
+  "usage_surfaced": true,
+  "framework_usage": {
+   "input_tokens": 120,
+   "output_tokens": 49,
+   "cache_read_tokens": 0,
+   "details": {
+    "prompt_cache_hit_tokens": 0,
+    "prompt_cache_miss_tokens": 120,
+    "reasoning_tokens": 9
+   }
+  },
+  "raw_usage": {
+   "prompt_tokens": 120,
+   "completion_tokens": 49,
+   "total_tokens": 169,
+   "prompt_tokens_details": {
+    "cached_tokens": 0
+   },
+   "completion_tokens_details": {
+    "reasoning_tokens": 9
+   },
+   "prompt_cache_hit_tokens": 0,
+   "prompt_cache_miss_tokens": 120
+  },
+  "normalized": {
+   "prompt_tokens": 120,
+   "completion_tokens": 49,
+   "cache_read": 0,
+   "cache_read_explicit": true,
+   "cache_read_source": "prompt_cache_hit_tokens",
+   "cache_write": null,
+   "raw_hit": 0,
+   "raw_miss": 120,
+   "dual_source_consistent": true
+  },
+  "hit_plus_miss_eq_prompt": true,
+  "model_identity": {
+   "requested": "deepseek-v4-flash",
+   "response": "deepseek-v4-flash"
+  },
+  "wire_max_tokens": 128,
+  "final_note": null,
+  "settled_usd": "0.000117480"
+ }
+}

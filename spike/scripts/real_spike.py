@@ -1,6 +1,7 @@
+# ruff: noqa: I001  # isort first-party 判定随 cwd 互斥（spike/ 项目语境 vs repo-root），按 spike/ 语境排序
 # Fit-Agent PydanticAI spike：真实调用入口（唯一路径经 build_spike_agent + PersistentFeeGuard）。
 # 三批次分进程串行执行，账本 spike/ledger.json 跨批次累计（并发启动会被锁拒绝）：
-#   python scripts/real_spike.py flash-regression | pro-smoke | vision-smoke
+#   python scripts/real_spike.py flash-regression | pro-smoke | vision-smoke | stream-complete | alias-probe
 # 前提：离线护栏全绿；价格核对 match；DEEPSEEK_API_KEY 只经环境变量传入（缺失即拒绝，不显示值）。
 # 证据写 evidence/real/<phase>.json（脱敏：不含请求头、不含 Key）；任何异常（含 StopSpike）都落证据再退出。
 
@@ -16,15 +17,14 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from pydantic_ai import (
-    RunContext,  # noqa: E402  # pyright: ignore[reportMissingImports]  # venv 内依赖：运行时+主 LSP 均已验证
-)
+# pi-lens-ignore: reportMissingImports
+from pydantic_ai import RunContext  # pyright: ignore[reportMissingImports]  # venv 内依赖：运行时+主 LSP+真 pyright 三种 cwd 均已验证；isort 分组见文件级 ruff: noqa: I001
 
-from spike_lib.fee_guard import StopSpike  # noqa: E402
-from spike_lib.ledger import PersistentFeeGuard  # noqa: E402
-from spike_lib.real_runner import build_spike_agent, read_api_key_from_env  # noqa: E402
-from spike_lib.run_harness import RunHarness  # noqa: E402
-from spike_lib.usage_norm import normalize_raw_usage  # noqa: E402
+from spike_lib.fee_guard import StopSpike
+from spike_lib.ledger import PersistentFeeGuard
+from spike_lib.real_runner import build_spike_agent, read_api_key_from_env
+from spike_lib.run_harness import RunHarness
+from spike_lib.usage_norm import normalize_raw_usage
 
 ROOT = Path(__file__).resolve().parents[1]
 LEDGER_PATH = ROOT / "ledger.json"
@@ -235,7 +235,7 @@ async def flash_regression() -> None:
         if error is not None:
             try:
                 phase.finish({"error": error})  # 异常也落证据（保留现场）
-            except Exception as exc2:
+            except Exception as exc2:  # noqa: BLE001  # 证据落盘兑底：任何异常都不能阻止 finish 尝试
                 print(f"[flash-regression] 证据落盘失败: {exc2}", file=sys.stderr)
         phase.guard.close()
 
@@ -261,8 +261,178 @@ async def smoke(model: str, phase_name: str) -> None:
         if error is not None:
             try:
                 phase.finish({"error": error})  # 异常也落证据（保留现场）
-            except Exception as exc2:
+            except Exception as exc2:  # noqa: BLE001  # 证据落盘兑底：任何异常都不能阻止 finish 尝试
                 print(f"[{phase_name}] 证据落盘失败: {exc2}", file=sys.stderr)
+        phase.guard.close()
+
+
+def _find_stop_spike(exc: BaseException) -> StopSpike | None:
+    """openai/httpx2 会把 transport 层 StopSpike 包装成连接类异常（表象 Connection error）；
+    沿 cause/context 链找回原始护栏停止，避免把护栏停止误判为基础设施故障。"""
+    seen: set[int] = set()
+    cur: BaseException | None = exc
+    while cur is not None and id(cur) not in seen:
+        seen.add(id(cur))
+        if isinstance(cur, StopSpike):
+            return cur
+        cur = cur.__cause__ or cur.__context__
+    return None
+
+
+async def stream_complete() -> None:
+    """缺口③补测：完整态（不取消）真实流式响应的 usage 浮出。
+    usage 属性（pydantic-ai 2.40 为 RunUsage 对象，非方法）在流完整消费后可读；
+    usage 仍未浮出属有效实验结果，exit 0 如实记录；仅基础设施异常非零退出。"""
+    phase = _Phase("stream-complete", "deepseek-v4-flash")
+    error: str | None = None
+    try:
+        agent = phase.build_agent()
+        async with agent.run_stream(
+            "流式冒烟：请用一句话说明什么是器械训练。",
+            model_settings={"max_tokens": 128},  # 运行级覆盖（≤128，严于护栏全局 256）
+        ) as result:
+            async for _ in result.stream_text():
+                pass  # 完整消费流，不取消
+            # pydantic-ai 2.40：result.usage 是属性（RunUsage），不是方法
+            fu = result.usage
+        if not phase.captured:
+            raise RuntimeError("未捕获到任何 wire 请求")
+        body = phase.captured[-1].body
+        wire_max = body.get("max_completion_tokens", body.get("max_tokens"))
+        if wire_max != 128:
+            raise AssertionError(
+                f"wire max_tokens={wire_max!r}，预期 128"
+                f"（max_completion_tokens={body.get('max_completion_tokens')!r}，"
+                f"max_tokens={body.get('max_tokens')!r}）"
+            )
+        last = phase.guard.calls[-1]
+        raw = last.usage_raw
+        fw = None
+        if fu is not None:
+            fw = {
+                "input_tokens": getattr(fu, "input_tokens", None),
+                "output_tokens": getattr(fu, "output_tokens", None),
+                "cache_read_tokens": getattr(fu, "cache_read_tokens", None),
+                "details": dict(getattr(fu, "details", {}) or {}),
+            }
+        usage_surfaced = fw is not None and bool(
+            fw["input_tokens"] or fw["output_tokens"]
+        )
+        hm = None
+        if raw is not None and "prompt_cache_hit_tokens" in raw:
+            hm = (
+                raw["prompt_cache_hit_tokens"] + raw.get("prompt_cache_miss_tokens", 0)
+                == raw["prompt_tokens"]
+            )
+        phase.finish(
+            {
+                "stream_complete_check": {
+                    "usage_surfaced": usage_surfaced,
+                    "framework_usage": fw,
+                    "raw_usage": raw,
+                    "normalized": asdict(normalize_raw_usage(raw))
+                    if raw is not None
+                    else None,
+                    "hit_plus_miss_eq_prompt": hm,
+                    "model_identity": {
+                        "requested": phase.model,
+                        "response": last.model,
+                    },
+                    "wire_max_tokens": wire_max,
+                    "final_note": last.note,
+                    "settled_usd": None
+                    if last.settled_usd is None
+                    else str(last.settled_usd),
+                }
+            }
+        )
+    except BaseException as exc:
+        error = f"{type(exc).__name__}: {exc}"
+        raise
+    finally:
+        if error is not None:
+            try:
+                phase.finish({"error": error})  # 异常也落证据（保留现场）
+            except Exception as exc2:  # noqa: BLE001  # 证据落盘兑底：任何异常都不能阻止 finish 尝试
+                print(f"[stream-complete] 证据落盘失败: {exc2}", file=sys.stderr)
+        phase.guard.close()
+
+
+def _classify_alias_failure(exc: BaseException) -> tuple[str, dict]:
+    """别名探测异常分类：(结局, 详情)。基础设施异常返回 infrastructure 由调用方重抛。
+    独立成函数：pi-lens 结构规则要求 except 处理器体内不含布尔/条件表达式。"""
+    stop = _find_stop_spike(exc)
+    if stop is not None:
+        detail = {
+            "stop_message": str(stop),
+            "wrapped_as": f"{type(exc).__name__}: {exc}",
+        }
+        return "guard_stopped", detail
+    status = getattr(exc, "status_code", None)
+    if isinstance(status, int) and status >= 400:
+        detail = {"status_code": status, "exception": f"{type(exc).__name__}: {exc}"}
+        return "server_rejected", detail
+    return "infrastructure", {}
+
+
+async def alias_probe() -> None:
+    """缺口②补测：官方 MODEL VERSION 别名路径实测。
+    请求**已知价模型** deepseek-v4-flash（护栏只对已知模型放行预留/计价），
+    观测服务端响应是否回显官方公示别名身份 DeepSeek-V4-Flash-0731
+    （出处 pricing-source.md 与 fee_guard.OFFICIAL_VERSION_ALIASES，不改护栏表）。
+    若回显别名 → 触发护栏 identity_alias_unverified 停止路径（别名映射未验证、不得静默放行）。
+    五结局（echoed_alias_unverified / echoed_requested / server_returned_other /
+    guard_stopped / server_rejected）都是有效观测，exit 0 如实记录；
+    仅基础设施异常非零退出；护栏停止不得绕过。"""
+    phase = _Phase("alias-probe", "deepseek-v4-flash")
+    error: str | None = None
+    try:
+        agent = phase.build_agent()
+        obs: dict = {"outcome": None, "detail": {}}
+        try:
+            result = await agent.run("别名探测冒烟：请回复 ok。")
+            calls = phase.guard.calls
+            last = calls[-1] if calls else None
+            if last is not None and (last.note or "").startswith(
+                "identity_alias_unverified"
+            ):
+                obs["outcome"] = "echoed_alias_unverified"
+            elif last is not None and last.settled_usd is not None:
+                obs["outcome"] = "echoed_requested"
+            elif last is not None and (last.note or "").startswith("identity_mismatch"):
+                obs["outcome"] = "server_returned_other"
+            else:
+                obs["outcome"] = "guard_stopped"
+            obs["detail"] = {
+                "requested_model": phase.model,
+                "response_model_identity": None if last is None else last.model,
+                "official_alias_map": {"DeepSeek-V4-Flash-0731": "deepseek-v4-flash"},
+                "last_note": None if last is None else last.note,
+                "settled_usd": None
+                if last is None or last.settled_usd is None
+                else str(last.settled_usd),
+                "guard_stopped_message": phase.guard.stopped,
+                "output_preview": (result.output or "")[:100],
+            }
+        # except 处理器内不得含布尔/条件表达式（pi-lens 结构规则）：
+        # 结局分类的三元式统迱到助手函数，处理器体内仅剩纯语句。
+        except Exception as exc:
+            outcome_class, failure_detail = _classify_alias_failure(exc)
+            if outcome_class == "infrastructure":
+                raise  # 基础设施异常：非零退出（finally 落证据）
+            obs["outcome"] = outcome_class
+            obs["detail"] = failure_detail
+        phase.payload["alias_probe"] = obs
+        phase.finish()
+    except BaseException as exc:
+        error = f"{type(exc).__name__}: {exc}"
+        raise
+    finally:
+        if error is not None:
+            try:
+                phase.finish({"error": error})  # 异常也落证据（保留现场）
+            except Exception as exc2:  # noqa: BLE001  # 证据落盘兑底：任何异常都不能阻止 finish 尝试
+                print(f"[alias-probe] 证据落盘失败: {exc2}", file=sys.stderr)
         phase.guard.close()
 
 
@@ -274,6 +444,8 @@ def main() -> None:
         "vision-smoke": lambda: asyncio.run(
             smoke("deepseek-v4-flash-vision-exp", "vision-smoke")
         ),
+        "stream-complete": lambda: asyncio.run(stream_complete()),
+        "alias-probe": lambda: asyncio.run(alias_probe()),
     }
     if phase not in phases:
         raise SystemExit(f"用法: real_spike.py {' | '.join(phases)}")

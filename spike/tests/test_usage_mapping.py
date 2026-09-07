@@ -5,7 +5,6 @@
 import asyncio
 
 from pydantic_ai import Agent
-
 from spike_lib.capture import ScriptedTransport, deepseek_usage
 from spike_lib.fee_guard import FeeGuard
 from spike_lib.real_runner import build_spike_agent
@@ -31,7 +30,11 @@ def test_hit_and_miss_fields_surface_in_normalized_and_raw():
         script=[
             {
                 "usage": deepseek_usage(
-                    prompt_tokens=1000, completion_tokens=16, cached_tokens=800, hit_tokens=800, miss_tokens=200
+                    prompt_tokens=1000,
+                    completion_tokens=16,
+                    cached_tokens=800,
+                    hit_tokens=800,
+                    miss_tokens=200,
                 ),
                 "content": "ok",
             }
@@ -40,7 +43,9 @@ def test_hit_and_miss_fields_surface_in_normalized_and_raw():
     captured: list = []
     result = asyncio.run(_agent(transport, captured).run("hello"))
     usage = result.usage
-    raw = transport.captured[0].body  # 非流式响应不在请求里；raw usage 取自 wire 响应解析
+    raw = transport.captured[
+        0
+    ].body  # 非流式响应不在请求里；raw usage 取自 wire 响应解析
     # wire 原始响应侧：由 guard transport 结算路径解析（此处用桩响应体直接构造视图）
     raw_view = normalize_raw_usage(
         {
@@ -75,8 +80,21 @@ def test_hit_and_miss_fields_surface_in_normalized_and_raw():
 
 
 def test_missing_cache_fields_is_not_zero():
+    # 桩用量量级注：伪造 prompt_tokens 必须低于护栏按请求体估的输入上界（~500），
+    # 否则 peak 时段结算会超预留触发 StopSpike（2026-09-07 教训：结算价随时钟峰谷切换）。
     transport = ScriptedTransport(
-        script=[{"usage": deepseek_usage(prompt_tokens=1000, completion_tokens=16, cached_tokens=None, hit_tokens=None, miss_tokens=None), "content": "ok"}]
+        script=[
+            {
+                "usage": deepseek_usage(
+                    prompt_tokens=300,
+                    completion_tokens=16,
+                    cached_tokens=None,
+                    hit_tokens=None,
+                    miss_tokens=None,
+                ),
+                "content": "ok",
+            }
+        ]
     )
     captured: list = []
     result = asyncio.run(_agent(transport, captured).run("hello"))
@@ -88,9 +106,7 @@ def test_missing_cache_fields_is_not_zero():
     assert norm.cache_read_source == CacheReadSource.NOT_PROVIDED
     assert norm.raw_hit is None and norm.raw_miss is None
 
-    raw_view = normalize_raw_usage(
-        {"prompt_tokens": 1000, "completion_tokens": 16}
-    )
+    raw_view = normalize_raw_usage({"prompt_tokens": 1000, "completion_tokens": 16})
     assert raw_view.cache_read is None and raw_view.cache_read_explicit is False
     assert raw_view.cache_read_source is None
 
@@ -98,7 +114,18 @@ def test_missing_cache_fields_is_not_zero():
 def test_zero_hit_with_explicit_fields_is_zero_not_missing():
     # 显式 0 命中（真实提供）与字段缺失必须可区分
     transport = ScriptedTransport(
-        script=[{"usage": deepseek_usage(prompt_tokens=1000, completion_tokens=16, cached_tokens=0, hit_tokens=0, miss_tokens=1000), "content": "ok"}]
+        script=[
+            {
+                "usage": deepseek_usage(
+                    prompt_tokens=300,
+                    completion_tokens=16,
+                    cached_tokens=0,
+                    hit_tokens=0,
+                    miss_tokens=300,
+                ),
+                "content": "ok",
+            }
+        ]
     )
     captured: list = []
     result = asyncio.run(_agent(transport, captured).run("hello"))
@@ -107,7 +134,13 @@ def test_zero_hit_with_explicit_fields_is_zero_not_missing():
     assert norm.cache_read_source == CacheReadSource.RAW_HIT
 
     raw_view = normalize_raw_usage(
-        {"prompt_tokens": 1000, "completion_tokens": 16, "prompt_cache_hit_tokens": 0, "prompt_cache_miss_tokens": 1000, "prompt_tokens_details": {"cached_tokens": 0}}
+        {
+            "prompt_tokens": 1000,
+            "completion_tokens": 16,
+            "prompt_cache_hit_tokens": 0,
+            "prompt_cache_miss_tokens": 1000,
+            "prompt_tokens_details": {"cached_tokens": 0},
+        }
     )
     assert raw_view.cache_read == 0 and raw_view.cache_read_explicit is True
 
@@ -139,9 +172,9 @@ def test_genai_prices_cached_tokens_fallback_without_raw_hit():
 def test_nested_cached_tokens_zero_without_hit_is_explicit_zero_not_missing():
     """审查修复：嵌套 cached_tokens=0 且无顶层 hit——wire 原始侧显式 0，不得判成缺失。"""
     raw = {
-        "prompt_tokens": 1000,
+        "prompt_tokens": 300,
         "completion_tokens": 16,
-        "total_tokens": 1016,
+        "total_tokens": 316,
         "prompt_tokens_details": {"cached_tokens": 0},
     }
     raw_view = normalize_raw_usage(raw)
@@ -168,14 +201,22 @@ def test_raw_view_detects_dual_source_inconsistency_flag():
         "prompt_tokens_details": {"cached_tokens": 300},
     }
     raw_view = normalize_raw_usage(raw)
-    assert raw_view.dual_source_consistent is False  # 归一层标注矛盾；计费侧由 FeeGuard 停止处理
+    assert (
+        raw_view.dual_source_consistent is False
+    )  # 归一层标注矛盾；计费侧由 FeeGuard 停止处理
 
 
 def test_deepseek_has_no_cache_write_category():
     transport = ScriptedTransport(
         script=[
             {
-                "usage": deepseek_usage(prompt_tokens=1000, completion_tokens=16, cached_tokens=0, hit_tokens=0, miss_tokens=1000),
+                "usage": deepseek_usage(
+                    prompt_tokens=300,
+                    completion_tokens=16,
+                    cached_tokens=0,
+                    hit_tokens=0,
+                    miss_tokens=300,
+                ),
                 "content": "ok",
             }
         ]
@@ -187,4 +228,4 @@ def test_deepseek_has_no_cache_write_category():
     # DeepSeek OpenAI 端点：miss 不冒充 write；归一 cache_write 恒为 None
     assert norm.cache_write is None
     assert usage.cache_write_tokens == 0
-    assert norm.raw_miss == 1000  # miss 保留在原始字段，不复用为 write
+    assert norm.raw_miss == 300  # miss 保留在原始字段，不复用为 write

@@ -7,16 +7,22 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
-import httpx2 as httpx
-from openai import AsyncOpenAI
-from pydantic_ai import Agent
-from pydantic_ai.models.openai import OpenAIChatModel
-from pydantic_ai.providers.deepseek import DeepSeekProvider
+import httpx2 as httpx  # pyright: ignore[reportMissingImports]  # venv 内依赖：运行时+真 pyright 均可解析；仅扫描器 import 误报
+from openai import AsyncOpenAI  # pyright: ignore[reportMissingImports]  # 同上
+from pydantic_ai import Agent  # pyright: ignore[reportMissingImports]  # 同上
+from pydantic_ai.models.openai import (  # pyright: ignore[reportMissingImports]  # 同上
+    OpenAIChatModel,
+)
+from pydantic_ai.providers.deepseek import (  # pyright: ignore[reportMissingImports]  # 同上
+    DeepSeekProvider,
+)
 
 from spike_lib.fee_guard import MAX_TOKENS_LIMIT, FeeGuard
 from spike_lib.guard_transport import FeeGuardTransport
 
-DEEPSEEK_BASE_URL = "https://api.deepseek.com"  # OpenAI 兼容端点（用户已拍板，本轮唯一真实 Provider）
+DEEPSEEK_BASE_URL = (
+    "https://api.deepseek.com"  # OpenAI 兼容端点（用户已拍板，本轮唯一真实 Provider）
+)
 
 
 def build_spike_agent(
@@ -33,7 +39,9 @@ def build_spike_agent(
 ) -> Agent:
     """构建受护栏约束的 Agent（真实调用入口；测试以桩 transport 注入 inner_transport）。"""
     transport = FeeGuardTransport(
-        inner=inner_transport if inner_transport is not None else httpx.AsyncHTTPTransport(),
+        inner=inner_transport
+        if inner_transport is not None
+        else httpx.AsyncHTTPTransport(),
         guard=guard,
         captured=captured,
         on_event=on_event,
@@ -64,5 +72,7 @@ def read_api_key_from_env(env_name: str = "DEEPSEEK_API_KEY") -> str:
 
     value = os.getenv(env_name)
     if not value:
-        raise RuntimeError(f"环境变量 {env_name} 未配置；真实调用拒绝启动（Key 只经环境变量传入）")
+        raise RuntimeError(
+            f"环境变量 {env_name} 未配置；真实调用拒绝启动（Key 只经环境变量传入）"
+        )
     return value

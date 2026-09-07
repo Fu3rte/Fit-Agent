@@ -6,8 +6,9 @@
 
 import asyncio
 
-from pydantic_ai import RunContext
-
+from pydantic_ai import (
+    RunContext,  # pyright: ignore[reportMissingImports]  # venv 内依赖：运行时+真 pyright 均可解析；仅扫描器 import 误报
+)
 from spike_lib.capture import ScriptedTransport, deepseek_usage
 from spike_lib.fee_guard import FeeGuard
 from spike_lib.real_runner import build_spike_agent
@@ -55,14 +56,18 @@ async def _wait_until(predicate, timeout: float = 5.0) -> None:
 
 
 def test_normal_completion_releases_slot_after_run_finishes():
-    transport = ScriptedTransport(script=[{"stream": True, "usage": USAGE, "content": "ok", "chunk_delay": 0.0}])
+    transport = ScriptedTransport(
+        script=[{"stream": True, "usage": USAGE, "content": "ok", "chunk_delay": 0.0}]
+    )
     captured: list = []
     timeline: list[str] = []
     outcome = RunOutcome(status="running")
 
     async def main() -> RunOutcome:
         harness = _build(transport, outcome, timeline, captured)
-        return await harness.run("正常完成", outcome=outcome, timeline=timeline, stream=True)
+        return await harness.run(
+            "正常完成", outcome=outcome, timeline=timeline, stream=True
+        )
 
     result = asyncio.run(main())
     assert result.status == "completed"
@@ -72,12 +77,56 @@ def test_normal_completion_releases_slot_after_run_finishes():
     assert timeline.count("slot_released") == 1
 
 
-def test_cancel_after_first_stream_chunk_forbids_subsequent_calls_and_no_success_commit():
-    """P1 修复：真分块 SSE——至少一个 chunk 已被消费后才取消（不是等待响应头阶段）。"""
+def test_stream_full_consumption_acclose_settles_usage():
+    """2026-09-07 补测修复：完整态流式（不取消）全量消费后，消费方主动 aclose 流时
+    若缓冲已含身份+usage（末尾 usage chunk 已被消费），须按自然结束同等结算，
+    不得误判为取消/截断而 abort 保留预留（usage 浮出 + 结算双验证）。"""
     transport = ScriptedTransport(
         script=[
-            {"stream": True, "usage": USAGE, "content": "0123456789" * 3, "chunk_delay": 0.1, "sse_chunks": 6},
-            {"stream": True, "usage": USAGE, "content": "should-never-happen", "chunk_delay": 0.1},
+            {
+                "stream": True,
+                "usage": USAGE,
+                "content": "0123456789" * 3,
+                "chunk_delay": 0.0,
+            }
+        ]
+    )
+    captured: list = []
+    timeline: list[str] = []
+    outcome = RunOutcome(status="running")
+    guard = FeeGuard()
+
+    async def main() -> tuple:
+        harness = _build(transport, outcome, timeline, captured, guard=guard)
+        res = await harness.run(
+            "完整消费", outcome=outcome, timeline=timeline, stream=True
+        )
+        return res, harness
+
+    result, _ = asyncio.run(main())
+    assert result.status == "completed"
+    assert "run_drive_finished" in result.events  # 正常完成，非取消
+    assert "stream_aborted" not in timeline  # 未被误判 abort
+    assert "settled" in timeline  # aclose 收尾结算
+    assert len(captured) == 1  # 无重复请求
+    last = guard.calls[-1]
+    assert last.settled_usd is not None  # 结算而非预留保留
+    assert last.usage_raw is not None  # raw usage 被保留
+    assert guard.stopped is None
+
+
+def test_stream_cancel_after_chunk_still_keeps_reservation_not_settled():
+    """aclose 收尾判定安全侧：真正取消（首 chunk 后）仍走 abort 保留预留，不得误结算。
+    （修复把 aclose 在缓冲含完整 usage 时改为结算；必须确认取消路径不受影响。）"""
+    transport = ScriptedTransport(
+        script=[
+            {
+                "stream": True,
+                "usage": USAGE,
+                "content": "0123456789" * 6,
+                "chunk_delay": 0.15,
+                "sse_chunks": 6,
+            }
         ]
     )
     captured: list = []
@@ -87,8 +136,58 @@ def test_cancel_after_first_stream_chunk_forbids_subsequent_calls_and_no_success
 
     async def main() -> RunOutcome:
         harness = _build(transport, outcome, timeline, captured, guard=guard)
-        task = asyncio.ensure_future(harness.run("开始", outcome=outcome, timeline=timeline, stream=True))
-        await _wait_until(lambda: "chunk:1" in timeline and any(e.startswith("chunk:") for e in timeline[1:]))
+        task = asyncio.ensure_future(
+            harness.run("中途取消", outcome=outcome, timeline=timeline, stream=True)
+        )
+        await _wait_until(lambda: any(e.startswith("chunk:") for e in timeline))
+        harness.cancel()
+        return await task
+
+    result = asyncio.run(main())
+    assert result.status == "cancelled"
+    assert "settled" not in timeline  # 取消不得结算
+    assert any(e.startswith("stream_aborted") for e in timeline)  # 仍走 abort
+    assert len(captured) == 1
+    last = guard.calls[-1]
+    assert last.settled_usd is None  # 预留保留不算 0
+    assert guard.stopped is None
+
+
+def test_cancel_after_first_stream_chunk_forbids_subsequent_calls_and_no_success_commit():
+    """P1 修复：真分块 SSE——至少一个 chunk 已被消费后才取消（不是等待响应头阶段）。"""
+    transport = ScriptedTransport(
+        script=[
+            {
+                "stream": True,
+                "usage": USAGE,
+                "content": "0123456789" * 3,
+                "chunk_delay": 0.1,
+                "sse_chunks": 6,
+            },
+            {
+                "stream": True,
+                "usage": USAGE,
+                "content": "should-never-happen",
+                "chunk_delay": 0.1,
+            },
+        ]
+    )
+    captured: list = []
+    timeline: list[str] = []
+    outcome = RunOutcome(status="running")
+    guard = FeeGuard()
+
+    async def main() -> RunOutcome:
+        harness = _build(transport, outcome, timeline, captured, guard=guard)
+        task = asyncio.ensure_future(
+            harness.run("开始", outcome=outcome, timeline=timeline, stream=True)
+        )
+        await _wait_until(
+            lambda: (
+                "chunk:1" in timeline
+                and any(e.startswith("chunk:") for e in timeline[1:])
+            )
+        )
         harness.cancel()  # 至少一个 chunk 已消费后取消
         return await task
 
@@ -96,7 +195,10 @@ def test_cancel_after_first_stream_chunk_forbids_subsequent_calls_and_no_success
     assert result.status == "cancelled"
     assert "run_drive_finished" not in result.events  # 不产生成功提交
     assert result.events[-1] == "slot_released"
-    assert any(e.startswith("chunk:") for e in result.events) is False or True  # chunk 事件在 timeline，不在 outcome
+    assert (
+        any(e.startswith("chunk:") for e in result.events) is False or True
+    )  # chunk 事件在 timeline，不在 outcome
+
     # 取消后禁止后续模型调用：短暂让步后 wire 请求数不变
     async def settle_check() -> None:
         await asyncio.sleep(0.15)
@@ -113,8 +215,18 @@ def test_cancel_during_uninterruptible_tool_finishes_same_task_before_slot_relea
     """P1 修复：不可中断收尾等待同一个 shielded task（无第二次 sleep、无重复完成事件）。"""
     transport = ScriptedTransport(
         script=[
-            {"stream": True, "usage": USAGE, "tool_call": {"id": "c1", "name": "lookup_plan", "arguments": "{}"}, "chunk_delay": 0.0},
-            {"stream": True, "usage": USAGE, "content": "should-never-happen", "chunk_delay": 0.0},
+            {
+                "stream": True,
+                "usage": USAGE,
+                "tool_call": {"id": "c1", "name": "lookup_plan", "arguments": "{}"},
+                "chunk_delay": 0.0,
+            },
+            {
+                "stream": True,
+                "usage": USAGE,
+                "content": "should-never-happen",
+                "chunk_delay": 0.0,
+            },
         ]
     )
     captured: list = []
@@ -122,9 +234,15 @@ def test_cancel_during_uninterruptible_tool_finishes_same_task_before_slot_relea
     outcome = RunOutcome(status="running")
 
     async def main() -> RunOutcome:
-        harness = _build(transport, outcome, timeline, captured, uninterruptible_tail=0.3)
-        task = asyncio.ensure_future(harness.run("触发工具", outcome=outcome, timeline=timeline, stream=True))
-        await _wait_until(lambda: any(e.startswith("tool_start") for e in outcome.events))
+        harness = _build(
+            transport, outcome, timeline, captured, uninterruptible_tail=0.3
+        )
+        task = asyncio.ensure_future(
+            harness.run("触发工具", outcome=outcome, timeline=timeline, stream=True)
+        )
+        await _wait_until(
+            lambda: any(e.startswith("tool_start") for e in outcome.events)
+        )
         harness.cancel()
         return await task
 
@@ -154,8 +272,12 @@ def test_second_run_model_request_happens_after_first_slot_release():
 
     async def main() -> tuple[RunOutcome, RunOutcome]:
         harness = _build(transport, o1, timeline, captured)
-        first = asyncio.ensure_future(harness.run("第一", outcome=o1, timeline=timeline, stream=True))
-        second = asyncio.ensure_future(harness.run("第二", outcome=o2, timeline=timeline, stream=True))
+        first = asyncio.ensure_future(
+            harness.run("第一", outcome=o1, timeline=timeline, stream=True)
+        )
+        second = asyncio.ensure_future(
+            harness.run("第二", outcome=o2, timeline=timeline, stream=True)
+        )
         return await first, await second
 
     r1, r2 = asyncio.run(main())
@@ -172,7 +294,13 @@ def test_harness_reusable_after_cancel():
     """P1 修复：取消标记在每个 Run 开始时重置，同一 harness 取消后可安全运行后续 Run。"""
     transport = ScriptedTransport(
         script=[
-            {"stream": True, "usage": USAGE, "content": "will-be-cancelled", "chunk_delay": 0.2, "sse_chunks": 4},
+            {
+                "stream": True,
+                "usage": USAGE,
+                "content": "will-be-cancelled",
+                "chunk_delay": 0.2,
+                "sse_chunks": 4,
+            },
             {"stream": True, "usage": USAGE, "content": "r2", "chunk_delay": 0.0},
         ]
     )
@@ -182,7 +310,9 @@ def test_harness_reusable_after_cancel():
 
     async def main() -> tuple[RunOutcome, RunOutcome]:
         harness = _build(transport, o1, timeline, captured)
-        first = asyncio.ensure_future(harness.run("第一", outcome=o1, timeline=timeline, stream=True))
+        first = asyncio.ensure_future(
+            harness.run("第一", outcome=o1, timeline=timeline, stream=True)
+        )
         await _wait_until(lambda: any(e.startswith("chunk:") for e in timeline))
         harness.cancel()
         await first
