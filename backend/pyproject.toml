@@ -7,11 +7,31 @@ authors = [
     { name = "Fu3rte", email = "2575716528@qq.com" }
 ]
 requires-python = ">=3.13"
-dependencies = []
+dependencies = [
+    # 以下均为 PLAN.md「技术栈」已拍依赖（Stage 0 授权加入）
+    "fastapi>=0.115",
+    "uvicorn>=0.30",
+    "aiosqlite>=0.21",
+    "platformdirs>=4.3",
+    # PydanticAI 核心（spike 实测版本 2.40.0）；消息契约 07 用 ModelMessagesTypeAdapter
+    "pydantic-ai-slim>=2.40,<3",
+    # 固定业务时区首次采样（S0-05，2026-09-09 拍板新增）：tzlocal 取本机 IANA 地区名；
+    # tzdata 提供 Windows（无系统 tz 数据库）下 ZoneInfo 解析地区规则所需的 IANA 数据
+    "tzlocal>=5",
+    "tzdata>=2024.1",
+]
 
-[project.scripts]
-backend = "backend:main"
+# Stage 0 不是可安装的 Python 包：源码以 backend/ 下的顶层包（config.py、main.py、
+# storage/、domain/ ... ）直接由 `uv run`/`.venv/bin/python` 导入，没有 src/<name> 布局。
+# 因此声明为非打包（virtual）项目，uv 只同步依赖、不构建本项目，`uv sync --group dev --locked`
+# 才能复制。Stage 5 做发布打包时补 build-system 与 `[project.scripts]` 入口并删掉本开关。
+[tool.uv]
+package = false
 
-[build-system]
-requires = ["uv_build>=0.12.3,<0.13.0"]
-build-backend = "uv_build"
+[dependency-groups]
+dev = [
+    "pytest>=9.1",
+]
+
+[tool.pytest.ini_options]
+norecursedirs = ["archive"]  # 归档的 pi 移植残留不参与收集

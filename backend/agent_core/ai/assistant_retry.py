@@ -31,81 +31,85 @@ def _build_pattern(patterns: tuple[str, ...]) -> re.Pattern[str]:
     return re.compile("|".join(patterns), re.IGNORECASE)
 
 
-_NON_RETRYABLE_PROVIDER_LIMIT_ERROR_PATTERN = _build_pattern((
-    # OpenCode Go/free-tier limits returned as 429 JSON error types by OpenCode's
-    # Zen API. These are subscription/account limits, not transient throttles.
-    r"GoUsageLimitError",
-    r"FreeUsageLimitError",
-    # OpenCode Go subscription-limit text asks users to enable available-balance
-    # usage after rolling/weekly/monthly limits are reached.
-    r"Monthly usage limit reached",
-    r"available balance",
-    # Generic quota/budget/billing exhaustion. `insufficient_quota` is OpenAI's
-    # quota/billing error code; the other strings cover common gateway wording.
-    r"insufficient_quota",
-    r"out of budget",
-    r"quota exceeded",
-    r"billing",
-))
+_NON_RETRYABLE_PROVIDER_LIMIT_ERROR_PATTERN = _build_pattern(
+    (
+        # OpenCode Go/free-tier limits returned as 429 JSON error types by OpenCode's
+        # Zen API. These are subscription/account limits, not transient throttles.
+        r"GoUsageLimitError",
+        r"FreeUsageLimitError",
+        # OpenCode Go subscription-limit text asks users to enable available-balance
+        # usage after rolling/weekly/monthly limits are reached.
+        r"Monthly usage limit reached",
+        r"available balance",
+        # Generic quota/budget/billing exhaustion. `insufficient_quota` is OpenAI's
+        # quota/billing error code; the other strings cover common gateway wording.
+        r"insufficient_quota",
+        r"out of budget",
+        r"quota exceeded",
+        r"billing",
+    )
+)
 
-_RETRYABLE_PROVIDER_ERROR_PATTERN = _build_pattern((
-    # Generic provider load, HTTP status, and server-side transient failures.
-    r"overloaded",
-    r"rate.?limit",
-    r"too many requests",
-    r"429",
-    r"500",
-    r"502",
-    r"503",
-    r"504",
-    r"524",
-    r"service.?unavailable",
-    r"server.?error",
-    r"internal.?error",
-    # Wrapper/provider text for transient upstream failures, including OpenRouter
-    # "Provider returned error" responses (#2264).
-    r"provider.?returned.?error",
-    r"exceeded request buffer limit while retrying upstream",
-    # Network, proxy, and fetch transport failures. This includes OpenAI Codex
-    # raw-fetch failures such as "upstream connect", "connection refused", and
-    # "reset before headers" (#733), plus OpenRouter connection drops (#3317).
-    r"network.?error",
-    r"connection.?error",
-    r"connection.?refused",
-    r"connection.?lost",
-    r"other side closed",
-    r"fetch failed",
-    r"getaddrinfo",
-    r"ENOTFOUND",
-    r"EAI_AGAIN",
-    r"upstream.?connect",
-    r"reset before headers",
-    r"socket hang up",
-    r"socket connection was closed",
-    r"timed? out",
-    r"timeout",
-    r"terminated",
-    # WebSocket transports can report close/error text instead of HTTP/fetch text.
-    r"websocket.?closed",
-    r"websocket.?error",
-    # Premature stream endings from SDKs and transports. Anthropic can throw
-    # "stream ended without ..." and "Anthropic stream ended before message_stop"
-    # (#4433); Bedrock/Smithy can throw an HTTP/2 no-response error (#3594).
-    r"ended without",
-    r"stream ended before message_stop",
-    r"stream ended before a terminal response event",
-    r"http2 request did not get a response",
-    # Provider-requested retry delay cap failures should flow through the outer
-    # retry policy so callers can surface/abort the backoff (#1123).
-    r"retry delay",
-    # Explicit retry guidance emitted mid-stream by OpenAI Responses and Bedrock
-    # stream exceptions (#6019).
-    r"you can retry your request",
-    r"try your request again",
-    r"please retry your request",
-    # gRPC based providers (e.g. NVIDIA NIM)
-    r"ResourceExhausted",
-))
+_RETRYABLE_PROVIDER_ERROR_PATTERN = _build_pattern(
+    (
+        # Generic provider load, HTTP status, and server-side transient failures.
+        r"overloaded",
+        r"rate.?limit",
+        r"too many requests",
+        r"429",
+        r"500",
+        r"502",
+        r"503",
+        r"504",
+        r"524",
+        r"service.?unavailable",
+        r"server.?error",
+        r"internal.?error",
+        # Wrapper/provider text for transient upstream failures, including OpenRouter
+        # "Provider returned error" responses (#2264).
+        r"provider.?returned.?error",
+        r"exceeded request buffer limit while retrying upstream",
+        # Network, proxy, and fetch transport failures. This includes OpenAI Codex
+        # raw-fetch failures such as "upstream connect", "connection refused", and
+        # "reset before headers" (#733), plus OpenRouter connection drops (#3317).
+        r"network.?error",
+        r"connection.?error",
+        r"connection.?refused",
+        r"connection.?lost",
+        r"other side closed",
+        r"fetch failed",
+        r"getaddrinfo",
+        r"ENOTFOUND",
+        r"EAI_AGAIN",
+        r"upstream.?connect",
+        r"reset before headers",
+        r"socket hang up",
+        r"socket connection was closed",
+        r"timed? out",
+        r"timeout",
+        r"terminated",
+        # WebSocket transports can report close/error text instead of HTTP/fetch text.
+        r"websocket.?closed",
+        r"websocket.?error",
+        # Premature stream endings from SDKs and transports. Anthropic can throw
+        # "stream ended without ..." and "Anthropic stream ended before message_stop"
+        # (#4433); Bedrock/Smithy can throw an HTTP/2 no-response error (#3594).
+        r"ended without",
+        r"stream ended before message_stop",
+        r"stream ended before a terminal response event",
+        r"http2 request did not get a response",
+        # Provider-requested retry delay cap failures should flow through the outer
+        # retry policy so callers can surface/abort the backoff (#1123).
+        r"retry delay",
+        # Explicit retry guidance emitted mid-stream by OpenAI Responses and Bedrock
+        # stream exceptions (#6019).
+        r"you can retry your request",
+        r"try your request again",
+        r"please retry your request",
+        # gRPC based providers (e.g. NVIDIA NIM)
+        r"ResourceExhausted",
+    )
+)
 
 
 @dataclass
@@ -142,11 +146,21 @@ class RetryCallbacks:
 
 class RetryCallbacksLike(Protocol):
     """Structural type for the ``callbacks`` argument (TS ``RetryCallbacks`` is an
-    interface): any object exposing the three optional callbacks satisfies it."""
+    interface): any object exposing the three optional callbacks satisfies it.
 
-    on_retry_scheduled: SyncOrAsyncCallback | None
-    on_retry_attempt_start: SyncOrAsyncCallback | None
-    on_retry_finished: SyncOrAsyncCallback | None
+    Declared as read-only properties: :func:`retry_assistant_call` only reads the
+    callbacks, and a mutable-attribute protocol would structurally reject
+    implementations that define them as methods (a concrete method signature
+    cannot accept assignment of ``SyncOrAsyncCallback | None``)."""
+
+    @property
+    def on_retry_scheduled(self) -> SyncOrAsyncCallback | None: ...
+
+    @property
+    def on_retry_attempt_start(self) -> SyncOrAsyncCallback | None: ...
+
+    @property
+    def on_retry_finished(self) -> SyncOrAsyncCallback | None: ...
 
 
 class RetrySleepAbortError(Exception):
