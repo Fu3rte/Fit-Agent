@@ -1,7 +1,7 @@
 """S0-04：编号迁移、user_version 与最小存储结构约束。
 
-生产迁移经 storage/migrations/001_*.sql；升级/失败/重跑语义用临时注入的
-迁移目录验证（不向生产迁移目录塞测试用假迁移）。
+生产迁移经 storage/migrations/001_*.sql（Stage 0）与 002_*.sql（Stage 1 两项业务
+存储）；升级/失败/重跑语义用临时注入的迁移目录验证（不向生产迁移目录塞测试用假迁移）。
 """
 
 import sqlite3
@@ -11,10 +11,11 @@ import pytest
 
 from storage.db import Database
 from storage.errors import FutureSchemaVersion, MigrationError
+from storage.migrations import load_migrations
 from storage.run_repo import RunRepo
 from tests.support import open_database
 
-EXPECTED_TABLES = {
+EXPECTED_RUNTIME_TABLES = {
     "conversations",
     "runs",
     "messages",
@@ -22,6 +23,9 @@ EXPECTED_TABLES = {
     "app_config",
     "provider_config",
 }
+# Stage 1 只新增这两项业务存储（stage1.md §3）；drafts/plans/records/stats 仍不得建。
+STAGE1_TABLES = {"exercises", "user_profile"}
+LATEST_VERSION = len(load_migrations())
 
 
 async def _table_names(db: Database) -> set[str]:
@@ -36,13 +40,14 @@ async def _table_names(db: Database) -> set[str]:
 
 async def test_fresh_initialize_creates_runtime_tables(tmp_path: Path) -> None:
     async with open_database(tmp_path / "app.db") as db:
-        assert await db.migrate() == 1
-        assert await db.pragma_value("user_version") == 1
+        assert await db.migrate() == LATEST_VERSION
+        assert await db.pragma_value("user_version") == LATEST_VERSION
         tables = await _table_names(db)
-        assert tables >= EXPECTED_TABLES
+        assert tables >= EXPECTED_RUNTIME_TABLES | STAGE1_TABLES
         # 不创建 11 张业务表（07 章责任边界）：库中表恰为运行时四表 +
-        # app_config/provider_config（sqlite_sequence 来自 AUTOINCREMENT）
-        assert tables == EXPECTED_TABLES | {"sqlite_sequence"}
+        # app_config/provider_config + Stage 1 的动作目录与档案两项业务存储
+        # （sqlite_sequence 来自 AUTOINCREMENT）
+        assert tables == EXPECTED_RUNTIME_TABLES | STAGE1_TABLES | {"sqlite_sequence"}
 
 
 async def test_repeated_start_does_not_rerun_migrations(tmp_path: Path) -> None:
@@ -50,7 +55,7 @@ async def test_repeated_start_does_not_rerun_migrations(tmp_path: Path) -> None:
     async with open_database(path) as db:
         await RunRepo(db).create_conversation("sentinel")
     async with open_database(path) as db:
-        assert await db.migrate() == 1  # 无新迁移可执行
+        assert await db.migrate() == LATEST_VERSION  # 无新迁移可执行
         # 若迁移被重复执行，CREATE TABLE 会与已存在表冲突——此处不抛错即证明跳过
         sentinel = await RunRepo(db).get_conversation("sentinel")
         assert sentinel is not None
@@ -91,7 +96,9 @@ async def test_upgrade_preserves_existing_data(tmp_path: Path) -> None:
 async def test_failed_migration_leaves_no_partial_structure(tmp_path: Path) -> None:
     """失败的单次迁移：版本号不虚报、不留半套结构；修复后可继续，不删用户库。"""
     migrations_dir = tmp_path / "migrations"
-    _write_migration(migrations_dir, 1, "base", "CREATE TABLE keep_me (id TEXT PRIMARY KEY);")
+    _write_migration(
+        migrations_dir, 1, "base", "CREATE TABLE keep_me (id TEXT PRIMARY KEY);"
+    )
     _write_migration(
         migrations_dir,
         2,
@@ -108,7 +115,9 @@ async def test_failed_migration_leaves_no_partial_structure(tmp_path: Path) -> N
         assert "half_done" not in tables  # 半套结构已回滚
 
         # 修复迁移文件后重跑：不需要删除数据库
-        _write_migration(migrations_dir, 2, "broken", "CREATE TABLE half_done (id TEXT PRIMARY KEY);")
+        _write_migration(
+            migrations_dir, 2, "broken", "CREATE TABLE half_done (id TEXT PRIMARY KEY);"
+        )
         assert await db.migrate() == 2
         assert "half_done" in await _table_names(db)
 
@@ -207,6 +216,7 @@ async def test_run_events_structure_matches_decided_schema(tmp_path: Path) -> No
     """结构验收：run_events 以 event_type + payload_json 存轨迹，
     id 为 INTEGER PRIMARY KEY AUTOINCREMENT（仅行身份，非恢复游标）。"""
     async with open_database(tmp_path / "app.db") as db:
+
         async def op(conn):
             async with conn.execute(
                 "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'run_events'"

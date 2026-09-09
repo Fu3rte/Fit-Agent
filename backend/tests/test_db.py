@@ -11,8 +11,11 @@ from typing import Any
 import pytest
 
 from storage.db import Database
+from storage.migrations import load_migrations
 from storage.run_repo import RunRepo
 from tests.support import open_database
+
+LATEST_VERSION = len(load_migrations())
 
 
 async def test_open_initializes_wal_foreign_keys_busy_timeout(tmp_path: Path) -> None:
@@ -93,7 +96,7 @@ async def test_transaction_commit_and_rollback(tmp_path: Path) -> None:
             await conn.execute(
                 "INSERT INTO conversations (id, created_at) VALUES ('c-ok', 't')"
             )
-        assert await db.pragma_value("user_version") == 1
+        assert await db.pragma_value("user_version") == LATEST_VERSION
         assert (await RunRepo(db).get_conversation("c-ok")) is not None
 
         with pytest.raises(RuntimeError, match="boom"):

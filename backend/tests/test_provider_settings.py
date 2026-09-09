@@ -54,7 +54,17 @@ from tests.support import (
 
 
 _SCANNED_TABLES = frozenset(
-    {"conversations", "runs", "messages", "run_events", "app_config", "provider_config"}
+    {
+        "conversations",
+        "runs",
+        "messages",
+        "run_events",
+        "app_config",
+        "provider_config",
+        # Stage 1 新增的两项业务存储：同样必须被凭据泄漏扫描覆盖
+        "exercises",
+        "user_profile",
+    }
 )
 
 
@@ -141,6 +151,12 @@ async def all_text_cells(db: Database) -> list[tuple[str, str, str]]:
         async with conn.execute("SELECT * FROM provider_config") as cursor:
             columns = tuple(str(c[0]) for c in cursor.description)
             cells += _rows_as_cells("provider_config", columns, await cursor.fetchall())
+        async with conn.execute("SELECT * FROM exercises") as cursor:
+            columns = tuple(str(c[0]) for c in cursor.description)
+            cells += _rows_as_cells("exercises", columns, await cursor.fetchall())
+        async with conn.execute("SELECT * FROM user_profile") as cursor:
+            columns = tuple(str(c[0]) for c in cursor.description)
+            cells += _rows_as_cells("user_profile", columns, await cursor.fetchall())
         return cells
 
     return await db.under_lock(op)
