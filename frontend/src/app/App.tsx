@@ -198,7 +198,7 @@ export default function App() {
 
         {/* 主区 */}
         <main className="relative flex-1 overflow-y-auto">
-          <div className="min-h-full">
+          <div className="h-full">
             <Routes>
               <Route path="/" element={<ChatPage />} />
               <Route path="/profile" element={<ProfilePage />} />

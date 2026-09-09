@@ -12,7 +12,7 @@ import {
   CircleStop,
   Loader2,
   RefreshCw,
-  SendHorizonal,
+  SendHorizontal,
   Settings,
   Sparkles,
 } from "lucide-react";
@@ -990,7 +990,7 @@ export default function ChatPage() {
   });
 
   return (
-    <div className="mx-auto flex h-full w-full max-w-3xl flex-col px-6">
+    <div className="relative mx-auto flex h-full w-full max-w-3xl flex-col px-6">
       <ChatEventsBridge
         key={subscribeCycle}
         onEvent={handleEvent}
@@ -1031,7 +1031,7 @@ export default function ChatPage() {
           {/* 消息流 */}
           <div
             ref={scrollRef}
-            className="flex-1 space-y-4 overflow-y-auto pb-4"
+            className="flex-1 space-y-4 overflow-y-auto pb-40"
           >
             {messages.isLoading && (
               <p className="pt-6 text-center text-xs text-muted-foreground">
@@ -1201,62 +1201,74 @@ export default function ChatPage() {
             })}
           </div>
 
-          {/* 运行中状态条 + 停止（输入不禁用：conversation_busy 的演示路径） */}
-          {showActiveBar && (
-            <div className="mb-2 flex items-center justify-between rounded-lg bg-secondary px-3 py-1.5 text-xs text-secondary-foreground">
-              <span className="flex items-center gap-2">
-                <span
-                  className="size-1.5 animate-pulse rounded-full bg-current"
-                  aria-hidden
-                />
-                {/* 08 8.8：pending/running 统一「处理中」，次要文案区分受理中/执行中 */}
-                {RUN_STATUS_COPY[active.started ? "running" : "pending"]}
-                <span className="text-muted-foreground">
-                  {runPhaseCopy(active.started)}
-                  {active.session === sessionId ? "" : "·其他会话"}
-                </span>
-              </span>
-              <Button
-                variant="ghost"
-                size="sm"
-                onClick={() => active.runId && cancel.mutate(active.runId)}
-                disabled={active.runId === "" || cancel.isPending}
-              >
-                <CircleStop aria-hidden />
-                停止
-              </Button>
-            </div>
-          )}
-
-          {/* 输入区 */}
-          <div className="flex items-end gap-2 border-t py-4">
-            <Textarea
-              ref={textareaRef}
-              value={input}
-              onChange={(e) => setInput(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter" && !e.shiftKey) {
-                  e.preventDefault();
-                  void send();
-                }
-              }}
-              disabled={composerDisabled}
-              placeholder={
-                configured
-                  ? "描述你的训练、提问，或发起变更…（Enter 发送，Shift+Enter 换行）"
-                  : "未配置模型，请先到设置页完成配置"
-              }
-              className="flex-1 resize-none"
-              rows={2}
+          {/* 输入容器：贴底浮层 + 上方渐变蒙板，消息从下方滚过 */}
+          <div className="absolute inset-x-0 bottom-0 z-10 bg-background px-6 pt-6 pb-8">
+            {/* 蒙板：贴着容器上沿，从背景色向透明淡出 */}
+            <div
+              aria-hidden
+              className="pointer-events-none absolute inset-x-0 bottom-full h-10 bg-linear-to-t from-background to-transparent"
             />
-            <Button
-              size="icon"
-              aria-label="发送"
-              onClick={() => void send()}
-              disabled={composerDisabled}
-            >
-              <SendHorizonal />
-            </Button>
+
+            {/* 运行中状态条 + 停止（输入不禁用：conversation_busy 的演示路径） */}
+            {showActiveBar && (
+              <div className="mb-2 flex items-center justify-between rounded-lg bg-secondary px-3 py-1.5 text-xs text-secondary-foreground">
+                <span className="flex items-center gap-2">
+                  <span
+                    className="size-1.5 animate-pulse rounded-full bg-current"
+                    aria-hidden
+                  />
+                  {/* 08 8.8：pending/running 统一「处理中」，次要文案区分受理中/执行中 */}
+                  {RUN_STATUS_COPY[active.started ? "running" : "pending"]}
+                  <span className="text-muted-foreground">
+                    {runPhaseCopy(active.started)}
+                    {active.session === sessionId ? "" : "·其他会话"}
+                  </span>
+                </span>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => active.runId && cancel.mutate(active.runId)}
+                  disabled={active.runId === "" || cancel.isPending}
+                >
+                  <CircleStop aria-hidden />
+                  停止
+                </Button>
+              </div>
+            )}
+
+            {/* 输入区：胶囊形输入框，发送按钮内嵌，仅有内容时显示 */}
+            <div className="relative">
+              <Textarea
+                ref={textareaRef}
+                value={input}
+                onChange={(e) => setInput(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" && !e.shiftKey) {
+                    e.preventDefault();
+                    void send();
+                  }
+                }}
+                disabled={composerDisabled}
+                placeholder={
+                  configured
+                    ? "描述你的训练、提问，或发起变更…（Enter 发送，Shift+Enter 换行）"
+                    : "未配置模型，请先到设置页完成配置"
+                }
+                className="min-h-0 resize-none rounded-full border-0 bg-card py-4 pr-14 pl-5 shadow-md focus-visible:ring-0"
+                rows={1}
+              />
+              {input.trim() !== "" && (
+                <Button
+                  size="icon"
+                  aria-label="发送"
+                  onClick={() => void send()}
+                  disabled={composerDisabled}
+                  className="absolute top-1/2 right-5 size-8 -translate-y-1/2 cursor-pointer"
+                >
+                  <SendHorizontal />
+                </Button>
+              )}
+            </div>
           </div>
         </>
       )}
