@@ -45,7 +45,7 @@ LATER_STAGE_TABLES = {
 }
 
 LATEST_VERSION = len(load_migrations())
-# 003 精选种子行数（已拍 24 项清单；见 S1-03 证据）
+# 003 精选种子行数（已拍 24 项清单；见 evidence/S1-evidence-linux-2026-09-09.md §5）
 SEEDED_EXERCISE_COUNT = 24
 FAKE_KEY = "sk-fitagent-fake-s102-not-a-real-key"
 

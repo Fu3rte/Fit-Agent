@@ -6,7 +6,7 @@
 
 ``SEED_ROWS`` 是**逐项来源核对表**（核对依据：数据集 instructions.zh / equipment /
 target 与动作定义一致，不是名称相似）；证据文件
-``pre-prj/stage/evidence/S1-03-actions-linux-2026-09-09.md`` 同步记录同一张表。
+``pre-prj/stage/evidence/S1-evidence-linux-2026-09-09.md`` 同步记录同一张表。
 所有用例只操作 ``tmp_path`` 下的临时文件库与临时迁移目录。
 """
 
