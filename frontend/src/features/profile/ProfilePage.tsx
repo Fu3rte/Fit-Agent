@@ -56,16 +56,6 @@ function ProfileCard({ profile }: { profile: Profile }) {
             <span className="text-right font-medium">{value}</span>
           </div>
         ))}
-        <div className="flex items-baseline justify-between gap-4">
-          <span className="shrink-0 text-muted-foreground">可用器械</span>
-          <span className="flex flex-wrap justify-end gap-1.5">
-            {profile.equipment.map((item) => (
-              <Badge key={item} variant="secondary">
-                {item}
-              </Badge>
-            ))}
-          </span>
-        </div>
       </CardContent>
     </Card>
   );
@@ -116,13 +106,14 @@ function BlockTable({ block }: { block: PlanBlock }) {
           每周{WEEKDAYS[block.weekday - 1] ?? `第 ${block.weekday} 天`}
         </span>
       </div>
-      <table className="w-full text-sm">
+      {/* table-fixed + 固定列宽：三个板块是三张独立表，自动布局会按各自内容算列宽，导致跨表不对齐 */}
+      <table className="w-full table-fixed text-sm">
         <thead>
           <tr className="border-b text-left text-xs text-muted-foreground">
-            <th className="py-1.5 pr-3 font-normal">动作</th>
-            <th className="py-1.5 pr-3 font-normal">组 × 次</th>
-            <th className="py-1.5 pr-3 font-normal">目标 RIR</th>
-            <th className="py-1.5 font-normal">渐进方式</th>
+            <th className="w-[40%] py-1.5 pr-3 font-normal">动作</th>
+            <th className="w-[18%] py-1.5 pr-3 font-normal">组 × 次</th>
+            <th className="w-[14%] py-1.5 pr-3 font-normal">目标 RIR</th>
+            <th className="w-[28%] py-1.5 font-normal">渐进方式</th>
           </tr>
         </thead>
         <tbody>

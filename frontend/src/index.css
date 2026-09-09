@@ -44,11 +44,6 @@
   --sidebar-accent-foreground: #0c0a09;
   --sidebar-border: #e7e5e4;
   --sidebar-ring: #292524;
-  --orb-mint: #a7e5d3;
-  --orb-peach: #f4c5a8;
-  --orb-lavender: #c8b8e0;
-  --orb-sky: #a8c8e8;
-  --orb-rose: #e8b8c4;
 }
 
 /* 暗色主题（C3B，取自 elevenlabs-theme.json dark 块） */
@@ -141,21 +136,10 @@
     @apply bg-background text-foreground font-sans antialiased;
     letter-spacing: 0.15px;
   }
-}
-
-/* 氛围渐变球：仅装饰，不做填充与文字色 */
-@utility bg-orb-mint {
-  background-image: radial-gradient(ellipse at center, var(--orb-mint) 0%, transparent 70%);
-}
-@utility bg-orb-peach {
-  background-image: radial-gradient(ellipse at center, var(--orb-peach) 0%, transparent 70%);
-}
-@utility bg-orb-lavender {
-  background-image: radial-gradient(ellipse at center, var(--orb-lavender) 0%, transparent 70%);
-}
-@utility bg-orb-sky {
-  background-image: radial-gradient(ellipse at center, var(--orb-sky) 0%, transparent 70%);
-}
-@utility bg-orb-rose {
-  background-image: radial-gradient(ellipse at center, var(--orb-rose) 0%, transparent 70%);
+  /* 应用是固定高度外壳（App 的 h-screen），主区内部自滑；
+     锁住视口，避免选词/拖选时浏览器再冒出一根窗口滚动条 */
+  html,
+  body {
+    overflow: hidden;
+  }
 }

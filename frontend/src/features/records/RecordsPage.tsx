@@ -7,7 +7,6 @@ import {
   CardContent,
   CardDescription,
   CardHeader,
-  CardTitle,
 } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { getRecords } from "@/lib/api";
@@ -58,7 +57,10 @@ function RecordCard({ record }: { record: TrainingRecord }) {
     <Card>
       <CardHeader>
         <div className="flex flex-wrap items-center gap-2">
-          <CardTitle className="tabular-nums">{record.date}</CardTitle>
+          {/* 日期用正文 sans：font-display 会兜底到系统 serif，数字观感突兀 */}
+          <span className="text-lg leading-none tracking-tight tabular-nums">
+            {record.date}
+          </span>
           <KindBadge kind={record.kind} />
           <StatusBadge status={record.status} />
         </div>

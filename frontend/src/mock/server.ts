@@ -12,12 +12,14 @@ import type {
   ChatMessage,
   ConfirmResult,
   Draft,
+  ErrorCode,
   FieldDiff,
   PrEntry,
   ProviderConfig,
   RecalcResult,
   Restriction,
   ReviewDoc,
+  RunStatus,
   SessionSummary,
   StatsSummary,
   TrainingRecord,
@@ -34,6 +36,12 @@ interface RunState {
   client_request_id: string;
   status: "pending" | "running" | "completed" | "failed" | "cancelled";
   cancelled: boolean;
+  /** 已保存的部分回答 = 已流出的整段文本（stage0 已拍 D1）；取消/失败后保留（08 8.7 规则 5/8） */
+  saved_text: string;
+  /** status = failed 时的失败原因（08 8.4） */
+  error_code?: ErrorCode;
+  /** 该 Run 已提出草稿的 id；当前状态以 state.drafts 为准（01 1.2） */
+  draft_ids: string[];
 }
 
 interface MockState {
@@ -55,7 +63,15 @@ interface MockState {
   sessions: SessionSummary[];
   messages: Map<string, ChatMessage[]>;
   drafts: Map<string, Draft>;
+  /** 草稿归属会话（mock 内部索引；契约 Draft 本身无会话字段） */
+  draft_sessions: Map<string, string>;
+  /** 首次确认凭据（owner 决策 B；01 1.3 提交凭据）：draft_id → 原始 context_version 与 summary；
+   *  重复确认返回持久化凭据，不从当前状态重建，不再写入或递增版本 */
+  confirm_receipts: Map<string, { context_version: number; summary: string }>;
   runs: Map<string, RunState>;
+  /** 唯一执行名额（08 8.3）：由正在执行的 Run 持有，runScript 实际退出（finally）后才释放；
+   *  与 Run 状态解耦——取消立即置 cancelled，名额不提前释放。非权威状态，仅作并发互斥。 */
+  execution_slot_run_id: string | null;
 }
 
 interface PlanState {
@@ -369,30 +385,70 @@ function seedState(): MockState {
     sessions,
     messages,
     drafts: new Map(),
+    draft_sessions: new Map(),
+    confirm_receipts: new Map(),
     runs: new Map(),
+    execution_slot_run_id: null,
   };
 }
 
 /* ------------------------------- SSE 总线 --------------------------------- */
 
-interface BufferedEvent {
-  id: number;
-  event: string;
-  data: unknown;
-}
-
+/**
+ * SSE 总线（08 8.7）：SSE 只负责实时展示，无事件缓冲、无事件 ID、无 Last-Event-ID
+ * 补读或重放——断线/刷新后经业务接口查询当前状态（GET /api/runs/active、会话消息
+ * 与草稿），不依赖浏览器自动重连。
+ */
 class SseHub {
-  private seq = 0;
-  private buffer: BufferedEvent[] = [];
-  private clients = new Set<ServerResponse>();
+  /** 连接 → 心跳空闲窗口重置器（08 8.7：业务事件重置该连接的 15s 空闲计时） */
+  private clients = new Map<ServerResponse, () => void>();
 
-  emit(event: string, data: unknown): void {
-    this.seq += 1;
-    const item = { id: this.seq, event, data };
-    this.buffer.push(item);
-    if (this.buffer.length > 200) this.buffer.shift();
-    const payload = `id: ${item.id}\nevent: ${item.event}\ndata: ${JSON.stringify(data)}\n\n`;
-    for (const client of this.clients) client.write(payload);
+  /**
+   * dev-only 控制位（演练 45s 无事件转查询）：不进 contract.ts、不进 SseEvent 联合类型，
+   * 挂起期间业务事件整段丢弃——不缓冲、不补发、不重放（08 8.7 无事件缓冲规则）。
+   */
+  readonly dev: DevSuspendControl = { until: 0, heartbeat: false, dropped: 0 };
+
+  /** 广播业务事件；返回值仅用于 dev 诊断（挂起窗口内为 false） */
+  emit(event: string, data: unknown): boolean {
+    if (this.suspended()) {
+      this.dev.dropped += 1;
+      return false;
+    }
+    const payload = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
+    for (const [client, resetIdle] of this.clients) {
+      client.write(payload);
+      resetIdle();
+    }
+    return true;
+  }
+
+  /** dev-only：当前是否处于业务事件挂起窗口 */
+  suspended(): boolean {
+    return this.dev.until > Date.now();
+  }
+
+  /**
+   * dev-only：挂起业务事件 seconds 秒。
+   * heartbeat=false 时同时静默心跳（完全静默，前端连续 45s 无事件即关闭连接转查询）；
+   * heartbeat=true 时连接保活、只丢业务事件（前端不得转查询）。
+   */
+  devSuspend(seconds: number, heartbeat: boolean): void {
+    this.dev.until = Date.now() + seconds * 1000;
+    this.dev.heartbeat = heartbeat;
+    this.dev.dropped = 0;
+  }
+
+  /** dev-only：解除挂起（心跳在下一个 15s 窗口内自行恢复；不补发任何已丢弃事件） */
+  devResume(): void {
+    this.dev.until = 0;
+    this.dev.heartbeat = false;
+    this.dev.dropped = 0;
+  }
+
+  /** dev-only：当前 SSE 连接数 */
+  get clientCount(): number {
+    return this.clients.size;
   }
 
   open(req: IncomingMessage, res: ServerResponse): void {
@@ -401,33 +457,75 @@ class SseHub {
       "Cache-Control": "no-cache",
       Connection: "keep-alive",
     });
-
-    const url = new URL(req.url ?? "/", "http://localhost");
-    const headerId = Number(req.headers["last-event-id"] ?? Number.NaN);
-    const queryId = Number(url.searchParams.get("last_event_id") ?? Number.NaN);
-    const lastId =
-      Number.isFinite(headerId) && headerId > 0
-        ? headerId
-        : Number.isFinite(queryId)
-          ? queryId
-          : 0;
-
-    for (const item of this.buffer) {
-      if (item.id > lastId) {
-        res.write(
-          `id: ${item.id}\nevent: ${item.event}\ndata: ${JSON.stringify(item.data)}\n\n`,
-        );
-      }
-    }
-
-    this.clients.add(res);
-    const heartbeat = setInterval(() => res.write(": ping\n\n"), 15000);
+    // 心跳（08 8.7）：连续 15s 无业务事件时发命名 heartbeat（不入库、不分配 ID、
+    // 无 UI 载荷）；业务事件重置空闲窗口，心跳发出后重新武装 15s
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const armHeartbeat = (): void => {
+      clearTimeout(timer);
+      timer = setTimeout(() => {
+        // dev-only 完全静默演练：挂起窗口内且 heartbeat=false 时只重武装计时、不写字节
+        if (!(this.suspended() && !this.dev.heartbeat)) {
+          res.write("event: heartbeat\ndata: {}\n\n");
+        }
+        armHeartbeat();
+      }, 15000);
+    };
+    armHeartbeat();
+    this.clients.set(res, armHeartbeat);
     req.on("close", () => {
-      clearInterval(heartbeat);
+      clearTimeout(timer);
       this.clients.delete(res);
     });
   }
 }
+
+/* ------------------------------ dev 控制元数据 ----------------------------- */
+
+/**
+ * dev-only：挂起控制形状（见 SseHub.dev）。
+ */
+interface DevSuspendControl {
+  /** 挂起截止时刻（Date.now() 毫秒）；0 = 未挂起 */
+  until: number;
+  /** 挂起期间是否照发 heartbeat：false = 完全静默；true = 保活但无业务事件 */
+  heartbeat: boolean;
+  /** 挂起期间被丢弃的业务事件计数（仅供人工核对确实静默，不参与任何业务状态） */
+  dropped: number;
+}
+
+/**
+ * dev-only：允许注入的失败原因，取值全部来自契约 ErrorCode（不新增形状、不扩枚举）。
+ * 默认注入 `interrupted_by_restart` 之外的通用失败；重启中断见 /api/dev/restart。
+ */
+const DEV_ERROR_CODES: readonly ErrorCode[] = [
+  "invalid_request",
+  "not_configured",
+  "conversation_busy",
+  "draft_stale",
+  "draft_modified",
+  "interrupted_by_restart",
+];
+
+function isInjectableErrorCode(value: string): value is ErrorCode {
+  return (DEV_ERROR_CODES as readonly string[]).includes(value);
+}
+
+/** 默认挂起时长（>45s 转查询阈值）与上限（防止忘开忘关） */
+const DEV_SUSPEND_DEFAULT_SECONDS = 60;
+const DEV_SUSPEND_MAX_SECONDS = 300;
+
+/**
+ * dev-only 总开关（默认开启）：置 FIT_MOCK_DEV_CONTROLS=off 时整组控制端点返回 409。
+ * mock 中间件只存在于 vite dev/preview 进程，本仓库产物由后端静态托管、不含 /api/dev/*；
+ * 该开关用于把 mock 演示放到非本机环境时彻底关闭故障注入面。
+ */
+const DEV_CONTROLS_ENABLED = process.env.FIT_MOCK_DEV_CONTROLS !== "off";
+
+/** 每个 dev 响应携带的边界声明，避免被误当作契约端点 */
+const DEV_NOTE = [
+  "dev-only mock 控制端点：不属于 src/lib/contract.ts 契约、无 SSE 事件类型变更，",
+  "UI/api.ts 不消费；真实后端落地后随 src/mock/ 一并删除",
+].join("");
 
 /* --------------------------------- 工具 ----------------------------------- */
 
@@ -463,6 +561,7 @@ function recordScriptReply(): { text: string; draft: Draft } {
     id: nextId("draft"),
     kind: "training_record",
     status: "pending",
+    revision: 1, // 初版修订（01 1.3：标识用户所见内容版本）
     base_business_version: 0, // 创建时以当时 context_version 填充
     payload: {
       date: MOCK_TODAY,
@@ -497,6 +596,7 @@ function planScriptReply(): { text: string; draft: Draft } {
     id: nextId("draft"),
     kind: "plan_adjust",
     status: "pending",
+    revision: 1, // 初版修订（01 1.3：标识用户所见内容版本）
     base_business_version: 0,
     payload: {
       title: "推日减量（PPL v2 → 拟议调整）",
@@ -516,6 +616,30 @@ function planScriptReply(): { text: string; draft: Draft } {
     text: "根据近期表现，建议对推日做如下调整（作为计划新版本草稿，不静默覆盖正式计划）：\n\n- 卧推 4 组 → **3 组**\n- 卧推目标 RIR 1-3 → **2-3**\n- 哑铃肩推 3 组 → **2 组**\n\n请确认后生成新版本；旧版本保留历史。",
     draft,
   };
+}
+
+/** 纠错后训练记录草稿的 diff 再生成（01 1.2：展示结果和 Diff 随纠错更新；从纠错后 payload 派生） */
+function recordDraftDiff(
+  p: Extract<Draft["payload"], { date: string }>,
+): FieldDiff[] {
+  const working = p.sets.filter((s) => s.set_type === "working");
+  const first = working[0];
+  const rows: FieldDiff[] = [
+    { field: "训练记录 · 日期", new_value: p.date },
+    {
+      field: `${p.exercise} · 工作组`,
+      new_value: `${working.length} 组 x ${first?.reps ?? "?"} 次 @ ${first?.weight_kg ?? "?"}kg`,
+    },
+  ];
+  working.forEach((s, i) => {
+    rows.push({
+      field: `第 ${i + 1} 组 · RIR`,
+      new_value: s.rir === undefined ? "未报告（待确认）" : String(s.rir),
+    });
+  });
+  if (p.warmup_summary)
+    rows.push({ field: "热身", new_value: `${p.warmup_summary}（摘要）` });
+  return rows;
 }
 
 const REVIEW_REPLY = [
@@ -550,11 +674,19 @@ async function runScript(
   message: string,
 ): Promise<void> {
   const emit = (event: string, data: unknown) => hub.emit(event, data);
+
+  // pending 阶段（08 8.1：pending → running）；短暂受理窗口后转 running 并发 run.started
+  await sleep(300);
+  if (run.cancelled) return finishCancelled(emit, run);
+  run.status = "running";
   emit("run.started", { run_id: run.id });
 
-  // 上下文压缩轻提示（B3：仅界面轻提示）；长会话触发一次
+  // 上下文压缩轻提示（B3：仅界面轻提示）；长会话触发一次（08 8.7 压缩两态）
   const history = state.messages.get(run.session_id) ?? [];
   if (history.length >= 5) {
+    await sleep(300);
+    if (run.cancelled) return finishCancelled(emit, run);
+    emit("context.compacting", { run_id: run.id });
     await sleep(300);
     if (run.cancelled) return finishCancelled(emit, run);
     emit("context.compacted", {
@@ -592,6 +724,8 @@ async function runScript(
     await sleep(450);
     if (run.cancelled) return finishCancelled(emit, run);
     emit("message.delta", { run_id: run.id, text: part + "\n" });
+    // 已流出整段记为已保存（stage0 已拍 D1）；取消/失败后经 /api/runs/active 恢复
+    run.saved_text += part + "\n";
   }
 
   if (draft) {
@@ -599,6 +733,8 @@ async function runScript(
     if (run.cancelled) return finishCancelled(emit, run);
     draft.base_business_version = state.context_version;
     state.drafts.set(draft.id, draft);
+    state.draft_sessions.set(draft.id, run.session_id);
+    run.draft_ids.push(draft.id);
     emit("draft.proposed", { run_id: run.id, draft });
   }
 
@@ -622,11 +758,299 @@ function finishCancelled(
   emit: (event: string, data: unknown) => void,
   run: RunState,
 ): void {
-  // 取消端点已置 status 并发过 run.cancelled；此处仅在尚未标记时补发，避免双发
-  if (run.status !== "cancelled") {
+  // 取消端点已置 status 并发过 run.cancelled；此处仅在剧本仍处活跃态时补发，
+  // 避免双发。已进入终态者（completed/cancelled，以及 dev 注入的 failed）一律不覆写
+  // （08 8.1：终态不可恢复、不得互相流转）。
+  if (run.status === "pending" || run.status === "running") {
     run.status = "cancelled";
     emit("run.cancelled", { run_id: run.id });
   }
+}
+
+/* --------------------------- dev-only 控制端点实现 --------------------------
+ *
+ * /api/dev/* 为 mock 演示与故障注入专用路由组（plans/stage0.md F0-02、第 7 节剧本
+ * 第 4/6/8 步）。它们不是契约端点：请求/响应形状一律不写进 src/lib/contract.ts，
+ * 不新增 SSE 事件类型，前端 UI 与 src/lib/api.ts 不消费。
+ * ------------------------------------------------------------------------- */
+
+/** Run 的 dev 诊断快照（形状仅用于人读与脚本断言，含 saved_text_chars 以核对保留） */
+interface DevRunSnapshot {
+  run_id: string;
+  session_id: string;
+  status: RunStatus;
+  error_code?: ErrorCode;
+  /** 已保存部分回答字符数（08 8.7 规则 5/8、已拍 D1：失败/中断后必须原样保留） */
+  saved_text_chars: number;
+  /** 该 Run 已提出草稿的 id：注入失败不丢弃、不改动草稿（01 1.2） */
+  draft_ids: string[];
+}
+
+function devRunSnapshot(run: RunState): DevRunSnapshot {
+  return {
+    run_id: run.id,
+    session_id: run.session_id,
+    status: run.status,
+    ...(run.error_code ? { error_code: run.error_code } : {}),
+    saved_text_chars: run.saved_text.length,
+    draft_ids: [...run.draft_ids],
+  };
+}
+
+/** 全局最近一个 Run（Map 插入序），与 GET /api/runs/active 的取法一致 */
+function latestRun(state: MockState): RunState | undefined {
+  let latest: RunState | undefined;
+  for (const r of state.runs.values()) latest = r;
+  return latest;
+}
+
+/** 最近一个仍在活跃态（pending/running）的 Run；mock 为全局单 Run（08 8.2/8.3） */
+function activeRun(state: MockState): RunState | undefined {
+  for (const r of [...state.runs.values()].reverse()) {
+    if (r.status === "pending" || r.status === "running") return r;
+  }
+  return undefined;
+}
+
+/** 活跃态可被注入失败的 Run（08 8.1：终态不得再流转） */
+function isInjectable(run: RunState): boolean {
+  return run.status === "pending" || run.status === "running";
+}
+
+/**
+ * dev-only：把 pending/running Run 转 failed 并发 run.failed（08 8.1 唯一合法入口）。
+ * 先置 cancelled 标志让在途剧本在下一个检查点静默退出——不覆写 failed、不补发
+ * run.cancelled、不追加完整助手消息；saved_text 与 draft_ids 一律不动。
+ */
+function failRun(hub: SseHub, run: RunState, code: ErrorCode): DevRunSnapshot {
+  run.cancelled = true;
+  run.status = "failed";
+  run.error_code = code;
+  hub.emit("run.failed", { run_id: run.id, error_code: code });
+  return devRunSnapshot(run);
+}
+
+function devUnknownRun(res: ServerResponse, runId: string | undefined): void {
+  apiError(res, {
+    http_status: 404,
+    error_code: "invalid_request",
+    message: `Run 不存在${runId ? `：${runId}` : ""}`,
+  });
+}
+
+function devTerminal(res: ServerResponse, run: RunState): void {
+  // 终态合法性（08 8.1）：completed/failed/cancelled 不得被注入失败或重启中断覆写
+  apiError(res, {
+    http_status: 409,
+    error_code: "invalid_request",
+    message: `Run ${run.id} 已处于终态 ${run.status}，不可注入失败（08 8.1：终态不可恢复）`,
+  });
+}
+
+async function handleDevControls(
+  req: IncomingMessage,
+  res: ServerResponse,
+  path: string,
+  state: MockState,
+  hub: SseHub,
+): Promise<void> {
+  const method = (req.method ?? "GET").toUpperCase();
+
+  if (!DEV_CONTROLS_ENABLED) {
+    return apiError(res, {
+      http_status: 409,
+      error_code: "invalid_request",
+      message: "mock dev 控制端点已关闭（FIT_MOCK_DEV_CONTROLS=off）",
+    });
+  }
+
+  /* 1) 重置种子场景：整份内存态回到 seedState() 初始值 */
+  if (path === "/api/dev/reset" && method === "POST") {
+    await readBody(req); // 消费请求体，保持 keep-alive 连接干净
+    const runsStopped: string[] = [];
+    for (const run of state.runs.values()) {
+      if (!isInjectable(run)) continue;
+      // 先置终态再置标志：剧本在下一检查点静默退出，不向已重置的场景补发事件
+      run.status = "cancelled";
+      run.cancelled = true;
+      runsStopped.push(run.id);
+    }
+    hub.devResume();
+    // 原地覆盖字段：保持 state 对象身份不变（在途剧本与中间件闭包仍指向同一对象）
+    Object.assign(state, seedState());
+    return json(res, 200, {
+      ok: true,
+      runs_stopped: runsStopped,
+      context_version: state.context_version,
+      plan_version: state.plan.version,
+      sessions: state.sessions.length,
+      records: state.records.length,
+      drafts: state.drafts.size,
+      execution_slot_run_id: state.execution_slot_run_id,
+      sse_clients: hub.clientCount,
+      note: "既有 SSE 连接不关闭（不重放、不补发），前端按 08 8.7 经查询取回新场景",
+      dev_note: DEV_NOTE,
+    });
+  }
+
+  /* 2) 注入 run.failed：活跃 Run 或指定 Run，错误码取自契约 ErrorCode */
+  if (path === "/api/dev/runs/fail" && method === "POST") {
+    const body = JSON.parse((await readBody(req)) || "{}") as {
+      run_id?: string;
+      error_code?: string;
+    };
+    const code = body.error_code ?? "invalid_request";
+    if (!isInjectableErrorCode(code))
+      return apiError(res, {
+        http_status: 400,
+        error_code: "invalid_request",
+        message: `error_code 不在契约 ErrorCode 之内：${code}`,
+        detail: DEV_ERROR_CODES.join(" | "),
+      });
+    let target: RunState | undefined;
+    if (body.run_id) {
+      target = state.runs.get(body.run_id);
+      if (!target) return devUnknownRun(res, body.run_id);
+      if (!isInjectable(target)) return devTerminal(res, target);
+    } else {
+      target = activeRun(state);
+      if (!target)
+        return apiError(res, {
+          http_status: 409,
+          error_code: "invalid_request",
+          message:
+            "当前没有 pending/running Run 可注入失败；run_id 可指定历史 Run（终态仍受 08 8.1 约束）",
+        });
+    }
+    const suppressed = hub.suspended();
+    const run = failRun(hub, target, code);
+    return json(res, 200, {
+      ok: true,
+      run,
+      event_suppressed_by_suspend: suppressed,
+      execution_slot_run_id: state.execution_slot_run_id,
+      note: "run.failed 已发出；执行名额在剧本实际退出后释放（08 8.3）",
+      dev_note: DEV_NOTE,
+    });
+  }
+
+  /* 3) 模拟服务重启中断（08 8.4：遗留 pending/running 统一 failed + interrupted_by_restart） */
+  if (path === "/api/dev/restart" && method === "POST") {
+    const body = JSON.parse((await readBody(req)) || "{}") as {
+      run_id?: string;
+    };
+    const legacy = [...state.runs.values()].filter(isInjectable);
+    if (body.run_id) {
+      const only = state.runs.get(body.run_id);
+      if (!only) return devUnknownRun(res, body.run_id);
+      if (!isInjectable(only)) return devTerminal(res, only);
+      legacy.length = 0;
+      legacy.push(only);
+    }
+    const suppressed = hub.suspended();
+    const affected = legacy.map((run) =>
+      failRun(hub, run, "interrupted_by_restart"),
+    );
+    // 进程重启隐含执行名额一并释放；已保存文本与草稿原样保留（saved_text_chars/draft_ids 可核对）
+    state.execution_slot_run_id = null;
+    return json(res, 200, {
+      ok: true,
+      affected,
+      skipped_terminal: [...state.runs.values()]
+        .filter((run) => !isInjectable(run))
+        .map((run) => `${run.id}:${run.status}`),
+      event_suppressed_by_suspend: suppressed,
+      execution_slot_run_id: null,
+      note: "仅投影 08 8.4 的 Run 状态：mock 不重启进程，SSE 连接与内存态仍在，saved_text 与草稿不丢",
+      dev_note: DEV_NOTE,
+    });
+  }
+
+  /* 4) 挂起 SSE 业务事件（演练 08 8.7「连续 45s 无事件 → 转查询」） */
+  if (path === "/api/dev/events/suspend" && method === "POST") {
+    const body = JSON.parse((await readBody(req)) || "{}") as {
+      seconds?: number;
+      heartbeat?: boolean;
+    };
+    if (
+      body.seconds !== undefined &&
+      (typeof body.seconds !== "number" ||
+        !Number.isFinite(body.seconds) ||
+        body.seconds <= 0)
+    )
+      return apiError(res, {
+        http_status: 400,
+        error_code: "invalid_request",
+        message: "seconds 须为正数（≤300 会被截到上限）",
+      });
+    const seconds = Math.min(
+      body.seconds ?? DEV_SUSPEND_DEFAULT_SECONDS,
+      DEV_SUSPEND_MAX_SECONDS,
+    );
+    const heartbeat = body.heartbeat === true;
+    hub.devSuspend(seconds, heartbeat);
+    return json(res, 200, {
+      ok: true,
+      suspended_seconds: seconds,
+      heartbeat_during_suspend: heartbeat,
+      business_events: "dropped",
+      active_run_id: activeRun(state)?.id ?? null,
+      sse_clients: hub.clientCount,
+      client_effect: heartbeat
+        ? "连接保活（heartbeat 每 15s）但无任何业务事件：前端不得转查询"
+        : "完全静默（无业务事件、无 heartbeat）：前端连续 45s 无事件即关闭连接转 GET /api/runs/active 轮询（08 8.7）",
+      note: `默认 ${DEV_SUSPEND_DEFAULT_SECONDS}s（>45s 阈值）；seconds 可缩短以便快速演练，上限 ${DEV_SUSPEND_MAX_SECONDS}s，可用 /api/dev/events/resume 提前恢复`,
+      dev_note: DEV_NOTE,
+    });
+  }
+
+  if (path === "/api/dev/events/resume" && method === "POST") {
+    await readBody(req);
+    const dropped = hub.dev.dropped;
+    hub.devResume();
+    return json(res, 200, {
+      ok: true,
+      dropped_business_events: dropped,
+      business_events: "resumed",
+      note: "不补发挂起期间丢弃的事件（08 8.7 无重放）；当前状态经业务接口查询",
+      dev_note: DEV_NOTE,
+    });
+  }
+
+  /* 5) 只读诊断快照（便于走查取证，不改任何状态） */
+  if (path === "/api/dev/status" && method === "GET") {
+    return json(res, 200, {
+      ok: true,
+      context_version: state.context_version,
+      has_api_key: state.provider.has_api_key,
+      plan_version: state.plan.version,
+      execution_slot_run_id: state.execution_slot_run_id,
+      runs: [...state.runs.values()].map(devRunSnapshot),
+      drafts: [...state.drafts.values()].map((d) => ({
+        id: d.id,
+        kind: d.kind,
+        status: d.status,
+        revision: d.revision,
+        base_business_version: d.base_business_version,
+      })),
+      dev_control: {
+        suspended_seconds_remaining: Math.max(
+          0,
+          Math.round((hub.dev.until - Date.now()) / 1000),
+        ),
+        heartbeat_while_suspended: hub.dev.heartbeat,
+        dropped_business_events: hub.dev.dropped,
+        sse_clients: hub.clientCount,
+      },
+      dev_note: DEV_NOTE,
+    });
+  }
+
+  return apiError(res, {
+    http_status: 404,
+    error_code: "invalid_request",
+    message: `未知 dev 控制端点 ${method} ${path}`,
+  });
 }
 
 /* ------------------------------ 统计重算 ---------------------------------- */
@@ -721,6 +1145,12 @@ function createHandler(state: MockState, hub: SseHub) {
         return;
       }
 
+      /* dev-only 控制端点组（/api/dev/*）：非契约、不进 contract.ts、不进 SseEvent；
+         见文件内「dev-only 控制端点实现」段 */
+      if (path.startsWith("/api/dev/")) {
+        return await handleDevControls(req, res, path, state, hub);
+      }
+
       /* Provider */
       if (path === "/api/provider" && method === "GET")
         return json(res, 200, state.provider);
@@ -791,6 +1221,20 @@ function createHandler(state: MockState, hub: SseHub) {
         return json(res, 200, state.messages.get(messagesMatch[1]) ?? []);
       }
 
+      /* 会话草稿当前状态列表（08 8.7 规则 2、01 1.2：当前状态经业务接口查询） */
+      const sessionDraftsMatch = path.match(
+        /^\/api\/sessions\/([^/]+)\/drafts$/,
+      );
+      if (sessionDraftsMatch && method === "GET") {
+        const drafts: Draft[] = [];
+        for (const [draftId, sessionId] of state.draft_sessions) {
+          if (sessionId !== sessionDraftsMatch[1]) continue;
+          const d = state.drafts.get(draftId);
+          if (d) drafts.push(d);
+        }
+        return json(res, 200, drafts);
+      }
+
       /* Run：发起 / 取消 */
       if (path === "/api/runs" && method === "POST") {
         const body = JSON.parse((await readBody(req)) || "{}") as {
@@ -811,15 +1255,13 @@ function createHandler(state: MockState, hub: SseHub) {
           if (r.client_request_id === body.client_request_id)
             return json(res, 200, { run_id: r.id });
         }
-        // 全局单 Run：活跃 Run 存在时 409
-        for (const r of state.runs.values()) {
-          if (r.status === "pending" || r.status === "running") {
-            return apiError(res, {
-              http_status: 409,
-              error_code: "conversation_busy",
-              message: "已有正在进行的对话，请稍候或取消当前任务。",
-            });
-          }
+        // 全局单 Run（08 8.2/8.3）：唯一执行名额被持有（含取消后的收尾窗口）时 409
+        if (state.execution_slot_run_id !== null) {
+          return apiError(res, {
+            http_status: 409,
+            error_code: "conversation_busy",
+            message: "已有正在进行的对话，请稍候或取消当前任务。",
+          });
         }
         if (!state.provider.has_api_key) {
           return apiError(res, {
@@ -833,25 +1275,35 @@ function createHandler(state: MockState, hub: SseHub) {
           id: nextId("run"),
           session_id: body.session_id,
           client_request_id: body.client_request_id,
-          status: "running",
+          status: "pending",
           cancelled: false,
+          saved_text: "",
+          draft_ids: [],
         };
         state.runs.set(run.id, run);
+        // 执行名额归本次 Run（08 8.3）：runScript 实际退出（finally）后才释放
+        state.execution_slot_run_id = run.id;
 
         const msgs = state.messages.get(body.session_id) ?? [];
         msgs.push({ id: nextId("m"), role: "user", content: body.message });
         state.messages.set(body.session_id, msgs);
 
-        // 剧本异步推进，不阻塞响应
-        void runScript(state, hub, run, body.message).catch(() => {
-          if (run.status === "running" || run.status === "pending") {
-            run.status = "failed";
-            hub.emit("run.failed", {
-              run_id: run.id,
-              error_code: "invalid_request",
-            });
-          }
-        });
+        // 剧本异步推进，不阻塞响应；名额在剧本实际退出后释放（08 8.3）
+        void runScript(state, hub, run, body.message)
+          .catch(() => {
+            if (run.status === "running" || run.status === "pending") {
+              run.status = "failed";
+              run.error_code = "invalid_request";
+              hub.emit("run.failed", {
+                run_id: run.id,
+                error_code: "invalid_request",
+              });
+            }
+          })
+          .finally(() => {
+            if (state.execution_slot_run_id === run.id)
+              state.execution_slot_run_id = null;
+          });
         return json(res, 200, { run_id: run.id });
       }
 
@@ -872,12 +1324,77 @@ function createHandler(state: MockState, hub: SseHub) {
         return json(res, 200, { run_id: run.id, status: run.status });
       }
 
+      /* Run 查询（08 8.7 断线/刷新恢复规则 2/3）：全局最近一个 Run 的当前状态
+         （状态 + 已保存部分回答 + 关联草稿当前状态）；null = 当前无可查询 Run */
+      if (path === "/api/runs/active" && method === "GET") {
+        const latest = latestRun(state);
+        if (!latest) return json(res, 200, { run: null });
+        return json(res, 200, {
+          run: {
+            run_id: latest.id,
+            session_id: latest.session_id,
+            status: latest.status,
+            saved_text: latest.saved_text,
+            ...(latest.error_code ? { error_code: latest.error_code } : {}),
+            drafts: latest.draft_ids.flatMap((id) => {
+              const d = state.drafts.get(id);
+              return d ? [d] : [];
+            }),
+          },
+        });
+      }
+
       /* 草稿：确认（幂等）/ 重算 */
+      /* 草稿纠错（01 1.2/1.3）：仅待确认草稿可纠错；整份 payload 替换，revision+1，
+         展示与 Diff 随之更新；不触碰正式数据与 context_version，不自动提交 */
+      const reviseMatch = path.match(/^\/api\/drafts\/([^/]+)\/revise$/);
+      if (reviseMatch && method === "POST") {
+        const body = JSON.parse((await readBody(req)) || "{}") as {
+          payload?: Draft["payload"];
+        };
+        const draft = state.drafts.get(reviseMatch[1]);
+        if (!draft)
+          return apiError(res, {
+            http_status: 404,
+            error_code: "invalid_request",
+            message: "草稿不存在",
+          });
+        if (draft.status !== "pending")
+          return apiError(res, {
+            http_status: 409,
+            error_code: "invalid_request",
+            message: "仅待确认草稿可纠错",
+          });
+        if (!body.payload)
+          return apiError(res, {
+            http_status: 400,
+            error_code: "invalid_request",
+            message: "缺少 payload",
+          });
+
+        draft.payload = body.payload;
+        // SAFETY: payload 形状由草稿 kind 决定；record 分支按 RecordDraftPayload 派生展示 diff，
+        // plan/profile 分支的 diff 内嵌于 payload 本体，直接取用保持两者一致
+        draft.diff =
+          draft.kind === "training_record"
+            ? recordDraftDiff(
+                body.payload as Extract<Draft["payload"], { date: string }>,
+              )
+            : (
+                body.payload as Extract<
+                  Draft["payload"],
+                  { title: string; diff: FieldDiff[] }
+                >
+              ).diff;
+        draft.revision += 1;
+        return json(res, 200, { draft });
+      }
+
       const confirmMatch = path.match(/^\/api\/drafts\/([^/]+)\/confirm$/);
       if (confirmMatch && method === "POST") {
         // 先读完请求体再分支，避免 keep-alive 连接上残留未消费的 body
         const confirmBody = JSON.parse((await readBody(req)) || "{}") as {
-          payload?: Draft["payload"];
+          revision?: number;
         };
         const draft = state.drafts.get(confirmMatch[1]);
         if (!draft)
@@ -886,18 +1403,37 @@ function createHandler(state: MockState, hub: SseHub) {
             error_code: "invalid_request",
             message: "草稿不存在",
           });
-
+        // 确认顺序（01 1.4）：1) 已提交草稿幂等返回原结果——不做 revision 要求，不受后续
+        // 业务版本/修订变化影响；返回首次提交时持久化的原始凭据（owner 决策 B），不从当前状态重建
         if (draft.status === "committed") {
+          const receipt = state.confirm_receipts.get(draft.id);
           const result: ConfirmResult = {
             draft_id: draft.id,
             status: "committed",
             newly_committed: false,
-            context_version: state.context_version,
-            summary: "该草稿已提交过（幂等返回原结果）",
+            context_version: receipt?.context_version ?? state.context_version,
+            summary: receipt?.summary ?? "该草稿已提交过（幂等返回原结果）",
           };
           return json(res, 200, result);
         }
 
+        // 2) 已丢弃拒绝：Discarded 不得再提交（01 1.3）；不做 revision 要求；先于基线/修订检查（01 1.4 顺序）
+        if (draft.status === "discarded")
+          return apiError(res, {
+            http_status: 409,
+            error_code: "invalid_request",
+            message: "草稿已丢弃，不可确认",
+          });
+
+        // 3) 首次确认才要求携带所见修订版本（01 1.4）
+        if (typeof confirmBody.revision !== "number")
+          return apiError(res, {
+            http_status: 400,
+            error_code: "invalid_request",
+            message: "缺少 revision（用户所见草稿修订版本）",
+          });
+
+        // 4) 业务基线检查（01 1.4/1.6）：context-version 先于修订检查
         if (draft.base_business_version !== state.context_version) {
           return apiError(res, {
             http_status: 409,
@@ -908,9 +1444,16 @@ function createHandler(state: MockState, hub: SseHub) {
           });
         }
 
-        // 内联纠错（阶段三拍板 A）：confirm 携带最终纠错后的草稿内容，以其提交并同步更新存储草稿；
-        // 幂等与 draft_stale 语义不变；真实后端仍以最终内容在事务内复查领域规则，前端纠错不绕过后端校验。
-        if (confirmBody.payload) draft.payload = confirmBody.payload;
+        // 5) 修订版本检查：所见修订与当前不一致 → 409 draft_modified（01 1.4）
+        if (confirmBody.revision !== draft.revision)
+          return apiError(res, {
+            http_status: 409,
+            error_code: "draft_modified",
+            message: "草稿已被修改（所见修订版本不一致），请刷新草稿后重试。",
+          });
+
+        // 6) 以服务端存储的草稿内容复查领域规则并原子提交（01 1.4）；
+        //    内联纠错不经确认提交——纠错走 revise 业务接口（01 1.2，不建第二编辑入口）
 
         // 原子提交（mock：顺序内存写入）
         if (draft.kind === "training_record") {
@@ -962,6 +1505,12 @@ function createHandler(state: MockState, hub: SseHub) {
                 ? "计划新版本已启用"
                 : "档案已更新",
         };
+        // 持久化首次确认凭据（owner 决策 B；01 1.3 提交凭据）：重复确认返回原始 context_version 与 summary，
+        // 不再写入正式数据或递增版本
+        state.confirm_receipts.set(draft.id, {
+          context_version: result.context_version,
+          summary: result.summary,
+        });
         return json(res, 200, result);
       }
 
@@ -975,18 +1524,98 @@ function createHandler(state: MockState, hub: SseHub) {
             message: "草稿不存在",
           });
 
-        // 以最新业务上下文重算：重新生成同 kind 草稿
-        const regenerated =
-          old.kind === "training_record"
-            ? recordScriptReply().draft
-            : planScriptReply().draft;
-        const fresh: Draft = {
-          ...regenerated,
-          id: nextId("draft"),
-          parent_draft_id: old.id,
-          base_business_version: state.context_version,
-        };
+        // 重算仅适用于被拦截的待确认/已过期草稿（01 1.6）；已提交/已丢弃不可重算
+        if (old.status === "committed" || old.status === "discarded")
+          return apiError(res, {
+            http_status: 409,
+            error_code: "invalid_request",
+            message: "该草稿已提交或已丢弃，不可重算",
+          });
+
+        // F0-02B1：重算仅是陈旧冲突恢复——只接受「pending 且 base 已落后于当前上下文」的草稿。
+        // 已重算过的 stale 草稿不可重复重算（重算动作在其新草稿上进行）；
+        // 仍基于最新上下文的 pending 草稿没有重算必要，直接走确认即可
+        if (old.status === "stale")
+          return apiError(res, {
+            http_status: 409,
+            error_code: "invalid_request",
+            message: "该草稿已重算过，请在新草稿上确认或丢弃",
+          });
+        if (
+          old.status !== "pending" ||
+          old.base_business_version === state.context_version
+        )
+          return apiError(res, {
+            http_status: 409,
+            error_code: "invalid_request",
+            message: "该草稿仍基于最新业务上下文，无需重算",
+          });
+
+        // 以当前 MockState 派生重算草稿（01 1.6：以最新业务上下文生成；新草稿 revision 从 1 起，
+        // 须再次确认）：不调用 canned 剧本回复，避免把已过期的旧提案当作最新上下文的产物
+        let fresh: Draft;
+        if (old.kind === "training_record") {
+          // 记录草稿：保留原草稿内容（用户意图，不虚构无关正式状态），
+          // 展示 diff 从 payload 派生（与 revise 同一渲染）
+          const p = old.payload as Extract<Draft["payload"], { date: string }>;
+          fresh = {
+            id: nextId("draft"),
+            kind: "training_record",
+            status: "pending",
+            revision: 1,
+            base_business_version: state.context_version,
+            parent_draft_id: old.id,
+            payload: { ...p },
+            diff: recordDraftDiff(p),
+          };
+        } else if (old.kind === "plan_adjust") {
+          // 计划草稿：从当前计划状态派生最小提案——旧值取当前计划实际值，
+          // 取第一个可减量动作（sets >= 2）提议组数 -1；确认事务按同字段规则应用
+          const ex = state.plan.blocks
+            .flatMap((b) => b.exercises)
+            .find((e) => e.sets >= 2);
+          const rows: FieldDiff[] = ex
+            ? [
+                {
+                  field: `${ex.name} · 组数`,
+                  old_value: String(ex.sets),
+                  new_value: String(ex.sets - 1),
+                },
+              ]
+            : [];
+          // F0-02B1：最新计划已派生不出可调整动作时，重算明确失败（409 invalid_request），
+          // 不创建草稿、不把父草稿置 stale、不推进任何版本
+          if (!rows.length)
+            return apiError(res, {
+              http_status: 409,
+              error_code: "invalid_request",
+              message: "当前计划没有组数 ≥ 2 的动作，重算无法生成新提案",
+            });
+          fresh = {
+            id: nextId("draft"),
+            kind: "plan_adjust",
+            status: "pending",
+            revision: 1,
+            base_business_version: state.context_version,
+            parent_draft_id: old.id,
+            payload: {
+              title: `计划调整重算（基于当前计划 ${state.plan.version}）`,
+              diff: rows,
+            },
+            diff: rows,
+          };
+        } else {
+          // mock Stage 0 场景不生成档案草稿；如出现则明确拒绝而非误派生
+          return apiError(res, {
+            http_status: 409,
+            error_code: "invalid_request",
+            message: "当前 mock 场景不支持档案草稿重算",
+          });
+        }
         state.drafts.set(fresh.id, fresh);
+        // 重算新草稿归属同一会话（sessions/:id/drafts 可恢复）
+        const oldSession = state.draft_sessions.get(old.id);
+        if (oldSession) state.draft_sessions.set(fresh.id, oldSession);
         old.status = "stale";
 
         const diff: FieldDiff[] = [];
@@ -1011,6 +1640,29 @@ function createHandler(state: MockState, hub: SseHub) {
           draft_vs_draft_diff: diff,
         };
         return json(res, 200, result);
+      }
+
+      /* 丢弃（01 1.3）：用户拒绝则丢弃待确认草稿，正式数据及业务版本不变；
+         Discarded 不得再提交；仅 pending 可转 discarded（重复丢弃幂等返回） */
+      const discardMatch = path.match(/^\/api\/drafts\/([^/]+)\/discard$/);
+      if (discardMatch && method === "POST") {
+        const draft = state.drafts.get(discardMatch[1]);
+        if (!draft)
+          return apiError(res, {
+            http_status: 404,
+            error_code: "invalid_request",
+            message: "草稿不存在",
+          });
+        if (draft.status === "discarded")
+          return json(res, 200, { draft_id: draft.id, status: "discarded" });
+        if (draft.status !== "pending")
+          return apiError(res, {
+            http_status: 409,
+            error_code: "invalid_request",
+            message: "仅待确认草稿可丢弃",
+          });
+        draft.status = "discarded";
+        return json(res, 200, { draft_id: draft.id, status: "discarded" });
       }
 
       return apiError(res, {

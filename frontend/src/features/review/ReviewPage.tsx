@@ -60,7 +60,7 @@ function WeekRow({ row }: { row: WeekCompletion }) {
           应训练 {row.planned} · 已完成 {row.completed}
         </span>
       </div>
-      <span className="font-display text-xl font-light tabular-nums">
+      <span className="text-xl font-light tabular-nums">
         {row.rate === null ? (
           <span className="text-sm text-muted-foreground">暂无</span>
         ) : (
@@ -91,7 +91,7 @@ function BucketRow({ buckets }: { buckets: Buckets }) {
             <span aria-hidden className={`size-2 rounded-full ${dot}`} />
             {label}
           </span>
-          <span className="font-display text-xl font-light tabular-nums">
+          <span className="text-xl font-light tabular-nums">
             {buckets[key]}
           </span>
         </div>

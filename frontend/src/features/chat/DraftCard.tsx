@@ -2,8 +2,10 @@
  * 草稿卡（PLAN-FRONTEND「草稿卡必含元素」）：
  * - 结构化字段级 Diff（A4）：旧值→新值，无旧值标「新增」；
  * - 关键字段内联纠错：只改待确认草稿（受控 payload），Diff 与展示实时更新，不自动提交；
+ *   未提交的纠错经「提交纠错」走纠错业务接口（01 1.2），确认写入的是服务端最新草稿；
  * - 确认采纳幂等；409 draft_stale → 错误态 + 按最新数据一键重算；
- * - 重算产生的新草稿展示新旧草稿 Diff，再次确认才生效。
+ * - 重算产生的新草稿展示新旧草稿 Diff，再次确认才生效；
+ * - 丢弃待确认草稿（01 1.3）：已丢弃徽章 + 只读，不得再提交。
  */
 import { CircleAlert, RefreshCcw, Sparkles } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
@@ -102,9 +104,7 @@ function EditablePlanDiff({
                       ? {
                           ...r,
                           new_value:
-                            e.target.value === ""
-                              ? ""
-                              : `${e.target.value} 组`,
+                            e.target.value === "" ? "" : `${e.target.value} 组`,
                         }
                       : r,
                   ),
@@ -249,6 +249,14 @@ export interface DraftCardProps {
   recalcDiff?: FieldDiff[];
   /** 已被重算草稿取代的旧卡 */
   superseded: boolean;
+  /** 内联纠错提交：把纠错后的完整 payload 交给 revise 业务接口（01 1.2，不自动提交） */
+  onRevise?: (payload: DraftPayload) => void;
+  /** 丢弃待确认草稿（01 1.3：Discarded 不得再提交） */
+  onDiscard?: () => void;
+  /** 纠错进行中：按钮据此禁用 */
+  revisePending?: boolean;
+  /** 丢弃进行中：按钮据此禁用 */
+  discardPending?: boolean;
 }
 
 export function DraftCard({
@@ -262,8 +270,13 @@ export function DraftCard({
   staleError,
   recalcDiff,
   superseded,
+  onRevise,
+  onDiscard,
+  revisePending = false,
+  discardPending = false,
 }: DraftCardProps) {
   const committed = draft.status === "committed";
+  const discarded = draft.status === "discarded";
 
   if (superseded) {
     return (
@@ -273,6 +286,9 @@ export function DraftCard({
       </div>
     );
   }
+
+  // 内联纠错未提交（01 1.2：纠错不自动提交，须经「提交纠错」走业务接口）
+  const dirty = JSON.stringify(payload) !== JSON.stringify(draft.payload);
 
   // 记录草稿：有纠错时用计算出的 Diff（反映纠错），否则展示服务端给的变更摘要
   const editedRows =
@@ -299,8 +315,11 @@ export function DraftCard({
             </Badge>
           )}
         </div>
-        <Badge variant={committed ? "default" : "secondary"}>
-          {committed ? "已采纳" : "待确认"}
+        <Badge
+          variant={committed ? "default" : discarded ? "outline" : "secondary"}
+          className={discarded ? "text-muted-foreground" : undefined}
+        >
+          {committed ? "已采纳" : discarded ? "已丢弃" : "待确认"}
         </Badge>
       </div>
 
@@ -321,7 +340,7 @@ export function DraftCard({
             <Input
               type="date"
               value={payload.date}
-              disabled={committed}
+              disabled={committed || discarded}
               onChange={(e) => onChange({ ...payload, date: e.target.value })}
               className="h-7 w-36 text-xs"
               aria-label="训练日期"
@@ -329,7 +348,7 @@ export function DraftCard({
           </div>
           <SetInputs
             sets={payload.sets}
-            disabled={committed}
+            disabled={committed || discarded}
             onChange={(sets) => onChange({ ...payload, sets })}
           />
         </div>
@@ -338,12 +357,10 @@ export function DraftCard({
           <p className="text-sm font-medium">{payload.title}</p>
           <EditablePlanDiff
             rows={payload.diff}
-            disabled={committed}
+            disabled={committed || discarded}
             onChange={(diff) => onChange({ ...payload, diff })}
           />
-          <p className="text-[11px] text-muted-foreground">
-            组数可内联纠错，仅修改待确认草稿，确认后才写入正式数据
-          </p>
+          <p className="text-[11px] text-muted-foreground">组数可内联纠错</p>
         </div>
       )}
 
@@ -405,15 +422,49 @@ export function DraftCard({
       )}
 
       {/* 操作区：纠错不替代最终确认 */}
-      {!committed && !staleError && (
+      {!committed && !discarded && !staleError && (
         <div className="mt-4 flex items-center justify-end gap-2">
-          <span className="mr-auto text-[11px] text-muted-foreground">
-            纠错仅修改待确认草稿，确认后才写入正式数据
-          </span>
-          <Button size="sm" onClick={onConfirm} disabled={confirmPending}>
+          {dirty && (
+            <span className="mr-auto text-[11px] text-muted-foreground">
+              先提交纠错（确认前需保存修改）
+            </span>
+          )}
+          {onRevise && dirty && (
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => onRevise(payload)}
+              disabled={revisePending}
+            >
+              提交纠错
+            </Button>
+          )}
+          {/* 有未提交的内联纠错时，确认前必须先走「提交纠错」（01 1.2） */}
+          <Button
+            size="sm"
+            onClick={onConfirm}
+            disabled={confirmPending || dirty}
+          >
             确认采纳
           </Button>
+          {onDiscard && (
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={onDiscard}
+              disabled={discardPending}
+            >
+              丢弃草稿
+            </Button>
+          )}
         </div>
+      )}
+
+      {/* 已丢弃（01 1.3）：不得再提交 */}
+      {discarded && (
+        <p className="mt-3 text-[11px] text-muted-foreground">
+          草稿已丢弃，不可确认。
+        </p>
       )}
     </div>
   );
