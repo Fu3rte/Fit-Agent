@@ -1,29 +1,20 @@
-# Fit-Agent 前端（frontend/）
+# 前端呈现层已拍决策存档（2026-09-06 拍板）
 
-产品一句话：本地自部署、单用户的健身计划、打卡与复盘 Web Agent —— 本文件负责其全部 Web 呈现层的决策。
+> 性质：历史决策存档，**已冻结为只读，今后一律不再更新**；后续决策变化也不回写本文件，以现行正本（`PLAN.md`、`pre-prj/design-decisions.md`、`pre-prj/architecture/` 各章）为准。原载体 `frontend/PLAN-FRONTEND.md` 已删除，本文件保存其当时仍有效的决策，仅供 `frontend/plans/` 各阶段计划回查事实。
+> 现行授权与覆盖规则以根目录 `PLAN.md`、`AGENTS.md`、`frontend/plans/business-roadmap.md` 为准；与架构正本冲突时以 `pre-prj/design-decisions.md` 及 `pre-prj/architecture/` 各章为准。
+> 原「SSE 按事件 ID 补读、Last-Event-ID 用作恢复游标、断线补读待拍」旧约定未迁入：已被 `pre-prj/architecture/08-agent-runtime.md` 8.7 替代（查询恢复、不依赖浏览器自动重连或 Last-Event-ID，2026-09-07）。
 
-> 本文件只记录 frontend/ 的前端决策；根目录 `PLAN.md` 管后端与 spike 授权，互不覆盖。
-> 架构对齐以 `pre-prj/architecture-decisions.md` 为准；业务约束以 `pre-prj/PRD.md` 为准。
-> 拍板日期：2026-09-06。
-
-## 当前授权范围
-
-frontend/ 内"契约先行 + mock 驱动"的呈现层开发（D1A）已随本表拍板授权。
-不含：真实后端联调、真实模型 / Key 流程、后端契约定稿——这些等后端 spike 落地后以契约为准对齐。
-
-## 已拍决策
-
-### A 组：库与机制
+## A 组：库与机制
 
 | 决策 | 选项 | 选了 | 为什么 |
 |---|---|---|---|
 | A1 服务端状态/数据获取 | A TanStack Query / B SWR / C 手写 fetch hooks | A | 草稿确认后需失效并刷新看板多块数据，Query 的缓存失效正是干这个的；手写 hooks 也会长出半个 Query |
-| A2 SSE 客户端 | A 原生 EventSource / B fetch 流手写解析 / C fetch-event-source | A；C 留作后期出现 POST 订阅需求时的备选，可从 A 切到 C | 订阅是 GET + Last-Event-ID 补读，原生够用，与后端"不引入额外 SSE 库"对称 |
+| A2 SSE 客户端 | A 原生 EventSource / B fetch 流手写解析 / C fetch-event-source | A；C 留作后期出现 POST 订阅需求时的备选，可从 A 切到 C | 订阅是 GET，原生够用，与后端"不引入额外 SSE 库"对称 |
 | A3 Markdown 渲染 | A react-markdown / B 纯文本换行 | A | 复盘、计划说明、工具结果摘要大概率是列表/表格文本；限定白名单元素防注入 |
 | A4 业务 Diff 呈现 | A 结构化字段级 Diff 自渲染 / B 通用文本 diff 库（jsdiff） | A | 业务 Diff 是"旧值→新值"的字段对，不是代码行 diff，引库反而绕 |
 | A5 提示与错误反馈 | A sonner（toast）+ 卡片内联提示 / B 全部内联 | A | conversation_busy、取消成功、Key 已保存等全局反馈需要 toast；sonner 是 shadcn 标准搭档 |
 
-### B 组：信息架构与页面
+## B 组：信息架构与页面
 
 | 决策 | 选项 | 选了 | 为什么 |
 |---|---|---|---|
@@ -44,27 +35,13 @@ frontend/ 内"契约先行 + mock 驱动"的呈现层开发（D1A）已随本表
 | /review | 统计与复盘 | 统计卡：完成率（按计划周 Wn）、三桶（符合目标/未符合/待补全组数）、PR 卡；复盘文本沉淀 + "依据已变更·可重新生成"徽章 + "在对话中生成复盘"按钮；页脚显示数据更新时间 |
 | /settings | 设置 | Provider 卡（协议/Base URL/has_api_key 徽章、Key 录入/替换/删除）+ 当前模型本地/云端标识 + 数据目录卡 |
 
-### C 组：视觉设计
-
-| 决策 | 选项 | 选了 | 为什么 |
-|---|---|---|---|
-| C1 设计语言 | 维持草稿的 ElevenLabs Editorial 风 | 维持：浅色基调、衬线大标题、0.75rem 圆角、柔和渐变球装饰、绿底用户气泡 | 草稿已很完整 |
-| C2 字体与离线 | A 自托管开源字体 / B 纯系统字体栈 / C Google Fonts CDN | A：自托管开源中文字体——思源黑体 400/700，woff2（全量/粗切） | 用户改推荐：中文 UI 下衬线标题实际落在中文字上，自托管保证观感一致、零授权风险、天然离线；Waldenburg 是 ElevenLabs 专有字体无法分发，实际永远走 fallback，所以 C2 才值得拍 |
-| C3 暗色模式 | A 首版仅浅色 / B 加暗色 | B：首版含暗色 | 用户改推荐；浅色为默认主题，暗色为第二主题 |
-
-### D 组：先行方式
-
-| 决策 | 选项 | 选了 | 为什么 |
-|---|---|---|---|
-| D1 前端先行方式 | A 契约先行 + mock 驱动 / B 等后端 API 形状定了再动 | A | Agent 侧怎么变都烧不到呈现层；会变的只是契约文件，而契约反正要两边一起定。B 安全但慢，会把前后端串行化 |
-
-D1A 落地方式：
+### D1A 落地方式
 
 - 前端产出契约草案：TS 类型定义（SSE 事件清单、REST 端点、草稿/看板数据形状），独立成文件；后端 spike 落地后以契约为准对齐，前端改动收敛在类型文件和少数渲染分支。
-- 未定项（SSE 事件全集、业务表字段等，与根 `PLAN.md`"后续未拍板"一致）只做"类型 + mock"，不做硬编码业务逻辑。
+- 未定项只做"类型 + mock"，不做硬编码业务逻辑。
 - 风险敞口 = 契约修订时的类型改动，不是返工。
 
-## 草稿卡必含元素（PRD 已定，按已拍决策实现，不另拍板）
+### 草稿卡必含元素（PRD 已定，按已拍决策实现，不另拍板）
 
 - 变更 Diff 对比呈现（A4，结构化字段级"旧值→新值"）。
 - `draft_stale` 错误态：409 拦截提示 + "按最新数据一键重算"按钮。
@@ -72,15 +49,21 @@ D1A 落地方式：
 - 关键字段内联纠错（只改待确认草稿，展示与 Diff 随之更新，不自动提交）+ "确认采纳"幂等提交。
 - `conversation_busy` 等全局错误走 toast（A5）。
 
-## 现状与差距
+## C 组：视觉设计
 
-- frontend/ 已有 Vite + React 19 + TS + Tailwind 4 + shadcn 风格脚手架（node_modules 已装），现有三页（chat/board/settings）为草稿结构，需按 B1 五页重构。
-- TanStack Query、react-markdown、sonner、思源黑体字体文件未装，随实现添加，只装 frontend/ 自己的 node_modules。
+| 决策 | 选项 | 选了 | 为什么 |
+|---|---|---|---|
+| C1 设计语言 | 维持草稿的 ElevenLabs Editorial 风 | 维持：浅色基调、衬线大标题、0.75rem 圆角、柔和渐变球装饰、绿底用户气泡 | 草稿已很完整 |
+| C2 字体与离线 | A 自托管开源字体 / B 纯系统字体栈 / C Google Fonts CDN | A：自托管开源中文字体——思源黑体 400/700，woff2 | 中文 UI 下衬线标题实际落在中文字上，自托管保证观感一致、零授权风险、天然离线 |
+| C3 暗色模式 | A 首版仅浅色 / B 加暗色 | B：首版含暗色 | 浅色为默认主题，暗色为第二主题 |
 
-## 验收标准（mock 阶段）
+## D 组：先行方式
 
-- `npm run dev` 正常启动；五页路由 + 侧边栏导航可用，当前项高亮。
-- 全部数据来自契约类型 + mock，无真实网络调用；草稿确认闭环（Diff、内联纠错、重算、draft_stale、幂等确认）在 mock 上可走通演示。
-- `npm run build`（tsc -b && vite build）零错误。
-- 桌面 ≥1024px 完整可用；浅色/暗色可切换；中文自托管字体加载，断网可用。
-- 全局反馈（conversation_busy、取消、Key 保存）以 toast 呈现（mock 演示）。
+| 决策 | 选项 | 选了 | 为什么 |
+|---|---|---|---|
+| D1 前端先行方式 | A 契约先行 + mock 驱动 / B 等后端 API 形状定了再动 | A | Agent 侧怎么变都烧不到呈现层；会变的只是契约文件，而契约反正要两边一起定 |
+
+## 落地状态
+
+- mock 呈现层第一版（commit ab4e61e，契约先行 + mock 驱动）按上述决策实现。
+- 与架构正本的偏差及契约修订计划见 `frontend/plans/stage0.md`；原文件的「现状与差距」「验收标准（mock 阶段）」为一次性状态记录，未迁入，由各阶段详细计划取代。

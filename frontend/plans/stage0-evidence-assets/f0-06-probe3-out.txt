@@ -1,0 +1,17 @@
+== F0-06 probe #3 (cancel mid-stream) | 2026-09-09T18:33:32+08:00 | budget 60s ==
+[C0] PASS  vite dev server reachable on 5199 | expected=yes actual=yes
+[C1] PASS  run_id parsed from body | expected=true actual=true
+[C2] PASS  streamed text present before cancel (chars>0) | expected=true actual=true
+[C3] PASS  run active before cancel | expected=true actual=true
+[C4] PASS  cancel response status=cancelled | expected=cancelled actual=cancelled
+[C5] PASS  runs/active status=cancelled after cancel | expected=cancelled actual=cancelled
+[C6] PASS  saved_text retained after cancel (>= chars at cancel, >0) | expected=true actual=true
+[C7] PASS  no draft on cancelled run (mid-stream) | expected=0 actual=0
+[C8] PASS  error_code absent on cancelled run | expected=<absent> actual=<absent>
+[C9] PASS  SSE delivered run.cancelled | expected=true actual=true
+-- saved_text tail --
+已将打卡内容整理为训练记录草稿：**杠铃卧推 4 组 x 8 次 @ 80kg**，第 4 组 RIR 未报告（保持为空，不自行补造）。
+
+
+== RESULT: PASS=10 FAIL=0 TOTAL=10 | elapsed=5s ==
+--- cleanup at +5s ---

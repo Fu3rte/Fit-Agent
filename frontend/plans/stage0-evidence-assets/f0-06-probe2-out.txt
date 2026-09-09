@@ -1,0 +1,30 @@
+== F0-06 refinement probe (mock only) | 2026-09-09T18:33:05+08:00 | budget 75s ==
+[R0] PASS  vite dev server reachable on 5199 | expected=yes actual=yes
+seed context_version (reset baseline) = 3  (expected 3 per src/mock/server.ts:363)
+[R1] PASS  first message.delta reached client before cancel (saved_text chars > 0) | expected=true actual=true
+[R2] PASS  run still active when cancelled | expected=true actual=true
+[R3] FAIL  after cancel status=cancelled | expected=cancelled actual=running
+[R4] PASS  saved_text retained after cancel (>= chars at cancel) | expected=true actual=true
+[R5] PASS  cancelled run has no draft | expected=0 actual=0
+[R6] PASS  plan_adjust draft proposed | expected=plan_adjust actual=plan_adjust
+[R7] PASS  context_version advanced past plan draft base | expected=true actual=true
+[R8] PASS  confirm stale plan draft -> draft_stale | expected=draft_stale actual=draft_stale
+[R9] PASS  recalc -> new plan draft revision 1 | expected=1 actual=1
+[R10] PASS  recalc old draft stale | expected=stale actual=stale
+[R11] PASS  recalc draft_vs_draft_diff non-empty (plan_adjust) | expected=true actual=true
+draft_vs_draft_diff = [{"field":"payload.title","old_value":"\"推日减量（PPL v2 → 拟议调整）\"","new_value":"\"计划调整重算（基于当前计划 v2）\""},{"field":"payload.diff","old_value":"[{\"field\":\"杠铃卧推 · 组数\",\"old_value\":\"4 组\",\"new_value\":\"3 组\"},{\"field\":\"杠铃卧推 · 目标 RIR\",\"old_value\":\"1-3\",\"new_value\":\"2-3\"},{\"field\":\"哑铃肩推 · 组数\",\"old_value\":\"3 组\",\"new_value\":\"2 组\"}]","new_value":"[{\"field\":\"杠铃卧推 · 组数\",\"old_value\":\"4\",\"new_value\":\"3\"}]"}]
+[R12] PASS  confirm recalculated plan draft -> committed | expected=committed actual=committed
+[R13] PASS  dev restart injection -> affected run failed/interrupted_by_restart | expected=true actual=true
+[R14] PASS  runs/active surfaces failed + error_code + saved_text kept | expected=true actual=true
+[R15] PASS  dev suspend -> business events dropped, heartbeat suppressed | expected=完全静默（无业务事件、无 heartbeat）：前端连续 45s 无事件即关闭连接转 GET /api/runs/active 轮询（08 8.7） actual=完全静默（无业务事件、无 heartbeat）：前端连续 45s 无事件即关闭连接转 GET /api/runs/active 轮询（08 8.7）
+[R16] PASS  dev resume -> no replay of dropped events | expected=不补发挂起期间丢弃的事件（08 8.7 无重放）；当前状态经业务接口查询 actual=不补发挂起期间丢弃的事件（08 8.7 无重放）；当前状态经业务接口查询
+-- SSE event names/counts --
+      4 event: context.compacted
+      4 event: context.compacting
+      3 event: draft.proposed
+      9 event: message.delta
+      3 event: run.completed
+      1 event: run.failed
+      4 event: run.started
+== RESULT: PASS=16 FAIL=1 TOTAL=17 | elapsed=16s | deadline_ok=yes ==
+--- cleanup done at +16s ---
