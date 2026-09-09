@@ -257,7 +257,7 @@ Harness、web_search、Agent 测评预算、P1 与最终发布清单沿用 PLAN 
 - [x] 动作身份、候选歧义、三类口径、受检推荐与停用保留达到本阶段验收范围。
 - [x] 档案缺失信息、拟议补丁与当次条件隔离验证通过；无正式事实写入旁路或独立版本递增。
 - [x] 两类限制、已明确红旗阻断及不自动解除测试通过；清单外症状返回“未知/需澄清”，不被宣称已安全判定。
-- [ ] Stage 0 回归与新增测试通过；按批准的阶段门槛提供同版本平台证据，未验证项明确保留。**（Linux 已提供：243 passed；Windows 未执行，方案 A 结项待人工回传）**
+- [x] Stage 0 回归与新增测试通过；按批准的阶段门槛提供同版本平台证据，未验证项明确保留。**（Linux 243 passed；Windows 243 passed + 隔离库人工实测通过，见 `evidence/S1-windows-checklist.md` §3）**
 - [x] Stage 2 确认事务、Stage 3 业务流、Stage 4 Agent 及前端接线责任清晰；未擅改项目契约或设计正本。
 
 阶段完成仅表示“动作目录、档案与安全规则基础达到已确认门槛”，不代表已能对话建档、确认业务变更或安全生成完整训练计划。
@@ -322,11 +322,19 @@ Harness、web_search、Agent 测评预算、P1 与最终发布清单沿用 PLAN 
 - **P2 处置**：S1-03 证据数字、003 许可声明、`schema.py` 缩进与 JSON 解析、S1-05 文档措辞与 `preview_patch` 交接提示已修；S1-04 三处测试（旁路扫描含 `agent_core` + `INSERT OR REPLACE`、无效补丁用例更名、当次条件用例改用真实 `SessionConditions`）已加固。仍留 P2：`validate_patch` 限制分支未查重复项；`preview_patch().action_restrictions` 在补丁触及限制时写 `known`（已在 S1-05 §6 交接）。
 - **口径限制（重要）**：本轮四个 reviewer 全部落到 fallback 模型 `deepseek/deepseek-v4.1-flash-expires-on-0910:high`（配置的 `openai-codex/gpt-5.6-sol:medium` 不可用），故 reviewer 结论只作线索；上述结论以父会话独立探针与边界核查为准。
 - **观察**：一次 `test_app` 进程内用例 flake（1/11）；10 次复跑全绿，留 S1-07 Windows 轮。
-- **未做**：Windows 全量自动化与隔离库人工实测、Stage 2–4 接线（S1-07 交接见 §9.8）。
+- **未做**（当时）：Windows 实测与 Stage 2–4 接线；Windows 已于 §9.9 补验通过。
 
 ### 9.8 S1-07 阶段验证与交接（2026-09-09）
 
 - **交接正本**：`evidence/S1-evidence-linux-2026-09-09.md`（合并证据与交接）+ `evidence/S1-windows-checklist.md`（Windows 步骤与回传模板）。
 - **实测**：全量 **243 passed，退出码 0**（Stage 0 69 / S1-02 12 / S1-03 29 / S1-04 79 / S1-05 54）；临时库探针（空库/升级/重开/`user_version=99` 拒绝）通过；`test_app` ×10 未复现 flake。
 - **reviewer**：首轮判 blocked（2 条 P1 均为单行文字错：backend 差异 21→23、引用不存在的 `ProfileModule`）；父会话核实后修正，另修 2 条 P2。
-- **结论**：**Stage 1 未结项**——方案 A 要求同版本 Windows 全量自动化 + 隔离库人工实测，本轮未执行；Windows 步骤与回传模板见交接 §6。
+- **结论**：交接完成；方案 A 的 Windows 侧于 §9.9 补验通过后，Stage 1 结项。
+
+### 9.9 Windows 结项验证（2026-09-09，提交 `e0d302f`）
+
+- **平台**：Windows 11 Pro build 26200，PowerShell 5.1.26100.8328，Python 3.13.13，uv 0.11.28；代码版本 `1a31876`（`d93fec3` + `1a31876` 均在历史内），`git status --porcelain -- backend pre-prj/stage` 为空。
+- **自动化**：`pytest tests -q -W error::pytest.PytestUnhandledThreadExceptionWarning` → **243 passed in 10.61s，退出码 0**，`-W` 门无触发。
+- **隔离库人工**（`FIT_AGENT_DATA_DIR` 指向 TEMP，未触碰 `%LOCALAPPDATA%\Fit-Agent`）：空库 `migrate=3`/`user_version=3`/`exercises=24`/`user_profile=(1,None,0)`；Stage 0 库升级 `1→3` 且会话/时区保留；`/healthz` ok、`Host`/`Origin` 均 `403`、仅 `127.0.0.1`、`Ctrl+C` 优雅收尾、重开时区不重取样；种子 24 项名称与属性逐条一致。
+- **证据**：`evidence/S1-windows-checklist.md` §3（逐条判定通过）；`evidence/S0-08-windows-2026-09-09.md` 平台信息同步补全。
+- **结论**：**Stage 1 结项**（方案 A 满足）。残留：Stage 2–4 接线未做；2 条 P2 与 flake 观察保留；Stage 0 系统时区切换仍豁免未验。

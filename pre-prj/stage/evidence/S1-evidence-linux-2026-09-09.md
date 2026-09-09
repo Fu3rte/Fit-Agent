@@ -1,12 +1,12 @@
 # Stage 1 证据与交接（Linux/WSL2 · 2026-09-09）
 
 > 单一正本：合并原 S1-01～S1-05 证据与 S1-07 交接。每项含平台、代码版本/差异、实际命令、退出码、结果、未覆盖范围（`stage0.md` §6 证据记录格式）。
-> Windows 验收清单另见 `S1-windows-checklist.md`（本轮未执行）。本文件不构成结项声明。
+> Windows 验收清单另见 `S1-windows-checklist.md`（2026-09-09 已执行并通过，见其 §3）。
 
 ## 0. 结论
 
 - Stage 1「动作目录 + 档案 + 安全限制」领域与存储基础（S1-01～S1-07）在 Linux/WSL2 交付并验证。
-- **未结项**：方案 A 要求同版本 Windows 全量自动化 + 隔离库人工实测，本轮未执行。
+- **方案 A 已满足**：同版本 Windows 全量自动化（`243 passed`）+ 隔离库人工实测全部通过（2026-09-09，`S1-windows-checklist.md` §3）→ **Stage 1 可结项**。
 - 全量 **243 passed，退出码 0**。
 - S1-02 曾按方案 B 整段回退，2026-09-09 按方案 A（测试断言随 schema 版本维护）重新落地；回退/重开历史见 `stage1.md` §9.3/§9.5。
 
@@ -90,6 +90,7 @@ cd backend && timeout 300s .venv/bin/python -m pytest tests -q -W error::pytest.
 | 24 | 悬垂举腿 | 0472 | body weight | abs | reps_bodyweight | — | 0 | 核心 |
 
 - 全部 `recommendable=0`、`active=1`；`source_ref = exercises-dataset:<id>`；`attribution` 逐行保留（媒体声明），文字数据许可为 MIT（见 003 头注释）。
+- `equipment` 列用数据集可读词（`body weight`/`leverage machine`/`sled`）；`003` 种子存的规范 token 为 `bodyweight`/`leverage_machine`/`sled_machine`（Windows 属性核对确认逐行一致）。
 - 「哑铃分腿蹲」2026-09-09 拍板 C 移出清单（数据集无可靠对应），故 24 项。
 
 ## 6. Stage 2–4 接入点
@@ -107,11 +108,11 @@ cd backend && timeout 300s .venv/bin/python -m pytest tests -q -W error::pytest.
 
 ## 7. Windows 验收
 
-见 `S1-windows-checklist.md`：同版本自动化 + 隔离库人工（空库/升级/停服重开/回环与 Host/Origin/种子核对）。**本轮未执行**，未填写判定前 Stage 1 不结项。
+见 `S1-windows-checklist.md`：**已执行并通过**（Windows 11 Pro build 26200；自动化 `243 passed`；空库迁移、Stage 0 升级、停服重开、回环与 Host/Origin、种子核对全通过；判定见其 §3）。
 
 ## 8. 残留风险与未覆盖
 
-- **Windows 未实测**（方案 A 结项门槛）；Stage 0 系统时区切换仍为豁免未验。
+- Stage 0 系统时区切换仍为豁免未验（不转写为通过）。
 - **Stage 2–4 接线未做**：确认事务、草稿/Diff/幂等、计划、记录、统计、HTTP/Agent/前端接口。
 - **P2 遗留**：① `validate_patch` 限制分支未查重复项；② `preview_patch().action_restrictions` 见 §6。
 - **flake**：`test_app` 进程内用例 1/11 偶发，10 次复跑全绿；留 Windows 轮复现。
