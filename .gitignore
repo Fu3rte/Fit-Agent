@@ -40,3 +40,11 @@ AGENTS.md
 
 # spike 运行时锁文件
 ledger.json.lock
+
+frontend/worker-timeout-review.md
+test/spike/evidence/real/
+test/spike/evidence/request-capture-sample.json
+test/business-table/business-data-storage-report.md
+test/business-table/test-plan.md
+test/business-table/verification-report.md
+test/spike/ledger.json
