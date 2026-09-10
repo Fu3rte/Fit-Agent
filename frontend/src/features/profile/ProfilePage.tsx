@@ -1,6 +1,11 @@
 import { Link } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
-import { ArrowRight, MessagesSquare, ShieldAlert } from "lucide-react";
+import {
+  ArrowRight,
+  MessagesSquare,
+  ShieldAlert,
+  ShieldCheck,
+} from "lucide-react";
 import {
   Card,
   CardContent,
@@ -13,13 +18,23 @@ import { buttonVariants } from "@/components/ui/button";
 import { getProfile } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import type {
+  Calibration,
   PlanBlock,
+  PlanSafetyReview,
+  PlanScheduleEntry,
   PlanVersion,
   Profile,
   Restriction,
 } from "@/lib/contract";
 
 const WEEKDAYS = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"];
+
+/** 日程状态展示文案（契约状态语义：应训练 / 到期即锁 / 替换计划时旧版未来未锁定日程取消） */
+const SCHEDULE_STATUS_LABEL: Record<PlanScheduleEntry["status"], string> = {
+  scheduled: "应训练",
+  locked: "已锁定",
+  cancelled: "已取消",
+};
 
 function Loading({ text }: { text: string }) {
   return <p className="mt-10 text-sm text-muted-foreground">{text}…</p>;
@@ -175,8 +190,188 @@ function BlockTable({ block }: { block: PlanBlock }) {
   );
 }
 
-/** 当前计划卡：版本/状态/日期 + 按板块分组的动作表 */
-function PlanCard({ plan }: { plan: PlanVersion }) {
+/**
+ * 使用前安全复核结果（F2-05；04 4.5 整份复核）：只有「可给出基于该计划的指导」与「整份阻断」
+ * 两种表达，不存在「部分可用」的中间状态。阻断只影响使用时：计划内容与历史仍按原样展示。
+ */
+function PlanSafetyNotice({ safety }: { safety: PlanSafetyReview }) {
+  if (safety.usable)
+    return (
+      <p className="flex items-start gap-1.5 rounded-lg border bg-muted/40 p-3 text-sm text-muted-foreground">
+        <ShieldCheck className="mt-0.5 size-4 shrink-0" aria-hidden />
+        <span>
+          已按最新红旗与限制复核整份计划（业务版本 {safety.context_version}
+          ）：可给出基于该计划的训练指导。
+        </span>
+      </p>
+    );
+  return (
+    <div className="rounded-lg border border-destructive/40 bg-destructive/5 p-3 text-sm">
+      <p className="flex items-center gap-1.5 font-medium text-destructive">
+        <ShieldAlert className="size-4 shrink-0" aria-hidden />
+        整份计划指导已阻断
+      </p>
+      {safety.red_flag_blocked && (
+        <p className="mt-1.5">
+          档案含红旗症状：不给任何基于该计划的处方，请先完成线下专业评估。
+        </p>
+      )}
+      {safety.conflicts.length > 0 && (
+        <>
+          <p className="mt-1.5">
+            以下动作命中当前有效限制；任一冲突即整份阻断，不会只跳过冲突动作、继续给其余动作的处方。
+          </p>
+          <ul className="mt-1.5 flex list-disc flex-col gap-0.5 pl-5">
+            {safety.conflicts.map((c) => (
+              <li key={`${c.exercise_id}·${c.restriction.name}`}>
+                {c.exercise_name} · 命中限制「{c.restriction.name}」（
+                {c.restriction.scope === "specific_action"
+                  ? "具体动作"
+                  : "动作模式"}
+                ）
+              </li>
+            ))}
+          </ul>
+        </>
+      )}
+      <p className="mt-1.5 text-muted-foreground">
+        计划内容与历史仍按原样展示；修改请从对话发起修订草稿，确认后生成新版本。
+      </p>
+    </div>
+  );
+}
+
+/** 校准说明（3.2）：无可信记录不给起始重量，只给逐级试重步骤与通过／停止标准 */
+function CalibrationSection({ calibration }: { calibration: Calibration }) {
+  return (
+    <section>
+      <div className="mb-2 flex items-center gap-2">
+        <h4 className="text-sm font-medium">负荷校准</h4>
+        <Badge variant="secondary" className="py-0.5">
+          需要校准
+        </Badge>
+      </div>
+      <p className="text-xs text-muted-foreground">
+        无可信训练记录：不给具体起始重量，也不按体重、估算 1RM 或默认杠重猜测。
+      </p>
+      <ol className="mt-2 flex list-decimal flex-col gap-1 pl-5 text-sm">
+        {calibration.steps.map((step) => (
+          <li key={step}>{step}</li>
+        ))}
+      </ol>
+      <p className="mt-2 text-sm">
+        <span className="text-muted-foreground">通过标准：</span>
+        {calibration.pass_criteria}
+      </p>
+      <p className="text-sm">
+        <span className="text-muted-foreground">停止条件：</span>
+        {calibration.stop_criteria}
+      </p>
+    </section>
+  );
+}
+
+/** 日程状态徒章：应训练 / 已锁定 / 已取消（取消保留展示，供替换后核对） */
+function ScheduleBadge({ status }: { status: PlanScheduleEntry["status"] }) {
+  return (
+    <Badge
+      variant={
+        status === "cancelled"
+          ? "secondary"
+          : status === "locked"
+            ? "outline"
+            : "default"
+      }
+      className={cn(
+        "py-1",
+        status === "cancelled" && "line-through opacity-70",
+      )}
+    >
+      {SCHEDULE_STATUS_LABEL[status]}
+    </Badge>
+  );
+}
+
+/**
+ * 具体日程（04 4.4）：`[开始日期, 复核日期)` 内逐个应训练日，按计划版本分组（当前版本在前）。
+ * 旧版本条目保留展示（已取消／已锁定），不隐藏历史；日历休息日不写成应训练日。
+ */
+function ScheduleSection({
+  schedules,
+  plan,
+}: {
+  schedules: PlanScheduleEntry[];
+  plan: PlanVersion;
+}) {
+  const versions = [...new Set(schedules.map((s) => s.plan_version))].sort(
+    (a, b) =>
+      a === plan.version ? -1 : b === plan.version ? 1 : b.localeCompare(a),
+  );
+  return (
+    <section>
+      <h4 className="text-sm font-medium">具体日程</h4>
+      <p className="mt-1 text-xs text-muted-foreground">
+        仅列应训练日（休息日不排）；到期即锁，替换计划只取消旧版未来未锁定日程。
+      </p>
+      <div className="mt-2 flex flex-col gap-3">
+        {versions.map((version) => {
+          const entries = schedules.filter((s) => s.plan_version === version);
+          const counts = entries.reduce<Record<string, number>>((acc, s) => {
+            acc[s.status] = (acc[s.status] ?? 0) + 1;
+            return acc;
+          }, {});
+          return (
+            <div key={version}>
+              <div className="mb-1.5 flex flex-wrap items-baseline gap-x-2 text-xs text-muted-foreground">
+                <span className="font-medium text-foreground">
+                  {version}
+                  {version === plan.version ? "（当前）" : "（历史，已归档）"}
+                </span>
+                <span>
+                  {entries.length} 个应训练日 ·
+                  {Object.entries(SCHEDULE_STATUS_LABEL)
+                    .filter(([status]) => (counts[status] ?? 0) > 0)
+                    .map(([status, label]) => ` ${label} ${counts[status]}`)
+                    .join(" /")}
+                </span>
+              </div>
+              <ul className="flex flex-wrap gap-1.5">
+                {entries.map((s) => (
+                  <li
+                    key={s.id}
+                    className="inline-flex items-center gap-1.5 rounded-full border py-0.5 pr-1 pl-2 text-xs"
+                  >
+                    <span className="tabular-nums">
+                      {s.date.slice(5)} {WEEKDAYS[s.weekday - 1]}
+                    </span>
+                    <ScheduleBadge status={s.status} />
+                  </li>
+                ))}
+              </ul>
+            </div>
+          );
+        })}
+      </div>
+    </section>
+  );
+}
+
+/**
+ * 当前计划卡（F2-05）：状态／版本／日期、安全复核结果、按板块分组的处方、校准说明与具体日程。
+ * 只读：处方修改只能从对话发起草稿并确认后生成新版本，本页无任何直接编辑入口。
+ */
+function PlanCard({
+  plan,
+  schedules,
+  safety,
+}: {
+  plan: PlanVersion;
+  schedules: PlanScheduleEntry[];
+  safety?: PlanSafetyReview;
+}) {
+  const calibration = plan.blocks
+    .flatMap((b) => b.exercises)
+    .find((e) => e.calibration.status === "needs_calibration")?.calibration;
   return (
     <Card className="sm:col-span-2">
       <CardHeader>
@@ -192,9 +387,14 @@ function PlanCard({ plan }: { plan: PlanVersion }) {
         </CardDescription>
       </CardHeader>
       <CardContent className="flex flex-col gap-6">
+        {safety && <PlanSafetyNotice safety={safety} />}
         {plan.blocks.map((block) => (
           <BlockTable key={block.name} block={block} />
         ))}
+        {calibration && <CalibrationSection calibration={calibration} />}
+        {schedules.length > 0 && (
+          <ScheduleSection schedules={schedules} plan={plan} />
+        )}
       </CardContent>
     </Card>
   );
@@ -248,11 +448,18 @@ export default function ProfilePage() {
             <ProfileCard profile={profile.data.profile} />
             <RestrictionsCard restrictions={profile.data.restrictions} />
             {profile.data.plan ? (
-              <PlanCard plan={profile.data.plan} />
+              <PlanCard
+                plan={profile.data.plan}
+                schedules={profile.data.schedules ?? []}
+                safety={profile.data.plan_safety}
+              />
             ) : (
               <Card className="sm:col-span-2">
                 <CardHeader>
                   <CardTitle>当前计划</CardTitle>
+                  <CardDescription>
+                    尚无计划；计划只能从对话生成，确认启用后才在此展示处方与日程
+                  </CardDescription>
                 </CardHeader>
                 <CardContent>
                   <p className="text-sm text-muted-foreground">尚无计划</p>

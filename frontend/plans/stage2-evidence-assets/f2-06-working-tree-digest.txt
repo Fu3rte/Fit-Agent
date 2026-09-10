@@ -1,0 +1,30 @@
+# F2-06 取证工作树身份（2026-09-10T14:18:47+08:00）
+## git
+HEAD: 1ab79701dea69ec2375a5b0d7183550e0afc50ff
+dirty(frontend):
+   M frontend/plans/business-roadmap.md
+   M frontend/src/features/chat/DraftCard.tsx
+   M frontend/src/features/profile/ProfilePage.tsx
+   M frontend/src/lib/contract.ts
+   M frontend/src/mock/server.ts
+  ?? frontend/plans/stage2-evidence-assets/
+  ?? frontend/plans/stage2-evidence.md
+  ?? frontend/plans/stage2.md
+  ?? frontend/scripts/
+  ?? frontend/src/mock/catalog.ts
+  ?? frontend/src/mock/plan.ts
+## sha256（被证据引用的文件）
+bb5c22b47a8050521529724ecb9f60df7720a41c72e9d1ae1a4d5a28688e5902  vite.config.ts
+2a0103e13557d100e9a9220def2495a0cc3b77d37e23d208f97b0d431335548a  package.json
+f1c2a15b8883cc0292599cb22b635756f2700c00693c2c67a5100cacee28d334  src/lib/contract.ts
+001b953c431d98806ae2d37d6cd8298c45ba101a5412ee82c4b2a6211da51223  src/mock/server.ts
+087ec7d8ab15305f676674e2e78f06c403b3d5033a649ad44f2de5fd4585fb50  src/mock/catalog.ts
+dc2493322066fcfcc450d3aed3511d84c7950f542c89c4a8cca1656868dada86  src/mock/plan.ts
+5a20afb36bc5cf1df2a04d405c4ebe914f556190f7c2fd0d8354ed70d2665e7a  src/features/chat/DraftCard.tsx
+2b25977909937da6135dbf0240a1a0fe0471403b50aefc218af2b99206d1d5ea  src/features/profile/ProfilePage.tsx
+cf2a38be1bcbe9ade081594868ce5a4605e03105c88b3b0248e57ed83ceca88d  scripts/f2-01-catalog-probe.mjs
+94165ca7f2dbe8002ff5d56ccda038a77416ad9a435820f051c550cd274f3226  scripts/f2-02-plan-probe.mjs
+08fe3eb43e66a40c19a8c2d8b6ecd73136abc39130e6c8b922818ea70ac0f2d7  scripts/f2-03-draft-revise-probe.mjs
+83775b4c08a2269b0d5274f5e35b392082ff7299eea82a9948059bb60bdfd49d  scripts/f2-04-plan-commit-probe.mjs
+56d703155e7e93653c963b30c500d5c133db566e3578781ec9e0cbaa0306db89  scripts/f2-05-plan-safety-probe.mjs
+45922417a275c849d28771cb4b86fb5c2b6aa1d1348dafa9c75101cfd7417f10  plans/stage2.md

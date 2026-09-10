@@ -15,7 +15,11 @@ import type {
   ErrorCode,
   FieldDiff,
   PhysicalState,
+  PlanBlock,
   PlanDraftPayload,
+  PlanScheduleEntry,
+  PlanScope,
+  PlanVersion,
   PrEntry,
   Profile,
   ProfileDraftPayload,
@@ -33,6 +37,18 @@ import {
   profilePayloadDiff,
   restrictionLabel,
 } from "../lib/profile";
+import {
+  PLAN_CANDIDATE,
+  buildPplDraft,
+  buildSchedules,
+  normalizePlanPayload,
+  planCandidates,
+  planDraftDiff,
+  planExercise,
+  planPayloadError,
+  reviewPlanSafety,
+  weekdayLabel,
+} from "./plan";
 
 /* ---------------------------------- 状态 ---------------------------------- */
 
@@ -84,8 +100,12 @@ interface MockState {
   /** 未建档（空种子）= null：GET /api/profile 据此表达未建档态（stage1 F1-01） */
   profile: Profile | null;
   restrictions: Restriction[];
-  /** 未生成/未启用计划（空种子）= null */
-  plan: PlanState | null;
+  /** 未生成/未启用计划（空种子）= null；形状 = 契约 PlanVersion（F2-01：不再是 mock 私有形状） */
+  plan: PlanVersion | null;
+  /** 历史计划版本（F2-04；PRD 5.3：正式版本只追加不原地改）：替换时旧版以 archived 归档保留 */
+  plan_history: PlanVersion[];
+  /** 具体日程（04 4.4）：多版本共存，scheduled/locked/cancelled 由启用事务写入 */
+  schedules: PlanScheduleEntry[];
   records: TrainingRecord[];
   stats: StatsSummary;
   review: ReviewDoc;
@@ -103,29 +123,17 @@ interface MockState {
   /** 唯一执行名额（08 8.3）：由正在执行的 Run 持有，runScript 实际退出（finally）后才释放；
    *  与 Run 状态解耦——取消立即置 cancelled，名额不提前释放。非权威状态，仅作并发互斥。 */
   execution_slot_run_id: string | null;
+  /** dev-only 故障注入位（F2-04）：置位后下一次计划确认事务在写入中途失败，用于验证整份回滚 */
+  dev_confirm_failure: boolean;
 }
 
-interface PlanState {
-  version: string;
-  start_date: string;
-  review_date: string;
-  status: "active" | "archived";
-  blocks: {
-    name: string;
-    weekday: number;
-    exercises: {
-      name: string;
-      variant: string;
-      sets: number;
-      rep_range: string;
-      target_rir: string;
-      progression: string;
-    }[];
-  }[];
-}
+/**
+ * 校准口径、目录身份构造器（`planExercise`）与计划生成／校验统一在 ./plan
+ * （F2-01 种子与 F2-02 生成共用同一实现，避免第二份身份与器械文案映射）。
+ */
 
 function seedState(): MockState {
-  const plan: PlanState = {
+  const plan: PlanVersion = {
     version: "v2",
     start_date: "2026-08-31",
     review_date: "2026-10-12",
@@ -134,91 +142,77 @@ function seedState(): MockState {
       {
         name: "推日",
         weekday: 2,
+        estimated_minutes: 60,
         exercises: [
-          {
-            name: "杠铃卧推",
-            variant: "杠铃",
+          planExercise("barbell-bench-press", {
             sets: 4,
             rep_range: "6-8",
             target_rir: "1-3",
             progression: "双重渐进",
-          },
-          {
-            name: "哑铃肩推",
-            variant: "哑铃",
+          }),
+          planExercise("seated-dumbbell-shoulder-press", {
             sets: 3,
             rep_range: "8-12",
             target_rir: "1-3",
             progression: "双重渐进",
-          },
-          {
-            name: "双杠臂屈伸",
-            variant: "自重",
+          }),
+          planExercise("parallel-bar-dip", {
             sets: 3,
             rep_range: "8-12",
             target_rir: "1-3",
             progression: "次数递增",
-          },
+          }),
         ],
       },
       {
         name: "拉日",
         weekday: 4,
+        estimated_minutes: 60,
         exercises: [
-          {
-            name: "引体向上",
-            variant: "自重",
+          planExercise("pull-up", {
             sets: 3,
             rep_range: "6-10",
             target_rir: "1-3",
             progression: "次数递增",
-          },
-          {
-            name: "杠铃划船",
-            variant: "杠铃",
+          }),
+          planExercise("barbell-bent-over-row", {
             sets: 4,
             rep_range: "8-10",
             target_rir: "1-3",
             progression: "双重渐进",
-          },
-          {
-            name: "面拉",
-            variant: "绳索",
+          }),
+          // 原「面拉」不在已拍 24 项内，改同后束部位的目录动作（12-15 次、RIR 2-3 原样保留）
+          planExercise("dumbbell-reverse-fly", {
             sets: 3,
             rep_range: "12-15",
             target_rir: "2-3",
             progression: "次数递增",
-          },
+          }),
         ],
       },
       {
         name: "腿日",
         weekday: 6,
+        estimated_minutes: 60,
         exercises: [
-          {
-            name: "杠铃深蹲",
-            variant: "杠铃",
+          planExercise("barbell-back-squat", {
             sets: 4,
             rep_range: "6-8",
             target_rir: "1-3",
             progression: "双重渐进",
-          },
-          {
-            name: "罗马尼亚硬拉",
-            variant: "杠铃",
+          }),
+          planExercise("barbell-romanian-deadlift", {
             sets: 3,
             rep_range: "8-10",
             target_rir: "1-3",
             progression: "双重渐进",
-          },
-          {
-            name: "腿屈伸",
-            variant: "器械",
+          }),
+          planExercise("leg-extension", {
             sets: 3,
             rep_range: "12-15",
             target_rir: "1-3",
             progression: "次数递增",
-          },
+          }),
         ],
       },
     ],
@@ -230,7 +224,7 @@ function seedState(): MockState {
       date: "2026-09-01",
       kind: "correction",
       status: "formal",
-      exercise: "杠铃卧推",
+      exercise: "杠铃平板卧推",
       variant: "杠铃",
       sets: [
         { weight_kg: 80, reps: 8, rir: 1, set_type: "working" },
@@ -247,7 +241,7 @@ function seedState(): MockState {
       date: "2026-09-03",
       kind: "new",
       status: "formal",
-      exercise: "杠铃划船",
+      exercise: "杠铃俯身划船",
       variant: "杠铃",
       sets: [
         { weight_kg: 60, reps: 10, rir: 2, set_type: "working" },
@@ -261,7 +255,7 @@ function seedState(): MockState {
       date: "2026-09-08",
       kind: "new",
       status: "formal",
-      exercise: "杠铃卧推",
+      exercise: "杠铃平板卧推",
       variant: "杠铃",
       sets: [
         { weight_kg: 77.5, reps: 8, rir: 2, set_type: "working" },
@@ -276,7 +270,7 @@ function seedState(): MockState {
       date: "2026-09-09",
       kind: "new",
       status: "pending_completion",
-      exercise: "哑铃肩推",
+      exercise: "坐姿哑铃肩推",
       variant: "哑铃",
       sets: [{ weight_kg: 15, reps: 10, set_type: "working" }],
       schedule_snapshot: null,
@@ -292,13 +286,13 @@ function seedState(): MockState {
     buckets: { met: 8, unmet: 1, pending: 1 },
     prs: [
       {
-        exercise: "杠铃卧推",
+        exercise: "杠铃平板卧推",
         variant: "杠铃",
         best_weight_kg: 80,
         best_reps_at_weight: 8,
       },
       {
-        exercise: "杠铃划船",
+        exercise: "杠铃俯身划船",
         variant: "杠铃",
         best_weight_kg: 60,
         best_reps_at_weight: 10,
@@ -415,6 +409,9 @@ function seedState(): MockState {
       },
     ],
     plan,
+    plan_history: [],
+    /** 种子计划的日程（F2-04）：mock 当前日期之前到期即锁（04 4.4），当日及之后为 scheduled */
+    schedules: seedSchedules(plan),
     records,
     stats,
     review,
@@ -426,7 +423,25 @@ function seedState(): MockState {
     confirm_receipts: new Map(),
     runs: new Map(),
     execution_slot_run_id: null,
+    dev_confirm_failure: false,
   };
+}
+
+/**
+ * 种子计划的日程（F2-04；04 4.4 到期即锁）：mock 当前日期之前到期即锁（locked），
+ * 当日及之后为应训练（scheduled）。种子只给状态，排程仍由 ./plan 给出（不写第二份算法）。
+ */
+function seedSchedules(plan: PlanVersion): PlanScheduleEntry[] {
+  const scope: PlanScope = {
+    start_date: plan.start_date,
+    review_date: plan.review_date,
+    weekdays: [...new Set(plan.blocks.map((b) => b.weekday))].sort(
+      (a, b) => a - b,
+    ),
+  };
+  return buildSchedules(plan.version, scope).map((s) =>
+    s.date < MOCK_TODAY ? { ...s, status: "locked" as const } : s,
+  );
 }
 
 /**
@@ -447,6 +462,8 @@ function emptySeedState(): MockState {
     profile: null,
     restrictions: [],
     plan: null,
+    plan_history: [],
+    schedules: [],
     records: [],
     stats: {
       per_week: [],
@@ -467,7 +484,34 @@ function emptySeedState(): MockState {
     confirm_receipts: new Map(),
     runs: new Map(),
     execution_slot_run_id: null,
+    dev_confirm_failure: false,
   };
+}
+
+/**
+ * Stage 2 计划生成种子（plans/stage2.md §7 前置）：已配置、已建档、无红旗、尚无计划、
+ * 无可信训练记录。provider 只置 has_api_key 徽章位，不存或返回任何 Key 明文；
+ * context_version = 1（档案与限制经一次确认写入）。复用同一控制端点切换
+ * （POST /api/dev/reset {"seed":"noplan"}），不是第二个种子机制。
+ */
+function noPlanSeedState(): MockState {
+  const base = emptySeedState();
+  base.context_version = 1;
+  base.provider.has_api_key = true;
+  base.profile = {
+    goal: "增肌（肌肥大）",
+    experience: "初级（有少量训练经验）",
+    weekly_frequency: 3,
+    session_minutes: 60,
+    equipment: ["杠铃", "哑铃", "卧推架", "引体架", "绳索"],
+    body_weight_kg: 72.5,
+    physical_state: { red_flags: [], notes: [] },
+  };
+  base.sessions = [
+    { id: "s1", title: "计划生成", updated_at: MOCK_UPDATED_AT },
+  ];
+  base.messages.set("s1", []);
+  return base;
 }
 
 /* ------------------------------- SSE 总线 --------------------------------- */
@@ -652,10 +696,10 @@ function recordScriptReply(): { text: string; draft: Draft } {
     kind: "training_record",
     status: "pending",
     revision: 1, // 初版修订（01 1.3：标识用户所见内容版本）
-    base_business_version: 0, // 创建时以当时 context_version 填充
+    base_business_version: 0, // 占位；由 runScript 在生成处按当时读到的 context_version 填充（01 1.3）
     payload: {
       date: MOCK_TODAY,
-      exercise: "杠铃卧推",
+      exercise: "杠铃平板卧推",
       variant: "杠铃",
       warmup_summary: "递增至 60kg",
       sets: [
@@ -668,7 +712,7 @@ function recordScriptReply(): { text: string; draft: Draft } {
     diff: [
       { field: "训练记录 · 日期", new_value: MOCK_TODAY },
       {
-        field: "杠铃卧推 · 工作组",
+        field: "杠铃平板卧推 · 工作组",
         new_value: "4 组 x 8 次 @ 80kg，目标 RIR 1-3",
       },
       { field: "第 4 组 · RIR", new_value: "未报告（待确认）" },
@@ -676,34 +720,503 @@ function recordScriptReply(): { text: string; draft: Draft } {
     ],
   };
   return {
-    text: "已将打卡内容整理为训练记录草稿：**杠铃卧推 4 组 x 8 次 @ 80kg**，第 4 组 RIR 未报告（保持为空，不自行补造）。\n\n请核对下方草稿卡，可内联纠错关键字段，确认采纳后才写入正式记录。",
+    text: "已将打卡内容整理为训练记录草稿：**杠铃平板卧推 4 组 x 8 次 @ 80kg**，第 4 组 RIR 未报告（保持为空，不自行补造）。\n\n请核对下方草稿卡，可内联纠错关键字段，确认采纳后才写入正式记录。",
     draft,
   };
 }
 
-function planScriptReply(): { text: string; draft: Draft } {
+/**
+ * 计划版本号只追加（PRD 5.3：正式版本不原地改）
+ */
+function nextPlanVersion(version: string): string {
+  return `v${Number(version.slice(1)) + 1}`;
+}
+
+/**
+ * 待确认计划草稿（01 1.2/1.3）：revision 从 1 起（标识用户所见内容版本），
+ * base_business_version 由 runScript 在生成处填充为当时读到的 context_version
+ */
+function pendingPlanDraft(payload: PlanDraftPayload): Draft {
+  return {
+    id: nextId("draft"),
+    kind: "plan_adjust",
+    status: "pending",
+    revision: 1,
+    base_business_version: 0,
+    payload,
+    diff: payload.diff,
+  };
+}
+
+/**
+ * 结构化替换草稿载荷（F2-04；PRD 5.3 只追加不原地改、04 4.4 旧版未来未锁定日程取消）：
+ * 拟议板块来自计划生成或处方改写；版本取当前计划下一版（无正式计划时 v1），生效范围取
+ * 3.3 已拍候选日期，新日程按新版本重建，旧版未来未锁定日程进取消清单（已锁定日程不动）。
+ * 产出后仍按 `planPayloadError` 复检，不通过即不产出草稿（fail-closed）。
+ */
+function replacementPayload(
+  state: MockState,
+  input: {
+    profile: Profile;
+    blocks: PlanBlock[];
+    title: string;
+    extra_diff?: FieldDiff[];
+  },
+): PlanDraftPayload | undefined {
+  const { profile, blocks } = input;
+  const previous = state.plan;
+  const scope: PlanScope = {
+    start_date: PLAN_CANDIDATE.start_date,
+    review_date: PLAN_CANDIDATE.review_date,
+    weekdays: [...new Set(blocks.map((b) => b.weekday))].sort((a, b) => a - b),
+  };
+  const version = previous ? nextPlanVersion(previous.version) : "v1";
+  const schedules = buildSchedules(version, scope);
+  const cancellations = previous
+    ? state.schedules.filter(
+        (s) =>
+          s.plan_version === previous.version &&
+          s.status === "scheduled" &&
+          s.date >= MOCK_TODAY,
+      )
+    : [];
+  const plan: PlanVersion = {
+    version,
+    start_date: scope.start_date,
+    review_date: scope.review_date,
+    status: "active",
+    blocks,
+  };
+  const payload: PlanDraftPayload = {
+    title: input.title,
+    diff: [
+      ...planDraftDiff(
+        plan,
+        scope,
+        schedules,
+        previous
+          ? { previous_version: previous.version, cancellations }
+          : undefined,
+      ),
+      ...(input.extra_diff ?? []),
+    ],
+    plan,
+    scope,
+    schedules,
+    cancellations,
+    candidates: planCandidates(profile, state.restrictions),
+  };
+  const invalid = planPayloadError(payload, {
+    profile,
+    restrictions: state.restrictions,
+    today: MOCK_TODAY,
+  });
+  return invalid ? undefined : payload;
+}
+
+/**
+ * 档案长期补丁 → 拟议完整档案（F2-04；01 1.4「受限组合计划草稿」）：补丁随计划一次确认写入，
+ * 确认前不改正式档案。无正式档案时返回 null（由 `planPayloadError` 以「尚未建档」拒绝）。
+ */
+function profileWithPatch(
+  current: Profile | null,
+  patch: ProfileDraftPayload,
+): Profile | null {
+  if (!current) return null;
+  const p = patch.profile;
+  return {
+    goal: p.goal ?? current.goal,
+    experience: p.experience ?? current.experience,
+    weekly_frequency: p.weekly_frequency ?? current.weekly_frequency,
+    session_minutes: p.session_minutes ?? current.session_minutes,
+    equipment: [...(p.equipment ?? current.equipment)],
+    body_weight_kg: p.body_weight_kg ?? current.body_weight_kg,
+    physical_state: p.physical_state
+      ? {
+          red_flags: [...p.physical_state.red_flags],
+          notes: [...p.physical_state.notes],
+        }
+      : {
+          red_flags: [...current.physical_state.red_flags],
+          notes: [...current.physical_state.notes],
+        },
+  };
+}
+
+/**
+ * 计划启用／替换事务（F2-04；01 1.4 原子确认、04 4.4 版本与日程）：
+ * 领域复查由调用方完成，本函数只做一次确认内的全部写入——档案长期补丁、新版本启用、
+ * 旧版归档保留、旧版未来未锁定日程取消（已锁定日程不动）、新日程写入、草稿提交、
+ * context_version 一次递增；任一步失败按快照整份回滚（档案、计划与历史、全部日程、
+ * 草稿状态、context_version），不留半写状态。mock 以顺序内存写入 + 快照回滚模拟同一事务，
+ * 不建第二套事务机制。dev 故障注入位（POST /api/dev/confirm/fail-next）用于验证中途失败的回滚。
+ */
+function commitPlanDraft(
+  state: MockState,
+  draft: Draft,
+  payload: PlanDraftPayload,
+  ctx: { profile: Profile; restrictions: Restriction[] },
+): { version: string; created: number; cancelled: number } {
+  const plan = payload.plan as PlanVersion;
+  const schedules = payload.schedules ?? [];
+  const previous = state.plan;
+  const snapshot = {
+    context_version: state.context_version,
+    profile: state.profile,
+    restrictions: state.restrictions,
+    plan: state.plan,
+    plan_history: state.plan_history,
+    schedules: state.schedules,
+    draft_status: draft.status,
+  };
+  try {
+    // 1) 长期档案补丁（与计划同一次确认、一次版本递增）
+    if (payload.profile_patch) {
+      state.profile = ctx.profile;
+      state.restrictions = ctx.restrictions;
+    }
+    // 2) 旧版只归档不原地改（PRD 5.3）
+    if (previous) {
+      state.plan_history = [
+        ...state.plan_history,
+        { ...previous, status: "archived" },
+      ];
+    }
+    // 3) 旧版未来未锁定日程取消，已锁定日程不动（04 4.4）
+    const cancellable = new Set(
+      state.schedules
+        .filter(
+          (s) =>
+            s.plan_version === previous?.version &&
+            s.status === "scheduled" &&
+            s.date >= MOCK_TODAY,
+        )
+        .map((s) => s.id),
+    );
+    state.schedules = [
+      ...state.schedules.map((s) =>
+        cancellable.has(s.id) ? { ...s, status: "cancelled" as const } : s,
+      ),
+      // 4) 新版本日程（服务端在草稿生成时已按生效范围算好，这里只归属到新版本）
+      ...schedules.map((s) => ({
+        ...s,
+        plan_version: plan.version,
+        status: "scheduled" as const,
+      })),
+    ];
+    // 5) 新版本启用
+    state.plan = { ...plan, status: "active" };
+    // dev-only 故障注入：正式写入已完成、尚未提交草稿与推进版本
+    if (state.dev_confirm_failure) {
+      state.dev_confirm_failure = false; // 一次性注入
+      throw new Error("dev 注入失败：计划启用事务在正式写入后失败");
+    }
+    // 6) 草稿提交与 context_version 递增同属这次提交（01 1.4）
+    draft.status = "committed";
+    state.context_version += 1;
+    return {
+      version: plan.version,
+      created: schedules.length,
+      cancelled: cancellable.size,
+    };
+  } catch (e) {
+    state.context_version = snapshot.context_version;
+    state.profile = snapshot.profile;
+    state.restrictions = snapshot.restrictions;
+    state.plan = snapshot.plan;
+    state.plan_history = snapshot.plan_history;
+    state.schedules = snapshot.schedules;
+    draft.status = snapshot.draft_status;
+    throw e;
+  }
+}
+
+/**
+ * 长期器械范围组合草稿的载荷（F2-04）：「以后只能用哑铃」= 档案器械补丁 + 新计划版本 +
+ * 新日程 + 旧版未来未锁定日程取消，一次确认、一次 context_version 递增。
+ * 当日临时限制（「今天只能用哑铃」）不走本路径，也不写长期档案。
+ * 生成与重算共用本函数（01 1.6：重算以最新业务上下文重新派生同一类提案）。
+ */
+function dumbbellPayload(state: MockState): PlanDraftPayload | undefined {
+  const profile = state.profile;
+  if (!profile) return undefined;
+  const proposed: Profile = { ...profile, equipment: ["哑铃"] };
+  const built = buildPplDraft({
+    profile: proposed,
+    restrictions: state.restrictions,
+  });
+  if (!built.ok) return undefined;
+  const base = state.plan
+    ? replacementPayload(state, {
+        profile: proposed,
+        blocks: built.plan.blocks,
+        title: `器械范围调整（${state.plan.version} → 拟议替换）`,
+      })
+    : built.payload;
+  if (!base) return undefined;
+  const patch: ProfileDraftPayload = {
+    profile: proposed,
+    restrictions: state.restrictions.map((r) => ({ ...r })),
+  };
+  const diff: FieldDiff[] = [
+    ...profilePayloadDiff({ profile, restrictions: state.restrictions }, patch),
+    ...base.diff,
+  ];
+  return {
+    ...base,
+    title: "器械范围调整（以后只能用哑铃）",
+    profile_patch: patch,
+    diff,
+  };
+}
+
+/**
+ * 长期器械范围的组合草稿回复（F2-04；plans/stage2.md §7 第 7 步）
+ */
+function dumbbellOnlyReply(state: MockState): { text: string; draft?: Draft } {
+  const profile = state.profile;
+  if (!profile) return { text: NO_PROFILE_PLAN_REPLY };
+  const payload = dumbbellPayload(state);
+  if (!payload)
+    return {
+      text: "按当前档案与限制无法生成仅用哑铃的计划（未通过安全前置校验）；未生成草稿，正式档案、计划与日程保持不变。",
+    };
+  return {
+    text: [
+      "已按「以后只能用哑铃」生成一张组合草稿（一次确认、一次版本递增）：",
+      "",
+      `- 档案器械补丁：${profile.equipment.join("、")} → **哑铃**（长期生效）`,
+      `- 拟议计划版本：${payload.plan?.version ?? "—"}${state.plan ? `（旧版 ${state.plan.version} 归档保留）` : "（新建）"}`,
+      `- 具体日程：${payload.schedules?.length ?? 0} 个应训练日`,
+      `- 旧版日程取消：${payload.cancellations?.length ?? 0} 个未来未锁定日程（已锁定日程不动）`,
+      "",
+      "确认前正式档案、计划与日程均不变；确认后档案补丁与新计划版本同时生效。",
+    ].join("\n"),
+    draft: pendingPlanDraft(payload),
+  };
+}
+
+/**
+ * 处方改写提案（存量演示剧本：推日减量）：按 3.1 可推荐目录从当前档案重建板块，只改组数与
+ * 目标 RIR；版本、日程与取消清单由 `replacementPayload` 按当前正式计划派生。
+ * `rows` = 实际落地的处方改写展示行（动作不在拟议计划内时不虚报变更）。
+ */
+function adjustPlanProposal(
+  state: MockState,
+): { payload: PlanDraftPayload; rows: FieldDiff[] } | undefined {
+  const profile = state.profile;
+  if (!profile || !state.plan) return undefined;
+  const built = buildPplDraft({
+    profile,
+    restrictions: state.restrictions,
+  });
+  if (!built.ok) return undefined;
+  const edits: Record<string, { sets?: number; target_rir?: string }> = {
+    "barbell-bench-press": { sets: 3, target_rir: "2-3" },
+    "seated-dumbbell-shoulder-press": { sets: 2 },
+  };
+  const rows: FieldDiff[] = [];
+  const blocks: PlanBlock[] = built.plan.blocks.map((b) => ({
+    ...b,
+    exercises: b.exercises.map((e) => {
+      const edit = edits[e.exercise_id];
+      if (!edit) return e;
+      if (edit.sets !== undefined && edit.sets !== e.sets)
+        rows.push({
+          field: `${e.name} · 组数`,
+          old_value: `${e.sets} 组`,
+          new_value: `${edit.sets} 组`,
+        });
+      if (edit.target_rir !== undefined && edit.target_rir !== e.target_rir)
+        rows.push({
+          field: `${e.name} · 目标 RIR`,
+          old_value: e.target_rir,
+          new_value: edit.target_rir,
+        });
+      return {
+        ...e,
+        sets: edit.sets ?? e.sets,
+        target_rir: edit.target_rir ?? e.target_rir,
+      };
+    }),
+  }));
+  const payload = replacementPayload(state, {
+    profile,
+    blocks,
+    title: `推日减量（${state.plan.version} → 拟议替换）`,
+    extra_diff: rows,
+  });
+  return payload ? { payload, rows } : undefined;
+}
+
+/**
+ * 计划类回复（F2-02/F2-04）：尚无正式计划时从正式档案生成 PPL 草稿；已有计划时给结构化
+ * 替换草稿（处方改写 + 只追加新版本 + 旧版未来未锁定日程取消）。
+ */
+function planScriptReply(state: MockState): { text: string; draft?: Draft } {
+  if (!state.plan) return newPlanReply(state);
+  if (!state.profile) return { text: NO_PROFILE_PLAN_REPLY };
+  const proposal = adjustPlanProposal(state);
+  if (!proposal)
+    return {
+      text: "按当前档案与限制无法生成这次计划调整（未通过安全前置校验）；未生成草稿，正式计划保持不变。",
+    };
+  const { payload, rows } = proposal;
+  return {
+    text: [
+      `根据近期表现，建议对计划做如下调整（只追加新版本 ${payload.plan?.version}，不静默覆盖 ${state.plan.version}）：`,
+      "",
+      ...rows.map(
+        (row) => `- ${row.field}：${row.old_value} → **${row.new_value}**`,
+      ),
+      `- 旧版 ${state.plan.version} 归档保留；未锁定且未到期的 ${payload.cancellations?.length ?? 0} 个旧日程将取消（已锁定日程不动）`,
+      "",
+      "请确认后启用；确认前正式计划与日程不变。",
+    ].join("\n"),
+    draft: pendingPlanDraft(payload),
+  };
+}
+
+/**
+ * F2-05：请求基于当前计划的训练日指导（只读，不生成任何草稿——计划修改仍须经对话草稿确认）。
+ * 给出处方前先用最新红旗与限制复核整份计划（04 4.5）：
+ * - 红旗症状独立阻断：建议线下专业评估，不给任何常规处方；
+ * - 任一动作命中具体动作／动作模式限制：整份阻断，**不**只跳过冲突动作继续给其余动作的处方。
+ * 两种阻断都只影响「使用时」：正式计划、日程与历史仍可在 /profile 查看，修订从对话发起。
+ */
+function planGuidanceReply(state: MockState): string {
+  /* 红旗独立阻断（02 2.3）：与有没有计划无关，先于计划检查——不生成、也不给出任何常规处方 */
+  const redFlags = state.profile?.physical_state.red_flags ?? [];
+  if (redFlags.length > 0)
+    return [
+      professionalEvalBlock(redFlags),
+      "当前档案含红旗症状，本次不给出任何基于计划的训练指导。请先完成线下专业评估；经专业人员确认可以恢复训练后，再从对话调整档案与计划。",
+    ].join("\n\n");
+
+  const plan = state.plan;
+  if (!plan) return NO_PLAN_GUIDANCE_REPLY;
+  const safety = reviewPlanSafety({
+    plan,
+    profile: state.profile,
+    restrictions: state.restrictions,
+    context_version: state.context_version,
+  });
+
+  /* 红旗已在上面拦截，这里的不可用只剩限制冲突（仍按整份阻断，不降级为逐动作跳过） */
+  if (!safety.usable) {
+    return [
+      `按最新限制复核当前计划 ${plan.version}：**整份计划指导已阻断**——任一动作命中限制时，我不会给出任何基于该计划的处方，也不会只跳过冲突动作、继续给其余「未冲突」动作的处方。`,
+      "",
+      ...safety.conflicts.map(
+        (c) =>
+          `- 冲突：${c.exercise_name} 命中限制「${c.restriction.name}」（${c.restriction.scope === "specific_action" ? "具体动作" : "动作模式"}）`,
+      ),
+      "",
+      `正式计划 ${plan.version}、日程与历史仍可在「档案与限制」页查看（不隐藏、不改写，也不标为「部分可用」）。`,
+      "修改计划只能从对话发起：说明你要调整的内容，我给出修订草稿，确认后生成新版本。",
+    ].join("\n");
+  }
+
+  const upcoming = state.schedules
+    .filter(
+      (s) =>
+        s.plan_version === plan.version &&
+        s.status === "scheduled" &&
+        s.date >= MOCK_TODAY,
+    )
+    .sort((a, b) => a.date.localeCompare(b.date))[0];
+  const block = plan.blocks.find((b) => b.weekday === upcoming?.weekday);
+  if (!upcoming || !block)
+    return [
+      `当前计划 ${plan.version} 通过最新红旗与限制复核，但区间内没有未到期的应训练日（${plan.start_date} ~ ${plan.review_date}）。`,
+      "复核日后的续期与跨周期切换不在本阶段范围内；如需新计划请从对话发起。",
+    ].join("\n");
+
+  const calibration = block.exercises[0]?.calibration;
+  return [
+    `下一个应训练日：${upcoming.date}（${weekdayLabel(block.weekday)}）· ${block.name} · 预计 ${block.estimated_minutes} 分钟（计划 ${plan.version}）`,
+    "",
+    ...block.exercises.map(
+      (e) =>
+        `- ${e.name} ${e.sets} 组 x ${e.rep_range} 次，目标 RIR ${e.target_rir}（${e.progression}）`,
+    ),
+    "",
+    "负荷：没有可信训练记录，不给出具体起始重量，按各动作的「需要校准」步骤逐级试重。",
+    calibration
+      ? `- 通过标准：${calibration.pass_criteria}；停止条件：${calibration.stop_criteria}`
+      : "",
+    "",
+    "该指导依据当前计划与最新安全复核；如出现疼痛或红旗症状请立即停止并按线下专业评估处理。",
+  ]
+    .filter((line) => line !== "")
+    .join("\n");
+}
+
+/**
+ * F2-02：从正式档案与当前有效限制生成 PPL 计划草稿（新建 v1）。
+ * 缺档案、档案含红旗症状或排不进档案约束时不给任何处方，只说明原因与下一步。
+ */
+function newPlanReply(state: MockState): { text: string; draft?: Draft } {
+  const built = buildPplDraft({
+    profile: state.profile,
+    restrictions: state.restrictions,
+  });
+  if (!built.ok) {
+    if (built.code === "red_flag")
+      return {
+        text: [
+          professionalEvalBlock(built.red_flags),
+          "当前档案已记录红旗症状，因此我不会生成任何计划处方。请先完成线下专业评估；经专业人员确认可以恢复训练后，再回来调整档案与计划。",
+        ].join("\n\n"),
+      };
+    if (built.code === "no_profile")
+      return {
+        text: [
+          "还没有正式档案，我不会凭空生成计划处方。",
+          "请在对话中补齐建档信息（目标、经验、每周频率、单次时长、可用器械、体重、动作限制与当前身体状态），确认后再生成计划。",
+        ].join("\n\n"),
+      };
+    return {
+      text: [
+        `当前条件排不出符合档案约束的 PPL 计划：${built.reason}。`,
+        "未生成任何计划草稿；请调整档案或说明可用日期后重试。",
+      ].join("\n\n"),
+    };
+  }
+
+  const { plan, scope, schedules } = built;
+  const first = schedules[0];
+  const last = schedules[schedules.length - 1];
+  const rows = plan.blocks.map(
+    (b) =>
+      `- ${b.name}（${weekdayLabel(b.weekday)}，预计 ${b.estimated_minutes} 分钟）：${b.exercises
+        .map(
+          (e) =>
+            `${e.name} ${e.sets} 组 x ${e.rep_range} 次，目标 RIR ${e.target_rir}`,
+        )
+        .join("；")}`,
+  );
   const draft: Draft = {
     id: nextId("draft"),
     kind: "plan_adjust",
     status: "pending",
     revision: 1, // 初版修订（01 1.3：标识用户所见内容版本）
-    base_business_version: 0,
-    payload: {
-      title: "推日减量（PPL v2 → 拟议调整）",
-      diff: [
-        { field: "杠铃卧推 · 组数", old_value: "4 组", new_value: "3 组" },
-        { field: "杠铃卧推 · 目标 RIR", old_value: "1-3", new_value: "2-3" },
-        { field: "哑铃肩推 · 组数", old_value: "3 组", new_value: "2 组" },
-      ],
-    },
-    diff: [
-      { field: "杠铃卧推 · 组数", old_value: "4", new_value: "3" },
-      { field: "杠铃卧推 · 目标 RIR", old_value: "1-3", new_value: "2-3" },
-      { field: "哑铃肩推 · 组数", old_value: "3", new_value: "2" },
-    ],
+    base_business_version: 0, // 占位；由 runScript 在生成处按当时读到的 context_version 填充（01 1.3）
+    payload: built.payload,
+    diff: built.payload.diff,
   };
   return {
-    text: "根据近期表现，建议对推日做如下调整（作为计划新版本草稿，不静默覆盖正式计划）：\n\n- 卧推 4 组 → **3 组**\n- 卧推目标 RIR 1-3 → **2-3**\n- 哑铃肩推 3 组 → **2 组**\n\n请确认后生成新版本；旧版本保留历史。",
+    text: [
+      `已按正式档案生成 PPL 计划草稿（新建 ${plan.version}）：`,
+      "",
+      `- 生效范围：${scope.start_date} 起，复核日期 ${scope.review_date}，每周 ${scope.weekdays.map(weekdayLabel).join(" / ")}`,
+      `- 具体日程：${first.date} ~ ${last.date} 共 ${schedules.length} 个应训练日（复核日当天不排日程）`,
+      ...rows,
+      "",
+      "负荷：当前没有可信训练记录，我不会给出任何起始重量；每个动作按「需要校准」处理（逐级试重，稳定完成处方次数下限且落在目标 RIR 区间才算通过）。",
+      "",
+      "请在草稿卡核对后确认；确认前正式计划与日程不变。",
+    ].join("\n"),
     draft,
   };
 }
@@ -821,11 +1334,11 @@ const RESTRICTION_SUBJECTS: readonly {
   scope: Restriction["scope"];
 }[] = [
   { pattern: /颈后推举/, name: "杠铃颈后推举", scope: "specific_action" },
-  { pattern: /卧推/, name: "杠铃卧推", scope: "specific_action" },
-  { pattern: /肩推/, name: "哑铃肩推", scope: "specific_action" },
-  { pattern: /引体向上/, name: "引体向上", scope: "specific_action" },
-  { pattern: /双杠臂屈伸/, name: "双杠臂屈伸", scope: "specific_action" },
-  { pattern: /划船/, name: "杠铃划船", scope: "specific_action" },
+  { pattern: /卧推/, name: "杠铃平板卧推", scope: "specific_action" },
+  { pattern: /肩推/, name: "坐姿哑铃肩推", scope: "specific_action" },
+  { pattern: /引体向上/, name: "自重引体向上", scope: "specific_action" },
+  { pattern: /双杠臂屈伸/, name: "自重双杠臂屈伸", scope: "specific_action" },
+  { pattern: /划船/, name: "杠铃俯身划船", scope: "specific_action" },
   { pattern: /弯举/, name: "哑铃弯举", scope: "specific_action" },
   { pattern: /深蹲/, name: "深蹲", scope: "movement_pattern" },
   { pattern: /硬拉/, name: "硬拉", scope: "movement_pattern" },
@@ -943,7 +1456,7 @@ function parseRestrictions(message: string): Restriction[] {
   for (const { pattern, name, scope } of RESTRICTION_SUBJECTS) {
     for (const m of message.matchAll(new RegExp(pattern.source, "g"))) {
       const end = m.index + m[0].length;
-      // 嵌在器械词内的动作名不是限制对象（「卧推架」不产生「杠铃卧推」限制）
+      // 嵌在器械词内的动作名不是限制对象（「卧推架」不产生「杠铃平板卧推」限制）
       if (equipment.some((s) => m.index < s.end && end > s.start)) continue;
       if (!RESTRICTION_MARKERS.test(clauseOf(message, m.index))) continue;
       out.push({ name, scope, note: message.trim() });
@@ -1405,7 +1918,7 @@ function buildProfileDraft(
     kind: "profile_update",
     status: "pending",
     revision: 1,
-    base_business_version: 0, // 落库前由 runScript 填充为当前 context_version
+    base_business_version: 0, // 占位；由 runScript 在生成处按当时读到的 context_version 填充（01 1.3）
     payload,
     diff: profileDraftDiff(state.profile, state.restrictions, payload),
   };
@@ -1516,7 +2029,7 @@ const REVIEW_REPLY = [
   "",
   "- 完成率：W1 **2/3（66.7%）**，W2 **1/1（100%）**；漏练保留，不做补课。",
   "- 组级判定：符合目标 8 组 / 未符合 1 组 / 待补全 1 组。",
-  "- PR：杠铃卧推 **80kg x8**；杠铃划船 **60kg x10**。",
+  "- PR：杠铃平板卧推 **80kg x8**；杠铃俯身划船 **60kg x10**。",
   "",
   "| 计划周 | 应训练 | 已完成 | 完成率 |",
   "| --- | --- | --- | --- |",
@@ -1526,10 +2039,40 @@ const REVIEW_REPLY = [
   "> 建议下一步：腿日恢复训练前先做接回评估；卧推维持 80kg 观察 RIR。",
 ].join("\n");
 
+/**
+ * 训练日指导意图（F2-05；04 4.5）：请求基于当前计划的训练指导。
+ * 只读分支——不生成任何草稿，计划修改仍须经对话草稿确认；与「计划调整」区分开。
+ */
+const GUIDANCE_PATTERN = /指导|练什么|训练安排/;
+
+/** 尚无正式计划时的指导口径：不凭空给处方，先经对话生成并确认计划 */
+const NO_PLAN_GUIDANCE_REPLY = [
+  "当前没有正式计划，我不会凭档案直接给出训练日指导。",
+  "请在对话里说明训练目标与可用日期，由我提出计划草稿；确认启用后，这里给出基于当周应训练日的处方与校准说明。",
+].join("\n");
+
+/** 无正式档案时的统一口径（计划类回复；建档才收集档案事实，不凭空生成计划处方） */
+const NO_PROFILE_PLAN_REPLY = [
+  "还没有正式档案，我不会凭空生成计划处方。",
+  "请在对话中补齐建档信息（目标、经验、每周频率、单次时长、可用器械、体重、动作限制与当前身体状态），确认后再生成计划。",
+].join("\n\n");
+
+/**
+ * 当日临时器械限制（02 章：不得污染长期档案；plans/stage2.md §7 第 7 步）：只说明不写入，
+ * 不生成任何草稿、不改正式档案、计划与日程。
+ */
+const TODAY_ONLY_EQUIPMENT_REPLY = [
+  "「今天只能用哑铃」是当日临时情况：**不写入长期档案**，也不修改正式计划与日程。",
+  "",
+  "按次安排（临时改变器械或当次训练内容）属于后续阶段能力；本阶段不会把当日限制沉淀成长期器械范围。",
+  "如果你说的是**以后**只能用哑铃，请照这个说法再说一次，我会给出「档案器械补丁 + 新计划 + 新日程」的组合草稿，确认后一次生效。",
+].join("\n");
+
 const GENERIC_REPLY = [
   "收到。当前处于 **mock 演示模式**，我可以：",
   "",
   "- 建档：直接给出目标、经验、每周频率、单次时长、可用器械、体重、动作限制与当前身体状态",
+  "- 请求训练指导：如「给我周三的训练指导」（按最新红旗与限制复核整份计划）",
   "- 调整计划：如「最近很累，帮我调整计划」",
   "- 生成复盘：如「给我看一下复盘」",
   "",
@@ -1567,9 +2110,23 @@ async function runScript(
   // 明确红旗症状优先扫描：任何意图分支都不得吞掉它（plans/stage1.md F1-02）
   const newRedFlags = scanRedFlags(state, run.session_id, message);
   const parsed = parseFacts(message);
-  const isCheckIn = CHECKIN_PATTERN.test(message);
+  const isGuidance = GUIDANCE_PATTERN.test(message);
+  // 「今天练什么」这类问句会同时命中打卡短语：指导意图优先，否则会把计划指导请求当成打卡
+  // （打卡类短语仍归记录分支，如「今天练了卧推 80kg 3 组」）
+  const isCheckIn = !isGuidance && CHECKIN_PATTERN.test(message);
   const isPlan = /计划|调整|哑铃/.test(message);
   const isReview = /复盘/.test(message);
+  // 器械范围短语（plans/stage2.md §7 第 7 步，02 章：当日限制不得污染长期档案）：
+  // 「以后只能用哑铃」= 长期档案补丁 + 新计划与新日程的组合草稿；「今天只能用哑铃」不写长期档案。
+  // 尚未建档时仍走建档收集（无正式档案无法生成计划处方）。
+  const equipmentScope =
+    state.profile === null
+      ? undefined
+      : /今天/.test(message) && message.includes("哑铃")
+        ? "today_only"
+        : /以后/.test(message) && message.includes("哑铃")
+          ? "long_term"
+          : undefined;
   // 未建档（对话是唯一建档入口）、本会话建档进行中、或消息含档案事实 → 走建档剧本
   const isOnboarding =
     state.profile === null ||
@@ -1578,6 +2135,10 @@ async function runScript(
 
   let text: string;
   let draft: Draft | undefined;
+  // 01 1.3/1.4：base_business_version 绑定「生成草稿时实际读到的业务版本」。提案就在下面这段
+  // 同步分支内按当前业务状态派生，所以先在生成处取版本；不得等流式输出结束后再用最新
+  // context_version 回填（否则流式期间被别的确认推进后，旧载荷会带着新版本通过 stale 检查）。
+  const base_business_version = state.context_version;
 
   if (isCheckIn) {
     if (CHECKIN_ENABLED) {
@@ -1587,6 +2148,12 @@ async function runScript(
     } else {
       text = CHECKIN_UNAVAILABLE_REPLY;
     }
+  } else if (equipmentScope === "today_only") {
+    text = TODAY_ONLY_EQUIPMENT_REPLY;
+  } else if (equipmentScope === "long_term") {
+    const r = dumbbellOnlyReply(state);
+    text = r.text;
+    draft = r.draft;
   } else if (isOnboarding) {
     const r = onboardingTurn(
       state,
@@ -1597,8 +2164,10 @@ async function runScript(
     );
     text = r.text;
     draft = r.draft;
+  } else if (isGuidance) {
+    text = planGuidanceReply(state);
   } else if (isPlan) {
-    const r = planScriptReply();
+    const r = planScriptReply(state);
     text = r.text;
     draft = r.draft;
   } else if (isReview) {
@@ -1617,6 +2186,9 @@ async function runScript(
     text = [professionalEvalBlock(newRedFlags), text].join("\n\n");
   }
 
+  // 生成时版本先落到草稿上，再开始流式输出（01 1.3：确认时的 stale 检查按这个版本比对）
+  if (draft) draft.base_business_version = base_business_version;
+
   // 流式输出：按段落切块；节奏放缓保证流式观感与 conversation_busy 演示窗口
   await sleep(600);
   if (run.cancelled) return finishCancelled(emit, run);
@@ -1632,7 +2204,6 @@ async function runScript(
   if (draft) {
     await sleep(500);
     if (run.cancelled) return finishCancelled(emit, run);
-    draft.base_business_version = state.context_version;
     state.drafts.set(draft.id, draft);
     state.draft_sessions.set(draft.id, run.session_id);
     run.draft_ids.push(draft.id);
@@ -1765,16 +2336,16 @@ async function handleDevControls(
     });
   }
 
-  /* 1) 重置种子场景：整份内存态回到初始值（默认种子 / 空种子） */
+  /* 1) 重置种子场景：整份内存态回到初始值（默认种子 / 空种子 / 计划生成种子） */
   if (path === "/api/dev/reset" && method === "POST") {
     const body = await readJsonBody<{ seed?: string }>(req);
     const seed = body.seed ?? "default";
-    if (seed !== "default" && seed !== "empty")
+    if (seed !== "default" && seed !== "empty" && seed !== "noplan")
       return apiError(res, {
         http_status: 400,
         error_code: "invalid_request",
         message: `未知种子场景：${seed}`,
-        detail: "default | empty",
+        detail: "default | empty | noplan",
       });
     const runsStopped: string[] = [];
     for (const run of state.runs.values()) {
@@ -1786,7 +2357,14 @@ async function handleDevControls(
     }
     hub.devResume();
     // 原地覆盖字段：保持 state 对象身份不变（在途剧本与中间件闭包仍指向同一对象）
-    Object.assign(state, seed === "empty" ? emptySeedState() : seedState());
+    Object.assign(
+      state,
+      seed === "empty"
+        ? emptySeedState()
+        : seed === "noplan"
+          ? noPlanSeedState()
+          : seedState(),
+    );
     return json(res, 200, {
       ok: true,
       seed,
@@ -1932,6 +2510,18 @@ async function handleDevControls(
       has_api_key: state.provider.has_api_key,
       has_profile: state.profile !== null,
       plan_version: state.plan?.version ?? null,
+      /** 历史计划版本（F2-04：替换时旧版以 archived 归档保留，PRD 5.3） */
+      plan_history: state.plan_history.map((p) => ({
+        version: p.version,
+        status: p.status,
+      })),
+      /** 具体日程全量快照（F2-04：原子切换后可核对取消／锁定与新日程） */
+      schedules: state.schedules.map((s) => ({
+        id: s.id,
+        plan_version: s.plan_version,
+        date: s.date,
+        status: s.status,
+      })),
       execution_slot_run_id: state.execution_slot_run_id,
       runs: [...state.runs.values()].map(devRunSnapshot),
       drafts: [...state.drafts.values()].map((d) => ({
@@ -1954,13 +2544,26 @@ async function handleDevControls(
     });
   }
 
+  /* 6) 注入下一次计划确认事务中途失败（F2-04；plans/stage2.md §7 第 8 步回滚验证）
+        确认事务在正式写入（档案补丁／计划／日程）之后、草稿提交与版本递增之前失败，
+        用于验证任一步失败时整份回滚；一次性，命中后自动解除 */
+  if (path === "/api/dev/confirm/fail-next" && method === "POST") {
+    await readBody(req);
+    state.dev_confirm_failure = true;
+    return json(res, 200, {
+      ok: true,
+      armed: true,
+      note: "下一次计划草稿确认将在正式写入后失败，并整份回滚（档案、计划与历史、全部日程、草稿状态、context_version）",
+      dev_note: DEV_NOTE,
+    });
+  }
+
   return apiError(res, {
     http_status: 404,
     error_code: "invalid_request",
     message: `未知 dev 控制端点 ${method} ${path}`,
   });
 }
-
 /* ------------------------------ 统计重算 ---------------------------------- */
 
 function recomputeStats(state: MockState): void {
@@ -2088,12 +2691,24 @@ function createHandler(state: MockState, hub: SseHub) {
 
       /* 档案（PRD §5.2；02 2.1/2.2）：profile = null = 尚未建档；plan 缺省 = 未生成/未启用 */
       if (path === "/api/profile" && method === "GET") {
+        /* F2-05：安全复核在请求时按最新红旗与限制重算，不缓存结果——限制/红旗一经确认即在此反映 */
+        const safety = state.plan
+          ? reviewPlanSafety({
+              plan: state.plan,
+              profile: state.profile,
+              restrictions: state.restrictions,
+              context_version: state.context_version,
+            })
+          : undefined;
         return json(res, 200, {
           profile: state.profile,
           restrictions: state.restrictions,
           context_version: state.context_version,
           /* STAGED-SHARED-EDIT（lane 3b，supervisor 批准）：/profile 当前计划卡数据源 */
           ...(state.plan ? { plan: state.plan } : {}),
+          /* 具体日程含历史版本条目（旧版已取消、已到期锁定）：计划卡展示取消/锁定并保留历史 */
+          ...(state.plan ? { schedules: state.schedules } : {}),
+          ...(safety ? { plan_safety: safety } : {}),
         });
       }
 
@@ -2302,9 +2917,31 @@ function createHandler(state: MockState, hub: SseHub) {
             body.payload as Extract<Draft["payload"], { date: string }>,
           );
         } else if (draft.kind === "plan_adjust") {
-          const p = body.payload as PlanDraftPayload;
-          draft.payload = p;
-          draft.diff = p.diff;
+          // 计划草稿：以服务端存储的草稿为基准，只取客户端提交的允许纠错字段；身份／时长／
+          // 日程／Diff／版本／状态／取消清单一律由服务端重建或保留（F2-03：结构化内容与 Diff 同步）
+          // 复合草稿（带长期档案补丁）的纠错同样按「补丁 + 当前正式档案」复检，与确认事务同一上下文
+          const storedPatch = (draft.payload as PlanDraftPayload).profile_patch;
+          const normalized = normalizePlanPayload(
+            draft.payload as PlanDraftPayload,
+            body.payload as PlanDraftPayload,
+            {
+              profile: storedPatch
+                ? profileWithPatch(state.profile, storedPatch)
+                : state.profile,
+              restrictions: storedPatch
+                ? (storedPatch.restrictions ?? [])
+                : state.restrictions,
+              today: MOCK_TODAY,
+            },
+          );
+          if (!normalized.ok)
+            return apiError(res, {
+              http_status: 400,
+              error_code: "invalid_request",
+              message: `计划载荷无效，纠错未生效：${normalized.error}`,
+            });
+          draft.payload = normalized.payload;
+          draft.diff = normalized.payload.diff;
         } else {
           // 档案草稿：确定性校验结构（六类事实 + 必填体重、限制粒度）后整份替换，
           // Diff 由服务端对比当前正式档案重新派生（不信任客户端提交值）
@@ -2389,7 +3026,15 @@ function createHandler(state: MockState, hub: SseHub) {
         //    内联纠错不经确认提交——纠错走 revise 业务接口（01 1.2，不建第二编辑入口）
         //    profile_update 的复查 = profilePayloadError（确定性字段校验）
 
-        // 原子提交（mock：顺序内存写入）
+        // 原子提交（mock：顺序内存写入）；计划草稿的写入在 commitPlanDraft 事务内完成
+        let planCommit:
+          | {
+              version: string;
+              created: number;
+              cancelled: number;
+              summary: string;
+            }
+          | undefined;
         if (draft.kind === "training_record") {
           const p = draft.payload as Extract<
             Draft["payload"],
@@ -2407,24 +3052,74 @@ function createHandler(state: MockState, hub: SseHub) {
             schedule_snapshot: null,
           });
         } else if (draft.kind === "plan_adjust") {
-          if (!state.plan)
-            return apiError(res, {
-              http_status: 409,
-              error_code: "invalid_request",
-              message: "当前没有正式计划，无法应用计划调整草稿",
-            });
           const p = draft.payload as PlanDraftPayload;
-          for (const d of p.diff) {
-            const sets = Number(d.new_value.match(/(\d+)/)?.[1]);
-            const ex = state.plan.blocks
-              .flatMap((b) => b.exercises)
-              .find((e) => d.field.startsWith(e.name));
-            if (ex && d.field.includes("组数") && Number.isFinite(sets))
-              ex.sets = sets;
+          if (!p.plan || !p.scope || !p.schedules)
+            return apiError(res, {
+              http_status: 400,
+              error_code: "invalid_request",
+              message:
+                "计划草稿缺少结构化载荷（计划版本／生效范围／具体日程），无法确认",
+            });
+          // 长期档案补丁：与计划同属一次确认（01 1.4 受限组合草稿）；补丁形状先用档案载荷口径把关
+          const patch = p.profile_patch;
+          if (patch) {
+            const patchError = profilePayloadError(patch);
+            if (patchError)
+              return apiError(res, {
+                http_status: 400,
+                error_code: "invalid_request",
+                message: `档案补丁无效，无法确认：${patchError}`,
+              });
           }
-          // 计划调整生成新版本（PRD 5.3：不静默覆盖、版本化启用）。
-          // mock 简化：旧版本不归档展示（当前无版本历史 UI 消费方，不建版本列表）。
-          state.plan.version = `v${Number(state.plan.version.slice(1)) + 1}`;
+          const nextProfile = patch
+            ? profileWithPatch(state.profile, patch)
+            : state.profile;
+          const nextRestrictions = patch
+            ? (patch.restrictions ?? []).map((r) => ({ ...r }))
+            : state.restrictions;
+          // 领域复查（01 1.4）：以草稿载荷与长期档案补丁合并后的正式上下文复检整份计划
+          const invalid = planPayloadError(p, {
+            profile: nextProfile,
+            restrictions: nextRestrictions,
+            today: MOCK_TODAY,
+          });
+          if (invalid)
+            return apiError(res, {
+              http_status: 400,
+              error_code: "invalid_request",
+              message: `计划草稿内容无效，无法确认：${invalid}`,
+            });
+          if (!nextProfile)
+            return apiError(res, {
+              http_status: 400,
+              error_code: "invalid_request",
+              message: "尚未建立正式档案，无法启用计划",
+            });
+          // 版本只追加不原地改（PRD 5.3）：无正式计划时新建 v1，替换时为当前版本的下一版
+          const expected = state.plan
+            ? nextPlanVersion(state.plan.version)
+            : "v1";
+          if (p.plan.version !== expected)
+            return apiError(res, {
+              http_status: 400,
+              error_code: "invalid_request",
+              message: `计划版本须为 ${expected}（版本只追加、不原地改），收到 ${p.plan.version}`,
+            });
+          const committed = commitPlanDraft(state, draft, p, {
+            profile: nextProfile,
+            restrictions: nextRestrictions,
+          });
+          planCommit = {
+            ...committed,
+            summary: [
+              `计划 ${committed.version} 已启用`,
+              state.plan_history.length > 0
+                ? `（${state.plan_history[state.plan_history.length - 1]?.version} 归档保留）`
+                : "（新建）",
+              `：新建日程 ${committed.created} 个，取消旧版未来未锁定日程 ${committed.cancelled} 个`,
+              patch ? "，长期档案补丁同次写入" : "",
+            ].join(""),
+          };
         } else {
           // 档案草稿：提交前对服务端存储的载荷做确定性复查（六类事实 + 必填体重、
           // 限制粒度）；不通过则不写任何正式数据、不递增版本
@@ -2461,8 +3156,12 @@ function createHandler(state: MockState, hub: SseHub) {
           };
           state.restrictions = nextRestrictions.map((r) => ({ ...r }));
         }
-        draft.status = "committed";
-        state.context_version += 1;
+        // 计划草稿的正式写入、草稿提交与 context_version 递增已在 commitPlanDraft 事务内
+        // 完成（失败即整份回滚）；其余草稿按 01 1.4 在同一提交内顺序写入
+        if (!planCommit) {
+          draft.status = "committed";
+          state.context_version += 1;
+        }
         recomputeStats(state);
 
         const result: ConfirmResult = {
@@ -2471,11 +3170,10 @@ function createHandler(state: MockState, hub: SseHub) {
           newly_committed: true,
           context_version: state.context_version,
           summary:
-            draft.kind === "training_record"
+            planCommit?.summary ??
+            (draft.kind === "training_record"
               ? "训练记录已写入正式数据"
-              : draft.kind === "plan_adjust"
-                ? "计划新版本已启用"
-                : "档案与动作限制已写入正式数据",
+              : "档案与动作限制已写入正式数据"),
         };
         // 持久化首次确认凭据（owner 决策 B；01 1.3 提交凭据）：重复确认返回原始 context_version 与 summary，
         // 不再写入正式数据或递增版本
@@ -2541,46 +3239,22 @@ function createHandler(state: MockState, hub: SseHub) {
             diff: recordDraftDiff(p),
           };
         } else if (old.kind === "plan_adjust") {
-          if (!state.plan)
+          // 计划草稿：以最新业务上下文重新派生同一类提案（01 1.6）——器械范围调整草稿按
+          // 补丁重算，其余按当前计划生成结构化替换提案；不把已过期的旧提案当最新上下文的产物
+          const oldPayload = old.payload as PlanDraftPayload;
+          const proposal = oldPayload.profile_patch
+            ? dumbbellPayload(state)
+            : adjustPlanProposal(state)?.payload;
+          if (!proposal)
             return apiError(res, {
               http_status: 409,
               error_code: "invalid_request",
-              message: "当前没有正式计划，无法重算计划调整草稿",
-            });
-          // 计划草稿：从当前计划状态派生最小提案——旧值取当前计划实际值，
-          // 取第一个可减量动作（sets >= 2）提议组数 -1；确认事务按同字段规则应用
-          const ex = state.plan.blocks
-            .flatMap((b) => b.exercises)
-            .find((e) => e.sets >= 2);
-          const rows: FieldDiff[] = ex
-            ? [
-                {
-                  field: `${ex.name} · 组数`,
-                  old_value: String(ex.sets),
-                  new_value: String(ex.sets - 1),
-                },
-              ]
-            : [];
-          // F0-02B1：最新计划已派生不出可调整动作时，重算明确失败（409 invalid_request），
-          // 不创建草稿、不把父草稿置 stale、不推进任何版本
-          if (!rows.length)
-            return apiError(res, {
-              http_status: 409,
-              error_code: "invalid_request",
-              message: "当前计划没有组数 ≥ 2 的动作，重算无法生成新提案",
+              message: "当前档案与限制下无法重算计划草稿（未通过安全前置校验）",
             });
           fresh = {
-            id: nextId("draft"),
-            kind: "plan_adjust",
-            status: "pending",
-            revision: 1,
+            ...pendingPlanDraft(proposal),
             base_business_version: state.context_version,
             parent_draft_id: old.id,
-            payload: {
-              title: `计划调整重算（基于当前计划 ${state.plan.version}）`,
-              diff: rows,
-            },
-            diff: rows,
           };
         } else {
           // 档案草稿：按会话最新收集事实重建提案（01 1.6「以最新业务上下文生成新草稿」）；

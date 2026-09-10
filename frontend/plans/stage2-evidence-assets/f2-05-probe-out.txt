@@ -1,0 +1,30 @@
+PASS 空态：已建档但无 plan / schedules / plan_safety — context_version=1
+PASS 生成计划草稿（plan_adjust）
+PASS 确认前正式计划与日程不变（/profile 仍无计划） — plan=undefined v=1
+PASS 确认成功并递增 context_version — {"draft_id":"draft-103","status":"committed","newly_committed":true,"context_version":2,"summary":"计划 v1 已启用（新建）：新建日程 12 个，取消旧版未来未锁定日程 0 个"}
+PASS 启用后 /profile 给出计划版本／状态／日期 — {"v":"v1","s":"active","d":["2026-09-14","2026-10-12"]}
+PASS 处方含身份／组次／RIR／校准（无起始重量）
+PASS 具体日程 12 条应为训练日且全部 scheduled — 12 条
+PASS 可用态安全复核：usable 且无冲突、无红旗
+PASS 刷新一致：再次查询计划／日程完全相同
+PASS 重复确认幂等：不重复建版本／日程，版本号不递增
+PASS 可用态指导给出下个应训练日处方且不生成草稿
+PASS 经建档链路确认新增具体动作限制
+PASS 新增限制后整份不可用且指出冲突动作 — [{"exercise_id":"barbell-bench-press","exercise_name":"杠铃平板卧推","restriction":{"name":"杠铃平板卧推","scope":"specific_action","note":"补充档案：目标增肌，初级经验，每周 3 次，每次 60 分钟，可用器材：杠铃、哑铃、卧推架、引体架、绳索，体重 72.5kg；最近卧推不适，没有其他不适。"}}]
+PASS 阻断时正式计划、日程与历史仍返回（不隐藏、不伪造「部分可用」）
+PASS 任一训练日说法都整份阻断且不输出任何处方
+PASS 阻断文案引导从对话发起修订草稿
+PASS 动作模式限制命中多个动作时整份不可用并逐条列出冲突 — 杠铃背蹲、保加利亚分腿蹲
+PASS 模式冲突下指导同样整份阻断、不输出未冲突动作处方
+PASS 红旗写入档案且复核为独立阻断（无限制冲突） — ["胸部异常不适"]
+PASS 红旗指导：仅建议线下专业评估、无处方、无草稿
+PASS 红旗请求计划：不给计划草稿，正式计划保持不变
+PASS 红旗种子（无计划）：请求计划与指导均不给草稿、不给处方
+PASS 替换确认后 /profile 给出 v2 与新版日程 — v2 / v2 12 条
+PASS 旧版未来未锁定日程取消仍在投影中可见（历史不隐藏） — 2026-09-14:cancelled,2026-09-16:cancelled,2026-09-18:cancelled,2026-09-21:cancelled,2026-09-23:cancelled,2026-09-25:cancelled,2026-09-28:cancelled,2026-09-30:cancelled,2026-10-02:cancelled,2026-10-05:cancelled,2026-10-07:cancelled,2026-10-09:cancelled
+PASS 替换后安全复核按新计划重算（可给出基于 v2 的指导）
+PASS 替换态刷新一致
+PASS 把受限动作改入草稿被服务端拒绝（限制动作 / 器械不符 / 同日重复同一口径） — {"http_status":400,"error_code":"invalid_request","message":"计划载荷无效，纠错未生效：推日：动作命中限制「杠铃平板卧推」（specific_action）：杠铃平板卧推"}
+PASS 被拒纠错不改正式数据（计划／日程／版本不变）
+
+全部通过

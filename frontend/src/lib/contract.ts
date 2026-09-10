@@ -104,23 +104,101 @@ export interface Restriction {
  note?: string;
 }
 
-/** 计划中的一个板块：推 / 拉 / 腿 */
-export interface PlanBlock {
- name: string;
- /** 每周第几天（1-7），用于展示每周安排 */
- weekday: number;
- exercises: PlanExercise[];
+/* ------------------------------ 动作目录（参考） ----------------------------- */
+
+/** 记录口径恰三类（03 章已拍；不新增辅助负重型、不建第四类） */
+export type ExerciseRecordType = "reps_weight" | "reps_bodyweight" | "time";
+
+/** 负重口径（stage1 S1-03 已拍五种；自重／计时型为 null，不虚构口径） */
+export type LoadConvention =
+ | "barbell_includes_bar_total"
+ | "dumbbell_per_hand"
+ | "machine_pin_displayed_value"
+ | "plate_loaded_total_excluding_empty"
+ | "unilateral_setting_per_side";
+
+/**
+ * 目录动作（03 3.1–3.2）：镜像后端 `exercises` 表中做计划候选判定所需的字段，
+ * 不另造第二份动作身份；媒体、attribution 等展示字段不入镜像。
+ * 后端 `recommendable` 列不在镜像内：stage1 全为 0 且本阶段不修改后端值，
+ * 候选资格由 mock 按已拍最小标准（来源已核对 + active + 器械／记录／负重口径／模式完整）判定。
+ */
+export interface CatalogExercise {
+ /** 稳定动作身份（03 3.1：停用后仍可按 ID 读） */
+ id: string;
+ /** 中文标准名（一个身份一个标准名） */
+ standard_name_zh: string;
+ /** 器械变式，如 barbell / dumbbell / bodyweight / cable / leverage_machine */
+ equipment_variant: string;
+ record_type: ExerciseRecordType;
+ /** 仅记录口径 reps_weight 需要；其余为 null */
+ load_convention: LoadConvention | null;
+ /** 单侧动作：左右分别计数 */
+ unilateral: boolean;
+ /** 停用不删除：false = 已停用，不得成为候选 */
+ active: boolean;
+ /** 动作模式（13 项已拍词表的子集，多归属仅跨界高复合型动作） */
+ modes: string[];
+ /** 来源与许可：核不上的条目不导入；空 = 未经来源核对 */
+ source_ref: string;
 }
 
+/* ---------------------------------- 计划 ---------------------------------- */
+
+/**
+ * 校准（3.2 已拍 2026-09-10）：无可信训练记录时不给具体起始重量，也不按体重、
+ * 估算 1RM 或默认杠重猜测，只展示逐级试重步骤与通过／停止标准。
+ * 基于可信历史的负荷与渐进建议留待记录数据接入后的阶段（plans/stage2.md §3.2）。
+ */
+export interface Calibration {
+ status: "needs_calibration" | "calibrated";
+ /** 逐级试重步骤（从轻到重，不含具体起始重量） */
+ steps: string[];
+ /** 通过标准：稳定完成处方次数下限，且落在目标 RIR 区间 */
+ pass_criteria: string;
+ /** 停止条件：疼痛／红旗症状、动作明显失稳、无法满足目标 RIR（停止后不继续加重） */
+ stop_criteria: string;
+}
+
+/**
+ * 计划动作（3.4）：目录身份 + 处方 + 校准状态。
+ * `name`／`variant` 为展示用文案，身份以 `exercise_id` 为准（不按名称猜测身份）。
+ */
 export interface PlanExercise {
+ /** 目录动作身份（CatalogExercise.id） */
+ exercise_id: string;
+ /** 展示名（取自目录 standard_name_zh） */
  name: string;
- /** 器械变式，如 杠铃/哑铃/自重 */
+ /** 器械变式展示文案，如 杠铃/哑铃/自重 */
  variant: string;
+ /** 所需器械（取自目录 equipment_variant；候选筛选按此与档案器械比对） */
+ equipment: string;
+ /** 动作模式（取自目录 modes；限制判定按模式集合交集） */
+ modes: string[];
  sets: number;
  rep_range: string;
  /** 目标 RIR，显式区间含端点（如 "1-3"） */
  target_rir: string;
  progression: string;
+ calibration: Calibration;
+}
+
+/** 计划中的一个板块：推 / 拉 / 腿 */
+export interface PlanBlock {
+ name: string;
+ /** 每周第几天（1-7），用于展示每周安排 */
+ weekday: number;
+ /** 该训练日预计时长（分钟）；须不超过档案单次可用时长 */
+ estimated_minutes: number;
+ exercises: PlanExercise[];
+}
+
+/** 计划生效范围（3.4）：应生效区间与每周训练日；不是覆盖任意频率的通用排程算法 */
+export interface PlanScope {
+ start_date: string;
+ review_date: string;
+ /** 每周训练日（1-7，周一起） */
+ weekdays: number[];
 }
 
 export interface PlanVersion {
@@ -129,6 +207,45 @@ export interface PlanVersion {
  review_date: string;
  status: "active" | "archived";
  blocks: PlanBlock[];
+}
+
+/**
+ * 具体日程（04 4.4）：`[开始日期, 复核日期)` 内逐个应训练日；日历休息日不写成应训练日。
+ * 到期即锁（locked）；替换计划只取消旧版未来未锁定日程（cancelled），已锁定日程不动。
+ */
+export interface PlanScheduleEntry {
+ id: string;
+ /** 归属计划版本 */
+ plan_version: string;
+ /** 每周第几天（1-7，周一起） */
+ weekday: number;
+ date: string;
+ status: "scheduled" | "locked" | "cancelled";
+}
+
+/**
+ * 计划安全复核投影（04 4.5；02 2.2/2.3）：请求基于当前计划的指导时按最新限制与红旗
+ * 复核整份计划。任一动作或模式冲突即整份阻断（不输出其余「未冲突」动作的处方），
+ * 红旗独立阻断；不新增「部分可用」计划状态。
+ */
+export interface PlanSafetyReview {
+ /** 复核所依据的业务版本（限制／红旗变更后须重新复核） */
+ context_version: number;
+ reviewed_at: string;
+ /** true = 可给出基于该计划的处方；false = 整份阻断 */
+ usable: boolean;
+ /** 红旗症状独立阻断（02 2.3：建议线下专业评估） */
+ red_flag_blocked: boolean;
+ /** 命中的限制冲突（空 = 无冲突） */
+ conflicts: PlanSafetyConflict[];
+}
+
+export interface PlanSafetyConflict {
+ /** 计划中被命中的动作身份（CatalogExercise.id） */
+ exercise_id: string;
+ exercise_name: string;
+ /** 命中的限制：具体动作或动作模式（02 2.2） */
+ restriction: Restriction;
 }
 
 /** 一次训练中的一组 */
@@ -257,10 +374,40 @@ export interface RecordDraftPayload {
  sets: RecordSet[];
 }
 
-/** 计划调整草稿载荷 */
+/**
+ * 计划草稿的可替换动作候选（stage2 F2-03）：服务端按当前正式档案器械与有效限制过滤后的
+ * 目录动作，供草稿卡轻量纠错选择；不是完整目录浏览器，也不扩目录。
+ */
+export interface PlanCandidate {
+ /** 目录动作身份（CatalogExercise.id） */
+ exercise_id: string;
+ /** 展示名（取自目录 standard_name_zh） */
+ name: string;
+ /** 器械变式展示文案，如 杠铃/哑铃/自重 */
+ variant: string;
+}
+
+/**
+ * 计划调整草稿载荷（stage2 F2-01：从「标题 + 文本 Diff」升级为结构化载荷）。
+ * 拟议计划版本、生效范围、具体日程与旧日程取消清单是结构化字段，不再塞进文本 Diff；
+ * `diff` 仍是服务端派生的字段级展示 Diff（A4）。
+ * 结构字段由计划生成（F2-02）填写：缺省 = 该草稿尚未带结构化载荷，不伪造空日程。
+ */
 export interface PlanDraftPayload {
  title: string;
  diff: FieldDiff[];
+ /** 拟议完整计划版本（确认前正式计划与日程不变） */
+ plan?: PlanVersion;
+ /** 生效范围（开始／复核日期与每周训练日） */
+ scope?: PlanScope;
+ /** 拟议具体日程（`[开始日期, 复核日期)` 内应训练日） */
+ schedules?: PlanScheduleEntry[];
+ /** 替换计划时旧版未来未锁定日程的取消清单（已锁定日程不动） */
+ cancellations?: PlanScheduleEntry[];
+ /** 可替换动作候选（F2-03；服务端按当前档案与限制给出，纠错时刷新） */
+ candidates?: PlanCandidate[];
+ /** 可选长期档案补丁（如「以后只能用哑铃」）：与计划、日程一次确认、一次版本递增 */
+ profile_patch?: ProfileDraftPayload;
 }
 
 /**
@@ -389,8 +536,10 @@ export interface DiscardResult {
  * - GET    /api/provider                -> ProviderConfig
  * - PUT    /api/provider/api-key        body {api_key} -> {has_api_key: true}
  * - DELETE /api/provider/api-key        -> {has_api_key: false}
- * - GET    /api/profile                 -> {profile: Profile | null, restrictions: Restriction[], context_version: number}
- *          profile = null 表示尚未建档（不返回占位档案，避免把未知写成默认值）
+ * - GET    /api/profile                 -> {profile: Profile | null, restrictions: Restriction[], context_version: number,
+ *                                            plan?: PlanVersion, schedules?: PlanScheduleEntry[], plan_safety?: PlanSafetyReview}
+ *          profile = null 表示尚未建档（不返回占位档案，避免把未知写成默认值）；
+ *          计划、日程与安全复核只读投影（计划变更仍只能从对话发起）
  * - GET    /api/records                 -> {records: TrainingRecord[]}
  * - GET    /api/stats                   -> StatsSummary
  * - GET    /api/review                  -> ReviewDoc
@@ -430,6 +579,10 @@ export interface ProfileResponse {
  context_version: number;
  /** STAGED-SHARED-EDIT（lane 3b，supervisor 批准）：契约遗漏；/profile 当前计划卡所需 */
  plan?: PlanVersion;
+ /** 具体日程（stage2 F2-01/F2-05；plan 缺省时同样缺省）：含历史版本条目（旧版取消、已到期锁定），状态语义见 PlanScheduleEntry */
+ schedules?: PlanScheduleEntry[];
+ /** 当前计划的安全复核投影（stage2 F2-01/F2-05）：按最新红旗与限制复核，与计划状态分开表达，不新增「部分可用」状态 */
+ plan_safety?: PlanSafetyReview;
 }
 
 /* --------------------------------- SSE 事件 -------------------------------- */

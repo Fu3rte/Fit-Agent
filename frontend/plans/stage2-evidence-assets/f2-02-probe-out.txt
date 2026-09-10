@@ -1,0 +1,32 @@
+PASS 可从已建档／无红旗／无计划档案生成计划草稿
+PASS 候选与已拍 3.3 一致（09-14 起 / 一三五 / 10-12 复核） — {"start_date":"2026-09-14","review_date":"2026-10-12","weekdays":[1,3,5]}
+PASS 恰好 12 个应训练日，09-14 至 10-09 — 12 条：2026-09-14 ~ 2026-10-09
+PASS 日程只落在周一／周三／周五且全部早于复核日 — 2026-09-14,2026-09-16,2026-09-18,2026-09-21,2026-09-23,2026-09-25,2026-09-28,2026-09-30,2026-10-02,2026-10-05,2026-10-07,2026-10-09
+PASS 休息日与复核日当天不生成名额
+PASS 计划版本与生效范围一致（[开始日期, 复核日期)）
+PASS 每周 3 个训练日且板块训练日都在生效范围内 — 推日/1 拉日/3 腿日/5
+PASS 每次预计时长不超过档案单次可用时长 — 推日 47min；拉日 47min；腿日 47min
+PASS 计划动作全部在已拍 24 项目录内且可推荐 — barbell-bench-press,seated-dumbbell-shoulder-press,parallel-bar-dip,cable-pushdown,pull-up,barbell-bent-over-row,dumbbell-biceps-curl,hanging-leg-raise,barbell-back-squat,barbell-romanian-deadlift,bulgarian-split-squat,hanging-leg-raise
+PASS 档案器械过滤生效：只有哑铃时只保留哑铃动作 — seated-dumbbell-shoulder-press,dumbbell-biceps-curl,bulgarian-split-squat
+PASS 无绳索器械时绳索动作不进入草稿 — barbell-bench-press,seated-dumbbell-shoulder-press,parallel-bar-dip,pull-up,barbell-bent-over-row,dumbbell-biceps-curl,hanging-leg-raise,barbell-back-squat,barbell-romanian-deadlift,bulgarian-split-squat,hanging-leg-raise
+PASS 具体动作限制命中者不进入草稿且草稿仍通过校验 — seated-dumbbell-shoulder-press,parallel-bar-dip,cable-pushdown,pull-up,barbell-bent-over-row,dumbbell-biceps-curl,hanging-leg-raise,barbell-back-squat,barbell-romanian-deadlift,bulgarian-split-squat,hanging-leg-raise
+PASS 动作模式限制命中者不进入草稿（含跨身份模式交集） — barbell-bench-press,seated-dumbbell-shoulder-press,parallel-bar-dip,cable-pushdown,pull-up,barbell-bent-over-row,dumbbell-biceps-curl,hanging-leg-raise,barbell-romanian-deadlift,hanging-leg-raise
+PASS 某训练日动作被限制清空时整体不给处方（fail-closed） — 推日的动作全部被器械或限制过滤，没有可用动作
+PASS 跨训练日复用同一动作身份不判冲突（悬垂举腿在拉日与腿日各一次） — hanging-leg-raise,hanging-leg-raise
+PASS 同一训练日重复同一动作身份被校验拒绝 — 推日在同一训练日重复同一动作身份：barbell-bench-press
+PASS 同一训练日跨板块重复同一动作身份被校验拒绝 — 拉日在同一训练日重复同一动作身份：pull-up
+PASS 计划不含任何起始重量或猜测负荷
+PASS 缺档案不生成处方 — 尚未建立正式档案，不生成计划处方
+PASS 档案含红旗症状不生成处方且带回红旗原文 — 档案存在红旗症状：胸部异常不适
+PASS 红旗档案的计划载荷也被校验拒绝（requesting 指导时的整份复核口径）
+PASS 每周频率不足以排进 3 个训练日时不猜排程 — 档案每周频率 2 次，排不进候选的 3 个训练日
+PASS 限制动作改入草稿被拒绝
+PASS 器械不符动作被拒绝 — 推日：动作所需器械不在档案器械内：杠铃平板卧推
+PASS 目录外动作身份被拒绝
+PASS 越界日程（复核日及以后）被拒绝
+PASS 休息日日程被拒绝
+PASS 超过档案单次可用时长被拒绝
+PASS 控制端点注册 noplan 种子（已配置／已建档／无红旗／无计划） — 种子由空种子派生（plan: null、records: []）并写入无红旗档案
+PASS 无正式计划时对话走计划生成分支
+
+全部通过
