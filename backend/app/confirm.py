@@ -33,14 +33,6 @@ stage2.md §4.2（逐步顺序）、§5 S2-05、§8 已拍「无业务变化首�
 from dataclasses import dataclass
 
 import aiosqlite
-
-from app.draft_repo import Draft, DraftRepo, InvalidDraftRow
-from app.drafts import (
-    DraftRevisionConflict,
-    ProfileFieldDiff,
-    UnknownDraft,
-    profile_diff,
-)
 from domain.actions.repo import ExerciseRepo
 from domain.profile.repo import ProfileRepo
 from domain.profile.rules import (
@@ -51,6 +43,14 @@ from domain.profile.rules import (
 from domain.profile.schema import Profile, profile_from_json
 from domain.profile.service import ProfileService
 from storage.db import Database
+
+from app.draft_repo import Draft, DraftRepo, InvalidDraftRow
+from app.drafts import (
+    DraftRevisionConflict,
+    ProfileFieldDiff,
+    UnknownDraft,
+    profile_diff,
+)
 
 
 class DraftDiscarded(ValueError):

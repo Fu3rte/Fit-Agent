@@ -17,6 +17,7 @@ import { Badge } from "@/components/ui/badge";
 import { buttonVariants } from "@/components/ui/button";
 import { getProfile } from "@/lib/api";
 import { cn } from "@/lib/utils";
+import type { ReactNode } from "react";
 import type {
   Calibration,
   PlanBlock,
@@ -50,14 +51,11 @@ function LoadError({ text }: { text: string }) {
 
 interface ProfileRow {
   label: string;
-  value: string;
-  /** 红旗事实用警示色强调；其余字段为普通正文 */
-  alert?: boolean;
+  value: ReactNode;
 }
 
-/** 档案卡：六类事实（目标/经验/频率/时长/器械/体重/当前身体状态，PRD 5.2，只读） */
+/** 档案卡：八项事实（目标/经验/频率/时长/器械/体重/身体情况，PRD 5.2，只读） */
 function ProfileCard({ profile }: { profile: Profile }) {
-  const ps = profile.physical_state;
   const rows: ProfileRow[] = [
     { label: "训练目标", value: profile.goal },
     { label: "训练经验", value: profile.experience },
@@ -69,13 +67,19 @@ function ProfileCard({ profile }: { profile: Profile }) {
     },
     { label: "体重", value: `${profile.body_weight_kg} kg` },
     {
-      label: "当前身体状态 · 红旗症状",
-      value: ps.red_flags.length > 0 ? ps.red_flags.join("、") : "无明确红旗",
-      alert: ps.red_flags.length > 0,
-    },
-    {
-      label: "当前身体状态 · 其他",
-      value: ps.notes.length > 0 ? ps.notes.join("、") : "无",
+      label: "身体情况",
+      // 逐条显示用户报告原文；空数组 = 用户确认无。阻断状态只看安全复核投影
+      // （PlanSafetyNotice / red_flag_blocked），不按本列表是否非空推断。
+      value:
+        profile.body_conditions.length > 0 ? (
+          <span className="flex flex-col items-end gap-0.5">
+            {profile.body_conditions.map((c) => (
+              <span key={c}>{c}</span>
+            ))}
+          </span>
+        ) : (
+          "无（用户确认）"
+        ),
     },
   ];
   return (
@@ -91,14 +95,7 @@ function ProfileCard({ profile }: { profile: Profile }) {
             className="flex items-baseline justify-between gap-4"
           >
             <span className="shrink-0 text-muted-foreground">{row.label}</span>
-            <span
-              className={cn(
-                "text-right font-medium",
-                row.alert && "text-destructive",
-              )}
-            >
-              {row.value}
-            </span>
+            <span className="text-right font-medium">{row.value}</span>
           </div>
         ))}
       </CardContent>
@@ -200,7 +197,7 @@ function PlanSafetyNotice({ safety }: { safety: PlanSafetyReview }) {
       <p className="flex items-start gap-1.5 rounded-lg border bg-muted/40 p-3 text-sm text-muted-foreground">
         <ShieldCheck className="mt-0.5 size-4 shrink-0" aria-hidden />
         <span>
-          已按最新红旗与限制复核整份计划（业务版本 {safety.context_version}
+          已按最新身体情况与限制复核整份计划（业务版本 {safety.context_version}
           ）：可给出基于该计划的训练指导。
         </span>
       </p>
@@ -213,7 +210,7 @@ function PlanSafetyNotice({ safety }: { safety: PlanSafetyReview }) {
       </p>
       {safety.red_flag_blocked && (
         <p className="mt-1.5">
-          档案含红旗症状：不给任何基于该计划的处方，请先完成线下专业评估。
+          档案身体情况命中需线下评估的安全性症状：不给任何基于该计划的处方，请先完成线下专业评估。
         </p>
       )}
       {safety.conflicts.length > 0 && (

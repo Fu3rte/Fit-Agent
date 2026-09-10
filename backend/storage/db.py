@@ -38,10 +38,10 @@ T = TypeVar("T")
 def require_outer_transaction(conn: aiosqlite.Connection, what: str) -> None:
     """断言 ``conn`` 来自 :meth:`Database.transaction`：本层不自行 BEGIN/COMMIT。
 
-    只接受外层事务连接的 repo 方法（档案读写、动作引用读取、草稿提交凭据写入）用本函数
-    守住调用契约：不在事务内即编程错误，既避免在持锁区间内再取锁（锁不可重入会死锁），
-    也避免把「部分写入 + 由调用方补提交」这种半事务形态留给后续阶段（stage2.md §2）。
-    错误消息带 ``what`` 前缀，便于定位是哪一步被误用。
+    只接受外层事务连接的 repo 方法（档案读写、动作引用读取、草稿提交凭据写入）用它
+    守住契约：不在事务内即编程错误，既避免在持锁区间内再取锁（锁不可重入，会死锁），
+    也避免留下「部分写入 + 由调用方补提交」的半事务形态（stage2.md §2）。``what``
+    只用于错误消息定位。
     """
     if not conn.in_transaction:
         raise RuntimeError(
@@ -52,13 +52,12 @@ def require_outer_transaction(conn: aiosqlite.Connection, what: str) -> None:
 async def _await_settled(
     statement: Coroutine[Any, Any, object],
 ) -> tuple[bool, BaseException | None]:
-    """等待一段串行化操作（语句 / 取锁+语句）真正 settle，其间到达的取消只记账。
+    """等待一段串行化操作（语句 / 取锁 + 语句）settle，其间到达的取消只记账。
 
-    aiosqlite 语句一旦排入后台线程队列就必然执行，取消调用方并不能撤销它；
-    所以 BEGIN/ROLLBACK 必须等其 settle 后才能判断事务状态，压制窗口的栅栏同理
-    必须等它跑完（含等锁阶段）才能恢复 logger。等待被独立 Task 承接，因此调用方
-    被取消（含反复取消）不会打断栅栏；返回 ``(等待期间是否被取消, 该操作自身异常)``，
-    由调用方决定何时恢复取消传播。
+    aiosqlite 语句一旦排入后台线程队列就必然执行，取消调用方并不能撤销它；所以
+    BEGIN/ROLLBACK 与压制栅栏都必须等其 settle（含等锁阶段）后才能继续。等待由独立
+    Task 承接，调用方被取消（含反复取消）不会打断它。返回 ``(等待期间是否被取消,
+    该操作自身异常)``，由调用方决定何时恢复取消传播。
     """
     task = asyncio.ensure_future(statement)
     cancelled = False
@@ -92,10 +91,8 @@ def _restore_logger_state(name: str, state: tuple[int, bool]) -> None:
     logger.disabled = state[1]
 
 
-# 压制状态按 logger 名引用计数：窗口可以重叠（单锁只串行化语句，不串行化压制窗口），
-# 只有最后一个窗口退出才恢复原状态，避免先退出的窗口把还在飞的凭据写入解了压制。
-# 计数与级别变更只发生在事件循环线程上（本进程单一 uvicorn worker，见 11 章），
-# aiosqlite 工作线程只读不写，因此无需加锁。
+# 压制状态按 logger 名引用计数（语义见 parameter_echo_suppressed）；计数与级别变更
+# 只发生在事件循环线程上（单一 uvicorn worker，见 11 章），因此无需加锁。
 _ECHO_SUPPRESSION_COUNT: dict[str, int] = {}
 _ECHO_SAVED_STATE: dict[str, tuple[int, bool]] = {}
 
@@ -158,16 +155,11 @@ class Database:
         self._conn = conn
 
     async def close(self) -> None:
-        """关闭连接；关闭后不遗留本应用持有的连接（可再次 open，用于重开检查）。
+        """关闭连接；不遗留本应用持有的连接，之后可再次 open（重开/停服检查）。
 
-        取消安全：即使调用方在 close 等待期间被取消（含反复取消），也要等底层
-        close settle 后才恢复取消传播（S0-02）。等待沿用 :func:`_await_settled`：
-        取消只记账、循环重等，因此等待期间被再次取消不会把底层关闭丢在后台——
-        否则 close() 已上抛而工作线程仍会经 call_soon_threadsafe 向（随后关闭的）
-        事件循环投递结果。这样最终 ``is_open`` 为 False、不会遗留仍打开的真实
-        连接，之后可以重新 open（重开/停服检查）。
-        先把连接从实例状态摘下（``_conn = None``），保证无论后续是否被
-        再次取消，本方法退出后实例状态都是“已关闭”。
+        取消安全（S0-02）：等待期内的取消只记账，close settle 后才传播——否则
+        close() 已上抛而工作线程仍会经 call_soon_threadsafe 向（随后关闭的）事件
+        循环投递结果。连接先摘除（``_conn = None``），保证退出后 ``is_open`` 为 False。
         """
         conn = self._conn
         if conn is None:
@@ -202,11 +194,10 @@ class Database:
     async def transaction(self) -> AsyncIterator[aiosqlite.Connection]:
         """多语句事务：从 BEGIN 到 COMMIT/ROLLBACK 全程持有唯一锁（07 7.1）。
 
-        事务体只使用 yield 出的连接做数据库操作；异常（含协程取消的
-        CancelledError）一律回滚并重新抛出，不遗留开放事务或被占用的锁。
-        BEGIN 提交给独立 Task 并 shield 等待：在 BEGIN 等待点被取消时，本协程
-        仍在持锁状态下等 BEGIN settle（后台线程可能随后才真正开启事务），
-        再按 in_transaction 回滚，最后才恢复取消传播（S0-03 竞态修复）。
+        事务体只使用 yield 出的连接做数据库操作；异常（含 CancelledError）一律回滚并
+        重新抛出，不遗留开放事务或被占用的锁。BEGIN 交给独立 Task 并 shield 等待：
+        在 BEGIN 等待点被取消时，仍在持锁状态下等它 settle（后台线程可能随后才真正
+        开启事务），再按 in_transaction 回滚，最后才恢复取消传播（S0-03）。
         """
         conn = self._require_open()
         async with self._lock:
@@ -228,38 +219,30 @@ class Database:
     async def parameter_echo_suppressed(self) -> AsyncIterator[None]:
         """把参数回显型 logger 临时抬到 WARNING，覆盖一段含凭据绑定参数的写入。
 
-        10.3 绝对禁止完整 Key 进入日志：本应用自身的 logger 从不打印 SQL 或参数，
-        唯一泄露面是 aiosqlite 在 DEBUG 下把绑定参数写进 "executing %s" 日志。
-        因此这里只抬级别（WARNING 以上的告警与异常仍照常输出，不丢生产诊断），
-        并在 finally 无条件恢复进入前的原状态（包括 NOTSET 继承与 disabled）。
+        10.3 绝对禁止完整 Key 进日志：本应用 logger 从不打印 SQL/参数，唯一泄露面是
+        aiosqlite 在 DEBUG 下把绑定参数写进 "executing %s"。故只抬级别（WARNING 以上
+        照常输出，不丢生产诊断），并在 finally 无条件恢复进入前的原状态（含 NOTSET
+        继承与 disabled）。
 
-        后台日志 settle：aiosqlite 在连接工作线程里先 set_result 再打
-        "operation ... completed"（同样含参数），因此 await 返回不等于该语句的日志
-        已产生。退出时先在唯一锁内排一条无参数语句作为栅栏：工作线程按队列顺序
-        处理，后继语句 settle 即证明前一条的日志点已过，之后才恢复 logger 级别，
-        避免把凭据留在恢复后的窗口里（也不让压制状态泄漏到块外）。
+        退出前在锁内排一条无参数语句作栅栏：工作线程按队列顺序处理，而后继语句
+        settle 即证明前一条的日志点已过（aiosqlite 先 set_result 再打 "completed"
+        日志，故 await 返回不等于日志已产生）。栅栏的等待同样用 :func:`_await_settled`
+        屏蔽取消——外层在这段挂起中被取消时不得提前恢复 logger，否则凭据语句的尾部
+        DEBUG 日志正好落在已解压制的窗口里；恢复原状态后才重抛取消。
 
-        栅栏的取消保护：栅栏本身要取唯一锁并等语句 settle，全程可能长时间挂起，
-        外层在这段等待中被取消时**不得**提前恢复 logger——那正好把凭据语句的尾部
-        DEBUG 日志留在已解压制的窗口里（10.3）。因此退出路径用 :func:`_await_settled`
-        等栅栏（含等锁阶段）真正 settle，取消只记账；恢复原状态后才重抛取消，
-        既不漏日志窗口也不吞掉取消。
-
-        并发边界（07 7.1 单连接 + 单锁）：锁串行化语句，不串行化压制窗口，所以压制
-        状态按 logger 名引用计数（只在事件循环线程变更）：先退出的窗口不会替仍开着
-        的窗口恢复级别。代价：压制是进程级 logger 状态，同一窗口内其他 aiosqlite
-        连接（如测试里的第二个库）的 DEBUG 参数回显会被一并压制——只丢诊断，不影响
-        正确性；WARNING 以上的驱动告警与异常照旧输出。
-        使用约束：本上下文必须包在 :meth:`transaction` / :meth:`under_lock` 外层
-        （退出时要取一次锁），在持锁区间内嵌套使用会因锁不可重入而死锁。
+        并发边界（07 7.1 单连接 + 单锁）：锁串行化语句但不串行化压制窗口，故按 logger
+        名引用计数（只在事件循环线程变更），先退出的窗口不会替仍开着的窗口恢复级别。
+        代价：压制是进程级 logger 状态，同窗口内其他 aiosqlite 连接（如测试的第二个库）
+        的 DEBUG 回显一并被压制——只丢诊断，不影响正确性。
+        约束：必须包在 :meth:`transaction` / :meth:`under_lock` 外层（退出时要取一次
+        锁），持锁区间内嵌套会因锁不可重入而死锁。
         """
         for name in _PARAMETER_ECHOING_LOGGERS:
             _suppress_parameter_echo(name)
         try:
             yield
         finally:
-            # 无条件等栅栏 settle 才恢复级别：等待期间（含栅栏等锁）到达的取消
-            # 只记账，因此提前恢复不会把凭据尾部日志留在解压制窗口里。
+            # 先等栅栏 settle 再恢复级别（取消只记账），见上文取消保护。
             cancelled, drain_error = await _await_settled(
                 self._drain_statement_logging()
             )
@@ -274,9 +257,8 @@ class Database:
     async def _drain_statement_logging(self) -> None:
         """排一条无参数语句，确认工作线程已越过前一条语句的日志点（栅栏）。
 
-        连接已关闭时直接返回：没有后台线程会再产生日志，也没有可等待的语句。
-        调用方（:meth:`parameter_echo_suppressed`）在屏蔽取消的独立 Task 里等本方法，
-        因此这里包括取锁在内的任何挂起点都不会被外层取消打断。
+        连接已关闭时直接返回（没有后台线程会再产生日志）。调用方用屏蔽取消的独立
+        Task 等待本方法，故含取锁在内的任何挂起点都不会被外层取消打断。
         """
         if not self.is_open:
             return

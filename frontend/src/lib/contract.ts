@@ -57,21 +57,6 @@ export interface ProviderConfig {
 }
 
 /**
- * 当前身体状态与红旗症状（PRD §5.2；02 2.1/2.3）。只承载用户报告的事实：
- * Agent 不诊断具体疾病、不扩充医学规则、不自动增删禁忌（PRD §5.2、02 2.3）。
- */
-export interface PhysicalState {
- /**
-  * 用户报告的红旗症状原文（02 2.3 清单：胸部异常不适、晕厥、异常气短、锐痛、麻木、
-  * 放射痛等）；出现时不生成常规训练处方、建议线下专业评估。
-  * 空数组 = 用户明确表示无红旗症状，与「尚未收集」可区分。
-  */
- red_flags: string[];
- /** 其他当前身体状态描述（非红旗），如「肩部偶有不适」；空数组 = 明确无其他状态 */
- notes: string[];
-}
-
-/**
  * 正式档案：建档事实的唯一来源（PRD §5.2 六类事实；02 2.1）。
  * 完整档案须含全部事实且 body_weight_kg 必填（stage1 已拍 2026-09-09：缺失时继续追问，
  * 不生成完整档案草稿）；未收集的字段在草稿侧缺省表达，不写默认值。
@@ -86,8 +71,12 @@ export interface Profile {
  equipment: string[];
  /** 体重（kg）；建档必填 */
  body_weight_kg: number;
- /** 当前身体状态与红旗症状（PRD §5.2；02 2.1/2.3） */
- physical_state: PhysicalState;
+ /**
+  * 当前身体情况（PRD §5.2；02 2.1/2.3）：用户报告原文逐条保存（如「深蹲时膝盖锐痛」），
+  * 存储层只保存事实、不做医学分类、不诊断、不自动增删禁忌；六类安全症状的匹配在读取时进行。
+  * 空数组 = 用户明确表示无身体情况，与字段缺省（尚未收集）可区分。
+  */
+ body_conditions: string[];
 }
 
 /**
@@ -156,7 +145,7 @@ export interface Calibration {
  steps: string[];
  /** 通过标准：稳定完成处方次数下限，且落在目标 RIR 区间 */
  pass_criteria: string;
- /** 停止条件：疼痛／红旗症状、动作明显失稳、无法满足目标 RIR（停止后不继续加重） */
+ /** 停止条件：疼痛／已报告的安全症状、动作明显失稳、无法满足目标 RIR（停止后不继续加重） */
  stop_criteria: string;
 }
 
@@ -224,17 +213,17 @@ export interface PlanScheduleEntry {
 }
 
 /**
- * 计划安全复核投影（04 4.5；02 2.2/2.3）：请求基于当前计划的指导时按最新限制与红旗
+ * 计划安全复核投影（04 4.5；02 2.2/2.3）：请求基于当前计划的指导时按最新限制与身体情况
  * 复核整份计划。任一动作或模式冲突即整份阻断（不输出其余「未冲突」动作的处方），
- * 红旗独立阻断；不新增「部分可用」计划状态。
+ * 命中安全症状独立阻断；不新增「部分可用」计划状态。
  */
 export interface PlanSafetyReview {
- /** 复核所依据的业务版本（限制／红旗变更后须重新复核） */
+ /** 复核所依据的业务版本（限制／身体情况变更后须重新复核） */
  context_version: number;
  reviewed_at: string;
  /** true = 可给出基于该计划的处方；false = 整份阻断 */
  usable: boolean;
- /** 红旗症状独立阻断（02 2.3：建议线下专业评估） */
+ /** 身体情况命中安全症状而独立阻断（02 2.3：建议线下专业评估） */
  red_flag_blocked: boolean;
  /** 命中的限制冲突（空 = 无冲突） */
  conflicts: PlanSafetyConflict[];
@@ -413,11 +402,11 @@ export interface PlanDraftPayload {
 /**
  * 档案变更草稿载荷（结构化档案字段；PRD §5.2 六类事实）。
  * 只承载已收集事实：字段缺省 = 尚未收集（未知），与显式空值（equipment: [] 无器械、
- * physical_state.red_flags: [] 明确无红旗）可区分；不得以默认值补造（PRD §5.2）。
+ * body_conditions: [] 明确无身体情况）可区分；不得以默认值补造（PRD §5.2）。
  * diff 不在载荷内：由服务端对比新旧档案派生字段级「旧值→新值」（A4；Draft.diff）。
  */
 export interface ProfileDraftPayload {
- /** 已收集的档案事实（目标与经验、频率、时长、器械、体重、身体状态与红旗症状） */
+ /** 已收集的档案事实（目标与经验、频率、时长、器械、体重、身体情况） */
  profile: Partial<Profile>;
  /** 拟议的限制集合（只含当前有效限制）；缺省 = 尚未收集，与空数组（明确无限制）可区分 */
  restrictions?: Restriction[];
@@ -581,7 +570,7 @@ export interface ProfileResponse {
  plan?: PlanVersion;
  /** 具体日程（stage2 F2-01/F2-05；plan 缺省时同样缺省）：含历史版本条目（旧版取消、已到期锁定），状态语义见 PlanScheduleEntry */
  schedules?: PlanScheduleEntry[];
- /** 当前计划的安全复核投影（stage2 F2-01/F2-05）：按最新红旗与限制复核，与计划状态分开表达，不新增「部分可用」状态 */
+ /** 当前计划的安全复核投影（stage2 F2-01/F2-05）：按最新身体情况与限制复核，与计划状态分开表达，不新增「部分可用」状态 */
  plan_safety?: PlanSafetyReview;
 }
 

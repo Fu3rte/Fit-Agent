@@ -50,8 +50,7 @@ def _buildable_profile() -> Profile:
         session_duration_minutes=Fact.known(60),
         available_equipment=Fact.known(("哑铃",)),
         action_restrictions=Fact.denied(),
-        body_state=Fact.known(()),
-        red_flags=Fact.denied(),
+        body_conditions=Fact.denied(),
         body_weight_kg=Fact.known(73.0),
     )
 

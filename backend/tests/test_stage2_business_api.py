@@ -118,7 +118,7 @@ async def _served_app(tmp_path: Path) -> AsyncIterator[tuple[FastAPI, Database]]
 
 
 def _first_time_profile() -> Profile:
-    """首次建档样本：九项明确回答齐备（可过首次确认完整性门）。"""
+    """首次建档样本：八项明确回答齐备（可过首次确认完整性门）。"""
     return Profile(
         training_goal=Fact.known("增肌"),
         training_experience=Fact.known("零基础"),
@@ -126,8 +126,7 @@ def _first_time_profile() -> Profile:
         session_duration_minutes=Fact.known(60),
         available_equipment=Fact.known(("哑铃",)),
         action_restrictions=Fact.denied(),
-        body_state=Fact.known(()),
-        red_flags=Fact.denied(),
+        body_conditions=Fact.denied(),
         body_weight_kg=Fact.known(73.0),
     )
 
@@ -254,14 +253,14 @@ async def test_profile_endpoint_reports_unbuilt_profile_as_null_without_writes(
 async def test_profile_endpoint_keeps_unknown_denied_and_known_distinct(
     tmp_path: Path,
 ) -> None:
-    """部分档案不显示成完整档案：九个字段都在，缺失／未知与明确无各不相同。"""
+    """部分档案不显示成完整档案：八个字段都在，缺失／未知与明确无各不相同。"""
     partial = Profile(
         training_goal=Fact.known("力量"),
         available_equipment=Fact.denied(),
         action_restrictions=Fact.known(
             (ActionRestriction(scope="specific_action", target=SEEDED_EXERCISE_ID),)
         ),
-        red_flags=Fact.known(()),
+        body_conditions=Fact.known(()),
     )
     async with _served_app(tmp_path) as (app, db):
         await _write_formal_profile(db, partial)
@@ -274,10 +273,10 @@ async def test_profile_endpoint_keeps_unknown_denied_and_known_distinct(
         assert sorted(facts) == sorted(FACT_FIELDS)
         assert facts["training_goal"] == {"state": "known", "value": "力量"}
         # 未收集（unknown）与明确无（denied）分别表达，都不是空数组或默认值
-        assert facts["body_state"] == {"state": "unknown", "value": None}
+        assert facts["training_experience"] == {"state": "unknown", "value": None}
         assert facts["available_equipment"] == {"state": "denied", "value": None}
         # 显式空集合是第三种表达，不与 denied／unknown 混同
-        assert facts["red_flags"] == {"state": "known", "value": []}
+        assert facts["body_conditions"] == {"state": "known", "value": []}
         assert facts["session_duration_minutes"] == {"state": "unknown", "value": None}
         # 限制按稳定身份（scope＋target）表达，展示名不参与身份
         assert facts["action_restrictions"]["value"] == [
@@ -526,7 +525,10 @@ REVISE_SHAPE_CASES = cast(
             },
         ),
         ("profile 非对象", {"json_body": _revise_body("x")}),
-        ("profile 缺字段", {"json_body": _revise_body(_facts_without("body_state"))}),
+        (
+            "profile 缺字段",
+            {"json_body": _revise_body(_facts_without("body_conditions"))},
+        ),
         (
             "profile 未知字段",
             {
@@ -534,6 +536,17 @@ REVISE_SHAPE_CASES = cast(
                     {
                         **_FIRST_TIME_FACTS,
                         "body_weight": {"state": "known", "value": 73.0},
+                    }
+                )
+            },
+        ),
+        (
+            "profile 用旧身体情况字段",
+            {
+                "json_body": _revise_body(
+                    {
+                        **_FIRST_TIME_FACTS,
+                        "body_state": {"state": "denied", "value": None},
                     }
                 )
             },

@@ -283,13 +283,13 @@ const redFlag = await addProfileFacts(
 );
 const blockedByFlag = await ofProfile();
 check(
-  "红旗写入档案且复核为独立阻断（无限制冲突）",
+  "身体情况命中安全症状即写入档案原文且复核为独立阻断（无限制冲突）",
   redFlag.confirm.status === 200 &&
-    blockedByFlag.profile.physical_state.red_flags.length > 0 &&
+    blockedByFlag.profile.body_conditions.length > 0 &&
     blockedByFlag.plan_safety?.red_flag_blocked === true &&
     blockedByFlag.plan_safety.usable === false &&
     blockedByFlag.plan_safety.conflicts.length === 0,
-  JSON.stringify(blockedByFlag.profile.physical_state.red_flags),
+  JSON.stringify(blockedByFlag.profile.body_conditions),
 );
 const flagGuidance = await run("s1", "给我周三的训练指导");
 check(

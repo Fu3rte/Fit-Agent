@@ -1041,7 +1041,7 @@ export default function ChatPage() {
             {/* 未建档引导：建档只能由对话发起（PRD §5.2），只是文案，不影响发送 */}
             {uncreatedProfile && (
               <p className="rounded-lg border bg-card px-3 py-2 text-xs text-muted-foreground">
-                尚未建档：建档只能通过对话完成（无独立表单）。按提示提供目标、经验、频率、时长、器械、体重、动作限制与当前身体状态，即可生成档案草稿。
+                尚未建档：建档只能通过对话完成（无独立表单）。按提示提供目标、经验、频率、时长、器械、体重、动作限制与身体情况，即可生成档案草稿。
               </p>
             )}
             {messages.isLoading && (

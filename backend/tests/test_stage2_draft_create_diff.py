@@ -291,8 +291,15 @@ async def test_diff_expresses_unbuilt_baseline_without_fabricating_defaults(
 
         # 未建档基线：base_profile 是 None，不是显式全未知档案
         assert view.base_profile is None
-        # 九个事实字段都有字段对，顺序固定
+        # 八个事实字段都有字段对，顺序固定
         assert [entry.field for entry in view.diff] == list(FACT_FIELDS)
+        # 身体情况只出现一个字段：旧两项身体情况字段不进 Diff
+        body_fields = [
+            entry.field
+            for entry in view.diff
+            if entry.field in ("body_conditions", "body_state", "red_flags")
+        ]
+        assert body_fields == ["body_conditions"]
         goal = _entry(view.diff, "training_goal")
         assert goal.before.is_unknown
         assert goal.after == Fact.known("增肌")
@@ -306,10 +313,9 @@ async def test_diff_expresses_unbuilt_baseline_without_fabricating_defaults(
             ActionRestriction(scope="movement_pattern", target="深蹲"),
         )
         # 拟议中仍未收集的字段保持 unknown：不算变更、不补造
-        for name in ("body_state", "red_flags"):
-            entry = _entry(view.diff, name)
-            assert entry.before.is_unknown and entry.after.is_unknown
-            assert entry.changed is False
+        body_conditions = _entry(view.diff, "body_conditions")
+        assert body_conditions.before.is_unknown and body_conditions.after.is_unknown
+        assert body_conditions.changed is False
 
 
 async def test_unbuilt_baseline_stays_distinguishable_from_explicit_empty_profile(
@@ -383,10 +389,9 @@ async def test_diff_expresses_field_changes_and_restriction_add_remove(
             "body_weight_kg",
         }
         # 未涉及字段不变且前后一致
-        for name in ("body_state", "red_flags"):
-            entry = _entry(view.diff, name)
-            assert entry.changed is False
-            assert entry.before == entry.after
+        body_conditions = _entry(view.diff, "body_conditions")
+        assert body_conditions.changed is False
+        assert body_conditions.before == body_conditions.after
 
 
 async def test_diff_keeps_unknown_denied_and_known_empty_distinct(
@@ -394,16 +399,12 @@ async def test_diff_keeps_unknown_denied_and_known_empty_distinct(
 ) -> None:
     async with open_database(tmp_path / "app.db") as db:
         await RunRepo(db).create_conversation("c1")
-        formal = Profile(
-            red_flags=Fact.denied(),
-            body_state=Fact.known(("肩部偶有不适",)),
-        )
+        formal = Profile(body_conditions=Fact.denied())
         await _simulate_formal_commit(db, formal)
         service = DraftService(db)
         proposed = Profile(
             available_equipment=Fact.denied(),
-            red_flags=Fact.known(()),
-            body_state=Fact.known(()),
+            body_conditions=Fact.known(()),
         )
         view = await service.create_profile_draft(
             draft_id="d1",
@@ -418,14 +419,30 @@ async def test_diff_keeps_unknown_denied_and_known_empty_distinct(
         assert equipment.before.is_unknown and equipment.after.is_denied
         assert equipment.changed is True
         # denied（明确无）与显式空集合 known(()) 不是同一语义
-        red_flags = _entry(view.diff, "red_flags")
-        assert red_flags.before.is_denied and red_flags.after == Fact.known(())
-        assert red_flags.changed is True
-        # known 值变化按值比较
-        body_state = _entry(view.diff, "body_state")
-        assert body_state.before.value == ("肩部偶有不适",)
-        assert body_state.after == Fact.known(())
-        assert body_state.changed is True
+        body_conditions = _entry(view.diff, "body_conditions")
+        assert body_conditions.before.is_denied
+        assert body_conditions.after == Fact.known(())
+        assert body_conditions.changed is True
+
+        # known 值变化按值比较：已报告原文 → 显式空集合
+        await _simulate_formal_commit(
+            db, Profile(body_conditions=Fact.known(("肩部偶有不适",)))
+        )
+        second = await service.create_profile_draft(
+            draft_id="d2",
+            generation_baseline=await service.prepare_generation_baseline(),
+            conversation_id="c1",
+            run_id=None,
+            proposed=Profile(body_conditions=Fact.known(())),
+        )
+        entry = _entry(second.diff, "body_conditions")
+        assert entry.before.value == ("肩部偶有不适",)
+        assert entry.after == Fact.known(())
+        assert entry.changed is True
+        # 身体情况是唯一变更字段，且只出现一项
+        assert [item.field for item in second.diff if item.changed] == [
+            "body_conditions"
+        ]
 
 
 # ---------- 非法内容不落库；输入对象不被修改 ----------

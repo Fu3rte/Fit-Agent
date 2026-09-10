@@ -95,14 +95,14 @@ def _fact_dto(fact: Fact[Any]) -> dict[str, Any]:
 
 
 def profile_facts_dto(profile: Profile) -> dict[str, Any]:
-    """档案 → 九个事实字段的三态对象；未收集与明确无显式表达，不用空数组／默认值填充。"""
+    """档案 → 八个事实字段的三态对象；未收集与明确无显式表达，不用空数组／默认值填充。"""
     return {name: _fact_dto(getattr(profile, name)) for name in FACT_FIELDS}
 
 
 def profile_response_dto(snapshot: ProfileSnapshot) -> dict[str, Any]:
     """正式档案读取快照 → ``GET /api/profile`` 响应体。
 
-    ``profile: null`` 表示尚未建档（``profile_json IS NULL``）；已建档（含部分事实）时是九个
+    ``profile: null`` 表示尚未建档（``profile_json IS NULL``）；已建档（含部分事实）时是八个
     事实字段的三态对象，缺失／未知与明确无都在字段对里显式表达，不显示成完整档案。
     """
     return {
@@ -193,7 +193,7 @@ def seen_revision_from_dto(body: dict[str, Any]) -> int:
 
 
 def proposed_profile_from_dto(payload: object) -> Profile:
-    """纠错载荷 ``{"profile": {字段: {state, value}}}`` → 拟议档案（九个字段全量）。
+    """纠错载荷 ``{"profile": {字段: {state, value}}}`` → 拟议档案（八个字段全量）。
 
     只做形状映射：``state`` 取值、known 必须带值、列表与限制条目的 JSON 形状在这里校验；
     值是否符合字段类型与领域规则（模式词表、限制引用的动作身份、非空文本）由应用层的领域

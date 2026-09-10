@@ -5,13 +5,16 @@
 
 - **三态事实**：``Fact`` 区分 unknown（尚未收集）／denied（用户明确否认）／known
   （已收集值）。不得把「未询问」写成「无」，也不得反向补造（stage1.md §5 S1-04 验收 1；
-  02 2.1）。红旗只承载用户报告原文，清单外文本同样只是原文，不判安全（判定归 S1-05）。
+  02 2.1）。身体情况（``body_conditions``）只承载用户报告原文，不分「症状」与「其他身体
+  状态」；6 类清单在读取时匹配（``domain.profile.safety``），本模块不做医学判断
+  （2026-09-10 拍板：原「当前身体状态」与「红旗症状」两项合并）。
 - **完整档案必填**：``REQUIRED_FACT_FIELDS`` 只含 ``body_weight_kg``（2026-09-09 已拍：
   缺失时不生成完整档案、不填默认值）；其余必填阈值与默认处方条件未拍，本模块不新增。
-- **首次建档完整性**：``FIRST_TIME_REQUIRED_FACT_FIELDS`` 是确认入口的九项明确回答清单
-  （stage2.md §4.3 已拍 1B，2026-09-09）；``EXPLICIT_NONE_FACT_FIELDS`` 是其中可用「明确无」
+- **首次建档完整性**：``FIRST_TIME_REQUIRED_FACT_FIELDS`` 是确认入口的八项明确回答清单
+  （stage2.md §4.3 已拍 1B，2026-09-09；2026-09-10 身体情况合并后九项变八项）；
+  ``EXPLICIT_NONE_FACT_FIELDS`` 是其中可用「明确无」
   回答的集合／限制类字段（2026-09-10 用户拍板 A）。两者与建档保存条件语义不同、并存：
-  建档过程仍允许保存部分事实，但首次正式确认按九项清单拒绝不完整档案；本模块只承载字段
+  建档过程仍允许保存部分事实，但首次正式确认按八项清单拒绝不完整档案；本模块只承载字段
   清单与缺口，判定归 ``domain.profile.rules``。
 - **两类动作限制**：``ActionRestriction`` 用 ``scope`` 区分具体动作（引用 ``exercises.id``
   稳定身份）与动作模式（引用 13 项已拍词表原词）；只表达「当前有效」，不带观察中／暂禁／
@@ -40,7 +43,8 @@ T = TypeVar("T")
 REQUIRED_FACT_FIELDS: tuple[str, ...] = ("body_weight_kg",)
 
 # 首次建档完整性清单（stage2.md §4.3 已拍 1B，2026-09-09）：目标、经验、频率、时长、
-# 器械、体重、动作限制、身体状态与症状询问九项都必须有明确回答。与
+# 器械、体重、动作限制、身体情况八项都必须有明确回答（2026-09-10 身体情况合并后九项
+# 变八项）。与
 # ``REQUIRED_FACT_FIELDS`` 语义不同：本清单是确认入口的完整性条件，不是建档过程的
 # 保存条件——建档允许逐步补全（保存部分事实），但首次正式确认必须齐备。完整性只表示
 # 信息齐备，不表示没有症状或已获训练安全许可（红旗阻断仍归 ``domain.profile.safety``）。
@@ -52,24 +56,23 @@ FIRST_TIME_REQUIRED_FACT_FIELDS: tuple[str, ...] = (
     "available_equipment",
     "body_weight_kg",
     "action_restrictions",
-    "body_state",
-    "red_flags",
+    "body_conditions",
 )
 
 # 「明确无」可以满足首次建档的字段（2026-09-10 用户拍板 A）：只有集合／限制类事实能用
-# 明确无回答——器械、动作限制、身体状态、红旗既可用 denied，也可用显式空集合（前端契约
-# equipment: [] 无器械、red_flags: [] 明确无红旗）。其余五项必须给出有效值：训练目标与
-# 训练经验必须是有效文本，频率、时长、体重必须是有效数值（stage2.md §4.3：不能以「无」
-# 替代必需的有效数值）。
+# 明确无回答——器械、动作限制、身体情况既可用 denied，也可用显式空集合（前端契约
+# equipment: [] 无器械、body_conditions: [] 明确无身体情况报告）。其余五项必须给出有效值：
+# 训练目标与训练经验必须是有效文本，频率、时长、体重必须是有效数值（stage2.md §4.3：
+# 不能以「无」替代必需的有效数值）。
 EXPLICIT_NONE_FACT_FIELDS: tuple[str, ...] = (
     "available_equipment",
     "action_restrictions",
-    "body_state",
-    "red_flags",
+    "body_conditions",
 )
 
-# 6 类已明确红旗原词（stage1.md §5 S1-05 验收 2；02 2.3）。本阶段只承载，不判定、
-# 不扩充医学规则；清单以「等」收尾，清单外报告文本按未知/需澄清处理（判定归 S1-05）。
+# 6 类已明确红旗原词（stage1.md §5 S1-05 验收 2；02 2.3）。本模块只承载清单，不判定、
+# 不扩充医学规则；匹配在读取时按身体情况原文进行（``domain.profile.safety``），清单以
+# 「等」收尾，清单外原文按未知/需澄清处理。
 RED_FLAG_KINDS: tuple[str, ...] = (
     "胸部异常不适",
     "晕厥",
@@ -87,11 +90,19 @@ FACT_VALUE_KINDS: dict[str, str] = {
     "session_duration_minutes": "integer",
     "available_equipment": "text_list",
     "action_restrictions": "restrictions",
-    "body_state": "text_list",
-    "red_flags": "text_list",
+    "body_conditions": "text_list",
     "body_weight_kg": "number",
 }
 FACT_FIELDS: tuple[str, ...] = tuple(FACT_VALUE_KINDS)
+
+# 旧版九字段中的两项身体情况（2026-09-10 已拍 1A：读旧写新、不新增迁移）。解码时按
+# text_list 处理，读入后合并为 ``body_conditions``；写入侧只输出新版八字段。
+LEGACY_BODY_CONDITION_FIELDS: tuple[str, ...] = ("body_state", "red_flags")
+_DECODE_VALUE_KINDS: dict[str, str] = {
+    **FACT_VALUE_KINDS,
+    "body_state": "text_list",
+    "red_flags": "text_list",
+}
 
 
 class InvalidProfileRow(ValueError):
@@ -120,7 +131,7 @@ class Fact(Generic[T]):
 
     @classmethod
     def denied(cls) -> "Fact[T]":
-        """用户明确否认（如明确说明无红旗症状、无动作限制）。"""
+        """用户明确否认（如明确说明无身体情况报告、无动作限制）。"""
         return cls("denied", None)
 
     @classmethod
@@ -164,8 +175,7 @@ class Profile:
     session_duration_minutes: Fact[int] = Fact.unknown()
     available_equipment: Fact[tuple[str, ...]] = Fact.unknown()
     action_restrictions: Fact[tuple[ActionRestriction, ...]] = Fact.unknown()
-    body_state: Fact[tuple[str, ...]] = Fact.unknown()
-    red_flags: Fact[tuple[str, ...]] = Fact.unknown()
+    body_conditions: Fact[tuple[str, ...]] = Fact.unknown()
     body_weight_kg: Fact[float] = Fact.unknown()
 
     @classmethod
@@ -190,7 +200,7 @@ class Profile:
         """首次建档仍未明确回答的字段（按 :data:`FIRST_TIME_REQUIRED_FACT_FIELDS` 顺序）。
 
         ``unknown``（未收集）一律算缺；``denied``（明确无）只在
-        :data:`EXPLICIT_NONE_FACT_FIELDS`（器械、动作限制、身体状态、红旗）上算已回答。
+        :data:`EXPLICIT_NONE_FACT_FIELDS`（器械、动作限制、身体情况）上算已回答。
         其余五项必须有有效值：训练目标与训练经验必须是有效文本，频率、时长、体重必须是
         有效数值（2026-09-10 用户拍板 A）。本属性只做缺口计算，不校验结构（结构校验归
         ``domain.profile.rules``）。
@@ -207,7 +217,7 @@ class Profile:
 
     @property
     def is_first_time_complete(self) -> bool:
-        """首次建档九项均已明确回答（「明确无」有效；不表示安全许可）。"""
+        """首次建档八项均已明确回答（「明确无」有效；不表示安全许可）。"""
         return not self.first_time_missing_fields
 
     @property
@@ -215,19 +225,6 @@ class Profile:
         """当前有效限制；未收集或明确无限制时返回空元组（两者用 ``action_restrictions`` 区分）。"""
         fact = self.action_restrictions
         return fact.value if fact.is_known and fact.value is not None else ()
-
-    @property
-    def reported_red_flags(self) -> tuple[str, ...]:
-        """用户报告的红旗原文；未收集或明确无红旗时为空元组。"""
-        fact = self.red_flags
-        return fact.value if fact.is_known and fact.value is not None else ()
-
-    @property
-    def unlisted_red_flag_labels(self) -> tuple[str, ...]:
-        """不在 6 类已明确清单内的报告原文：只承载，不判安全/不安全（判定归 S1-05）。"""
-        return tuple(
-            label for label in self.reported_red_flags if label not in RED_FLAG_KINDS
-        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -264,11 +261,14 @@ class SessionConditions:
     """
 
     available_equipment: Fact[tuple[str, ...]] | None = None
-    red_flags: Fact[tuple[str, ...]] | None = None
+    body_conditions: Fact[tuple[str, ...]] | None = None
 
 
 def profile_to_json(profile: Profile) -> str:
-    """档案 → ``user_profile.profile_json`` 文本；键集固定为 ``FACT_FIELDS``。"""
+    """档案 → ``user_profile.profile_json`` 文本；键集固定为 ``FACT_FIELDS``。
+
+    只输出新版八字段；旧版九字段在 :func:`profile_from_json` 读入时即合并，不再写回。
+    """
     return json.dumps(
         {name: _encode_fact(getattr(profile, name)) for name in FACT_FIELDS},
         ensure_ascii=False,
@@ -277,20 +277,77 @@ def profile_to_json(profile: Profile) -> str:
 
 
 def profile_from_json(raw: str) -> Profile:
-    """``profile_json`` 文本 → 档案；缺字段/未知字段/类型不符一律视为数据损坏。"""
+    """``profile_json`` 文本 → 档案；缺字段/未知字段/类型不符一律视为数据损坏。
+
+    同时接受旧版九字段（``body_state`` + ``red_flags``）：读入时保序去重合并为
+    ``body_conditions``（2026-09-10 已拍 1A 读旧写新、不加迁移）；新旧字段混用视为结构非法。
+    """
     try:
         payload = json.loads(raw)
     except (TypeError, ValueError) as exc:
         raise InvalidProfileRow(f"档案 JSON 无法解析：{raw!r}") from exc
     if not isinstance(payload, dict):
         raise InvalidProfileRow(f"档案 JSON 不是对象：{raw!r}")
-    unknown_keys = sorted(set(payload) - set(FACT_FIELDS))
+    unknown_keys = sorted(
+        set(payload) - set(FACT_FIELDS) - set(LEGACY_BODY_CONDITION_FIELDS)
+    )
     if unknown_keys:
         raise InvalidProfileRow(f"档案 JSON 含未登记字段：{unknown_keys}")
+    if any(name in payload for name in LEGACY_BODY_CONDITION_FIELDS):
+        return _profile_from_legacy_json(payload)
     missing_keys = sorted(set(FACT_FIELDS) - set(payload))
     if missing_keys:
         raise InvalidProfileRow(f"档案 JSON 缺字段：{missing_keys}")
     return Profile(**{name: _decode_fact(name, payload[name]) for name in FACT_FIELDS})
+
+
+def _profile_from_legacy_json(payload: dict[str, Any]) -> Profile:
+    """旧版九字段 JSON → 档案：两项身体情况合并，其余字段照常解码。"""
+    legacy_keys = [name for name in LEGACY_BODY_CONDITION_FIELDS if name in payload]
+    if (
+        len(legacy_keys) != len(LEGACY_BODY_CONDITION_FIELDS)
+        or "body_conditions" in payload
+    ):
+        raise InvalidProfileRow(
+            f"档案 JSON 身体情况字段新旧混用或不完整：{sorted(legacy_keys)}"
+        )
+    missing_keys = sorted(set(FACT_FIELDS) - {"body_conditions"} - set(payload))
+    if missing_keys:
+        raise InvalidProfileRow(f"档案 JSON 缺字段：{missing_keys}")
+    facts = {
+        name: _decode_fact(name, payload[name])
+        for name in FACT_FIELDS
+        if name != "body_conditions"
+    }
+    facts["body_conditions"] = _merge_legacy_body_conditions(
+        _decode_fact("body_state", payload["body_state"]),
+        _decode_fact("red_flags", payload["red_flags"]),
+    )
+    return Profile(**facts)
+
+
+def _merge_legacy_body_conditions(
+    body_state: Fact[Any], red_flags: Fact[Any]
+) -> Fact[tuple[str, ...]]:
+    """旧版两项身体情况合并为 ``body_conditions``（保序去重，两者都是 text_list）。
+
+    - 两项都 ``unknown`` → ``unknown``（不得当作「无」）。
+    - 任一项有报告原文 → ``known(保序去重后的原文)``。
+    - 有回答但都无内容（``denied`` 或 ``known(())``）→ ``denied``。
+    历史信息不完整（一项 unknown、另一项已回答）在合并后无法再区分，只在此说明，不新增
+    运行期标记字段（2026-09-10 已拍 1A）。
+    """
+    contents: list[str] = []
+    answered = False
+    for fact in (body_state, red_flags):
+        if fact.is_unknown:
+            continue
+        answered = True
+        if fact.is_known and fact.value is not None:
+            contents.extend(fact.value)
+    if contents:
+        return Fact.known(tuple(dict.fromkeys(contents)))
+    return Fact.denied() if answered else Fact.unknown()
 
 
 def _encode_fact(fact: Fact[Any]) -> dict[str, Any]:
@@ -326,7 +383,7 @@ def _encode_value(value: Any) -> Any:
 
 
 def _decode_value(name: str, raw: Any) -> Any:
-    kind = FACT_VALUE_KINDS[name]
+    kind = _DECODE_VALUE_KINDS[name]
     if kind == "text":
         return _require_text(name, raw)
     if kind == "integer":

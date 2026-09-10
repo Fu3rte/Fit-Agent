@@ -33,7 +33,7 @@ const PROFILE = {
   session_minutes: 60,
   equipment: ["杠铃", "哑铃", "卧推架", "引体架", "绳索"],
   body_weight_kg: 72.5,
-  physical_state: { red_flags: [], notes: [] },
+  body_conditions: [],
 };
 const build = (profile = PROFILE, restrictions = []) =>
   buildPplDraft({ profile, restrictions });
@@ -245,26 +245,30 @@ check(
 );
 const redFlag = build({
   ...PROFILE,
-  physical_state: { red_flags: ["胸部异常不适"], notes: [] },
+  body_conditions: ["胸部异常不适"],
 });
 check(
-  "档案含红旗症状不生成处方且带回红旗原文",
+  "身体情况命中六类安全症状不生成处方且带回原文",
   redFlag.ok === false &&
     redFlag.code === "red_flag" &&
     redFlag.red_flags.join() === "胸部异常不适",
   redFlag.ok ? "仍生成了处方" : redFlag.reason,
 );
 check(
-  "红旗档案的计划载荷也被校验拒绝（requesting 指导时的整份复核口径）",
-  /红旗/.test(
+  "命中安全症状的计划载荷也被校验拒绝（requesting 指导时的整份复核口径）",
+  /命中安全症状/.test(
     planPayloadError(payload, {
       profile: {
         ...PROFILE,
-        physical_state: { red_flags: ["锐痛"], notes: [] },
+        body_conditions: ["锐痛"],
       },
       restrictions: [],
     }) ?? "",
   ),
+);
+check(
+  "普通身体情况非空但未命中六类时不作红旗阻断（读取时分类）",
+  build({ ...PROFILE, body_conditions: ["肩部偶有不适"] }).ok === true,
 );
 const lowFrequency = build({ ...PROFILE, weekly_frequency: 2 });
 check(
@@ -335,14 +339,14 @@ check(
 /* 9. mock 接入：noplan 种子 + 无计划时走生成分支 */
 const server = read("../src/mock/server.ts");
 check(
-  "控制端点注册 noplan 种子（已配置／已建档／无红旗／无计划）",
+  "控制端点注册 noplan 种子（已配置／已建档／无安全症状／无计划）",
   /seed !== "noplan"/.test(server) &&
-    /function noPlanSeedState\(\): MockState \{[\s\S]*?emptySeedState\(\)[\s\S]*?has_api_key = true;[\s\S]*?physical_state: \{ red_flags: \[\], notes: \[\] \},/.test(
+    /function noPlanSeedState\(\): MockState \{[\s\S]*?emptySeedState\(\)[\s\S]*?has_api_key = true;[\s\S]*?body_conditions: \[\],[\s\S]*?\};/.test(
       server,
     ) &&
     !/function noPlanSeedState[\s\S]*?\n {2}plan:/.test(server) &&
     !/function noPlanSeedState[\s\S]*?\n {2}records:/.test(server),
-  "种子由空种子派生（plan: null、records: []）并写入无红旗档案",
+  "种子由空种子派生（plan: null、records: []）并写入无身体情况（明确无）档案",
 );
 check(
   "无正式计划时对话走计划生成分支",

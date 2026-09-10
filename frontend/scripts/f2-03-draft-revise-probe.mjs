@@ -31,7 +31,7 @@ const PROFILE = {
   session_minutes: 60,
   equipment: ["杠铃", "哑铃", "卧推架", "引体架", "绳索"],
   body_weight_kg: 72.5,
-  physical_state: { red_flags: [], notes: [] },
+  body_conditions: [],
 };
 
 const generated = buildPplDraft({ profile: PROFILE, restrictions: [] });

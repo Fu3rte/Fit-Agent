@@ -42,7 +42,7 @@ export const NEEDS_CALIBRATION: Calibration = {
   ],
   pass_criteria: "稳定完成处方次数下限，且落在目标 RIR 区间",
   stop_criteria:
-    "出现疼痛／红旗症状、动作明显失稳，或无法满足目标 RIR 时停止，不继续加重",
+    "出现疼痛或其他不适、动作明显失稳，或无法满足目标 RIR 时停止，不继续加重",
 };
 
 /**
@@ -382,12 +382,52 @@ export function planDraftDiff(
   return rows;
 }
 
+/**
+ * 六类安全症状（02 2.3 清单；plans/stage1.md §8 已拍：清单外继续澄清、不判定安全，
+ * 不扩充医学规则）。只在读取时对 `body_conditions` 原文做确定性匹配——存储层不做医学判断，
+ * 分类不写档案、不新增／解除限制。
+ */
+const SAFETY_SYMPTOM_PATTERNS: readonly { label: string; pattern: RegExp }[] = [
+  { label: "胸部异常不适", pattern: /胸部(?:异常|明显|持续)(?:不适|闷|痛)/ },
+  { label: "晕厥", pattern: /晕厥|昏厥|晕倒/ },
+  { label: "异常气短", pattern: /气短|喘不上气|呼吸困难/ },
+  { label: "锐痛", pattern: /锐痛|刺痛/ },
+  { label: "麻木", pattern: /麻木|发麻/ },
+  { label: "放射痛", pattern: /放射痛|放射到|放射至/ },
+];
+
+export interface BodyConditionClassification {
+  /** 命中六类清单的原文子句（非空即阻断，建议线下专业评估） */
+  confirmed: string[];
+  /** 未命中清单的原文子句（不判定安全、需澄清；不得当作红旗阻断） */
+  unlisted: string[];
+}
+
+/**
+ * 读取时安全分类（02 2.3；本文件唯一分类入口）：按 `body_conditions` 原文逐条匹配六类清单。
+ * 空数组 = 用户明确表示无身体情况；普通身体情况非空但未命中六类时不判红旗。
+ */
+export function classifyBodyConditions(
+  body_conditions: readonly string[] | undefined,
+): BodyConditionClassification {
+  const confirmed: string[] = [];
+  const unlisted: string[] = [];
+  for (const condition of body_conditions ?? []) {
+    const hit = SAFETY_SYMPTOM_PATTERNS.some(({ pattern }) =>
+      pattern.test(condition),
+    );
+    const bucket = hit ? confirmed : unlisted;
+    if (!bucket.includes(condition)) bucket.push(condition);
+  }
+  return { confirmed, unlisted };
+}
+
 export interface PlanDraftBlocked {
   ok: false;
-  /** no_profile = 尚未建档；red_flag = 档案含红旗症状；unschedulable = 排不进档案约束 */
+  /** no_profile = 尚未建档；red_flag = 身体情况命中安全症状；unschedulable = 排不进档案约束 */
   code: "no_profile" | "red_flag" | "unschedulable";
   reason: string;
-  /** code = red_flag 时给出红旗症状原文（文案由调用方组织，本模块不写对话文案） */
+  /** code = red_flag 时给出命中六类清单的原文（文案由调用方组织，本模块不写对话文案） */
   red_flags: string[];
 }
 
@@ -403,7 +443,7 @@ export type PlanDraftBuild = PlanDraftBlocked | PlanDraftReady;
 
 /**
  * 从正式档案与当前有效限制生成 PPL 计划草稿（F2-02）。
- * 缺档案或存在红旗症状时不生成任何处方；按 3.1 过滤后任一块没有可用动作、
+ * 缺档案或身体情况命中六类安全症状时不生成任何处方；按 3.1 过滤后任一块没有可用动作、
  * 或生成结果未通过 `planPayloadError` 自检时同样不给处方（fail-closed）。
  */
 export function buildPplDraft(input: {
@@ -418,12 +458,12 @@ export function buildPplDraft(input: {
       reason: "尚未建立正式档案，不生成计划处方",
       red_flags: [],
     };
-  const red_flags = [...profile.physical_state.red_flags];
+  const red_flags = classifyBodyConditions(profile.body_conditions).confirmed;
   if (red_flags.length > 0)
     return {
       ok: false,
       code: "red_flag",
-      reason: `档案存在红旗症状：${red_flags.join("、")}`,
+      reason: `身体情况命中安全症状：${red_flags.join("、")}`,
       red_flags,
     };
   if (profile.weekly_frequency < PLAN_CANDIDATE.weekdays.length)
@@ -494,7 +534,7 @@ export function buildPplDraft(input: {
 
 /**
  * 计划草稿的确定性安全前置校验（F2-02；生成自检与后续纠错／确认提交共用同一口径）。
- * 返回 undefined = 通过；否则返回具体违规说明。覆盖：缺档案／红旗、频率、每次预计时长、
+ * 返回 undefined = 通过；否则返回具体违规说明。覆盖：缺档案／安全症状、频率、每次预计时长、
  * 器械、具体动作与动作模式限制、同一训练日重复动作身份（同一 weekday 跨板块一并去重；
  * 跨训练日复用不判冲突）、
  * 只引用可推荐目录动作、无可信记录一律校准（无起始重量）、日程与生效范围严格一致。
@@ -505,9 +545,9 @@ export function planPayloadError(
 ): string | undefined {
   const { profile, restrictions } = ctx;
   if (!profile) return "尚未建档：不生成计划处方";
-  const redFlags = profile.physical_state.red_flags;
+  const redFlags = classifyBodyConditions(profile.body_conditions).confirmed;
   if (redFlags.length > 0)
-    return `档案存在红旗症状（${redFlags.join("、")}）：不生成常规计划处方`;
+    return `身体情况命中安全症状（${redFlags.join("、")}）：不生成常规计划处方`;
 
   const { plan, scope, schedules } = payload;
   if (!plan || !scope || !schedules)
@@ -579,7 +619,7 @@ export function planPayloadError(
 /**
  * 使用时整份安全复核（F2-05；04 4.5、02 2.2/2.3）：按最新红旗与限制重查当前计划的全部动作。
  * 任一动作命中具体动作限制（同名）或动作模式限制（模式交集）即整份不可用（`usable: false`），
- * 不输出其余「未冲突」动作的处方；红旗症状独立阻断（`red_flag_blocked`）。
+ * 不输出其余「未冲突」动作的处方；身体情况命中安全症状时独立阻断（`red_flag_blocked`）。
  * 复核只产出投影、不改写计划内容，也不新增计划状态：限制解除后重新复核即可恢复可用。
  * `context_version` 记录本次复核依据的业务版本（/profile 与指导请求都在请求时重算，不缓存结果）。
  */
@@ -608,8 +648,9 @@ export function reviewPlanSafety(input: {
         });
     }
   }
+  /* 读取时分类（同一入口）：普通身体情况非空但未命中六类**不**阻断（02 2.3） */
   const red_flag_blocked =
-    (input.profile?.physical_state.red_flags.length ?? 0) > 0;
+    classifyBodyConditions(input.profile?.body_conditions).confirmed.length > 0;
   return {
     context_version: input.context_version,
     reviewed_at: new Date().toISOString(),

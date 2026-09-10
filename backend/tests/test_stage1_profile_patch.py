@@ -93,8 +93,15 @@ async def test_apply_patch_does_not_modify_input_objects() -> None:
             (ActionRestriction("specific_action", "barbell-back-squat"),)
         ),
     )
+    profile = Profile(
+        training_goal=Fact.known("增肌"),
+        action_restrictions=Fact.known(
+            (ActionRestriction("specific_action", "barbell-back-squat"),)
+        ),
+        body_conditions=Fact.known(("肩部偶有不适",)),
+    )
     patch = ProfilePatch(
-        facts={"available_equipment": Fact.known(("哑铃",))},
+        facts={"body_conditions": Fact.known(("深蹲时膝盖锐痛",))},
         add_restrictions=(ActionRestriction("movement_pattern", "深蹲"),),
     )
     facts_snapshot = dict(patch.facts)
@@ -106,6 +113,8 @@ async def test_apply_patch_does_not_modify_input_objects() -> None:
         ActionRestriction("specific_action", "barbell-back-squat"),
     )
     assert profile.available_equipment.is_unknown
+    assert profile.body_conditions == Fact.known(("肩部偶有不适",))
+    assert proposed.body_conditions == Fact.known(("深蹲时膝盖锐痛",))
     assert dict(patch.facts) == facts_snapshot
     assert patch.add_restrictions == (ActionRestriction("movement_pattern", "深蹲"),)
     assert proposed.restrictions == (
@@ -172,11 +181,34 @@ async def test_preview_rejects_session_conditions_before_touching_database(
         assert await _profile_row(db) == (None, 0)
 
 
+def test_body_conditions_patch_is_memory_only() -> None:
+    """长期身体情况补丁纯内存：apply_patch 只返回新对象，输入档案与序列化结果不动。"""
+    profile = Profile(body_conditions=Fact.denied(), body_weight_kg=Fact.known(70.0))
+    patch = ProfilePatch(facts={"body_conditions": Fact.known(("深蹲时膝盖锐痛",))})
+    proposed = rules.apply_patch(profile, patch)
+    assert proposed.body_conditions == Fact.known(("深蹲时膝盖锐痛",))
+    assert profile.body_conditions == Fact.denied()
+    assert profile_to_json(profile) == profile_to_json(
+        Profile(body_conditions=Fact.denied(), body_weight_kg=Fact.known(70.0))
+    )
+
+
+def test_session_body_conditions_do_not_enter_long_term_patch() -> None:
+    """当次身体情况只由 SessionConditions 承载，长期补丁不读它、也不写进档案。"""
+    today = SessionConditions(body_conditions=Fact.known(("今天膝盖锐痛",)))
+    rules.validate_session_conditions(today)
+    with pytest.raises(TypeError):
+        rules.validate_patch(today)  # type: ignore[arg-type]
+    proposed = rules.apply_patch(_seeded_profile(), ProfilePatch())
+    assert proposed.body_conditions.is_unknown
+    assert "今天膝盖锐痛" not in profile_to_json(proposed)
+
+
 def test_session_condition_shape_is_disjoint_from_patch_and_profile() -> None:
     patch_fields = set(ProfilePatch.__dataclass_fields__)
     session_fields = set(SessionConditions.__dataclass_fields__)
     assert patch_fields == {"facts", "add_restrictions", "remove_restrictions"}
-    assert session_fields == {"available_equipment", "red_flags"}
+    assert session_fields == {"available_equipment", "body_conditions"}
     assert patch_fields.isdisjoint(session_fields)
 
 
@@ -197,12 +229,18 @@ def test_session_conditions_validate_structure() -> None:
     rules.validate_session_conditions(
         SessionConditions(
             available_equipment=Fact.denied(),
-            red_flags=Fact.known(("麻木",)),
+            body_conditions=Fact.known(("肩部偶有不适",)),
         )
     )
     with pytest.raises(rules.InvalidProfile):
         rules.validate_session_conditions(
             SessionConditions(available_equipment=Fact.known(("哑铃", "哑铃")))
         )
+    # 当次身体情况按与长期档案同口径校验（text_list：非空文本、不重复）；输入对象不被修改
+    for bad in (Fact.known(("深蹲时膝盖锐痛", "深蹲时膝盖锐痛")), Fact.known("锐痛")):
+        conditions = SessionConditions(body_conditions=bad)
+        with pytest.raises(rules.InvalidProfile):
+            rules.validate_session_conditions(conditions)
+        assert conditions.body_conditions is bad
     with pytest.raises(TypeError):
         rules.validate_session_conditions(ProfilePatch())  # type: ignore[arg-type]

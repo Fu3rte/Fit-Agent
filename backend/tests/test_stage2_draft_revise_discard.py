@@ -50,7 +50,7 @@ SEEDED_EXERCISE_ID = "barbell-back-squat"  # 003 迁移种子：合法具体动�
 
 
 def _seeded_profile() -> Profile:
-    """已建档正式档案样本：带限制与红旗事实（供 2B 安全字段纠错对照）。"""
+    """已建档正式档案样本：带限制与身体情况事实（供 2B 安全字段纠错对照）。"""
     return Profile(
         training_goal=Fact.known("力量"),
         body_weight_kg=Fact.known(72.5),
@@ -58,8 +58,7 @@ def _seeded_profile() -> Profile:
         action_restrictions=Fact.known(
             (ActionRestriction(scope="specific_action", target=SEEDED_EXERCISE_ID),)
         ),
-        body_state=Fact.known(("肩部偶有不适",)),
-        red_flags=Fact.known(("锐痛",)),
+        body_conditions=Fact.known(("肩部偶有不适", "锐痛")),
     )
 
 
@@ -94,17 +93,16 @@ def _revised_profile() -> Profile:
 
 
 def _corrected_safety_profile() -> Profile:
-    """2B 纠错样本：内联更正红旗、身体状态与动作限制（结构化、可校验）。"""
+    """2B 纠错样本：内联更正身体情况与动作限制（结构化、可校验）。"""
     return Profile(
         training_goal=Fact.known("增肌"),
         training_experience=Fact.known("零基础"),
         weekly_frequency=Fact.known(3),
         session_duration_minutes=Fact.known(60),
         available_equipment=Fact.denied(),
-        # 明确无限制（denied）与明确无症状（known(())）都是 2B 允许的内联纠错
+        # 明确无限制（denied）与明确无身体情况（known(())）都是 2B 允许的内联纠错
         action_restrictions=Fact.denied(),
-        body_state=Fact.known(("腰部紧绷感",)),
-        red_flags=Fact.known(()),
+        body_conditions=Fact.known(("腰部紧绷感",)),
         body_weight_kg=Fact.known(73.0),
     )
 
@@ -215,7 +213,7 @@ async def test_revise_updates_proposal_revision_and_diff_without_touching_formal
 async def test_correction_covers_all_approved_content_including_safety_fields(
     tmp_path: Path,
 ) -> None:
-    """拍板 2B：动作限制、红旗与身体状态允许在草稿中内联纠错（结构化、经后端校验）。"""
+    """拍板 2B：动作限制与身体情况允许在草稿中内联纠错（结构化、经后端校验）。"""
     async with open_database(tmp_path / "app.db") as db:
         service, baseline = await _setup_service_with_draft(db, draft_id="d1")
 
@@ -229,12 +227,11 @@ async def test_correction_covers_all_approved_content_including_safety_fields(
             ActionRestriction(scope="specific_action", target=SEEDED_EXERCISE_ID),
         )
         assert restrictions.after.is_denied
-        red_flags = _entry(view.diff, "red_flags")
-        assert red_flags.before == Fact.known(("锐痛",))
-        assert red_flags.after == Fact.known(())
-        body_state = _entry(view.diff, "body_state")
-        assert body_state.after == Fact.known(("腰部紧绷感",))
-        # 允许用户纠错不等于正式限制／红旗被解除：正式档案原样（草稿级纠错而已）
+        body_conditions = _entry(view.diff, "body_conditions")
+        assert body_conditions.before == Fact.known(("肩部偶有不适", "锐痛"))
+        assert body_conditions.after == Fact.known(("腰部紧绷感",))
+        assert body_conditions.changed is True
+        # 允许用户纠错不等于正式限制／身体情况被改写：正式档案原样（草稿级纠错而已）
         assert await ProfileRepo(db).read() == baseline
 
 

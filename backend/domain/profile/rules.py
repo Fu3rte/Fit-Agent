@@ -5,9 +5,10 @@
 
 边界（stage1.md §5 S1-04）：
 
-- 只做结构表示与引用校验；限制是否命中动作、红旗是否阻断由 S1-05 判定。
+- 只做结构表示与引用校验；限制是否命中动作、红旗是否阻断由 S1-05 判定。身体情况原文
+  不在本模块分类（6 类清单匹配归读取时的 ``domain.profile.safety``）。
 - 不新增业务必填规则、医学阈值或红旗解除语义：Stage 1 必填只有已拍的
-  ``body_weight_kg``；首次建档完整性按 stage2.md §4.3 已拍 1B 的九项明确回答清单执行，
+  ``body_weight_kg``；首次建档完整性按 stage2.md §4.3 已拍 1B 的八项明确回答清单执行，
   不自行加必填或放宽。
 - 补丁计算不得修改输入对象；错误补丁在构造新档案之前失败，不产生部分修改。
 - 拟议补丁与当次条件是两种类型；当次条件传入补丁接口即拒绝（02 2.4）。
@@ -158,13 +159,13 @@ def missing_first_time_fields(profile: Profile) -> tuple[str, ...]:
 
 
 def ensure_first_time_complete(profile: Profile) -> Profile:
-    """首次确认入口的完整性契约：九项事实必须明确回答，缺失即拒绝确认。
+    """首次确认入口的完整性契约：八项事实必须明确回答，缺失即拒绝确认。
 
-    stage2.md §4.3 已拍 1B（2026-09-09）与 2026-09-10 用户拍板 A：目标、经验、频率、时长、
-    器械、体重、动作限制、身体状态与症状询问全部要求明确回答；「明确无」（``denied``）只在
-    ``EXPLICIT_NONE_FACT_FIELDS``（器械、动作限制、身体状态、红旗）上有效，训练目标与训练
-    经验必须是有效文本，未知一律不算完整；数值字段不能以「无」替代有效数值。缺失时拒绝
-    确认且不补造任何字段。
+    stage2.md §4.3 已拍 1B（2026-09-09）、2026-09-10 用户拍板 A 与身体情况合并：目标、经验、
+    频率、时长、器械、体重、动作限制、身体情况全部要求明确回答；「明确无」（``denied``）只在
+    ``EXPLICIT_NONE_FACT_FIELDS``（器械、动作限制、身体情况）上有效，训练目标与训练经验必须
+    是有效文本，未知一律不算完整；数值字段不能以「无」替代有效数值。缺失时拒绝确认且不补造
+    任何字段。
 
     调用方：正式档案尚未建立（``ProfileSnapshot.profile is None``）时的首次确认事务
     （S2-05），与 :func:`ensure_complete_profile`（Stage 1 建档过程唯一必填体重、允许
@@ -259,9 +260,9 @@ def validate_session_conditions(conditions: SessionConditions) -> None:
             raise InvalidProfile(f"当次器械条件不是三态事实：{fact!r}")
         if fact.is_known:
             _validate_text_list("session.available_equipment", fact.value)
-    if conditions.red_flags is not None:
-        fact = conditions.red_flags
+    if conditions.body_conditions is not None:
+        fact = conditions.body_conditions
         if not isinstance(fact, Fact):
-            raise InvalidProfile(f"当次红旗条件不是三态事实：{fact!r}")
+            raise InvalidProfile(f"当次身体情况不是三态事实：{fact!r}")
         if fact.is_known:
-            _validate_text_list("session.red_flags", fact.value)
+            _validate_text_list("session.body_conditions", fact.value)

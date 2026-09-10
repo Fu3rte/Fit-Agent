@@ -5,8 +5,9 @@
  *   未提交的纠错经「提交纠错」走纠错业务接口（01 1.2），确认写入的是服务端最新草稿；
  * - 确认采纳幂等；409 draft_stale → 错误态 + 按最新数据一键重算；
  * - 重算产生的新草稿展示新旧草稿 Diff，再次确认才生效；
- * - 档案草稿：六类事实 + 必填体重结构化展示，选择/数字/文本与器械、限制列表增删走
- *   同一纠错接口（限制含粒度）；红旗症状只读（02 2.3：Agent 不解除红旗）；
+ * - 档案草稿：八项事实 + 必填体重结构化展示，选择/数字/文本与器械、限制、身体情况
+ *   列表增删走同一纠错接口（限制含粒度）；身体情况内联纠错只改待确认草稿；
+ *   提议理由链为读取时派生展示（3a／3b），不写入 ActionRestriction、不进正式档案；
  * - 丢弃待确认草稿（01 1.3）：已丢弃徽章 + 只读，不得再提交。
  */
 import { useState, type ReactNode } from "react";
@@ -548,9 +549,56 @@ const withCurrent = (options: string[], current?: string): string[] =>
         : options;
 
 /**
+ * 草稿卡 3a／3b（读取时派生展示，不新增存储字段）：
+ * 3a——有身体情况且本次提议了限制时，给出理由链（本次身体情况集合 → 本次限制集合）；
+ * 3b——有身体情况但本次未提议限制时显式展示结论，不静默放过。
+ * **集合级，不建立「条件 i → 限制 j」的逐条对应**（2026-09-11 用户拍板）：逐条对应要么靠医学推断
+ * （禁止），要么靠新增只读字段（方案排除）；理由链表达的是「本次草稿的上下文」，不是因果论断。
+ * 理由链只解释本次提议：不写入 ActionRestriction（不加 reason／source），不进正式档案。
+ */
+function RestrictionRationale({
+    bodyConditions,
+    restrictions,
+}: {
+    bodyConditions?: string[];
+    restrictions?: Restriction[];
+}) {
+    // 无身体情况报告（未收集／明确无）时没有本次提议可解释；限制未收集时不声称结论
+    if (bodyConditions === undefined || bodyConditions.length === 0)
+        return null;
+    if (restrictions === undefined) return null;
+    const reported = bodyConditions.join("、");
+    if (restrictions.length === 0)
+        return (
+            <p className="rounded-md border border-border bg-muted/40 p-2 text-xs text-muted-foreground">
+                已记录身体情况，本次未提议动作限制
+            </p>
+        );
+    return (
+        <div className="rounded-md border border-border bg-muted/40 p-2 text-xs">
+            <p className="text-muted-foreground">
+                本次提议理由（集合级，不逐条对应）
+            </p>
+            <ul className="mt-1 space-y-0.5">
+                <li>已记录身体情况：「{reported}」</li>
+                <li>
+                    本次提议限制：
+                    {restrictions
+                        .map(
+                            (r) =>
+                                `${r.name === "" ? "待填写" : r.name}（${r.scope === "specific_action" ? "具体动作" : "动作模式"}）`,
+                        )
+                        .join("、")}
+                </li>
+            </ul>
+        </div>
+    );
+}
+
+/**
  * 档案草稿结构化卡：PRD §5.2 六类事实 + 必填体重，全部只改待确认草稿（不自动提交）。
- * 红旗症状只读展示：红旗由对话报告记入档案，草稿卡不提供解除/编辑（02 2.3：Agent
- * 不诊断、不解除红旗）。
+ * 身体情况只保存用户报告原文（内联纠错只改待确认草稿）；分类（六类安全症状）在
+ * 读取时由安全复核完成，草稿卡不做医学判断、不据此阻断。
  */
 function ProfileDraftFields({
     payload,
@@ -563,13 +611,14 @@ function ProfileDraftFields({
 }) {
     const [newEquipment, setNewEquipment] = useState("");
     const [newRestriction, setNewRestriction] = useState("");
+    const [newBodyCondition, setNewBodyCondition] = useState("");
     const [newRestrictionScope, setNewRestrictionScope] =
         useState<Restriction["scope"]>("specific_action");
 
     const prof = payload.profile;
     const equipment = prof.equipment;
     const restrictions = payload.restrictions;
-    const physical = prof.physical_state;
+    const bodyConditions = prof.body_conditions;
 
     const patch = (p: Partial<Profile>) =>
         onChange({ ...payload, profile: { ...prof, ...p } });
@@ -596,7 +645,7 @@ function ProfileDraftFields({
     return (
         <div className="mt-3 space-y-2.5 rounded-lg border border-border bg-muted/30 p-3">
             <p className="text-xs font-medium">
-                建档事实（六类 + 体重，均必填；修改后需提交纠错）
+                建档事实（八项，均必填；修改后需提交纠错）
             </p>
 
             <FieldLine label="训练目标">
@@ -881,38 +930,95 @@ function ProfileDraftFields({
                 )}
             </ListField>
 
-            <ListField label="当前身体状态与红旗症状（只读；红旗由对话报告记入）">
-                <div className="flex flex-wrap items-center gap-1.5">
-                    <span className="text-muted-foreground">红旗症状</span>
-                    {physical === undefined ? (
-                        <span className="text-muted-foreground">尚未收集</span>
-                    ) : physical.red_flags.length > 0 ? (
-                        physical.red_flags.map((flag) => (
-                            <Badge
-                                key={flag}
-                                variant="destructive"
-                                className="text-[10px]"
+            <ListField label="身体情况（用户报告原文；可内联纠错）">
+                {bodyConditions === undefined ? (
+                    <p className="text-muted-foreground">尚未收集</p>
+                ) : (
+                    <>
+                        {bodyConditions.length === 0 && (
+                            <p className="text-muted-foreground">
+                                无（用户明确说明）
+                            </p>
+                        )}
+                        {bodyConditions.map((c, i) => (
+                            <div
+                                key={i}
+                                className="flex flex-wrap items-center gap-1.5"
                             >
-                                {flag}
-                            </Badge>
-                        ))
-                    ) : (
-                        <span className="text-muted-foreground">
-                            无明确红旗（用户确认）
-                        </span>
-                    )}
-                </div>
-                <div className="flex flex-wrap items-center gap-1.5">
-                    <span className="text-muted-foreground">其他描述</span>
-                    {physical === undefined ? (
-                        <span className="text-muted-foreground">尚未收集</span>
-                    ) : physical.notes.length > 0 ? (
-                        <span>{physical.notes.join("、")}</span>
-                    ) : (
-                        <span className="text-muted-foreground">无</span>
-                    )}
-                </div>
+                                <Input
+                                    value={c}
+                                    disabled={disabled}
+                                    onChange={(e) =>
+                                        patch({
+                                            body_conditions: bodyConditions.map(
+                                                (n, j) =>
+                                                    j === i
+                                                        ? e.target.value
+                                                        : n,
+                                            ),
+                                        })
+                                    }
+                                    className="h-7 w-64 text-xs"
+                                    aria-label={`身体情况 ${i + 1}`}
+                                />
+                                <Button
+                                    variant="ghost"
+                                    size="sm"
+                                    className="h-7 px-2 text-xs"
+                                    disabled={disabled}
+                                    onClick={() =>
+                                        patch({
+                                            body_conditions:
+                                                bodyConditions.filter(
+                                                    (_, j) => j !== i,
+                                                ),
+                                        })
+                                    }
+                                    aria-label={`删除身体情况 ${c === "" ? i + 1 : c}`}
+                                >
+                                    删除
+                                </Button>
+                            </div>
+                        ))}
+                        {!disabled && (
+                            <div className="flex flex-wrap items-center gap-1.5">
+                                <Input
+                                    value={newBodyCondition}
+                                    onChange={(e) =>
+                                        setNewBodyCondition(e.target.value)
+                                    }
+                                    placeholder="如 深蹲时膝盖锐痛"
+                                    className="h-7 w-64 text-xs"
+                                    aria-label="新增身体情况"
+                                />
+                                <Button
+                                    variant="outline"
+                                    size="sm"
+                                    className="h-7 px-2 text-xs"
+                                    disabled={newBodyCondition.trim() === ""}
+                                    onClick={() => {
+                                        patch({
+                                            body_conditions: [
+                                                ...bodyConditions,
+                                                newBodyCondition.trim(),
+                                            ],
+                                        });
+                                        setNewBodyCondition("");
+                                    }}
+                                    aria-label="添加身体情况"
+                                >
+                                    添加
+                                </Button>
+                            </div>
+                        )}
+                    </>
+                )}
             </ListField>
+
+            <RestrictionRationale
+                bodyConditions={bodyConditions}
+                restrictions={restrictions}
+            />
         </div>
     );
 }

@@ -45,17 +45,12 @@ export function profileFieldRows(
     );
   if (p.body_weight_kg !== undefined)
     push("档案 · 体重", `${p.body_weight_kg} kg`);
-  if (p.physical_state !== undefined) {
-    const ps = p.physical_state;
+  if (p.body_conditions !== undefined) {
     push(
-      "档案 · 当前身体状态 · 红旗症状",
-      ps.red_flags.length > 0
-        ? ps.red_flags.join("、")
-        : "无明确红旗（用户确认）",
-    );
-    push(
-      "档案 · 当前身体状态 · 其他",
-      ps.notes.length > 0 ? ps.notes.join("、") : "无",
+      "档案 · 身体情况",
+      p.body_conditions.length > 0
+        ? p.body_conditions.join("、")
+        : "无（用户确认）",
     );
   }
   if (payload.restrictions !== undefined)

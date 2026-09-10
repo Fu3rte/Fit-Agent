@@ -13,7 +13,9 @@ S1-05 的输入是三类显式来源：正式档案、拟议补丁后的条件�
   分别命中。限制未命中不等于完整训练安全许可。
 - **红旗清单**：6 类已明确红旗任一出现即阻断常规处方并附线下专业评估提示，不输出疾病
   诊断；清单外症状原文只返回未知/需澄清，不判为无红旗或安全放行，也不扩充医学规则
-  （2026-09-09 已拍）。
+  （2026-09-09 已拍）。分类在**读取时**执行：正式／拟议／当次三来源的身体情况原文
+  （``body_conditions``）在每次调用时与清单原词做确定性匹配，存储只保存报告原文
+  （2026-09-10 拍板）；只做原词包含匹配，不把前端正则搬进领域层。
 - **来源独立**：长期、拟议、当次任一来源出现红旗，另一来源的「无红旗」不能覆盖；限制
   检查通过也不能消除红旗；补丁把红旗改为 denied 同样不能清除正式档案已报告的红旗
   （02 2.3：红旗阻断不因计划修订自动解除）。
@@ -73,7 +75,7 @@ class RestrictionHit:
 
 @dataclass(frozen=True, slots=True)
 class RedFlagFinding:
-    """一个来源的一条红旗记录：``label`` 是报告原文。"""
+    """一个来源的一条红旗相关记录：``label`` 为命中的清单原词，清单外时为报告原文。"""
 
     source: RedFlagSource
     label: str
@@ -212,6 +214,11 @@ def assess_red_flags(
 ) -> RedFlagCheck:
     """按来源独立评估红旗：任一来源的「无红旗」都不覆盖其他来源的红旗。
 
+    三个入参都是**身体情况报告原文**（``body_conditions``）三态事实：正式档案、拟议补丁、
+    当次条件。每次调用都在此做 6 类清单原词匹配（存储层不分类，2026-09-10 拍板）：一条原文
+    命中清单原词即计入 ``confirmed``（标签取清单原词），未命中任何原词的原文计入
+    ``unlisted``（标签取原文），清单外内容不判安全。
+
     ``proposed``／``session`` 为 None 表示该来源本次未提供，不计入未收集；``unknown``
     来源记入 ``unknown_sources``（需澄清），``denied`` 来源视为用户明确否认，``known``
     空元组表示已收集且无报告。
@@ -238,8 +245,13 @@ def assess_red_flags(
         if not isinstance(labels, tuple):
             raise TypeError(f"红旗来源 {source} 的 known 值需要文本元组：{labels!r}")
         for label in labels:
-            if label in RED_FLAG_KINDS:
-                confirmed.append(RedFlagFinding(source=source, label=label))
+            if not isinstance(label, str):
+                raise TypeError(f"红旗来源 {source} 的报告原文需要文本：{label!r}")
+            matched = tuple(kind for kind in RED_FLAG_KINDS if kind in label)
+            if matched:
+                confirmed.extend(
+                    RedFlagFinding(source=source, label=kind) for kind in matched
+                )
             else:
                 unlisted.append(RedFlagFinding(source=source, label=label))
     return RedFlagCheck(
@@ -259,10 +271,10 @@ def evaluate_safety(
     """对候选动作集合做本地确定性安全校验，输入三类来源、输出命中与阻断原因。
 
     - ``profile``：正式档案；限制命中按**补丁后**条件计算（01 1.4：不能只按旧条件校验），
-      红旗则按正式／拟议／当次三来源独立评估。
+      红旗则按正式／拟议／当次三来源的身体情况原文独立评估（分类在读取时执行）。
     - ``patch``：拟议长期补丁（纯内存应用，不改输入对象、不落库）；补丁删除限制后按删除后
       条件判定，生效与版本推进归 Stage 2 确认事务（01 1.4）。
-    - ``session``：当次条件；当前只承载当次红旗，器械条件不构成动作限制（02 2.2、2.4）。
+    - ``session``：当次条件；当前只承载当次身体情况，器械条件不构成动作限制（02 2.2、2.4）。
 
     限制状态：正式未收集（``unknown``）时结果恒为未收集；否则取补丁后条件的三态。补丁触及
     限制只改变命中集，不把「未收集」升级成「已知无限制」，也不当 denied 放行。
@@ -288,8 +300,10 @@ def evaluate_safety(
         else ()
     )
     hits = check_action_restrictions(restrictions, candidate_actions)
-    proposed_red_flags = None if patch is None else patch.facts.get("red_flags")
-    session_red_flags = None if session is None else session.red_flags
+    proposed_body_conditions = (
+        None if patch is None else patch.facts.get("body_conditions")
+    )
+    session_body_conditions = None if session is None else session.body_conditions
     return SafetyCheckResult(
         restrictions=RestrictionCheck(
             state=(
@@ -300,6 +314,6 @@ def evaluate_safety(
             hits=hits,
         ),
         red_flags=assess_red_flags(
-            profile.red_flags, proposed_red_flags, session_red_flags
+            profile.body_conditions, proposed_body_conditions, session_body_conditions
         ),
     )

@@ -2,13 +2,13 @@
 
 验收对照（stage2.md §5 S2-01「完整性契约」）：
 
-- 九项事实（目标、经验、频率、时长、器械、体重、动作限制、身体状态与症状询问）全部要求
-  明确回答；「未知」不算完整。2026-09-10 用户拍板 A：「明确无」只对器械、动作限制、
-  身体状态、红旗四项有效，训练目标与训练经验必须是有效文本，其余数值字段必须是有效数值。
+- 八项事实（目标、经验、频率、时长、器械、体重、动作限制、身体情况）全部要求明确回答；
+  「未知」不算完整。2026-09-10 用户拍板 A：「明确无」只对器械、动作限制、身体情况三项
+  有效，训练目标与训练经验必须是有效文本，其余数值字段必须是有效数值。
 - 每类信息缺失／未知时拒绝首次确认；全部明确回答时可进入后续确认校验。
 - 明确回答仍须符合对应字段的类型与领域校验，不能以「无」替代必需的有效数值。
-- 完整性只表示信息齐备，不等于没有症状或已获训练安全许可：红旗仍独立阻断，确认成功不
-  自动解除红旗或限制。
+- 完整性只表示信息齐备，不等于没有症状或已获训练安全许可：身体情况原文命中六类清单仍
+  独立阻断，确认成功不自动解除报告或限制。
 - Stage 1 的「部分事实可保存」能力不被当作生产确认规则，也不被本契约取消。
 
 确认事务编排（app/confirm.py）与 HTTP 接线（api/routes_drafts.py）归 S2-05／S2-07；本模块
@@ -27,7 +27,8 @@ from domain.profile.schema import ActionRestriction, Fact, Profile
 from domain.profile.service import ProfileService
 from tests.support import open_database
 
-# 已拍九项清单（stage2.md §4.3）：本文件硬编码，字段清单漂移时大声失败。
+# 已拍八项清单（stage2.md §4.3，2026-09-10 身体情况合并后九项变八项）：本文件硬编码，
+# 字段清单漂移时大声失败。
 DECIDED_FIRST_TIME_FIELDS = (
     "training_goal",
     "training_experience",
@@ -36,8 +37,7 @@ DECIDED_FIRST_TIME_FIELDS = (
     "available_equipment",
     "body_weight_kg",
     "action_restrictions",
-    "body_state",
-    "red_flags",
+    "body_conditions",
 )
 
 # 必需有效数值的字段：denied（明确无）不能替代有效数值（stage2.md §4.3）。
@@ -52,8 +52,7 @@ REQUIRED_VALUE_FIELDS = (
 EXPLICIT_NONE_FIELDS = (
     "available_equipment",
     "action_restrictions",
-    "body_state",
-    "red_flags",
+    "body_conditions",
 )
 
 # 必须给出有效文本的字段：2026-09-10 拍板 A，denied（明确无）不算回答。
@@ -85,7 +84,7 @@ def _action(standard_name: str) -> Exercise:
 
 
 def _answered_profile(**overrides: object) -> Profile:
-    """九项均已明确回答的档案；overrides 用于把指定字段替换为待验证状态/取值。"""
+    """八项均已明确回答的档案；overrides 用于把指定字段替换为待验证状态/取值。"""
     base: dict[str, object] = {
         "training_goal": Fact.known("增肌"),
         "training_experience": Fact.known("新手"),
@@ -94,8 +93,7 @@ def _answered_profile(**overrides: object) -> Profile:
         "available_equipment": Fact.known(("杠铃",)),
         "body_weight_kg": Fact.known(72.5),
         "action_restrictions": Fact.known(()),
-        "body_state": Fact.known(("肩部偶有不适",)),
-        "red_flags": Fact.known(()),
+        "body_conditions": Fact.known(("肩部偶有不适",)),
     }
     base.update(overrides)
     return Profile(**base)  # type: ignore[arg-type]
@@ -210,11 +208,11 @@ def test_explicit_none_cannot_replace_a_required_text_value(field: str) -> None:
 
 @pytest.mark.parametrize(
     "field",
-    ["available_equipment", "action_restrictions", "body_state", "red_flags"],
+    ["available_equipment", "action_restrictions", "body_conditions"],
 )
 def test_known_empty_collection_is_an_explicit_answer(field: str) -> None:
     assert field in schema.EXPLICIT_NONE_FACT_FIELDS
-    # 显式空集合与前端契约的 equipment: []／red_flags: [] 同义，都是明确回答
+    # 显式空集合与前端契约的 equipment: []／body_conditions: [] 同义，都是明确回答
     profile = _answered_profile(**{field: Fact.known(())})
     assert profile.first_time_missing_fields == ()
     assert rules.ensure_first_time_complete(profile) is profile
@@ -295,7 +293,7 @@ async def test_unbuilt_profile_is_not_confirmable(tmp_path: Path) -> None:
 
 
 def test_reported_red_flag_counts_as_answered_but_still_blocks() -> None:
-    profile = _answered_profile(red_flags=Fact.known(("晕厥",)))
+    profile = _answered_profile(body_conditions=Fact.known(("晕厥",)))
     assert profile.first_time_missing_fields == ()
     assert (
         rules.ensure_first_time_complete(profile) is profile
@@ -306,7 +304,7 @@ def test_reported_red_flag_counts_as_answered_but_still_blocks() -> None:
 
 
 def test_unlisted_symptom_is_answered_but_not_treated_as_safe() -> None:
-    profile = _answered_profile(red_flags=Fact.known(("最近训练有点头晕",)))
+    profile = _answered_profile(body_conditions=Fact.known(("最近训练有点头晕",)))
     assert rules.ensure_first_time_complete(profile) is profile
     result = evaluate_safety(profile, ())
     assert result.red_flags.is_blocked is False

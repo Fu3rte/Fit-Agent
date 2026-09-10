@@ -14,7 +14,6 @@ import type {
   Draft,
   ErrorCode,
   FieldDiff,
-  PhysicalState,
   PlanBlock,
   PlanDraftPayload,
   PlanScheduleEntry,
@@ -41,6 +40,7 @@ import {
   PLAN_CANDIDATE,
   buildPplDraft,
   buildSchedules,
+  classifyBodyConditions,
   normalizePlanPayload,
   planCandidates,
   planDraftDiff,
@@ -81,13 +81,14 @@ interface OnboardingState {
   /** 缺省 = 未收集；[] = 用户明确说明无器械 */
   equipment?: string[];
   body_weight_kg?: number;
-  /** 缺省 = 未收集；[] = 用户明确说明无限制（只含当前有效限制，无状态语义） */
+  /** 缺省 = 未收集；[] = 用户明确说明无限制（只含当前有效限制，无状态语义）
+   *  2026-09-10 拍板：首次建档不单独追问，结论由身体情况推出（未提议限制时为 []） */
   restrictions?: Restriction[];
-  /** 缺省 = 未收集；已收集时 red_flags/notes 为明确值（[] = 用户确认无） */
-  physical_state?: PhysicalState;
+  /** 缺省 = 未收集；已收集时为用户报告原文（[] = 用户明确否认；存储不做医学分类） */
+  body_conditions?: string[];
   /** 最近一次追问的事实：用于把「没有」解释为对该项的明确否认 */
   last_asked?: OnboardingFact;
-  /** 清单外症状（未判定安全）：用户明确否认前不写入档案，也不判定为无 */
+  /** 读取时分类未命中六类清单的原文（不判定安全）：只用于澄清追问，不单独入档 */
   pending_symptoms: string[];
   /** 最近一次生成的档案草稿 id 与当时的载荷快照：避免同基线重复出稿 */
   draft_id?: string;
@@ -394,10 +395,7 @@ function seedState(): MockState {
       session_minutes: 60,
       equipment: ["杠铃", "哑铃", "卧推架", "引体架", "绳索"],
       body_weight_kg: 72.5,
-      physical_state: {
-        red_flags: [],
-        notes: ["肩部偶有不适（颈后推举时明显）"],
-      },
+      body_conditions: ["肩部偶有不适（颈后推举时明显）"],
     },
     // 只列当前有效的已确认限制（02 2.2）：两种粒度各一例，不携带状态语义
     restrictions: [
@@ -505,7 +503,7 @@ function noPlanSeedState(): MockState {
     session_minutes: 60,
     equipment: ["杠铃", "哑铃", "卧推架", "引体架", "绳索"],
     body_weight_kg: 72.5,
-    physical_state: { red_flags: [], notes: [] },
+    body_conditions: [],
   };
   base.sessions = [
     { id: "s1", title: "计划生成", updated_at: MOCK_UPDATED_AT },
@@ -829,15 +827,7 @@ function profileWithPatch(
     session_minutes: p.session_minutes ?? current.session_minutes,
     equipment: [...(p.equipment ?? current.equipment)],
     body_weight_kg: p.body_weight_kg ?? current.body_weight_kg,
-    physical_state: p.physical_state
-      ? {
-          red_flags: [...p.physical_state.red_flags],
-          notes: [...p.physical_state.notes],
-        }
-      : {
-          red_flags: [...current.physical_state.red_flags],
-          notes: [...current.physical_state.notes],
-        },
+    body_conditions: [...(p.body_conditions ?? current.body_conditions)],
   };
 }
 
@@ -1075,22 +1065,30 @@ function planScriptReply(state: MockState): { text: string; draft?: Draft } {
 
 /**
  * F2-05：请求基于当前计划的训练日指导（只读，不生成任何草稿——计划修改仍须经对话草稿确认）。
- * 给出处方前先用最新红旗与限制复核整份计划（04 4.5）：
- * - 红旗症状独立阻断：建议线下专业评估，不给任何常规处方；
+ * 给出处方前先用最新身体情况分类与限制复核整份计划（04 4.5）：
+ * - 命中六类安全症状时独立阻断：建议线下专业评估，不给任何常规处方；
  * - 任一动作命中具体动作／动作模式限制：整份阻断，**不**只跳过冲突动作继续给其余动作的处方。
  * 两种阻断都只影响「使用时」：当前计划与其当前日程仍可在 /profile 查看，修订从对话发起。
  */
 function planGuidanceReply(state: MockState): string {
-  /* 红旗独立阻断（02 2.3）：与有没有计划无关，先于计划检查——不生成、也不给出任何常规处方 */
-  const redFlags = state.profile?.physical_state.red_flags ?? [];
+  /* 安全症状独立阻断（02 2.3；读取时分类）：与有没有计划无关，先于计划检查——不生成、也不给出任何常规处方 */
+  const redFlags = classifyBodyConditions(
+    state.profile?.body_conditions,
+  ).confirmed;
   if (redFlags.length > 0)
     return [
       professionalEvalBlock(redFlags),
-      "当前档案含红旗症状，本次不给出任何基于计划的训练指导。请先完成线下专业评估；经专业人员确认可以恢复训练后，再从对话调整档案与计划。",
+      "当前身体情况命中需要专业评估的症状，本次不给出任何基于计划的训练指导。请先完成线下专业评估；经专业人员确认可以恢复训练后，再从对话调整档案与计划。",
     ].join("\n\n");
 
   const plan = state.plan;
   if (!plan) return NO_PLAN_GUIDANCE_REPLY;
+  /* 普通身体情况非空但未命中六类：不阻断，只提示需澄清（不判定安全） */
+  const unlisted = classifyBodyConditions(
+    state.profile?.body_conditions,
+  ).unlisted;
+  const clarification =
+    unlisted.length > 0 ? [unlistedSymptomBlock(unlisted)] : [];
   const safety = reviewPlanSafety({
     plan,
     profile: state.profile,
@@ -1098,7 +1096,7 @@ function planGuidanceReply(state: MockState): string {
     context_version: state.context_version,
   });
 
-  /* 红旗已在上面拦截，这里的不可用只剩限制冲突（仍按整份阻断，不降级为逐动作跳过） */
+  /* 安全症状已在上面拦截，这里的不可用只剩限制冲突（仍按整份阻断，不降级为逐动作跳过） */
   if (!safety.usable) {
     return [
       `按最新限制复核当前计划 ${plan.version}：**整份计划指导已阻断**——任一动作命中限制时，我不会给出任何基于该计划的处方，也不会只跳过冲突动作、继续给其余「未冲突」动作的处方。`,
@@ -1124,8 +1122,9 @@ function planGuidanceReply(state: MockState): string {
   const block = plan.blocks.find((b) => b.weekday === upcoming?.weekday);
   if (!upcoming || !block)
     return [
-      `当前计划 ${plan.version} 通过最新红旗与限制复核，但区间内没有未到期的应训练日（${plan.start_date} ~ ${plan.review_date}）。`,
+      `当前计划 ${plan.version} 通过最新身体情况与限制复核，但区间内没有未到期的应训练日（${plan.start_date} ~ ${plan.review_date}）。`,
       "复核日后的续期与跨周期切换不在本阶段范围内；如需新计划请从对话发起。",
+      ...clarification,
     ].join("\n");
 
   const calibration = block.exercises[0]?.calibration;
@@ -1142,7 +1141,8 @@ function planGuidanceReply(state: MockState): string {
       ? `- 通过标准：${calibration.pass_criteria}；停止条件：${calibration.stop_criteria}`
       : "",
     "",
-    "该指导依据当前计划与最新安全复核；如出现疼痛或红旗症状请立即停止并按线下专业评估处理。",
+    "该指导依据当前计划与最新安全复核；如出现疼痛或需专业评估的情况请立即停止并按线下专业评估处理。",
+    ...clarification,
   ]
     .filter((line) => line !== "")
     .join("\n");
@@ -1150,7 +1150,7 @@ function planGuidanceReply(state: MockState): string {
 
 /**
  * F2-02：从正式档案与当前有效限制生成 PPL 计划草稿（新建 v1）。
- * 缺档案、档案含红旗症状或排不进档案约束时不给任何处方，只说明原因与下一步。
+ * 缺档案、身体情况命中六类安全症状或排不进档案约束时不给任何处方，只说明原因与下一步。
  */
 function newPlanReply(state: MockState): { text: string; draft?: Draft } {
   const built = buildPplDraft({
@@ -1162,14 +1162,14 @@ function newPlanReply(state: MockState): { text: string; draft?: Draft } {
       return {
         text: [
           professionalEvalBlock(built.red_flags),
-          "当前档案已记录红旗症状，因此我不会生成任何计划处方。请先完成线下专业评估；经专业人员确认可以恢复训练后，再回来调整档案与计划。",
+          "当前身体情况命中需要专业评估的症状，因此我不会生成任何计划处方。请先完成线下专业评估；经专业人员确认可以恢复训练后，再回来调整档案与计划。",
         ].join("\n\n"),
       };
     if (built.code === "no_profile")
       return {
         text: [
           "还没有正式档案，我不会凭空生成计划处方。",
-          "请在对话中补齐建档信息（目标、经验、每周频率、单次时长、可用器械、体重、动作限制与当前身体状态），确认后再生成计划。",
+          "请在对话中补齐建档信息（目标、经验、每周频率、单次时长、可用器械、体重、动作限制与身体情况），确认后再生成计划。",
         ].join("\n\n"),
       };
     return {
@@ -1257,8 +1257,9 @@ type OnboardingFact =
   | "equipment"
   | "body_weight_kg"
   | "restrictions"
-  | "physical_state";
+  | "body_conditions";
 
+/** 建档事实顺序（八项）；动作限制不单独追问：结论由身体情况一次推出（2026-09-10 拍板） */
 const ONBOARDING_FACTS: readonly OnboardingFact[] = [
   "goal",
   "experience",
@@ -1267,10 +1268,13 @@ const ONBOARDING_FACTS: readonly OnboardingFact[] = [
   "equipment",
   "body_weight_kg",
   "restrictions",
-  "physical_state",
+  "body_conditions",
 ];
 
-const FACT_QUESTIONS: Record<OnboardingFact, string> = {
+/** 可单独追问的事实；`restrictions` 无独立追问文案（结论随 `body_conditions` 一次给出） */
+type AskedFact = Exclude<OnboardingFact, "restrictions">;
+
+const FACT_QUESTIONS: Record<AskedFact, string> = {
   goal: "你的训练目标是什么？（增肌 / 力量 / 整体健康）",
   experience:
     "你的训练经验大概到什么程度？（零基础 / 有一点基础 / 稳定训练过一段时间）",
@@ -1279,10 +1283,8 @@ const FACT_QUESTIONS: Record<OnboardingFact, string> = {
   equipment:
     "可用器械有哪些？（如杠铃、哑铃、卧推架、引体架、绳索；没有器械也请直接说明）",
   body_weight_kg: "当前体重是多少公斤？（建档必填，我不会替你填默认值）",
-  restrictions:
-    "有没有已知的动作限制？可以说具体动作（如「颈后推举肩部不适」）或动作模式（如「深蹲膝部不适」）；没有请明确说「没有」。",
-  physical_state:
-    "当前身体状态如何？有没有胸部异常不适、晕厥、异常气短、锐痛、麻木、放射痛这类需要线下专业评估的情况？没有也请明确说明。",
+  body_conditions:
+    "当前身体情况如何？一次说明就好：有没有哪里不适、是否影响某个动作（如「深蹲时膝盖锐痛」）、是否出现胸部异常不适、晕厥、异常气短、锐痛、麻木、放射痛这类需要线下专业评估的情况；都没有也请明确说「没有」。",
 };
 
 /**
@@ -1306,24 +1308,11 @@ const CHECKIN_PATTERN =
 /** 用户明确否认的表达（仅用于把「没有」解释为对上一问的明确否认） */
 const DENIAL_PATTERN = /没有|没|无|不用|不需要|一切正常|都正常|没问题/;
 
-/**
- * 明确红旗症状（02 2.3 清单）。plans/stage1.md §8 已拍：清单外症状继续澄清、
- * 不判定安全，不自行扩充医学规则；Agent 不诊断、不解除红旗。
- */
-const RED_FLAG_PATTERNS: readonly { label: string; pattern: RegExp }[] = [
-  { label: "胸部异常不适", pattern: /胸部(?:异常|明显|持续)(?:不适|闷|痛)/ },
-  { label: "晕厥", pattern: /晕厥|昏厥|晕倒/ },
-  { label: "异常气短", pattern: /气短|喘不上气|呼吸困难/ },
-  { label: "锐痛", pattern: /锐痛|刺痛/ },
-  { label: "麻木", pattern: /麻木|发麻/ },
-  { label: "放射痛", pattern: /放射痛|放射到|放射至/ },
-];
-
-/** 症状标记（用于识别清单外症状 → 继续澄清，不判定安全） */
+/** 症状标记（识别身体情况报告的原文子句；不做分类，不判定安全） */
 const SYMPTOM_MARKER =
   /不适|不舒服|疼痛|疼|痛|发麻|麻木|发酸|酸胀|发紧|头晕|晕|气短|胸闷|受伤|肿/;
 
-/** 已知限制对象（阶段 1 演示短语表；不在表内不做限制解析） */
+/** 已知限制对象（固定提议剧本的短语表）：只用于模拟「限制提议」，不在写入阶段做医学分类 */
 const RESTRICTION_SUBJECTS: readonly {
   pattern: RegExp;
   name: string;
@@ -1380,10 +1369,10 @@ interface ParsedFacts {
   restrictions: Restriction[];
   /** 用户明确说明无动作限制 */
   restrictions_none: boolean;
-  red_flags: string[];
-  /** 用户明确说明无红旗/无不适 */
+  /** 用户报告的身体情况原文子句（只存原文，分类在读取时进行） */
+  body_conditions: string[];
+  /** 用户明确说明无身体情况（不入档的否定不算报告） */
   physical_none: boolean;
-  unlisted_symptoms: string[];
   /** 本条消息是否提供了任何建档事实（含明确否认） */
   touched: boolean;
 }
@@ -1397,25 +1386,12 @@ function onboardingOf(state: MockState, sessionId: string): OnboardingState {
   return ob;
 }
 
-/** 明确红旗识别：否定前缀（如「没有胸部异常不适」）不算报告红旗 */
-function detectRedFlags(message: string): string[] {
-  const found: string[] = [];
-  for (const { label, pattern } of RED_FLAG_PATTERNS) {
-    const re = new RegExp(pattern.source, "g");
-    let m: RegExpExecArray | null;
-    while ((m = re.exec(message)) !== null) {
-      const before = message.slice(Math.max(0, m.index - 6), m.index);
-      if (!/(没有|没|无|不|未)/.test(before)) {
-        if (!found.includes(label)) found.push(label);
-        break;
-      }
-    }
-  }
-  return found;
-}
-
-/** 清单外症状：只做澄清，不判定安全（plans/stage1.md §8） */
-function unlistedSymptoms(message: string): string[] {
+/**
+ * 身体情况报告原文：逐子句保存原文（如「深蹲时膝盖锐痛」整句入档，不只存「锐痛」）。
+ * 不做医学分类，也不在写入阶段判定红旗；命中与未命中清单的区分放到读取时（classifyBodyConditions）。
+ * 否认子句（「没有其他不适」）不算报告。
+ */
+function reportedBodyConditions(message: string): string[] {
   return message
     .split(/[，。；;,、\n！!？?]/)
     .map((c) => c.trim())
@@ -1445,7 +1421,10 @@ function clauseOf(message: string, index: number): string {
   return message.slice(start);
 }
 
-/** 限制解析：已知限制对象 + 同一子句内不适/受限标记（两种粒度；不引入限制状态语义） */
+/**
+ * 限制提议（固定剧本，不做通用医学推断器）：已知限制对象 + 同一子句内不适／受限标记。
+ * 提议只进草稿（用户确认前不写正式限制）；理由链由草稿卡按「身体情况 → 提议限制」派生展示。
+ */
 function parseRestrictions(message: string): Restriction[] {
   const out: Restriction[] = [];
   const equipment = equipmentSpans(message);
@@ -1468,9 +1447,8 @@ function parseFacts(message: string): ParsedFacts {
     equipment_none: false,
     restrictions: [],
     restrictions_none: false,
-    red_flags: [],
+    body_conditions: [],
     physical_none: false,
-    unlisted_symptoms: [],
     touched: false,
   };
 
@@ -1558,13 +1536,13 @@ function parseFacts(message: string): ParsedFacts {
     out.touched = true;
   }
 
-  out.red_flags = detectRedFlags(text);
-  if (out.red_flags.length > 0) out.touched = true;
-  // 明确红旗消息里的不适归入红旗，不再重复解析为动作限制（避免把症状误报成限制）
-  if (out.red_flags.length === 0) {
-    out.restrictions = parseRestrictions(text);
-    if (out.restrictions.length > 0) out.touched = true;
-  }
+  // 身体情况：只保存用户报告原文（逐子句；不做分类，分类在读取时进行）
+  out.body_conditions = reportedBodyConditions(text);
+  if (out.body_conditions.length > 0) out.touched = true;
+  // 限制提议：基于同一批报告原文（固定剧本），进草稿而非正式限制
+  out.restrictions =
+    out.body_conditions.length > 0 ? parseRestrictions(text) : [];
+  if (out.restrictions.length > 0) out.touched = true;
   if (
     /没有(?:任何)?(?:动作)?限制|无(?:动作)?限制|没有(?:动作)?受限|都能练|都可以练|没有不能做/.test(
       text,
@@ -1575,22 +1553,13 @@ function parseFacts(message: string): ParsedFacts {
   }
 
   if (
-    out.red_flags.length === 0 &&
+    out.body_conditions.length === 0 &&
     /没有(?:这些|其他)?(?:情况|问题|症状|不适|异常)|无不适|无异常|一切正常|都正常|没有问题/.test(
       text,
     )
   ) {
     out.physical_none = true;
     out.touched = true;
-  }
-  // 限制相关不适归入限制，不重复当清单外症状；其余症状只做澄清，不判定安全
-  if (
-    out.red_flags.length === 0 &&
-    out.restrictions.length === 0 &&
-    !out.physical_none
-  ) {
-    out.unlisted_symptoms = unlistedSymptoms(text);
-    if (out.unlisted_symptoms.length > 0) out.touched = true;
   }
 
   return out;
@@ -1599,38 +1568,21 @@ function parseFacts(message: string): ParsedFacts {
 function professionalEvalBlock(flags: string[]): string {
   return [
     `> ⚠️ 你报告的「${flags.join("、")}」属于需要专业评估的情况：建议尽快线下就医并由专业人员评估。`,
-    "> 我不会在此基础上给出任何训练建议；该症状已记入待生成的档案内容（红旗症状字段）。Agent 不诊断，也不解除红旗。",
+    "> 我不会在此基础上给出任何训练建议；该描述已按原文记入身体情况，分类在读取时进行。Agent 不诊断，也不解除这类阻断。",
   ].join("\n");
 }
 
 function unlistedSymptomBlock(symptoms: string[]): string {
   return [
-    `你提到的「${symptoms.join("；")}」不在我能判定的明确红旗清单内（本阶段只识别正本明确列出的症状），因此我不会判断它是否安全，也不会把它写成「无」。`,
+    `你提到的「${symptoms.join("；")}」不在我能判定的安全症状清单内（本阶段只识别正本明确列出的症状），因此我不会判断它是否安全，也不会把它写成「无」。`,
     "请补充：具体部位、在什么动作或场景下出现、持续多久、是否影响日常；如持续或加重，建议线下专业评估。",
   ].join("\n");
 }
 
-/** 扫描并在会话建档状态中记录明确红旗（不覆盖已记录的红旗）；返回本次报告的红旗 */
-function scanRedFlags(
-  state: MockState,
-  sessionId: string,
-  message: string,
-): string[] {
-  const flags = detectRedFlags(message);
-  if (flags.length === 0) return [];
-  const ob = onboardingOf(state, sessionId);
-  ob.physical_state = {
-    red_flags: [
-      ...new Set([...(ob.physical_state?.red_flags ?? []), ...flags]),
-    ],
-    notes: ob.physical_state?.notes ?? [],
-  };
-  ob.pending_symptoms = [];
-  return flags;
-}
-
-function missingFacts(ob: OnboardingState): OnboardingFact[] {
-  return ONBOARDING_FACTS.filter((f) => {
+function missingFacts(ob: OnboardingState): AskedFact[] {
+  return ONBOARDING_FACTS.filter((f): f is AskedFact => {
+    // 不单独追问动作限制：结论随身体情况一次推出（2026-09-10 拍板）
+    if (f === "restrictions") return false;
     switch (f) {
       case "goal":
         return ob.goal === undefined;
@@ -1644,10 +1596,8 @@ function missingFacts(ob: OnboardingState): OnboardingFact[] {
         return ob.equipment === undefined;
       case "body_weight_kg":
         return ob.body_weight_kg === undefined;
-      case "restrictions":
-        return ob.restrictions === undefined;
-      case "physical_state":
-        return ob.physical_state === undefined;
+      case "body_conditions":
+        return ob.body_conditions === undefined;
     }
   });
 }
@@ -1663,18 +1613,15 @@ function applyDenial(
     ack.push("可用器械：无（用户明确说明）");
     return;
   }
-  if (fact === "restrictions" && ob.restrictions === undefined) {
-    ob.restrictions = [];
-    ack.push("动作限制：无（用户明确说明）");
-    return;
-  }
   if (
-    fact === "physical_state" &&
-    (ob.physical_state?.red_flags.length ?? 0) === 0
+    fact === "body_conditions" &&
+    (ob.body_conditions === undefined || ob.body_conditions.length === 0)
   ) {
-    ob.physical_state = { red_flags: [], notes: [] };
+    ob.body_conditions = [];
     ob.pending_symptoms = [];
-    ack.push("当前身体状态：无明确红旗（用户确认）");
+    /* 身体情况结论 = 无 → 动作限制结论同次给出（不单独追问） */
+    ob.restrictions = ob.restrictions ?? [];
+    ack.push("当前身体情况：无（用户确认）");
     return;
   }
   if (fact === "experience" && ob.experience === undefined) {
@@ -1741,14 +1688,25 @@ function applyFacts(
     ob.restrictions = [];
     ack.push("动作限制：无（用户明确说明）");
   }
-  // 已明确红旗不被后到的「无红旗」覆盖（02 2.3；backend S1-05 同规则）
+  // 身体情况：只保存用户报告原文（逐条去重合并，不做分类）
+  if (parsed.body_conditions.length > 0) {
+    ob.body_conditions = [
+      ...new Set([...(ob.body_conditions ?? []), ...parsed.body_conditions]),
+    ];
+    ack.push(`当前身体情况：${ob.body_conditions.join("；")}`);
+    /* 动作限制结论随身体情况一次推出：本次提议的限制进草稿，用户确认前不写正式限制 */
+    ob.restrictions = ob.restrictions ?? [];
+  }
+  // 未知不等于无：只有用户明确否认（且本条未报告任何身体情况）才写显式空值（PRD §5.2）
   if (
     parsed.physical_none &&
-    (ob.physical_state?.red_flags.length ?? 0) === 0
+    parsed.body_conditions.length === 0 &&
+    (ob.body_conditions === undefined || ob.body_conditions.length === 0)
   ) {
-    ob.physical_state = { red_flags: [], notes: [] };
+    ob.body_conditions = [];
     ob.pending_symptoms = [];
-    ack.push("当前身体状态：无明确红旗（用户确认）");
+    ob.restrictions = ob.restrictions ?? [];
+    ack.push("当前身体情况：无（用户确认）");
   }
   if (DENIAL_PATTERN.test(message) && !parsed.touched && ob.last_asked)
     applyDenial(ob, ob.last_asked, ack);
@@ -1765,7 +1723,7 @@ function profileDraftPayload(
     ob.equipment === undefined ||
     ob.body_weight_kg === undefined ||
     ob.restrictions === undefined ||
-    ob.physical_state === undefined
+    ob.body_conditions === undefined
   )
     return undefined;
   return {
@@ -1776,7 +1734,7 @@ function profileDraftPayload(
       session_minutes: ob.session_minutes,
       equipment: ob.equipment,
       body_weight_kg: ob.body_weight_kg,
-      physical_state: ob.physical_state,
+      body_conditions: ob.body_conditions,
     },
     restrictions: ob.restrictions,
   };
@@ -1847,21 +1805,13 @@ function profilePayloadError(payload: unknown): string | undefined {
     equipment.some((e) => typeof e !== "string" || e.trim() === "")
   )
     return "可用器械须为非空字符串列表（无器械请用空列表）";
-  const physical = prof.physical_state;
-  if (typeof physical !== "object" || physical === null)
-    return "缺少当前身体状态";
-  const ps = physical as Record<string, unknown>;
-  for (const [key, label] of [
-    ["red_flags", "红旗症状"],
-    ["notes", "其他描述"],
-  ] as const) {
-    const list = ps[key];
-    if (
-      !Array.isArray(list) ||
-      list.some((s) => typeof s !== "string" || s.trim() === "")
-    )
-      return `当前身体状态 · ${label}须为非空字符串列表`;
-  }
+  // 身体情况只存用户报告原文（逐条）；空列表 = 用户明确表示无，缺省则是尚未收集
+  const conditions = prof.body_conditions;
+  if (
+    !Array.isArray(conditions) ||
+    conditions.some((s) => typeof s !== "string" || s.trim() === "")
+  )
+    return "当前身体情况须为非空字符串列表（无身体情况请用空列表）";
   const restrictions = (payload as { restrictions?: unknown }).restrictions;
   // 完整档案草稿必须携带当前有效限制列表：缺省 = 尚未收集，不得在确认时写成「无限制」
   if (restrictions === undefined)
@@ -1933,7 +1883,7 @@ function composeOnboardingReply(
 }
 
 /**
- * 一轮建档回复：记录本轮事实 → 红旗/清单外症状分支 → 追问下一项缺失事实或出稿。
+ * 一轮建档回复：记录本轮事实 → 安全提示／需澄清分支 → 追问下一项缺失事实或出稿。
  * 缺失事实继续追问、不编造；事实齐备时只生成一份 profile_update 草稿（结构化载荷 +
  * 服务端派生 Diff），同一基线不并存竞争草稿（plans/stage1.md F1-02）。
  */
@@ -1942,29 +1892,23 @@ function onboardingTurn(
   sessionId: string,
   message: string,
   parsed: ParsedFacts,
-  newRedFlags: string[],
+  safetyHits: string[],
 ): { text: string; draft?: Draft } {
   const ob = onboardingOf(state, sessionId);
   const ack: string[] = [];
   const blocks: string[] = [];
 
-  if (newRedFlags.length > 0) {
-    ack.push(`当前身体状态 · 红旗症状：${newRedFlags.join("、")}`);
-    blocks.push(professionalEvalBlock(newRedFlags));
+  if (safetyHits.length > 0) {
+    ack.push(`当前身体情况 · 需专业评估：${safetyHits.join("、")}`);
+    blocks.push(professionalEvalBlock(safetyHits));
   }
 
   applyFacts(ob, parsed, message, ack);
 
-  if (parsed.unlisted_symptoms.length > 0) {
-    ob.pending_symptoms = [
-      ...new Set([...ob.pending_symptoms, ...parsed.unlisted_symptoms]),
-    ];
-    // 未判定安全的症状不写成「无」；但已记录的红旗事实不得被后到的症状清空
-    // （02 2.3；与 applyFacts 中「已明确红旗不被后到的无红旗覆盖」同规则）
-    if ((ob.physical_state?.red_flags.length ?? 0) === 0)
-      ob.physical_state = undefined;
-    blocks.push(unlistedSymptomBlock(parsed.unlisted_symptoms));
-  }
+  // 未命中六类清单的报告只做澄清，不判定安全（读取时分类；原文照常入档，不写成「无」）
+  ob.pending_symptoms = classifyBodyConditions(parsed.body_conditions).unlisted;
+  if (ob.pending_symptoms.length > 0)
+    blocks.push(unlistedSymptomBlock(ob.pending_symptoms));
 
   const missing = missingFacts(ob);
   if (missing.length > 0) {
@@ -2050,7 +1994,7 @@ const NO_PLAN_GUIDANCE_REPLY = [
 /** 无正式档案时的统一口径（计划类回复；建档才收集档案事实，不凭空生成计划处方） */
 const NO_PROFILE_PLAN_REPLY = [
   "还没有正式档案，我不会凭空生成计划处方。",
-  "请在对话中补齐建档信息（目标、经验、每周频率、单次时长、可用器械、体重、动作限制与当前身体状态），确认后再生成计划。",
+  "请在对话中补齐建档信息（目标、经验、每周频率、单次时长、可用器械、体重、动作限制与身体情况），确认后再生成计划。",
 ].join("\n\n");
 
 /**
@@ -2067,8 +2011,8 @@ const TODAY_ONLY_EQUIPMENT_REPLY = [
 const GENERIC_REPLY = [
   "收到。当前处于 **mock 演示模式**，我可以：",
   "",
-  "- 建档：直接给出目标、经验、每周频率、单次时长、可用器械、体重、动作限制与当前身体状态",
-  "- 请求训练指导：如「给我周三的训练指导」（按最新红旗与限制复核整份计划）",
+  "- 建档：直接给出目标、经验、每周频率、单次时长、可用器械、体重、动作限制与身体情况",
+  "- 请求训练指导：如「给我周三的训练指导」（按最新身体情况与限制复核整份计划）",
   "- 调整计划：如「最近很累，帮我调整计划」",
   "- 生成复盘：如「给我看一下复盘」",
   "",
@@ -2103,9 +2047,10 @@ async function runScript(
     });
   }
 
-  // 明确红旗症状优先扫描：任何意图分支都不得吞掉它（plans/stage1.md F1-02）
-  const newRedFlags = scanRedFlags(state, run.session_id, message);
+  // 身体情况读取时分类：任何意图分支都不得吞掉需专业评估的报告（plans/stage1.md F1-02），
+  // 但分类不写档案、不阻断普通身体情况
   const parsed = parseFacts(message);
+  const safetyHits = classifyBodyConditions(parsed.body_conditions).confirmed;
   const isGuidance = GUIDANCE_PATTERN.test(message);
   // 「今天练什么」这类问句会同时命中打卡短语：指导意图优先，否则会把计划指导请求当成打卡
   // （打卡类短语仍归记录分支，如「今天练了卧推 80kg 3 组」）
@@ -2156,7 +2101,7 @@ async function runScript(
       run.session_id,
       message,
       parsed,
-      newRedFlags,
+      safetyHits,
     );
     text = r.text;
     draft = r.draft;
@@ -2172,14 +2117,14 @@ async function runScript(
     text = GENERIC_REPLY;
   }
 
-  if (newRedFlags.length > 0 && !isOnboarding) {
-    // 明确红旗：立即给出专业评估措辞，且不生成训练类草稿（plans/stage1.md F1-02）
+  if (safetyHits.length > 0 && !isOnboarding) {
+    // 身体情况命中六类安全症状：立即给出专业评估措辞，且不生成训练类草稿（plans/stage1.md F1-02）
     if (draft && draft.kind !== "profile_update") {
       draft = undefined;
       text =
-        "你报告的症状需要先线下专业评估；本次不生成训练建议或计划调整草稿。";
+        "你报告的情况需要先线下专业评估；本次不生成训练建议或计划调整草稿。";
     }
-    text = [professionalEvalBlock(newRedFlags), text].join("\n\n");
+    text = [professionalEvalBlock(safetyHits), text].join("\n\n");
   }
 
   // 生成时版本先落到草稿上，再开始流式输出（01 1.3：确认时的 stale 检查按这个版本比对）
@@ -3145,10 +3090,7 @@ function createHandler(state: MockState, hub: SseHub) {
             session_minutes: prof.session_minutes,
             equipment: [...prof.equipment],
             body_weight_kg: prof.body_weight_kg,
-            physical_state: {
-              red_flags: [...prof.physical_state.red_flags],
-              notes: [...prof.physical_state.notes],
-            },
+            body_conditions: [...prof.body_conditions],
           };
           state.restrictions = nextRestrictions.map((r) => ({ ...r }));
         }

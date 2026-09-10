@@ -198,7 +198,7 @@ def test_denied_restrictions_are_distinct_from_unknown() -> None:
 
 def test_patch_touching_restrictions_does_not_upgrade_unknown_to_known() -> None:
     """P1 回归：正式限制未收集时，触及限制的补丁不得升级为「已知无限制」。"""
-    profile = Profile(red_flags=Fact.denied())
+    profile = Profile(body_conditions=Fact.denied())
     patch = ProfilePatch(add_restrictions=(BY_KNEE_EXTENSION,))
     result = safety.evaluate_safety(profile, (_action("高位下拉"),), patch=patch)
     assert result.restrictions.state == "unknown"
@@ -210,7 +210,7 @@ def test_patch_touching_restrictions_does_not_upgrade_unknown_to_known() -> None
 
 def test_unknown_formal_restrictions_still_hit_under_post_patch_conditions() -> None:
     """P1 回归：正式未收集不得当 denied 放行，命中集仍按补丁后条件计算。"""
-    profile = Profile(red_flags=Fact.denied())
+    profile = Profile(body_conditions=Fact.denied())
     patch = ProfilePatch(add_restrictions=(BY_KNEE_EXTENSION,))
     result = safety.evaluate_safety(profile, (_action("腿屈伸"),), patch=patch)
     assert result.restrictions.state == "unknown"
@@ -220,7 +220,7 @@ def test_unknown_formal_restrictions_still_hit_under_post_patch_conditions() -> 
 
 
 def test_unrelated_patch_keeps_unknown_restrictions_unknown() -> None:
-    patch = ProfilePatch(facts={"red_flags": Fact.denied()})
+    patch = ProfilePatch(facts={"body_conditions": Fact.denied()})
     result = safety.evaluate_safety(
         Profile.empty(), (_action("杠铃背蹲"),), patch=patch
     )
@@ -247,7 +247,7 @@ def test_candidate_modes_must_be_in_shared_vocabulary() -> None:
 def test_each_listed_red_flag_blocks_prescription_with_offline_evaluation(
     kind: str,
 ) -> None:
-    profile = Profile(red_flags=Fact.known((kind,)))
+    profile = Profile(body_conditions=Fact.known((kind,)))
     result = safety.evaluate_safety(profile, ())
     assert result.red_flags.confirmed == (
         safety.RedFlagFinding("formal_profile", kind),
@@ -266,7 +266,7 @@ def test_red_flag_advice_is_fixed_text_without_disease_diagnosis() -> None:
 
 
 def test_unlisted_symptom_only_returns_clarification() -> None:
-    profile = Profile(red_flags=Fact.known(("心悸",)))
+    profile = Profile(body_conditions=Fact.known(("心悸",)))
     result = safety.evaluate_safety(profile, ())
     assert result.red_flags.confirmed == ()
     assert result.red_flags.unlisted == (
@@ -282,7 +282,7 @@ def test_unlisted_symptom_only_returns_clarification() -> None:
 
 
 def test_listed_and_unlisted_reports_are_kept_apart() -> None:
-    profile = Profile(red_flags=Fact.known(("晕厥", "心悸")))
+    profile = Profile(body_conditions=Fact.known(("晕厥", "心悸")))
     result = safety.evaluate_safety(profile, ())
     assert [finding.label for finding in result.red_flags.confirmed] == ["晕厥"]
     assert [finding.label for finding in result.red_flags.unlisted] == ["心悸"]
@@ -290,21 +290,37 @@ def test_listed_and_unlisted_reports_are_kept_apart() -> None:
 
 
 def test_denied_red_flags_need_no_clarification() -> None:
-    profile = Profile(red_flags=Fact.denied())
+    profile = Profile(body_conditions=Fact.denied())
     result = safety.evaluate_safety(profile, ())
     assert result.red_flags.confirmed == ()
     assert result.red_flags.unknown_sources == ()
     assert not result.red_flags.needs_clarification
 
 
-def test_body_state_text_does_not_block_or_clear_red_flags() -> None:
-    """红旗只认 ``red_flags`` 事实；``body_state`` 文本不参与阻断（自然语言识别未实现）。"""
-    profile = Profile(body_state=Fact.known(("胸部异常不适",)))
+def test_plain_body_condition_text_does_not_block_red_flags() -> None:
+    """普通身体情况非空但未命中六类：不阻断红旗，也不判为安全（进澄清）。"""
+    profile = Profile(body_conditions=Fact.known(("肩部偶有酸胀感",)))
     result = safety.evaluate_safety(profile, ())
     assert result.red_flags.confirmed == ()
-    assert result.red_flags.unknown_sources == ("formal_profile",)
+    assert result.red_flags.unknown_sources == ()
     assert not result.is_blocked
     assert result.needs_clarification
+    assert [finding.label for finding in result.red_flags.unlisted] == [
+        "肩部偶有酸胀感"
+    ]
+
+
+def test_listed_kind_inside_a_raw_report_is_classified_at_read_time() -> None:
+    """分类在读取时执行：原文包含清单原词即命中，命中标签取清单原词。"""
+    profile = Profile(body_conditions=Fact.known(("深蹲时膝盖锐痛",)))
+    result = safety.evaluate_safety(profile, ())
+    assert result.red_flags.confirmed == (
+        safety.RedFlagFinding("formal_profile", "锐痛"),
+    )
+    assert result.red_flags.unlisted == ()
+    assert result.is_blocked
+    # 分类不写档案：输入档案原样，原文不被分类结果替换
+    assert profile.body_conditions == Fact.known(("深蹲时膝盖锐痛",))
 
 
 # ---------- 验收 3：来源独立，无红旗不能覆盖有红旗 ----------
@@ -322,15 +338,17 @@ def test_other_source_without_red_flag_cannot_override(
     formal: Fact[tuple[str, ...]], session: Fact[tuple[str, ...]]
 ) -> None:
     result = safety.evaluate_safety(
-        Profile(red_flags=formal), (), session=SessionConditions(red_flags=session)
+        Profile(body_conditions=formal),
+        (),
+        session=SessionConditions(body_conditions=session),
     )
     assert result.is_blocked
     assert "晕厥" in [finding.label for finding in result.red_flags.confirmed]
 
 
 def test_proposed_patch_denial_cannot_clear_formal_red_flag() -> None:
-    profile = Profile(red_flags=Fact.known(("锐痛",)))
-    patch = ProfilePatch(facts={"red_flags": Fact.denied()})
+    profile = Profile(body_conditions=Fact.known(("锐痛",)))
+    patch = ProfilePatch(facts={"body_conditions": Fact.denied()})
     result = safety.evaluate_safety(profile, (), patch=patch)
     assert result.red_flags.confirmed == (
         safety.RedFlagFinding("formal_profile", "锐痛"),
@@ -339,8 +357,8 @@ def test_proposed_patch_denial_cannot_clear_formal_red_flag() -> None:
 
 
 def test_proposed_patch_red_flag_blocks_even_when_formal_denies() -> None:
-    profile = Profile(red_flags=Fact.denied())
-    patch = ProfilePatch(facts={"red_flags": Fact.known(("异常气短",))})
+    profile = Profile(body_conditions=Fact.denied())
+    patch = ProfilePatch(facts={"body_conditions": Fact.known(("异常气短",))})
     result = safety.evaluate_safety(profile, (), patch=patch)
     assert result.red_flags.confirmed == (
         safety.RedFlagFinding("proposed_patch", "异常气短"),
@@ -350,7 +368,8 @@ def test_proposed_patch_red_flag_blocks_even_when_formal_denies() -> None:
 
 def test_passing_restriction_check_does_not_clear_red_flag() -> None:
     profile = Profile(
-        action_restrictions=Fact.known((BY_SQUAT,)), red_flags=Fact.known(("麻木",))
+        action_restrictions=Fact.known((BY_SQUAT,)),
+        body_conditions=Fact.known(("麻木",)),
     )
     result = safety.evaluate_safety(profile, (_action("高位下拉"),))
     assert result.restrictions.hits == ()
@@ -359,8 +378,8 @@ def test_passing_restriction_check_does_not_clear_red_flag() -> None:
 
 
 def test_unknown_session_red_flags_need_clarification() -> None:
-    profile = Profile(red_flags=Fact.denied())
-    session = SessionConditions(red_flags=Fact.unknown())
+    profile = Profile(body_conditions=Fact.denied())
+    session = SessionConditions(body_conditions=Fact.unknown())
     result = safety.evaluate_safety(profile, (), session=session)
     assert result.red_flags.unknown_sources == ("session_conditions",)
     assert result.red_flags.needs_clarification
@@ -370,9 +389,9 @@ def test_unknown_session_red_flags_need_clarification() -> None:
 
 
 def test_each_source_reports_its_own_red_flag() -> None:
-    profile = Profile(red_flags=Fact.known(("晕厥",)))
-    patch = ProfilePatch(facts={"red_flags": Fact.known(("锐痛",))})
-    session = SessionConditions(red_flags=Fact.known(("放射痛",)))
+    profile = Profile(body_conditions=Fact.known(("晕厥",)))
+    patch = ProfilePatch(facts={"body_conditions": Fact.known(("锐痛",))})
+    session = SessionConditions(body_conditions=Fact.known(("放射痛",)))
     result = safety.evaluate_safety(profile, (), patch=patch, session=session)
     assert [
         (finding.source, finding.label) for finding in result.red_flags.confirmed
@@ -388,18 +407,19 @@ def test_each_source_reports_its_own_red_flag() -> None:
 
 def test_evaluation_does_not_mutate_inputs() -> None:
     profile = Profile(
-        action_restrictions=Fact.known((BY_SQUAT,)), red_flags=Fact.known(("晕厥",))
+        action_restrictions=Fact.known((BY_SQUAT,)),
+        body_conditions=Fact.known(("晕厥",)),
     )
     patch = ProfilePatch(
-        add_restrictions=(BY_KNEE_EXTENSION,), facts={"red_flags": Fact.denied()}
+        add_restrictions=(BY_KNEE_EXTENSION,), facts={"body_conditions": Fact.denied()}
     )
-    session = SessionConditions(red_flags=Fact.known(("麻木",)))
+    session = SessionConditions(body_conditions=Fact.known(("麻木",)))
     actions = (_action("腿屈伸"),)
     before = (profile, patch, session, actions)
     safety.evaluate_safety(profile, actions, patch=patch, session=session)
     assert (profile, patch, session, actions) == before
     assert profile.action_restrictions == Fact.known((BY_SQUAT,))
-    assert profile.red_flags == Fact.known(("晕厥",))
+    assert profile.body_conditions == Fact.known(("晕厥",))
 
 
 def test_safety_module_has_no_write_or_red_flag_clearing_capability() -> None:
@@ -418,7 +438,7 @@ async def test_service_check_does_not_write_profile_or_version(tmp_path: Path) -
             Profile(
                 body_weight_kg=Fact.known(70.0),
                 action_restrictions=Fact.known((BY_SQUAT,)),
-                red_flags=Fact.denied(),
+                body_conditions=Fact.denied(),
             ),
         )
         before = await _profile_row(db)
@@ -548,12 +568,12 @@ async def test_service_session_red_flag_blocks_without_writing(tmp_path: Path) -
     async with open_database(tmp_path / "session.db") as db:
         await _write_profile(
             db,
-            Profile(body_weight_kg=Fact.known(70.0), red_flags=Fact.denied()),
+            Profile(body_weight_kg=Fact.known(70.0), body_conditions=Fact.denied()),
         )
         before = await _profile_row(db)
         result = await ProfileService(db).check_candidate_actions_safety(
             ["barbell-back-squat"],
-            session=SessionConditions(red_flags=Fact.known(("晕厥",))),
+            session=SessionConditions(body_conditions=Fact.known(("晕厥",))),
         )
         assert result.is_blocked
         assert result.advice == (safety.RED_FLAG_BLOCK_ADVICE,)

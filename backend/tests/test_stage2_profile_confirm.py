@@ -20,6 +20,7 @@
 """
 
 import asyncio
+import json
 from dataclasses import replace
 from pathlib import Path
 
@@ -45,6 +46,7 @@ from domain.profile.rules import (
     UnknownExerciseReference,
 )
 from domain.profile.schema import (
+    FACT_FIELDS,
     ActionRestriction,
     Fact,
     InvalidProfileRow,
@@ -69,8 +71,7 @@ def _first_time_profile() -> Profile:
         session_duration_minutes=Fact.known(60),
         available_equipment=Fact.known(("哑铃",)),
         action_restrictions=Fact.denied(),
-        body_state=Fact.known(()),
-        red_flags=Fact.denied(),
+        body_conditions=Fact.denied(),
         body_weight_kg=Fact.known(73.0),
     )
 
@@ -150,6 +151,36 @@ async def _tamper_stored_proposal(db: Database, draft_id: str, payload: str) -> 
             "UPDATE business_drafts SET proposed_profile_json = ? WHERE id = ?",
             (payload, draft_id),
         )
+
+
+def _legacy_nine_field_json() -> str:
+    """旧版九字段 profile_json（身体情况尚未合并）；只用于构造存量档案前置状态。"""
+    payload = json.loads(profile_to_json(_existing_profile()))
+    del payload["body_conditions"]
+    payload["body_state"] = {"state": "known", "value": ["肩部偶有不适"]}
+    payload["red_flags"] = {"state": "known", "value": ["肩部偶有不适", "锐痛"]}
+    return json.dumps(payload, ensure_ascii=False)
+
+
+async def _write_legacy_formal_profile_json(db: Database, payload: str) -> None:
+    """直接写入旧格式 profile_json 并推进一次版本：模拟身体情况合并前已有的存量档案。"""
+    async with db.transaction() as conn:
+        await conn.execute(
+            "UPDATE user_profile SET profile_json = ? WHERE id = 1", (payload,)
+        )
+        await ProfileRepo(db).bump_context_version_in_transaction(conn)
+
+
+async def _stored_profile_json(db: Database) -> str:
+    async def op(conn):
+        async with conn.execute(
+            "SELECT profile_json FROM user_profile WHERE id = 1"
+        ) as cursor:
+            row = await cursor.fetchone()
+        assert row is not None
+        return row["profile_json"]
+
+    return await db.under_lock(op)
 
 
 async def _setup_draft(
@@ -240,6 +271,53 @@ async def test_confirmation_of_an_existing_profile_applies_the_proposed_change(
         formal = await ProfileRepo(db).read()
         assert formal.profile == _changed_profile()
         assert formal.context_version == 2
+
+
+async def test_legacy_stored_profile_is_read_then_confirmed_in_the_new_format(
+    tmp_path: Path,
+) -> None:
+    """旧存量档案：读取时合并身体情况 → 可生成并确认新格式草稿 → 落盘为八字段结构。"""
+    async with open_database(tmp_path / "app.db") as db:
+        await _write_legacy_formal_profile_json(db, _legacy_nine_field_json())
+
+        # 读取旧 JSON：两项旧身体情况合并为 body_conditions（保序去重）
+        snapshot = await ProfileRepo(db).read()
+        assert snapshot.context_version == 1
+        assert snapshot.profile is not None
+        assert snapshot.profile.body_conditions == Fact.known(("肩部偶有不适", "锐痛"))
+
+        await RunRepo(db).create_conversation("c1")
+        await RunRepo(db).create_run_with_user_message(
+            "c1", "r1", "cri-1", "改一下体重"
+        )
+        drafts = DraftService(db)
+        baseline = await drafts.prepare_generation_baseline()
+        assert baseline.context_version == 1
+        await drafts.create_profile_draft(
+            draft_id="d1",
+            generation_baseline=baseline,
+            conversation_id="c1",
+            run_id="r1",
+            proposed=replace(
+                _changed_profile(),
+                body_conditions=Fact.known(("肩部偶有不适", "锐痛")),
+            ),
+        )
+
+        result = await ConfirmService(db).confirm_profile_draft(
+            draft_id="d1", seen_revision=INITIAL_REVISION
+        )
+
+        assert result.committed_business_version == 2
+        payload = json.loads(await _stored_profile_json(db))
+        # 写入只产生新版八字段结构；确认事务仍恰好推进一次版本
+        assert sorted(payload) == sorted(FACT_FIELDS)
+        assert "body_state" not in payload and "red_flags" not in payload
+        assert payload["body_conditions"] == {
+            "state": "known",
+            "value": ["肩部偶有不适", "锐痛"],
+        }
+        assert (await ProfileRepo(db).read()).context_version == 2
 
 
 # ---------- 幂等：重复确认始终返回原结果，正式副作用只有一次 ----------
