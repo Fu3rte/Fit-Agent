@@ -1,0 +1,114 @@
+== F1-05 probe (Stage 1 建档闭环, protocol level) | 2026-09-09T23:06:14+08:00 | port=5199 | budget=180s ==
+-- started vite PID=439254 on 5199 (user 5173 untouched) --
+[C0] PASS  vite dev server reachable on dedicated port 5199 | expected=yes actual=yes
+[A1] PASS  reset ok | expected=true actual=true
+[A2] PASS  reset seed=empty | expected=empty actual=empty
+[A3] PASS  reset has_profile=false | expected=false actual=false
+[A4] PASS  reset drafts=0 | expected=0 actual=0
+[A5] PASS  empty seed context_version=0 | expected=0 actual=0
+[A6] PASS  GET /api/profile profile=null (未建档) | expected=null actual=null
+[A7] PASS  GET /api/profile restrictions=[] | expected=0 actual=0
+[A8] PASS  GET /api/profile context_version=0 | expected=0 actual=0
+[A9] PASS  GET /api/records empty | expected=0 actual=0
+[A10] PASS  GET /api/sessions empty (bare array) | expected=0 actual=0
+[B1] PASS  PUT api-key -> has_api_key=true (no plaintext) | expected=true actual=true
+[B2] PASS  POST /api/sessions returns id | expected=true actual=true
+[B3] PASS  sessions count=1 | expected=1 actual=1
+[T1a] PASS  POST /api/runs accepted (200) | expected=200 actual=200
+[T1b] PASS  run completed | expected=completed actual=completed
+[T1c] PASS  no draft generated while facts missing | expected=0 actual=0
+[T1d] PASS  reply asks missing fact (训练经验) | expected=true actual=true
+[T1e] PASS  reply does not claim a draft | expected=false actual=false
+[T1f] PASS  reply does not fabricate default experience | expected=false actual=false
+[T1g] PASS  profile still null | expected=null actual=null
+[T2a] PASS  run completed | expected=completed actual=completed
+[T2b] PASS  no draft on red-flag turn | expected=0 actual=0
+[T2c] PASS  reply recommends offline professional evaluation | expected=true actual=true
+[T2d] PASS  reply states evaluation/assessment | expected=true actual=true
+[T2e] PASS  reply records red flag into profile content | expected=true actual=true
+[T2f] PASS  reply contains no training prescription markers | expected=false actual=false
+[T2g] PASS  dev/status drafts=0 after red-flag turn | expected=0 actual=0
+[T2h] PASS  profile still null after red-flag turn | expected=false actual=false
+[T3a] PASS  run completed | expected=completed actual=completed
+[T3b] PASS  exactly one draft | expected=1 actual=1
+[T3c] PASS  draft kind=profile_update | expected=profile_update actual=profile_update
+[T3d] PASS  draft status=pending | expected=pending actual=pending
+[T3e] PASS  draft revision=1 | expected=1 actual=1
+[T3f] PASS  draft base_business_version=0 (empty seed) | expected=0 actual=0
+[T3g] PASS  payload goal | expected=增肌（肌肥大） actual=增肌（肌肥大）
+[T3h] PASS  payload experience | expected=初级（有少量训练经验） actual=初级（有少量训练经验）
+[T3i] PASS  payload weekly_frequency=3 | expected=3 actual=3
+[T3j] PASS  payload session_minutes=60 | expected=60 actual=60
+[T3k] PASS  payload body_weight_kg=75 (required field) | expected=75 actual=75
+[T3l] PASS  payload equipment collected | expected=true actual=true
+[T3m] PASS  payload red flag recorded in profile draft | expected=true actual=true
+[T3n] PASS  payload restrictions count=1 | expected=1 actual=1
+[T3o] PASS  restriction scope=specific_action | expected=specific_action actual=specific_action
+[T3p] PASS  server-derived diff non-empty (new profile) | expected=true actual=true
+[T3q] PASS  diff carries weight field row | expected=true actual=true
+[T3r] PASS  diff carries restriction row | expected=true actual=true
+[F1] PASS  pre-confirm profile still null | expected=null actual=null
+[F2] PASS  pre-confirm restrictions still empty | expected=0 actual=0
+[F3] PASS  pre-confirm context_version still 0 | expected=0 actual=0
+[R1] PASS  revise revision+1 (=2) | expected=2 actual=2
+[R2] PASS  revise keeps status pending | expected=pending actual=pending
+[R3] PASS  revise diff re-derived (每周频率 row) | expected=true actual=true
+[R4] PASS  revise diff shows new frequency value | expected=true actual=true
+[R5] PASS  revise diff shows added restriction | expected=true actual=true
+[R6] PASS  revise payload restrictions count=2 | expected=2 actual=2
+[R7] PASS  revise does not touch formal data (has_profile=false) | expected=false actual=false
+[R8] PASS  revise does not advance context_version | expected=0 actual=0
+[C1] PASS  confirm newly_committed=true | expected=true actual=true
+[C2] PASS  confirm status=committed | expected=committed actual=committed
+[C3] PASS  confirm context_version=1 | expected=1 actual=1
+[C4] PASS  confirm summary | expected=档案与动作限制已写入正式数据 actual=档案与动作限制已写入正式数据
+[C5] PASS  profile written (non-null) | expected=true actual=true
+[C6] PASS  profile weekly_frequency=4 | expected=4 actual=4
+[C7] PASS  profile body_weight_kg=75 | expected=75 actual=75
+[C8] PASS  profile equipment count=3 | expected=3 actual=3
+[C9] PASS  profile red flag retained | expected=true actual=true
+[C10] PASS  restrictions written count=2 | expected=2 actual=2
+[C11] PASS  profile context_version=1 | expected=1 actual=1
+[I1] PASS  repeat confirm newly_committed=false | expected=false actual=false
+[I2] PASS  repeat confirm returns original context_version=1 | expected=1 actual=1
+[I3] PASS  repeat confirm returns original summary | expected=档案与动作限制已写入正式数据 actual=档案与动作限制已写入正式数据
+[I4] PASS  repeat confirm does not advance context_version | expected=1 actual=1
+[TB1] PASS  new pending draft created | expected=1 actual=1
+[TB2] PASS  draft B kind=profile_update | expected=profile_update actual=profile_update
+[TB3] PASS  draft B base_business_version=1 | expected=1 actual=1
+[SC1] PASS  session 2 draft created | expected=1 actual=1
+[SC2] PASS  session 2 draft kind=profile_update | expected=profile_update actual=profile_update
+[SC3] PASS  session 2 confirm newly_committed=true | expected=true actual=true
+[SC4] PASS  context_version advanced to 2 | expected=2 actual=2
+[SC5] PASS  formal profile now session 2 (weight=70) | expected=70 actual=70
+[ST1] PASS  stale confirm HTTP 409 | expected=409 actual=409
+[ST2] PASS  stale error_code=draft_stale | expected=draft_stale actual=draft_stale
+[ST3] PASS  stale rejected: context_version still 2 | expected=2 actual=2
+[ST4] PASS  stale rejected: committed drafts unchanged (D1 + C) | expected=2 actual=2
+[TS1] PASS  run completed | expected=completed actual=completed
+[TS2] PASS  no competing draft while one pending | expected=0 actual=0
+[TS3] PASS  reply tells user draft is stale/recalc | expected=true actual=true
+[RC1] PASS  recalc new_draft revision=1 | expected=1 actual=1
+[RC2] PASS  recalc new_draft base_business_version=2 | expected=2 actual=2
+[RC3] PASS  recalc old_draft status=stale | expected=stale actual=stale
+[RC4] PASS  recalc draft_vs_draft_diff non-empty | expected=true actual=true
+[RC5] PASS  draft_vs_draft_diff shows frequency change | expected=true actual=true
+[RC6] PASS  recalc new_draft diff re-derived vs current profile | expected=true actual=true
+[CB1] PASS  recalc draft confirm newly_committed=true | expected=true actual=true
+[CB2] PASS  context_version advanced to 3 | expected=3 actual=3
+[CB3] PASS  profile updated weekly_frequency=5 | expected=5 actual=5
+[CB4] PASS  profile body_weight_kg=75 (S1 facts rebuilt) | expected=75 actual=75
+[CB5] PASS  restrictions count=2 | expected=2 actual=2
+[TD1] PASS  new draft for discard created | expected=1 actual=1
+[DC1] PASS  discard status=discarded | expected=discarded actual=discarded
+[DC0] PASS  confirm discarded HTTP 409 | expected=409 actual=409
+[DC2] PASS  confirm discarded -> error_code invalid_request | expected=invalid_request actual=invalid_request
+[DC3] PASS  discard/reject did not advance context_version | expected=3 actual=3
+[Q1] PASS  session drafts recoverable (4 drafts) | expected=4 actual=4
+[Q2] PASS  recovered drafts include committed | expected=true actual=true
+[Q3] PASS  recovered drafts include stale | expected=true actual=true
+[Q4] PASS  recovered drafts include discarded | expected=true actual=true
+[Q5] PASS  runs/active exposes latest run draft state | expected=1 actual=1
+[Q6] PASS  session messages recoverable | expected=true actual=true
+== RESULT: PASS=110 FAIL=0 TOTAL=110 | elapsed=28s ==
+--- cleanup at +28s (killed only PID 439254; 5173 untouched) ---

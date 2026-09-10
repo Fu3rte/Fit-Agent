@@ -56,6 +56,26 @@ export interface ProviderConfig {
  data_dir: string;
 }
 
+/**
+ * 当前身体状态与红旗症状（PRD §5.2；02 2.1/2.3）。只承载用户报告的事实：
+ * Agent 不诊断具体疾病、不扩充医学规则、不自动增删禁忌（PRD §5.2、02 2.3）。
+ */
+export interface PhysicalState {
+ /**
+  * 用户报告的红旗症状原文（02 2.3 清单：胸部异常不适、晕厥、异常气短、锐痛、麻木、
+  * 放射痛等）；出现时不生成常规训练处方、建议线下专业评估。
+  * 空数组 = 用户明确表示无红旗症状，与「尚未收集」可区分。
+  */
+ red_flags: string[];
+ /** 其他当前身体状态描述（非红旗），如「肩部偶有不适」；空数组 = 明确无其他状态 */
+ notes: string[];
+}
+
+/**
+ * 正式档案：建档事实的唯一来源（PRD §5.2 六类事实；02 2.1）。
+ * 完整档案须含全部事实且 body_weight_kg 必填（stage1 已拍 2026-09-09：缺失时继续追问，
+ * 不生成完整档案草稿）；未收集的字段在草稿侧缺省表达，不写默认值。
+ */
 export interface Profile {
  goal: string;
  experience: string;
@@ -64,13 +84,23 @@ export interface Profile {
  /** 单次可用时长（分钟） */
  session_minutes: number;
  equipment: string[];
+ /** 体重（kg）；建档必填 */
  body_weight_kg: number;
+ /** 当前身体状态与红旗症状（PRD §5.2；02 2.1/2.3） */
+ physical_state: PhysicalState;
 }
 
-/** 动作限制；restricted = 暂禁（红色徽章） */
+/**
+ * 动作限制（PRD §5.2/§5.7；02 2.2）。只保存当前有效的已确认限制，不承载生命周期/状态
+ * 语义——不新增观察中／暂禁／永久等状态；「暂禁」仅为 /profile 红色徽章展示文案，
+ * 解除 = 经对话草稿确认后删除该条（02 2.2）。增删只能经对话草稿确认（02 2.1/2.2）。
+ */
 export interface Restriction {
+ /** 限制对象名称，如具体动作「杠铃颈后推举」或动作模式「颈前深蹲」 */
  name: string;
- restricted: boolean;
+ /** 粒度（02 2.2）：具体动作 / 动作模式（如深蹲、髋铰链、水平推） */
+ scope: "specific_action" | "movement_pattern";
+ /** 说明：用户报告原文或确认备注 */
  note?: string;
 }
 
@@ -233,10 +263,17 @@ export interface PlanDraftPayload {
  diff: FieldDiff[];
 }
 
-/** 档案变更草稿载荷 */
+/**
+ * 档案变更草稿载荷（结构化档案字段；PRD §5.2 六类事实）。
+ * 只承载已收集事实：字段缺省 = 尚未收集（未知），与显式空值（equipment: [] 无器械、
+ * physical_state.red_flags: [] 明确无红旗）可区分；不得以默认值补造（PRD §5.2）。
+ * diff 不在载荷内：由服务端对比新旧档案派生字段级「旧值→新值」（A4；Draft.diff）。
+ */
 export interface ProfileDraftPayload {
- title: string;
- diff: FieldDiff[];
+ /** 已收集的档案事实（目标与经验、频率、时长、器械、体重、身体状态与红旗症状） */
+ profile: Partial<Profile>;
+ /** 拟议的限制集合（只含当前有效限制）；缺省 = 尚未收集，与空数组（明确无限制）可区分 */
+ restrictions?: Restriction[];
 }
 
 export type DraftPayload =
@@ -352,7 +389,8 @@ export interface DiscardResult {
  * - GET    /api/provider                -> ProviderConfig
  * - PUT    /api/provider/api-key        body {api_key} -> {has_api_key: true}
  * - DELETE /api/provider/api-key        -> {has_api_key: false}
- * - GET    /api/profile                 -> {profile: Profile, restrictions: Restriction[], context_version: number}
+ * - GET    /api/profile                 -> {profile: Profile | null, restrictions: Restriction[], context_version: number}
+ *          profile = null 表示尚未建档（不返回占位档案，避免把未知写成默认值）
  * - GET    /api/records                 -> {records: TrainingRecord[]}
  * - GET    /api/stats                   -> StatsSummary
  * - GET    /api/review                  -> ReviewDoc
@@ -381,8 +419,13 @@ export interface RunHandle {
  run_id: string;
 }
 
+/**
+ * GET /api/profile（PRD §5.2；02 2.1/2.2）：正式档案 + 当前有效限制 + 业务版本。
+ * profile = null 表示尚未建档：此时 restrictions 为空数组、plan 缺省；未建档引导的呈现
+ * 随阶段 1 F1-04。
+ */
 export interface ProfileResponse {
- profile: Profile;
+ profile: Profile | null;
  restrictions: Restriction[];
  context_version: number;
  /** STAGED-SHARED-EDIT（lane 3b，supervisor 批准）：契约遗漏；/profile 当前计划卡所需 */

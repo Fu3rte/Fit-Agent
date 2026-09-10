@@ -82,7 +82,7 @@ function dropConnection(reason: ConnectionLostReason): void {
  clearWatchdog();
  closeSource();
  // 快照遍历：回调内可能退订，不能边遍历活动 Set 边调用
- for (const listener of Array.from(connectionListeners)) listener(reason);
+ for (const listener of [...connectionListeners]) listener(reason);
 }
 
 /**

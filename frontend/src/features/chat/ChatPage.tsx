@@ -26,6 +26,7 @@ import {
   discardDraft,
   getActiveRun,
   getMessages,
+  getProfile,
   getProvider,
   getSessionDrafts,
   getSessions,
@@ -194,6 +195,10 @@ export default function ChatPage() {
 
   const provider = useQuery({ queryKey: ["provider"], queryFn: getProvider });
   const configured = provider.data?.has_api_key === true;
+
+  /** 未建档（契约 profile = null）：对话页只给一句引导，不改成表单、不禁用输入 */
+  const profile = useQuery({ queryKey: ["profile"], queryFn: getProfile });
+  const uncreatedProfile = profile.data?.profile === null;
 
   const messages = useQuery({
     queryKey: ["messages", sessionId],
@@ -1033,6 +1038,12 @@ export default function ChatPage() {
             ref={scrollRef}
             className="flex-1 space-y-4 overflow-y-auto pb-40"
           >
+            {/* 未建档引导：建档只能由对话发起（PRD §5.2），只是文案，不影响发送 */}
+            {uncreatedProfile && (
+              <p className="rounded-lg border bg-card px-3 py-2 text-xs text-muted-foreground">
+                尚未建档：建档只能通过对话完成（无独立表单）。按提示提供目标、经验、频率、时长、器械、体重、动作限制与当前身体状态，即可生成档案草稿。
+              </p>
+            )}
             {messages.isLoading && (
               <p className="pt-6 text-center text-xs text-muted-foreground">
                 加载中…

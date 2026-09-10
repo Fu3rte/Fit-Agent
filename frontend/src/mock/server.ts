@@ -14,7 +14,11 @@ import type {
   Draft,
   ErrorCode,
   FieldDiff,
+  PhysicalState,
+  PlanDraftPayload,
   PrEntry,
+  Profile,
+  ProfileDraftPayload,
   ProviderConfig,
   RecalcResult,
   Restriction,
@@ -24,6 +28,11 @@ import type {
   StatsSummary,
   TrainingRecord,
 } from "@/lib/contract";
+import {
+  profileFieldRows,
+  profilePayloadDiff,
+  restrictionLabel,
+} from "../lib/profile";
 
 /* ---------------------------------- 状态 ---------------------------------- */
 
@@ -44,19 +53,39 @@ interface RunState {
   draft_ids: string[];
 }
 
+/**
+ * 建档会话状态（stage1 F1-02 多轮收集）。每个事实三态：缺省 = 尚未收集（未知）、
+ * 显式值 = 用户已给出、显式空数组 = 用户明确否认；不把未知写成默认值（PRD §5.2）。
+ */
+interface OnboardingState {
+  goal?: string;
+  experience?: string;
+  weekly_frequency?: number;
+  session_minutes?: number;
+  /** 缺省 = 未收集；[] = 用户明确说明无器械 */
+  equipment?: string[];
+  body_weight_kg?: number;
+  /** 缺省 = 未收集；[] = 用户明确说明无限制（只含当前有效限制，无状态语义） */
+  restrictions?: Restriction[];
+  /** 缺省 = 未收集；已收集时 red_flags/notes 为明确值（[] = 用户确认无） */
+  physical_state?: PhysicalState;
+  /** 最近一次追问的事实：用于把「没有」解释为对该项的明确否认 */
+  last_asked?: OnboardingFact;
+  /** 清单外症状（未判定安全）：用户明确否认前不写入档案，也不判定为无 */
+  pending_symptoms: string[];
+  /** 最近一次生成的档案草稿 id 与当时的载荷快照：避免同基线重复出稿 */
+  draft_id?: string;
+  drafted_snapshot?: string;
+}
+
 interface MockState {
   context_version: number;
   provider: ProviderConfig;
-  profile: {
-    goal: string;
-    experience: string;
-    weekly_frequency: number;
-    session_minutes: number;
-    equipment: string[];
-    body_weight_kg: number;
-  };
+  /** 未建档（空种子）= null：GET /api/profile 据此表达未建档态（stage1 F1-01） */
+  profile: Profile | null;
   restrictions: Restriction[];
-  plan: PlanState;
+  /** 未生成/未启用计划（空种子）= null */
+  plan: PlanState | null;
   records: TrainingRecord[];
   stats: StatsSummary;
   review: ReviewDoc;
@@ -65,6 +94,8 @@ interface MockState {
   drafts: Map<string, Draft>;
   /** 草稿归属会话（mock 内部索引；契约 Draft 本身无会话字段） */
   draft_sessions: Map<string, string>;
+  /** 建档对话状态（按会话；stage1 F1-02） */
+  onboarding: Map<string, OnboardingState>;
   /** 首次确认凭据（owner 决策 B；01 1.3 提交凭据）：draft_id → 原始 context_version 与 summary；
    *  重复确认返回持久化凭据，不从当前状态重建，不再写入或递增版本 */
   confirm_receipts: Map<string, { context_version: number; summary: string }>;
@@ -369,13 +400,18 @@ function seedState(): MockState {
       session_minutes: 60,
       equipment: ["杠铃", "哑铃", "卧推架", "引体架", "绳索"],
       body_weight_kg: 72.5,
+      physical_state: {
+        red_flags: [],
+        notes: ["肩部偶有不适（颈后推举时明显）"],
+      },
     },
+    // 只列当前有效的已确认限制（02 2.2）：两种粒度各一例，不携带状态语义
     restrictions: [
-      { name: "杠铃颈后推举", restricted: true, note: "肩部不适史，暂禁" },
+      { name: "杠铃颈后推举", scope: "specific_action", note: "肩部不适史" },
       {
-        name: "颈前深蹲模式",
-        restricted: false,
-        note: "观察中，可用颈后深蹲替代",
+        name: "颈前深蹲",
+        scope: "movement_pattern",
+        note: "膝部不适，改用颈后深蹲",
       },
     ],
     plan,
@@ -386,6 +422,48 @@ function seedState(): MockState {
     messages,
     drafts: new Map(),
     draft_sessions: new Map(),
+    onboarding: new Map(),
+    confirm_receipts: new Map(),
+    runs: new Map(),
+    execution_slot_run_id: null,
+  };
+}
+
+/**
+ * 全新空种子（stage1 F1-01）：无档案/限制/计划/记录，供建档闭环从零走查。
+ * 复用 Stage 0 控制端点切换（POST /api/dev/reset {"seed":"empty"}），不是第二个种子机制。
+ * provider 与默认种子一致（未配置 Key，走设置页配置链路）；context_version 从 0 起。
+ */
+function emptySeedState(): MockState {
+  return {
+    context_version: 0,
+    provider: {
+      protocol: "openai-compatible",
+      base_url: "https://api.deepseek.com/v1",
+      has_api_key: false,
+      model: { name: "deepseek-chat", deployment: "cloud" },
+      data_dir: "/home/user/.local/share/Fit-Agent",
+    },
+    profile: null,
+    restrictions: [],
+    plan: null,
+    records: [],
+    stats: {
+      per_week: [],
+      buckets: { met: 0, unmet: 0, pending: 0 },
+      prs: [],
+      data_updated_at: MOCK_UPDATED_AT,
+    },
+    review: {
+      text: "当前没有可复盘的训练记录；完成打卡并确认后可生成复盘。",
+      stale: false,
+      generated_at: MOCK_UPDATED_AT,
+    },
+    sessions: [],
+    messages: new Map(),
+    drafts: new Map(),
+    draft_sessions: new Map(),
+    onboarding: new Map(),
     confirm_receipts: new Map(),
     runs: new Map(),
     execution_slot_run_id: null,
@@ -547,6 +625,18 @@ function readBody(req: IncomingMessage): Promise<string> {
   });
 }
 
+/**
+ * dev 控制端点请求体：非法/空 JSON 一律视为空对象（mock 开发端点，不因请求体格式中断；
+ * 各端点随后自行校验字段）。
+ */
+async function readJsonBody<T>(req: IncomingMessage): Promise<T> {
+  try {
+    return JSON.parse((await readBody(req)) || "{}") as T;
+  } catch {
+    return {} as T;
+  }
+}
+
 function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
 }
@@ -642,6 +732,785 @@ function recordDraftDiff(
   return rows;
 }
 
+/* ---------------------- 建档对话剧本（stage1 F1-02） -----------------------
+ *
+ * plans/stage1.md F1-02：从空种子开始的多轮建档剧本。确定性解析只覆盖阶段 1 演示
+ * 短语（目标/经验/频率/时长/器械/体重/动作限制/当前身体状态），不是通用 NLP；
+ * 未收集的事实保持未知，不写默认值（PRD §5.2 六类事实，缺失继续追问）。
+ * ------------------------------------------------------------------------- */
+
+/** 建档事实键（顺序 = 追问顺序） */
+type OnboardingFact =
+  | "goal"
+  | "experience"
+  | "weekly_frequency"
+  | "session_minutes"
+  | "equipment"
+  | "body_weight_kg"
+  | "restrictions"
+  | "physical_state";
+
+const ONBOARDING_FACTS: readonly OnboardingFact[] = [
+  "goal",
+  "experience",
+  "weekly_frequency",
+  "session_minutes",
+  "equipment",
+  "body_weight_kg",
+  "restrictions",
+  "physical_state",
+];
+
+const FACT_QUESTIONS: Record<OnboardingFact, string> = {
+  goal: "你的训练目标是什么？（增肌 / 力量 / 整体健康）",
+  experience:
+    "你的训练经验大概到什么程度？（零基础 / 有一点基础 / 稳定训练过一段时间）",
+  weekly_frequency: "每周计划训练几次？",
+  session_minutes: "每次训练大约能安排多少分钟？",
+  equipment:
+    "可用器械有哪些？（如杠铃、哑铃、卧推架、引体架、绳索；没有器械也请直接说明）",
+  body_weight_kg: "当前体重是多少公斤？（建档必填，我不会替你填默认值）",
+  restrictions:
+    "有没有已知的动作限制？可以说具体动作（如「颈后推举肩部不适」）或动作模式（如「深蹲膝部不适」）；没有请明确说「没有」。",
+  physical_state:
+    "当前身体状态如何？有没有胸部异常不适、晕厥、异常气短、锐痛、麻木、放射痛这类需要线下专业评估的情况？没有也请明确说明。",
+};
+
+/**
+ * 阶段能力开关：训练打卡（记录写入）属阶段 3（plans/business-roadmap.md）。
+ * 阶段 1 的 mock 不开放打卡：plans/stage1.md F1-02 要求仅说明该能力不在本阶段开放、
+ * 不生成训练记录草稿，也不宣称建立计划是记录训练的业务前提。Stage 0 记录剧本保留在
+ * 开关之后，待阶段 3 接线时替换为真实记录流程。
+ */
+const CHECKIN_ENABLED = false;
+
+const CHECKIN_UNAVAILABLE_REPLY = [
+  "训练打卡（写入训练记录）不在本阶段开放，我不会生成训练记录草稿。",
+  "",
+  "本阶段对话只用于建档；训练记录与统计在后续阶段接入，建档本身不受影响——需要的话我们继续把档案补齐。",
+].join("\n");
+
+/** 打卡类请求（阶段 1 仅识别这些演示短语，不解析自然语言意图） */
+const CHECKIN_PATTERN =
+  /打卡|训练记录|记录一下|记一下|帮我记|今天练|昨天练|今天做|昨天做|\d+\s*(?:kg|公斤)\D{0,6}\d+\s*组|\d+\s*组\s*[x×]?\s*\d+\s*次/;
+
+/** 用户明确否认的表达（仅用于把「没有」解释为对上一问的明确否认） */
+const DENIAL_PATTERN = /没有|没|无|不用|不需要|一切正常|都正常|没问题/;
+
+/**
+ * 明确红旗症状（02 2.3 清单）。plans/stage1.md §8 已拍：清单外症状继续澄清、
+ * 不判定安全，不自行扩充医学规则；Agent 不诊断、不解除红旗。
+ */
+const RED_FLAG_PATTERNS: readonly { label: string; pattern: RegExp }[] = [
+  { label: "胸部异常不适", pattern: /胸部(?:异常|明显|持续)(?:不适|闷|痛)/ },
+  { label: "晕厥", pattern: /晕厥|昏厥|晕倒/ },
+  { label: "异常气短", pattern: /气短|喘不上气|呼吸困难/ },
+  { label: "锐痛", pattern: /锐痛|刺痛/ },
+  { label: "麻木", pattern: /麻木|发麻/ },
+  { label: "放射痛", pattern: /放射痛|放射到|放射至/ },
+];
+
+/** 症状标记（用于识别清单外症状 → 继续澄清，不判定安全） */
+const SYMPTOM_MARKER =
+  /不适|不舒服|疼痛|疼|痛|发麻|麻木|发酸|酸胀|发紧|头晕|晕|气短|胸闷|受伤|肿/;
+
+/** 已知限制对象（阶段 1 演示短语表；不在表内不做限制解析） */
+const RESTRICTION_SUBJECTS: readonly {
+  pattern: RegExp;
+  name: string;
+  scope: Restriction["scope"];
+}[] = [
+  { pattern: /颈后推举/, name: "杠铃颈后推举", scope: "specific_action" },
+  { pattern: /卧推/, name: "杠铃卧推", scope: "specific_action" },
+  { pattern: /肩推/, name: "哑铃肩推", scope: "specific_action" },
+  { pattern: /引体向上/, name: "引体向上", scope: "specific_action" },
+  { pattern: /双杠臂屈伸/, name: "双杠臂屈伸", scope: "specific_action" },
+  { pattern: /划船/, name: "杠铃划船", scope: "specific_action" },
+  { pattern: /弯举/, name: "哑铃弯举", scope: "specific_action" },
+  { pattern: /深蹲/, name: "深蹲", scope: "movement_pattern" },
+  { pattern: /硬拉/, name: "硬拉", scope: "movement_pattern" },
+  { pattern: /髋铰链/, name: "髋铰链", scope: "movement_pattern" },
+  { pattern: /水平推/, name: "水平推", scope: "movement_pattern" },
+  { pattern: /水平拉/, name: "水平拉", scope: "movement_pattern" },
+  { pattern: /垂直推/, name: "垂直推", scope: "movement_pattern" },
+  { pattern: /垂直拉/, name: "垂直拉", scope: "movement_pattern" },
+];
+
+const RESTRICTION_MARKERS = /不适|不舒服|疼|痛|受伤|受限|不能|避免|做不了/;
+
+/** 子句分隔符：限制标记只与同一子句内的限制对象绑定 */
+const CLAUSE_BREAK = /[，。；;,、\n！!？?：]/;
+
+/** 器械关键词（阶段 1 演示短语表） */
+const EQUIPMENT_NAMES: readonly string[] = [
+  "杠铃",
+  "哑铃凳",
+  "哑铃",
+  "卧推架",
+  "引体架",
+  "单杠",
+  "绳索",
+  "龙门架",
+  "固定器械",
+  "器械",
+  "壶铃",
+  "弹力带",
+  "自重",
+  "徒手",
+];
+
+interface ParsedFacts {
+  goal?: string;
+  experience?: string;
+  weekly_frequency?: number;
+  session_minutes?: number;
+  equipment?: string[];
+  /** 用户明确说明无器械（显式空值，区别于未知） */
+  equipment_none: boolean;
+  body_weight_kg?: number;
+  restrictions: Restriction[];
+  /** 用户明确说明无动作限制 */
+  restrictions_none: boolean;
+  red_flags: string[];
+  /** 用户明确说明无红旗/无不适 */
+  physical_none: boolean;
+  unlisted_symptoms: string[];
+  /** 本条消息是否提供了任何建档事实（含明确否认） */
+  touched: boolean;
+}
+
+function onboardingOf(state: MockState, sessionId: string): OnboardingState {
+  let ob = state.onboarding.get(sessionId);
+  if (!ob) {
+    ob = { pending_symptoms: [] };
+    state.onboarding.set(sessionId, ob);
+  }
+  return ob;
+}
+
+/** 明确红旗识别：否定前缀（如「没有胸部异常不适」）不算报告红旗 */
+function detectRedFlags(message: string): string[] {
+  const found: string[] = [];
+  for (const { label, pattern } of RED_FLAG_PATTERNS) {
+    const re = new RegExp(pattern.source, "g");
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(message)) !== null) {
+      const before = message.slice(Math.max(0, m.index - 6), m.index);
+      if (!/(没有|没|无|不|未)/.test(before)) {
+        if (!found.includes(label)) found.push(label);
+        break;
+      }
+    }
+  }
+  return found;
+}
+
+/** 清单外症状：只做澄清，不判定安全（plans/stage1.md §8） */
+function unlistedSymptoms(message: string): string[] {
+  return message
+    .split(/[，。；;,、\n！!？?]/)
+    .map((c) => c.trim())
+    .filter(
+      (c) => c !== "" && SYMPTOM_MARKER.test(c) && !DENIAL_PATTERN.test(c),
+    );
+}
+
+/** 器械词在原文中的下标区间（用于排除嵌在器械词里的动作名，如「卧推架」中的「卧推」） */
+function equipmentSpans(message: string): { start: number; end: number }[] {
+  const re = new RegExp(EQUIPMENT_NAMES.join("|"), "g");
+  return [...message.matchAll(re)].map((m) => ({
+    start: m.index,
+    end: m.index + m[0].length,
+  }));
+}
+
+/** index 所在的标点子句原文 */
+function clauseOf(message: string, index: number): string {
+  let start = 0;
+  for (let i = 0; i < index; i++) {
+    if (CLAUSE_BREAK.test(message[i])) start = i + 1;
+  }
+  for (let end = index; end < message.length; end++) {
+    if (CLAUSE_BREAK.test(message[end])) return message.slice(start, end);
+  }
+  return message.slice(start);
+}
+
+/** 限制解析：已知限制对象 + 同一子句内不适/受限标记（两种粒度；不引入限制状态语义） */
+function parseRestrictions(message: string): Restriction[] {
+  const out: Restriction[] = [];
+  const equipment = equipmentSpans(message);
+  for (const { pattern, name, scope } of RESTRICTION_SUBJECTS) {
+    for (const m of message.matchAll(new RegExp(pattern.source, "g"))) {
+      const end = m.index + m[0].length;
+      // 嵌在器械词内的动作名不是限制对象（「卧推架」不产生「杠铃卧推」限制）
+      if (equipment.some((s) => m.index < s.end && end > s.start)) continue;
+      if (!RESTRICTION_MARKERS.test(clauseOf(message, m.index))) continue;
+      out.push({ name, scope, note: message.trim() });
+      break;
+    }
+  }
+  return out;
+}
+
+function parseFacts(message: string): ParsedFacts {
+  const text = message.trim();
+  const out: ParsedFacts = {
+    equipment_none: false,
+    restrictions: [],
+    restrictions_none: false,
+    red_flags: [],
+    physical_none: false,
+    unlisted_symptoms: [],
+    touched: false,
+  };
+
+  const goal = /增肌|肌肥大/.test(text)
+    ? "增肌（肌肥大）"
+    : /力量/.test(text)
+      ? "力量"
+      : /健康|体能/.test(text)
+        ? "整体健康"
+        : undefined;
+  if (goal) {
+    out.goal = goal;
+    out.touched = true;
+  }
+
+  const experience =
+    /零基础|没有练过|没练过|没有经验|没有基础|没练|新手|从没练/.test(text)
+      ? "零基础"
+      : /初级|一点基础|有点基础|刚入门|入门|不到一年|半年/.test(text)
+        ? "初级（有少量训练经验）"
+        : /中级|一年多|两年|三年|稳定训练/.test(text)
+          ? "中级"
+          : undefined;
+  if (experience) {
+    out.experience = experience;
+    out.touched = true;
+  }
+
+  const freq =
+    text.match(/(?:每周|一周|周)[^\d]{0,4}(\d+)\s*次/) ??
+    text.match(/(\d+)\s*次\s*\/?\s*(?:每周|周)/);
+  if (freq) {
+    out.weekly_frequency = Number(freq[1]);
+    out.touched = true;
+  }
+
+  const durMin =
+    text.match(/(?:每次|一次|单次)[^\d]{0,4}(\d+)\s*分钟/) ??
+    text.match(/(\d+)\s*分钟/);
+  const durHour = text.match(/(\d+(?:\.\d+)?)\s*(?:小时|钟头)/);
+  if (durMin) {
+    out.session_minutes = Number(durMin[1]);
+    out.touched = true;
+  } else if (durHour) {
+    out.session_minutes = Math.round(Number(durHour[1]) * 60);
+    out.touched = true;
+  }
+
+  // 体重：优先取带「体重」标记的表述；无标记时仅在非打卡类语句里取 kg 数值
+  const weightMarked = text.match(/体重[^\d]{0,6}(\d+(?:\.\d+)?)/);
+  const weightLoose = /[组次]/.test(text)
+    ? null
+    : text.match(/(\d+(?:\.\d+)?)\s*(?:kg|公斤|千克)/i);
+  const weight = weightMarked ?? weightLoose;
+  if (weight) {
+    out.body_weight_kg = Number(weight[1]);
+    out.touched = true;
+  }
+
+  // 明确「无器械」优先：先剔除否定短语内的器械词，避免把「没有器械」当成可用器械
+  const noneEquipment = /(?:没有|没|无)[^，。；;]{0,4}器械|自重|徒手/.exec(
+    text,
+  );
+  const eqMatched = EQUIPMENT_NAMES.filter((n) => text.includes(n)).filter(
+    (n) => {
+      if (!noneEquipment) return true;
+      const at = text.indexOf(n);
+      return !(
+        at >= noneEquipment.index &&
+        at < noneEquipment.index + noneEquipment[0].length
+      );
+    },
+  );
+  const eqList = eqMatched.filter(
+    (n) =>
+      n !== "自重" &&
+      n !== "徒手" &&
+      !eqMatched.some((m) => m !== n && m.includes(n)),
+  );
+  if (eqList.length > 0) {
+    out.equipment = eqList;
+    out.touched = true;
+  } else if (noneEquipment) {
+    out.equipment_none = true;
+    out.touched = true;
+  }
+
+  out.red_flags = detectRedFlags(text);
+  if (out.red_flags.length > 0) out.touched = true;
+  // 明确红旗消息里的不适归入红旗，不再重复解析为动作限制（避免把症状误报成限制）
+  if (out.red_flags.length === 0) {
+    out.restrictions = parseRestrictions(text);
+    if (out.restrictions.length > 0) out.touched = true;
+  }
+  if (
+    /没有(?:任何)?(?:动作)?限制|无(?:动作)?限制|没有(?:动作)?受限|都能练|都可以练|没有不能做/.test(
+      text,
+    )
+  ) {
+    out.restrictions_none = true;
+    out.touched = true;
+  }
+
+  if (
+    out.red_flags.length === 0 &&
+    /没有(?:这些|其他)?(?:情况|问题|症状|不适|异常)|无不适|无异常|一切正常|都正常|没有问题/.test(
+      text,
+    )
+  ) {
+    out.physical_none = true;
+    out.touched = true;
+  }
+  // 限制相关不适归入限制，不重复当清单外症状；其余症状只做澄清，不判定安全
+  if (
+    out.red_flags.length === 0 &&
+    out.restrictions.length === 0 &&
+    !out.physical_none
+  ) {
+    out.unlisted_symptoms = unlistedSymptoms(text);
+    if (out.unlisted_symptoms.length > 0) out.touched = true;
+  }
+
+  return out;
+}
+
+function professionalEvalBlock(flags: string[]): string {
+  return [
+    `> ⚠️ 你报告的「${flags.join("、")}」属于需要专业评估的情况：建议尽快线下就医并由专业人员评估。`,
+    "> 我不会在此基础上给出任何训练建议；该症状已记入待生成的档案内容（红旗症状字段）。Agent 不诊断，也不解除红旗。",
+  ].join("\n");
+}
+
+function unlistedSymptomBlock(symptoms: string[]): string {
+  return [
+    `你提到的「${symptoms.join("；")}」不在我能判定的明确红旗清单内（本阶段只识别正本明确列出的症状），因此我不会判断它是否安全，也不会把它写成「无」。`,
+    "请补充：具体部位、在什么动作或场景下出现、持续多久、是否影响日常；如持续或加重，建议线下专业评估。",
+  ].join("\n");
+}
+
+/** 扫描并在会话建档状态中记录明确红旗（不覆盖已记录的红旗）；返回本次报告的红旗 */
+function scanRedFlags(
+  state: MockState,
+  sessionId: string,
+  message: string,
+): string[] {
+  const flags = detectRedFlags(message);
+  if (flags.length === 0) return [];
+  const ob = onboardingOf(state, sessionId);
+  ob.physical_state = {
+    red_flags: [
+      ...new Set([...(ob.physical_state?.red_flags ?? []), ...flags]),
+    ],
+    notes: ob.physical_state?.notes ?? [],
+  };
+  ob.pending_symptoms = [];
+  return flags;
+}
+
+function missingFacts(ob: OnboardingState): OnboardingFact[] {
+  return ONBOARDING_FACTS.filter((f) => {
+    switch (f) {
+      case "goal":
+        return ob.goal === undefined;
+      case "experience":
+        return ob.experience === undefined;
+      case "weekly_frequency":
+        return ob.weekly_frequency === undefined;
+      case "session_minutes":
+        return ob.session_minutes === undefined;
+      case "equipment":
+        return ob.equipment === undefined;
+      case "body_weight_kg":
+        return ob.body_weight_kg === undefined;
+      case "restrictions":
+        return ob.restrictions === undefined;
+      case "physical_state":
+        return ob.physical_state === undefined;
+    }
+  });
+}
+
+/** 回答上一问时的裸否定（如「没有」）：只对可表达为「无」的事实生效 */
+function applyDenial(
+  ob: OnboardingState,
+  fact: OnboardingFact,
+  ack: string[],
+): void {
+  if (fact === "equipment" && ob.equipment === undefined) {
+    ob.equipment = [];
+    ack.push("可用器械：无（用户明确说明）");
+    return;
+  }
+  if (fact === "restrictions" && ob.restrictions === undefined) {
+    ob.restrictions = [];
+    ack.push("动作限制：无（用户明确说明）");
+    return;
+  }
+  if (
+    fact === "physical_state" &&
+    (ob.physical_state?.red_flags.length ?? 0) === 0
+  ) {
+    ob.physical_state = { red_flags: [], notes: [] };
+    ob.pending_symptoms = [];
+    ack.push("当前身体状态：无明确红旗（用户确认）");
+    return;
+  }
+  if (fact === "experience" && ob.experience === undefined) {
+    ob.experience = "零基础";
+    ack.push("训练经验：零基础（用户确认）");
+  }
+}
+
+function applyFacts(
+  ob: OnboardingState,
+  parsed: ParsedFacts,
+  message: string,
+  ack: string[],
+): void {
+  if (parsed.goal !== undefined && parsed.goal !== ob.goal) {
+    ob.goal = parsed.goal;
+    ack.push(`训练目标：${parsed.goal}`);
+  }
+  if (parsed.experience !== undefined && parsed.experience !== ob.experience) {
+    ob.experience = parsed.experience;
+    ack.push(`训练经验：${parsed.experience}`);
+  }
+  if (
+    parsed.weekly_frequency !== undefined &&
+    parsed.weekly_frequency !== ob.weekly_frequency
+  ) {
+    ob.weekly_frequency = parsed.weekly_frequency;
+    ack.push(`每周频率：${parsed.weekly_frequency} 次`);
+  }
+  if (
+    parsed.session_minutes !== undefined &&
+    parsed.session_minutes !== ob.session_minutes
+  ) {
+    ob.session_minutes = parsed.session_minutes;
+    ack.push(`单次时长：${parsed.session_minutes} 分钟`);
+  }
+  if (
+    parsed.equipment !== undefined &&
+    JSON.stringify(parsed.equipment) !== JSON.stringify(ob.equipment)
+  ) {
+    ob.equipment = parsed.equipment;
+    ack.push(`可用器械：${parsed.equipment.join("、")}`);
+  }
+  if (
+    parsed.body_weight_kg !== undefined &&
+    parsed.body_weight_kg !== ob.body_weight_kg
+  ) {
+    ob.body_weight_kg = parsed.body_weight_kg;
+    ack.push(`体重：${parsed.body_weight_kg} kg`);
+  }
+  if (parsed.restrictions.length > 0) {
+    const merged = [...(ob.restrictions ?? [])];
+    for (const r of parsed.restrictions)
+      if (!merged.some((m) => m.name === r.name)) merged.push(r);
+    ob.restrictions = merged;
+    ack.push(`动作限制：${restrictionLabel(merged)}`);
+  }
+  // 未知不等于无：只有用户明确否认才写显式空值（PRD §5.2）
+  if (parsed.equipment_none && ob.equipment?.length !== 0) {
+    ob.equipment = [];
+    ack.push("可用器械：无（用户明确说明）");
+  }
+  if (parsed.restrictions_none && ob.restrictions?.length !== 0) {
+    ob.restrictions = [];
+    ack.push("动作限制：无（用户明确说明）");
+  }
+  // 已明确红旗不被后到的「无红旗」覆盖（02 2.3；backend S1-05 同规则）
+  if (
+    parsed.physical_none &&
+    (ob.physical_state?.red_flags.length ?? 0) === 0
+  ) {
+    ob.physical_state = { red_flags: [], notes: [] };
+    ob.pending_symptoms = [];
+    ack.push("当前身体状态：无明确红旗（用户确认）");
+  }
+  if (DENIAL_PATTERN.test(message) && !parsed.touched && ob.last_asked)
+    applyDenial(ob, ob.last_asked, ack);
+}
+
+function profileDraftPayload(
+  ob: OnboardingState,
+): ProfileDraftPayload | undefined {
+  if (
+    ob.goal === undefined ||
+    ob.experience === undefined ||
+    ob.weekly_frequency === undefined ||
+    ob.session_minutes === undefined ||
+    ob.equipment === undefined ||
+    ob.body_weight_kg === undefined ||
+    ob.restrictions === undefined ||
+    ob.physical_state === undefined
+  )
+    return undefined;
+  return {
+    profile: {
+      goal: ob.goal,
+      experience: ob.experience,
+      weekly_frequency: ob.weekly_frequency,
+      session_minutes: ob.session_minutes,
+      equipment: ob.equipment,
+      body_weight_kg: ob.body_weight_kg,
+      physical_state: ob.physical_state,
+    },
+    restrictions: ob.restrictions,
+  };
+}
+
+/**
+ * 档案草稿字段级 Diff（A4：由服务端对比新旧档案派生「旧值→新值」，不信任客户端提交值）。
+ * 新值口径与草稿卡一致（src/lib/profile.ts profileFieldRows）；未建档（old = null）时
+ * 全部为新增，渲染层显示「新增」徽章。
+ */
+function profileDraftDiff(
+  oldProfile: Profile | null,
+  oldRestrictions: Restriction[],
+  payload: ProfileDraftPayload,
+): FieldDiff[] {
+  // 未建档（old = null）：全部为新增，渲染层按缺省 old_value 显示「新增」徽章
+  if (oldProfile === null)
+    return profileFieldRows(payload).map(({ field, value }) => ({
+      field,
+      new_value: value,
+    }));
+  // 已建档：与草稿卡实时 Diff 同一口径（profilePayloadDiff）对比新旧档案，
+  // 只列出真正变化的字段，避免把未变化字段渲染成伪变更
+  return profilePayloadDiff(
+    { profile: oldProfile, restrictions: oldRestrictions },
+    payload,
+  );
+}
+
+/**
+ * 档案载荷的确定性校验（纠错与确认提交共用；只认服务端可校验的结构，不信任客户端值）。
+ * 返回 undefined = 载荷有效；否则返回具体缺项/非法项说明。完整档案须含六类事实且
+ * 体重必填（plans/stage1.md §8 已拍）；字段缺省一律拒绝，不当作「无」（未知 ≠ 显式 none）。
+ */
+function profilePayloadError(payload: unknown): string | undefined {
+  if (
+    typeof payload !== "object" ||
+    payload === null ||
+    !("profile" in payload)
+  )
+    return "缺少 profile 字段";
+  const profile = (payload as { profile?: unknown }).profile;
+  if (typeof profile !== "object" || profile === null)
+    return "profile 字段无效";
+  const prof = profile as Record<string, unknown>;
+  const missingText = (key: string, label: string): string | undefined => {
+    const v = prof[key];
+    return typeof v === "string" && v.trim() !== ""
+      ? undefined
+      : `缺少${label}`;
+  };
+  const invalidNumber = (key: string, label: string): string | undefined => {
+    const v = prof[key];
+    return typeof v === "number" && Number.isFinite(v) && v > 0
+      ? undefined
+      : `${label}须为正数`;
+  };
+  const invalid =
+    missingText("goal", "训练目标") ??
+    missingText("experience", "训练经验") ??
+    invalidNumber("weekly_frequency", "每周频率") ??
+    invalidNumber("session_minutes", "单次时长") ??
+    invalidNumber("body_weight_kg", "体重");
+  if (invalid) return invalid;
+  const equipment = prof.equipment;
+  if (
+    !Array.isArray(equipment) ||
+    equipment.some((e) => typeof e !== "string" || e.trim() === "")
+  )
+    return "可用器械须为非空字符串列表（无器械请用空列表）";
+  const physical = prof.physical_state;
+  if (typeof physical !== "object" || physical === null)
+    return "缺少当前身体状态";
+  const ps = physical as Record<string, unknown>;
+  for (const [key, label] of [
+    ["red_flags", "红旗症状"],
+    ["notes", "其他描述"],
+  ] as const) {
+    const list = ps[key];
+    if (
+      !Array.isArray(list) ||
+      list.some((s) => typeof s !== "string" || s.trim() === "")
+    )
+      return `当前身体状态 · ${label}须为非空字符串列表`;
+  }
+  const restrictions = (payload as { restrictions?: unknown }).restrictions;
+  // 完整档案草稿必须携带当前有效限制列表：缺省 = 尚未收集，不得在确认时写成「无限制」
+  if (restrictions === undefined)
+    return "缺少动作限制（无限制请用空列表明确表达）";
+  if (!Array.isArray(restrictions)) return "动作限制须为列表";
+  for (const r of restrictions) {
+    if (typeof r !== "object" || r === null) return "动作限制条目无效";
+    const item = r as Record<string, unknown>;
+    if (typeof item.name !== "string" || item.name.trim() === "")
+      return "动作限制缺少名称";
+    if (item.scope !== "specific_action" && item.scope !== "movement_pattern")
+      return "动作限制粒度须为 specific_action 或 movement_pattern";
+    if (item.note !== undefined && typeof item.note !== "string")
+      return "动作限制说明须为字符串";
+  }
+  return undefined;
+}
+
+/** 按会话最新收集事实重建档案载荷（重算用；拿不到时由调用方保留旧草稿内容） */
+function latestProfilePayload(
+  state: MockState,
+  draftId: string,
+): ProfileDraftPayload | undefined {
+  const sessionId = state.draft_sessions.get(draftId);
+  if (!sessionId) return undefined;
+  const ob = state.onboarding.get(sessionId);
+  if (!ob) return undefined;
+  return profileDraftPayload(ob);
+}
+
+/** 本会话是否已有待确认的档案草稿（避免同一基线并存多份竞争草稿） */
+function pendingProfileDraft(
+  state: MockState,
+  sessionId: string,
+): Draft | undefined {
+  for (const [draftId, sid] of state.draft_sessions) {
+    if (sid !== sessionId) continue;
+    const d = state.drafts.get(draftId);
+    if (d && d.kind === "profile_update" && d.status === "pending") return d;
+  }
+  return undefined;
+}
+
+function buildProfileDraft(
+  state: MockState,
+  payload: ProfileDraftPayload,
+): Draft {
+  return {
+    id: nextId("draft"),
+    kind: "profile_update",
+    status: "pending",
+    revision: 1,
+    base_business_version: 0, // 落库前由 runScript 填充为当前 context_version
+    payload,
+    diff: profileDraftDiff(state.profile, state.restrictions, payload),
+  };
+}
+
+function composeOnboardingReply(
+  ack: string[],
+  blocks: string[],
+  tail: string,
+): string {
+  const parts: string[] = [];
+  if (ack.length > 0) parts.push(`已记录：${ack.join("；")}。`);
+  parts.push(...blocks);
+  parts.push(tail);
+  return parts.join("\n\n");
+}
+
+/**
+ * 一轮建档回复：记录本轮事实 → 红旗/清单外症状分支 → 追问下一项缺失事实或出稿。
+ * 缺失事实继续追问、不编造；事实齐备时只生成一份 profile_update 草稿（结构化载荷 +
+ * 服务端派生 Diff），同一基线不并存竞争草稿（plans/stage1.md F1-02）。
+ */
+function onboardingTurn(
+  state: MockState,
+  sessionId: string,
+  message: string,
+  parsed: ParsedFacts,
+  newRedFlags: string[],
+): { text: string; draft?: Draft } {
+  const ob = onboardingOf(state, sessionId);
+  const ack: string[] = [];
+  const blocks: string[] = [];
+
+  if (newRedFlags.length > 0) {
+    ack.push(`当前身体状态 · 红旗症状：${newRedFlags.join("、")}`);
+    blocks.push(professionalEvalBlock(newRedFlags));
+  }
+
+  applyFacts(ob, parsed, message, ack);
+
+  if (parsed.unlisted_symptoms.length > 0) {
+    ob.pending_symptoms = [
+      ...new Set([...ob.pending_symptoms, ...parsed.unlisted_symptoms]),
+    ];
+    // 未判定安全的症状不写成「无」；但已记录的红旗事实不得被后到的症状清空
+    // （02 2.3；与 applyFacts 中「已明确红旗不被后到的无红旗覆盖」同规则）
+    if ((ob.physical_state?.red_flags.length ?? 0) === 0)
+      ob.physical_state = undefined;
+    blocks.push(unlistedSymptomBlock(parsed.unlisted_symptoms));
+  }
+
+  const missing = missingFacts(ob);
+  if (missing.length > 0) {
+    const next = missing[0];
+    ob.last_asked = next;
+    const tail =
+      ack.length > 0 || blocks.length > 0
+        ? `接下来：${FACT_QUESTIONS[next]}`
+        : `我没能从这句话里提取到建档信息。请补充：${FACT_QUESTIONS[next]}`;
+    return { text: composeOnboardingReply(ack, blocks, tail) };
+  }
+
+  const pending = pendingProfileDraft(state, sessionId);
+  if (pending) {
+    const tail =
+      pending.base_business_version === state.context_version
+        ? "档案草稿已生成且仍待确认：请在草稿卡中核对或纠错后确认；确认前正式档案不变。"
+        : "已有档案草稿因业务数据变更而过期：请在草稿卡中按最新数据一键重算后再确认。";
+    return { text: composeOnboardingReply(ack, blocks, tail) };
+  }
+
+  const payload = profileDraftPayload(ob);
+  if (!payload)
+    return {
+      text: composeOnboardingReply(
+        ack,
+        blocks,
+        `请继续补充：${FACT_QUESTIONS[missingFacts(ob)[0] ?? "goal"]}`,
+      ),
+    };
+
+  const snapshot = JSON.stringify(payload);
+  if (ob.draft_id !== undefined && ob.drafted_snapshot === snapshot)
+    return {
+      text: composeOnboardingReply(
+        ack,
+        blocks,
+        "档案内容与上一份草稿一致，未生成新草稿。",
+      ),
+    };
+
+  const draft = buildProfileDraft(state, payload);
+  ob.draft_id = draft.id;
+  ob.drafted_snapshot = snapshot;
+  ob.last_asked = undefined;
+  return {
+    text: composeOnboardingReply(
+      ack,
+      blocks,
+      "已收集齐建档所需事实，生成 1 份档案草稿（结构化载荷；字段级 Diff 由服务端对比新旧档案派生）。请在草稿卡核对后确认；确认前正式档案不变。",
+    ),
+    draft,
+  };
+}
+
 const REVIEW_REPLY = [
   "## 本阶段复盘（基于最新有效记录重算）",
   "",
@@ -660,11 +1529,11 @@ const REVIEW_REPLY = [
 const GENERIC_REPLY = [
   "收到。当前处于 **mock 演示模式**，我可以：",
   "",
-  "- 训练打卡：如「今天卧推 80kg 4组x8」",
+  "- 建档：直接给出目标、经验、每周频率、单次时长、可用器械、体重、动作限制与当前身体状态",
   "- 调整计划：如「最近很累，帮我调整计划」",
   "- 生成复盘：如「给我看一下复盘」",
   "",
-  "所有业务变更都会先以草稿卡展示，确认后才写入。",
+  "训练打卡不在本阶段开放；所有业务变更都会先以草稿卡展示，确认后才写入。",
 ].join("\n");
 
 async function runScript(
@@ -695,15 +1564,37 @@ async function runScript(
     });
   }
 
-  const isRecord = /打卡|卧推|深蹲|硬拉|划船/.test(message);
+  // 明确红旗症状优先扫描：任何意图分支都不得吞掉它（plans/stage1.md F1-02）
+  const newRedFlags = scanRedFlags(state, run.session_id, message);
+  const parsed = parseFacts(message);
+  const isCheckIn = CHECKIN_PATTERN.test(message);
   const isPlan = /计划|调整|哑铃/.test(message);
   const isReview = /复盘/.test(message);
+  // 未建档（对话是唯一建档入口）、本会话建档进行中、或消息含档案事实 → 走建档剧本
+  const isOnboarding =
+    state.profile === null ||
+    parsed.touched ||
+    state.onboarding.get(run.session_id)?.last_asked !== undefined;
 
   let text: string;
   let draft: Draft | undefined;
 
-  if (isRecord) {
-    const r = recordScriptReply();
+  if (isCheckIn) {
+    if (CHECKIN_ENABLED) {
+      const r = recordScriptReply();
+      text = r.text;
+      draft = r.draft;
+    } else {
+      text = CHECKIN_UNAVAILABLE_REPLY;
+    }
+  } else if (isOnboarding) {
+    const r = onboardingTurn(
+      state,
+      run.session_id,
+      message,
+      parsed,
+      newRedFlags,
+    );
     text = r.text;
     draft = r.draft;
   } else if (isPlan) {
@@ -714,6 +1605,16 @@ async function runScript(
     text = REVIEW_REPLY;
   } else {
     text = GENERIC_REPLY;
+  }
+
+  if (newRedFlags.length > 0 && !isOnboarding) {
+    // 明确红旗：立即给出专业评估措辞，且不生成训练类草稿（plans/stage1.md F1-02）
+    if (draft && draft.kind !== "profile_update") {
+      draft = undefined;
+      text =
+        "你报告的症状需要先线下专业评估；本次不生成训练建议或计划调整草稿。";
+    }
+    text = [professionalEvalBlock(newRedFlags), text].join("\n\n");
   }
 
   // 流式输出：按段落切块；节奏放缓保证流式观感与 conversation_busy 演示窗口
@@ -864,9 +1765,17 @@ async function handleDevControls(
     });
   }
 
-  /* 1) 重置种子场景：整份内存态回到 seedState() 初始值 */
+  /* 1) 重置种子场景：整份内存态回到初始值（默认种子 / 空种子） */
   if (path === "/api/dev/reset" && method === "POST") {
-    await readBody(req); // 消费请求体，保持 keep-alive 连接干净
+    const body = await readJsonBody<{ seed?: string }>(req);
+    const seed = body.seed ?? "default";
+    if (seed !== "default" && seed !== "empty")
+      return apiError(res, {
+        http_status: 400,
+        error_code: "invalid_request",
+        message: `未知种子场景：${seed}`,
+        detail: "default | empty",
+      });
     const runsStopped: string[] = [];
     for (const run of state.runs.values()) {
       if (!isInjectable(run)) continue;
@@ -877,12 +1786,14 @@ async function handleDevControls(
     }
     hub.devResume();
     // 原地覆盖字段：保持 state 对象身份不变（在途剧本与中间件闭包仍指向同一对象）
-    Object.assign(state, seedState());
+    Object.assign(state, seed === "empty" ? emptySeedState() : seedState());
     return json(res, 200, {
       ok: true,
+      seed,
       runs_stopped: runsStopped,
       context_version: state.context_version,
-      plan_version: state.plan.version,
+      has_profile: state.profile !== null,
+      plan_version: state.plan?.version ?? null,
       sessions: state.sessions.length,
       records: state.records.length,
       drafts: state.drafts.size,
@@ -895,10 +1806,9 @@ async function handleDevControls(
 
   /* 2) 注入 run.failed：活跃 Run 或指定 Run，错误码取自契约 ErrorCode */
   if (path === "/api/dev/runs/fail" && method === "POST") {
-    const body = JSON.parse((await readBody(req)) || "{}") as {
-      run_id?: string;
-      error_code?: string;
-    };
+    const body = await readJsonBody<{ run_id?: string; error_code?: string }>(
+      req,
+    );
     const code = body.error_code ?? "invalid_request";
     if (!isInjectableErrorCode(code))
       return apiError(res, {
@@ -936,9 +1846,7 @@ async function handleDevControls(
 
   /* 3) 模拟服务重启中断（08 8.4：遗留 pending/running 统一 failed + interrupted_by_restart） */
   if (path === "/api/dev/restart" && method === "POST") {
-    const body = JSON.parse((await readBody(req)) || "{}") as {
-      run_id?: string;
-    };
+    const body = await readJsonBody<{ run_id?: string }>(req);
     const legacy = [...state.runs.values()].filter(isInjectable);
     if (body.run_id) {
       const only = state.runs.get(body.run_id);
@@ -968,10 +1876,9 @@ async function handleDevControls(
 
   /* 4) 挂起 SSE 业务事件（演练 08 8.7「连续 45s 无事件 → 转查询」） */
   if (path === "/api/dev/events/suspend" && method === "POST") {
-    const body = JSON.parse((await readBody(req)) || "{}") as {
-      seconds?: number;
-      heartbeat?: boolean;
-    };
+    const body = await readJsonBody<{ seconds?: number; heartbeat?: boolean }>(
+      req,
+    );
     if (
       body.seconds !== undefined &&
       (typeof body.seconds !== "number" ||
@@ -1023,7 +1930,8 @@ async function handleDevControls(
       ok: true,
       context_version: state.context_version,
       has_api_key: state.provider.has_api_key,
-      plan_version: state.plan.version,
+      has_profile: state.profile !== null,
+      plan_version: state.plan?.version ?? null,
       execution_slot_run_id: state.execution_slot_run_id,
       runs: [...state.runs.values()].map(devRunSnapshot),
       drafts: [...state.drafts.values()].map((d) => ({
@@ -1061,7 +1969,7 @@ function recomputeStats(state: MockState): void {
 
   // 处方区间以计划版本中该动作的为准（不另设隐藏容差）；找不到时退回通用区间
   const prescriptionOf = (exercise: string) => {
-    const ex = state.plan.blocks
+    const ex = (state.plan?.blocks ?? [])
       .flatMap((b) => b.exercises)
       .find((e) => e.name === exercise);
     const rir = ex?.target_rir.match(/(\d+)-(\d+)/);
@@ -1178,14 +2086,14 @@ function createHandler(state: MockState, hub: SseHub) {
         return json(res, 200, { has_api_key: false });
       }
 
-      /* 档案 */
+      /* 档案（PRD §5.2；02 2.1/2.2）：profile = null = 尚未建档；plan 缺省 = 未生成/未启用 */
       if (path === "/api/profile" && method === "GET") {
         return json(res, 200, {
           profile: state.profile,
           restrictions: state.restrictions,
           context_version: state.context_version,
           /* STAGED-SHARED-EDIT（lane 3b，supervisor 批准）：/profile 当前计划卡数据源 */
-          plan: state.plan,
+          ...(state.plan ? { plan: state.plan } : {}),
         });
       }
 
@@ -1371,21 +2279,46 @@ function createHandler(state: MockState, hub: SseHub) {
             error_code: "invalid_request",
             message: "缺少 payload",
           });
-
-        draft.payload = body.payload;
-        // SAFETY: payload 形状由草稿 kind 决定；record 分支按 RecordDraftPayload 派生展示 diff，
-        // plan/profile 分支的 diff 内嵌于 payload 本体，直接取用保持两者一致
-        draft.diff =
+        // payload 形状由草稿 kind 决定（D1A 单一形状源）：不匹配则拒绝，
+        // 避免整份替换后 draft.diff 派生到错误形状上
+        const payloadMatchesKind =
           draft.kind === "training_record"
-            ? recordDraftDiff(
-                body.payload as Extract<Draft["payload"], { date: string }>,
-              )
-            : (
-                body.payload as Extract<
-                  Draft["payload"],
-                  { title: string; diff: FieldDiff[] }
-                >
-              ).diff;
+            ? "sets" in body.payload
+            : draft.kind === "plan_adjust"
+              ? "title" in body.payload && "diff" in body.payload
+              : "profile" in body.payload;
+        if (!payloadMatchesKind)
+          return apiError(res, {
+            http_status: 400,
+            error_code: "invalid_request",
+            message: `payload 形状与草稿类型不匹配：${draft.kind}`,
+          });
+
+        // 展示与 Diff 随纠错更新（01 1.2）：diff 一律由服务端派生，不信任客户端提交值
+        // （记录：从 payload 派生；计划：diff 属于计划提案本体；档案：对比当前正式档案派生）
+        if (draft.kind === "training_record") {
+          draft.payload = body.payload;
+          draft.diff = recordDraftDiff(
+            body.payload as Extract<Draft["payload"], { date: string }>,
+          );
+        } else if (draft.kind === "plan_adjust") {
+          const p = body.payload as PlanDraftPayload;
+          draft.payload = p;
+          draft.diff = p.diff;
+        } else {
+          // 档案草稿：确定性校验结构（六类事实 + 必填体重、限制粒度）后整份替换，
+          // Diff 由服务端对比当前正式档案重新派生（不信任客户端提交值）
+          const invalid = profilePayloadError(body.payload);
+          if (invalid)
+            return apiError(res, {
+              http_status: 400,
+              error_code: "invalid_request",
+              message: `档案载荷无效：${invalid}`,
+            });
+          const p = body.payload as ProfileDraftPayload;
+          draft.payload = p;
+          draft.diff = profileDraftDiff(state.profile, state.restrictions, p);
+        }
         draft.revision += 1;
         return json(res, 200, { draft });
       }
@@ -1454,6 +2387,7 @@ function createHandler(state: MockState, hub: SseHub) {
 
         // 6) 以服务端存储的草稿内容复查领域规则并原子提交（01 1.4）；
         //    内联纠错不经确认提交——纠错走 revise 业务接口（01 1.2，不建第二编辑入口）
+        //    profile_update 的复查 = profilePayloadError（确定性字段校验）
 
         // 原子提交（mock：顺序内存写入）
         if (draft.kind === "training_record") {
@@ -1473,10 +2407,13 @@ function createHandler(state: MockState, hub: SseHub) {
             schedule_snapshot: null,
           });
         } else if (draft.kind === "plan_adjust") {
-          const p = draft.payload as Extract<
-            Draft["payload"],
-            { title: string; diff: FieldDiff[] }
-          >;
+          if (!state.plan)
+            return apiError(res, {
+              http_status: 409,
+              error_code: "invalid_request",
+              message: "当前没有正式计划，无法应用计划调整草稿",
+            });
+          const p = draft.payload as PlanDraftPayload;
           for (const d of p.diff) {
             const sets = Number(d.new_value.match(/(\d+)/)?.[1]);
             const ex = state.plan.blocks
@@ -1488,6 +2425,41 @@ function createHandler(state: MockState, hub: SseHub) {
           // 计划调整生成新版本（PRD 5.3：不静默覆盖、版本化启用）。
           // mock 简化：旧版本不归档展示（当前无版本历史 UI 消费方，不建版本列表）。
           state.plan.version = `v${Number(state.plan.version.slice(1)) + 1}`;
+        } else {
+          // 档案草稿：提交前对服务端存储的载荷做确定性复查（六类事实 + 必填体重、
+          // 限制粒度）；不通过则不写任何正式数据、不递增版本
+          const p = draft.payload as ProfileDraftPayload;
+          const invalid = profilePayloadError(p);
+          if (invalid)
+            return apiError(res, {
+              http_status: 400,
+              error_code: "invalid_request",
+              message: `档案草稿内容无效，无法确认：${invalid}`,
+            });
+          // 原子写入完整档案与当前有效限制（01 1.4：版本检查、领域复查、正式写入、
+          // 版本递增、草稿状态变更同属一次提交）
+          const prof = p.profile as Profile;
+          const nextRestrictions = p.restrictions;
+          if (nextRestrictions === undefined)
+            return apiError(res, {
+              http_status: 400,
+              error_code: "invalid_request",
+              message:
+                "档案草稿内容无效，无法确认：缺少动作限制（无限制须为空列表）",
+            });
+          state.profile = {
+            goal: prof.goal,
+            experience: prof.experience,
+            weekly_frequency: prof.weekly_frequency,
+            session_minutes: prof.session_minutes,
+            equipment: [...prof.equipment],
+            body_weight_kg: prof.body_weight_kg,
+            physical_state: {
+              red_flags: [...prof.physical_state.red_flags],
+              notes: [...prof.physical_state.notes],
+            },
+          };
+          state.restrictions = nextRestrictions.map((r) => ({ ...r }));
         }
         draft.status = "committed";
         state.context_version += 1;
@@ -1503,7 +2475,7 @@ function createHandler(state: MockState, hub: SseHub) {
               ? "训练记录已写入正式数据"
               : draft.kind === "plan_adjust"
                 ? "计划新版本已启用"
-                : "档案已更新",
+                : "档案与动作限制已写入正式数据",
         };
         // 持久化首次确认凭据（owner 决策 B；01 1.3 提交凭据）：重复确认返回原始 context_version 与 summary，
         // 不再写入正式数据或递增版本
@@ -1569,6 +2541,12 @@ function createHandler(state: MockState, hub: SseHub) {
             diff: recordDraftDiff(p),
           };
         } else if (old.kind === "plan_adjust") {
+          if (!state.plan)
+            return apiError(res, {
+              http_status: 409,
+              error_code: "invalid_request",
+              message: "当前没有正式计划，无法重算计划调整草稿",
+            });
           // 计划草稿：从当前计划状态派生最小提案——旧值取当前计划实际值，
           // 取第一个可减量动作（sets >= 2）提议组数 -1；确认事务按同字段规则应用
           const ex = state.plan.blocks
@@ -1605,12 +2583,20 @@ function createHandler(state: MockState, hub: SseHub) {
             diff: rows,
           };
         } else {
-          // mock Stage 0 场景不生成档案草稿；如出现则明确拒绝而非误派生
-          return apiError(res, {
-            http_status: 409,
-            error_code: "invalid_request",
-            message: "当前 mock 场景不支持档案草稿重算",
-          });
+          // 档案草稿：按会话最新收集事实重建提案（01 1.6「以最新业务上下文生成新草稿」）；
+          // 拿不到最新事实时保留旧草稿内容（用户意图，不虚构），Diff 一律对比当前正式档案派生
+          const oldPayload = old.payload as ProfileDraftPayload;
+          const payload = latestProfilePayload(state, old.id) ?? oldPayload;
+          fresh = {
+            id: nextId("draft"),
+            kind: "profile_update",
+            status: "pending",
+            revision: 1,
+            base_business_version: state.context_version,
+            parent_draft_id: old.id,
+            payload,
+            diff: profileDraftDiff(state.profile, state.restrictions, payload),
+          };
         }
         state.drafts.set(fresh.id, fresh);
         // 重算新草稿归属同一会话（sessions/:id/drafts 可恢复）
@@ -1618,20 +2604,31 @@ function createHandler(state: MockState, hub: SseHub) {
         if (oldSession) state.draft_sessions.set(fresh.id, oldSession);
         old.status = "stale";
 
-        const diff: FieldDiff[] = [];
-        // SAFETY: payload 只做字段级序列化对比，不当成可变记录使用；DraftPayload 联合类型的键在此处按 JSON 视图遍历
-        const oldPayload = old.payload as unknown as Record<string, unknown>;
-        // SAFETY: 同上，fresh.payload 为刚生成的 DraftPayload，仅用于与旧草稿做 JSON 字段对比
-        const newPayload = fresh.payload as unknown as Record<string, unknown>;
-        for (const key of Object.keys(newPayload)) {
-          const a = JSON.stringify(oldPayload[key]);
-          const b = JSON.stringify(newPayload[key]);
-          if (a !== b)
-            diff.push({
-              field: `payload.${key}`,
-              old_value: a ?? "—",
-              new_value: b ?? "—",
-            });
+        // 新旧草稿 Diff：档案草稿按字段级展示口径对比两份载荷；其余草稿保持原 payload 键级对比
+        let diff: FieldDiff[] = [];
+        if (old.kind === "profile_update" && fresh.kind === "profile_update") {
+          diff = profilePayloadDiff(
+            old.payload as ProfileDraftPayload,
+            fresh.payload as ProfileDraftPayload,
+          );
+        } else {
+          // SAFETY: payload 只做字段级序列化对比，不当成可变记录使用；DraftPayload 联合类型的键在此处按 JSON 视图遍历
+          const oldPayload = old.payload as unknown as Record<string, unknown>;
+          // SAFETY: 同上，fresh.payload 为刚生成的 DraftPayload，仅用于与旧草稿做 JSON 字段对比
+          const newPayload = fresh.payload as unknown as Record<
+            string,
+            unknown
+          >;
+          for (const key of Object.keys(newPayload)) {
+            const a = JSON.stringify(oldPayload[key]);
+            const b = JSON.stringify(newPayload[key]);
+            if (a !== b)
+              diff.push({
+                field: `payload.${key}`,
+                old_value: a ?? "—",
+                new_value: b ?? "—",
+              });
+          }
         }
 
         const result: RecalcResult = {

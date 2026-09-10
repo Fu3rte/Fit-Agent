@@ -5,8 +5,11 @@
  *   未提交的纠错经「提交纠错」走纠错业务接口（01 1.2），确认写入的是服务端最新草稿；
  * - 确认采纳幂等；409 draft_stale → 错误态 + 按最新数据一键重算；
  * - 重算产生的新草稿展示新旧草稿 Diff，再次确认才生效；
+ * - 档案草稿：六类事实 + 必填体重结构化展示，选择/数字/文本与器械、限制列表增删走
+ *   同一纠错接口（限制含粒度）；红旗症状只读（02 2.3：Agent 不解除红旗）；
  * - 丢弃待确认草稿（01 1.3）：已丢弃徽章 + 只读，不得再提交。
  */
+import { useState, type ReactNode } from "react";
 import { CircleAlert, RefreshCcw, Sparkles } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -16,9 +19,13 @@ import type {
   DraftKind,
   DraftPayload,
   FieldDiff,
+  Profile,
+  ProfileDraftPayload,
   RecordDraftPayload,
   RecordSet,
+  Restriction,
 } from "@/lib/contract";
+import { profilePayloadDiff } from "@/lib/profile";
 
 const KIND_LABEL: Record<DraftKind, string> = {
   training_record: "训练记录草稿",
@@ -232,6 +239,385 @@ function SetInputs({
   );
 }
 
+/* ------------------------------ 档案草稿字段 ------------------------------ */
+
+/** 六类建档事实 + 必填体重的内联纠错（选择 / 数字 / 文本 / 器械与限制列表增删） */
+const PROFILE_GOALS = ["增肌（肌肥大）", "力量", "整体健康"];
+const PROFILE_EXPERIENCES = ["零基础", "初级（有少量训练经验）", "中级"];
+const RESTRICTION_SCOPES: Array<{
+  value: Restriction["scope"];
+  label: string;
+}> = [
+  { value: "specific_action", label: "具体动作" },
+  { value: "movement_pattern", label: "动作模式" },
+];
+
+const selectClass =
+  "h-7 rounded-md border border-input bg-transparent px-2 text-xs disabled:opacity-50";
+
+function FieldLine({
+  label,
+  children,
+}: {
+  label: string;
+  children: ReactNode;
+}) {
+  return (
+    <div className="flex flex-wrap items-center gap-2 text-xs">
+      <span className="min-w-24 text-muted-foreground">{label}</span>
+      {children}
+    </div>
+  );
+}
+
+function ListField({
+  label,
+  children,
+}: {
+  label: string;
+  children: ReactNode;
+}) {
+  return (
+    <div className="text-xs">
+      <div className="mb-1.5 text-muted-foreground">{label}</div>
+      <div className="space-y-1.5">{children}</div>
+    </div>
+  );
+}
+
+/** 选项里补上草稿自带的非表内取值，避免编辑后 select 丢失原值 */
+const withCurrent = (options: string[], current?: string): string[] =>
+  current !== undefined && !options.includes(current)
+    ? [...options, current]
+    : options;
+
+/**
+ * 档案草稿结构化卡：PRD §5.2 六类事实 + 必填体重，全部只改待确认草稿（不自动提交）。
+ * 红旗症状只读展示：红旗由对话报告记入档案，草稿卡不提供解除/编辑（02 2.3：Agent
+ * 不诊断、不解除红旗）。
+ */
+function ProfileDraftFields({
+  payload,
+  disabled,
+  onChange,
+}: {
+  payload: ProfileDraftPayload;
+  disabled: boolean;
+  onChange: (payload: ProfileDraftPayload) => void;
+}) {
+  const [newEquipment, setNewEquipment] = useState("");
+  const [newRestriction, setNewRestriction] = useState("");
+  const [newRestrictionScope, setNewRestrictionScope] =
+    useState<Restriction["scope"]>("specific_action");
+
+  const prof = payload.profile;
+  const equipment = prof.equipment;
+  const restrictions = payload.restrictions;
+  const physical = prof.physical_state;
+
+  const patch = (p: Partial<Profile>) =>
+    onChange({ ...payload, profile: { ...prof, ...p } });
+  const patchRestriction = (i: number, p: Partial<Restriction>) =>
+    onChange({
+      ...payload,
+      restrictions: (restrictions ?? []).map((r, j) =>
+        j === i ? { ...r, ...p } : r,
+      ),
+    });
+  const addRestriction = () => {
+    const name = newRestriction.trim();
+    if (name === "") return;
+    onChange({
+      ...payload,
+      restrictions: [
+        ...(restrictions ?? []),
+        { name, scope: newRestrictionScope },
+      ],
+    });
+    setNewRestriction("");
+  };
+
+  return (
+    <div className="mt-3 space-y-2.5 rounded-lg border border-border bg-muted/30 p-3">
+      <p className="text-xs font-medium">
+        建档事实（六类 + 体重，均必填；修改后需提交纠错）
+      </p>
+
+      <FieldLine label="训练目标">
+        <select
+          aria-label="训练目标"
+          className={selectClass}
+          value={prof.goal ?? ""}
+          disabled={disabled}
+          onChange={(e) => patch({ goal: e.target.value })}
+        >
+          {prof.goal === undefined && <option value="">未收集</option>}
+          {withCurrent(PROFILE_GOALS, prof.goal).map((g) => (
+            <option key={g} value={g}>
+              {g}
+            </option>
+          ))}
+        </select>
+      </FieldLine>
+
+      <FieldLine label="训练经验">
+        <select
+          aria-label="训练经验"
+          className={selectClass}
+          value={prof.experience ?? ""}
+          disabled={disabled}
+          onChange={(e) => patch({ experience: e.target.value })}
+        >
+          {prof.experience === undefined && <option value="">未收集</option>}
+          {withCurrent(PROFILE_EXPERIENCES, prof.experience).map((v) => (
+            <option key={v} value={v}>
+              {v}
+            </option>
+          ))}
+        </select>
+      </FieldLine>
+
+      <FieldLine label="每周频率">
+        <Input
+          type="number"
+          min={1}
+          value={prof.weekly_frequency ?? ""}
+          disabled={disabled}
+          onChange={(e) =>
+            patch({ weekly_frequency: toNumber(e.target.value) })
+          }
+          className="h-7 w-20 text-xs"
+          aria-label="每周训练频率（次）"
+        />
+        <span className="text-muted-foreground">次 / 周</span>
+      </FieldLine>
+
+      <FieldLine label="单次时长">
+        <Input
+          type="number"
+          min={1}
+          value={prof.session_minutes ?? ""}
+          disabled={disabled}
+          onChange={(e) => patch({ session_minutes: toNumber(e.target.value) })}
+          className="h-7 w-20 text-xs"
+          aria-label="单次训练时长（分钟）"
+        />
+        <span className="text-muted-foreground">分钟</span>
+      </FieldLine>
+
+      <FieldLine label="体重（必填）">
+        <Input
+          type="number"
+          min={0}
+          step="0.5"
+          value={prof.body_weight_kg ?? ""}
+          disabled={disabled}
+          onChange={(e) => patch({ body_weight_kg: toNumber(e.target.value) })}
+          className="h-7 w-20 text-xs"
+          aria-label="体重（kg）"
+        />
+        <span className="text-muted-foreground">kg</span>
+      </FieldLine>
+
+      <ListField label="可用器械">
+        {equipment === undefined ? (
+          <p className="text-muted-foreground">尚未收集</p>
+        ) : (
+          <>
+            {equipment.length === 0 && (
+              <p className="text-muted-foreground">无器械（用户明确说明）</p>
+            )}
+            {equipment.map((name, i) => (
+              <div key={i} className="flex flex-wrap items-center gap-1.5">
+                <Input
+                  value={name}
+                  disabled={disabled}
+                  onChange={(e) =>
+                    patch({
+                      equipment: equipment.map((n, j) =>
+                        j === i ? e.target.value : n,
+                      ),
+                    })
+                  }
+                  className="h-7 w-40 text-xs"
+                  aria-label={`可用器械 ${i + 1}`}
+                />
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="h-7 px-2 text-xs"
+                  disabled={disabled}
+                  onClick={() =>
+                    patch({ equipment: equipment.filter((_, j) => j !== i) })
+                  }
+                  aria-label={`删除器械 ${name === "" ? i + 1 : name}`}
+                >
+                  删除
+                </Button>
+              </div>
+            ))}
+            {!disabled && (
+              <div className="flex flex-wrap items-center gap-1.5">
+                <Input
+                  value={newEquipment}
+                  onChange={(e) => setNewEquipment(e.target.value)}
+                  placeholder="如 杠铃"
+                  className="h-7 w-40 text-xs"
+                  aria-label="新增器械名称"
+                />
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="h-7 px-2 text-xs"
+                  disabled={newEquipment.trim() === ""}
+                  onClick={() => {
+                    patch({ equipment: [...equipment, newEquipment.trim()] });
+                    setNewEquipment("");
+                  }}
+                  aria-label="添加器械"
+                >
+                  添加
+                </Button>
+              </div>
+            )}
+          </>
+        )}
+      </ListField>
+
+      <ListField label="动作限制（当前有效，仅两种粒度）">
+        {restrictions === undefined ? (
+          <p className="text-muted-foreground">尚未收集</p>
+        ) : (
+          <>
+            {restrictions.length === 0 && (
+              <p className="text-muted-foreground">无（用户明确说明）</p>
+            )}
+            {restrictions.map((r, i) => (
+              <div key={i} className="flex flex-wrap items-center gap-1.5">
+                <Input
+                  value={r.name}
+                  disabled={disabled}
+                  onChange={(e) =>
+                    patchRestriction(i, { name: e.target.value })
+                  }
+                  className="h-7 w-40 text-xs"
+                  aria-label={`限制 ${i + 1} 名称`}
+                />
+                <select
+                  aria-label={`限制 ${i + 1} 粒度`}
+                  className={selectClass}
+                  value={r.scope}
+                  disabled={disabled}
+                  onChange={(e) =>
+                    patchRestriction(i, {
+                      scope: e.target.value as Restriction["scope"],
+                    })
+                  }
+                >
+                  {RESTRICTION_SCOPES.map((s) => (
+                    <option key={s.value} value={s.value}>
+                      {s.label}
+                    </option>
+                  ))}
+                </select>
+                {r.note && (
+                  <span
+                    className="max-w-56 truncate text-muted-foreground"
+                    title={r.note}
+                  >
+                    {r.note}
+                  </span>
+                )}
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="h-7 px-2 text-xs"
+                  disabled={disabled}
+                  onClick={() =>
+                    onChange({
+                      ...payload,
+                      restrictions: restrictions.filter((_, j) => j !== i),
+                    })
+                  }
+                  aria-label={`删除限制 ${r.name === "" ? i + 1 : r.name}`}
+                >
+                  删除
+                </Button>
+              </div>
+            ))}
+            {!disabled && (
+              <div className="flex flex-wrap items-center gap-1.5">
+                <Input
+                  value={newRestriction}
+                  onChange={(e) => setNewRestriction(e.target.value)}
+                  placeholder="如 颈后推举"
+                  className="h-7 w-40 text-xs"
+                  aria-label="新增限制名称"
+                />
+                <select
+                  aria-label="新增限制粒度"
+                  className={selectClass}
+                  value={newRestrictionScope}
+                  onChange={(e) =>
+                    setNewRestrictionScope(
+                      e.target.value as Restriction["scope"],
+                    )
+                  }
+                >
+                  {RESTRICTION_SCOPES.map((s) => (
+                    <option key={s.value} value={s.value}>
+                      {s.label}
+                    </option>
+                  ))}
+                </select>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="h-7 px-2 text-xs"
+                  disabled={newRestriction.trim() === ""}
+                  onClick={addRestriction}
+                  aria-label="添加限制"
+                >
+                  添加
+                </Button>
+              </div>
+            )}
+          </>
+        )}
+      </ListField>
+
+      <ListField label="当前身体状态与红旗症状（只读；红旗由对话报告记入）">
+        <div className="flex flex-wrap items-center gap-1.5">
+          <span className="text-muted-foreground">红旗症状</span>
+          {physical === undefined ? (
+            <span className="text-muted-foreground">尚未收集</span>
+          ) : physical.red_flags.length > 0 ? (
+            physical.red_flags.map((flag) => (
+              <Badge key={flag} variant="destructive" className="text-[10px]">
+                {flag}
+              </Badge>
+            ))
+          ) : (
+            <span className="text-muted-foreground">
+              无明确红旗（用户确认）
+            </span>
+          )}
+        </div>
+        <div className="flex flex-wrap items-center gap-1.5">
+          <span className="text-muted-foreground">其他描述</span>
+          {physical === undefined ? (
+            <span className="text-muted-foreground">尚未收集</span>
+          ) : physical.notes.length > 0 ? (
+            <span>{physical.notes.join("、")}</span>
+          ) : (
+            <span className="text-muted-foreground">无</span>
+          )}
+        </div>
+      </ListField>
+    </div>
+  );
+}
+
 /* -------------------------------- 草稿卡 ---------------------------------- */
 
 export interface DraftCardProps {
@@ -290,17 +676,23 @@ export function DraftCard({
   // 内联纠错未提交（01 1.2：纠错不自动提交，须经「提交纠错」走业务接口）
   const dirty = JSON.stringify(payload) !== JSON.stringify(draft.payload);
 
-  // 记录草稿：有纠错时用计算出的 Diff（反映纠错），否则展示服务端给的变更摘要
-  const editedRows =
-    "sets" in payload
-      ? recordDiffRows(draft.payload as RecordDraftPayload, payload)
+  // 记录/档案草稿：有未提交纠错时用客户端实时 Diff（展示与 Diff 随纠错更新），
+  // 否则展示服务端派生的变更 Diff；计划草稿的 diff 内嵌于 payload（可内联纠错）
+  const isRecord = "sets" in payload;
+  const isProfile = "profile" in payload;
+  const editedRows = isRecord
+    ? recordDiffRows(draft.payload as RecordDraftPayload, payload)
+    : isProfile
+      ? profilePayloadDiff(draft.payload as ProfileDraftPayload, payload)
       : [];
   const diffRows: FieldDiff[] =
-    "sets" in payload
+    isRecord || isProfile
       ? editedRows.length > 0
         ? editedRows
         : draft.diff
-      : payload.diff;
+      : "diff" in payload
+        ? payload.diff
+        : draft.diff;
 
   return (
     <div className="mt-3 rounded-xl border bg-card p-4 shadow-sm">
@@ -324,7 +716,7 @@ export function DraftCard({
       </div>
 
       {/* 内容 + 内联纠错 */}
-      {"sets" in payload ? (
+      {isRecord && (
         <div className="mt-3 space-y-2">
           <div className="rounded-lg bg-bubble-out px-3 py-2 text-xs text-bubble-out-foreground">
             <p className="font-medium">+ 新增训练记录</p>
@@ -352,7 +744,17 @@ export function DraftCard({
             onChange={(sets) => onChange({ ...payload, sets })}
           />
         </div>
-      ) : (
+      )}
+      {/* 档案草稿：结构化事实卡 + 内联纠错（只改待确认草稿，不自动提交） */}
+      {isProfile && (
+        <ProfileDraftFields
+          payload={payload}
+          disabled={committed || discarded}
+          onChange={onChange}
+        />
+      )}
+      {/* 计划草稿：Diff 可内联纠错 */}
+      {"diff" in payload && (
         <div className="mt-3 space-y-2">
           <p className="text-sm font-medium">{payload.title}</p>
           <EditablePlanDiff
