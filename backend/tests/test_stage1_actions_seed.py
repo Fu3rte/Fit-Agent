@@ -313,12 +313,21 @@ def _strip_line_comments(sql: str) -> str:
     return re.sub(r"--[^\n]*", "", sql)
 
 
+# S1-03 种子维护只涉及 001–003；本助手固定只复制这三个文件（Stage 2 的 004 草稿表
+# 与本组用例无关），此后由用例自行追加临时编号迁移。
+_STAGE1_MIGRATION_FILES = (
+    "001_stage0_runtime_and_settings.sql",
+    "002_stage1_actions_profile.sql",
+    "003_stage1_action_seed.sql",
+)
+
+
 def _migration_dir(tmp_path: Path) -> Path:
     """复制生产迁移（001–003）到临时目录；后续可再追加临时迁移。"""
     directory = tmp_path / "migrations"
     directory.mkdir(exist_ok=True)
-    for path in sorted(DEFAULT_MIGRATIONS_DIR.glob("*.sql")):
-        shutil.copy(path, directory / path.name)
+    for name in _STAGE1_MIGRATION_FILES:
+        shutil.copy(DEFAULT_MIGRATIONS_DIR / name, directory / name)
     return directory
 
 
@@ -497,7 +506,8 @@ async def test_later_numbered_migration_can_extend_seed_incrementally(
 async def test_seed_import_keeps_context_version_untouched(tmp_path: Path) -> None:
     """种子导入不推进统一业务版本，也不建立独立计数器（S1-02/S1-03 边界）。"""
     async with open_database(tmp_path / "app.db") as db:
-        assert await db.migrate() == 3
+        # 用生产迁移全量版本（含后续阶段新增编号迁移）：种子导入不建立用户事实。
+        assert await db.migrate() == len(load_migrations())
         assert await _profile_row(db) == USER_PROFILE_ROW
         service = ActionCatalogService(db)
         assert await service.resolve("barbell full squat")

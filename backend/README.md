@@ -36,6 +36,7 @@ backend/
 │   └── stats/                # 06 完成率/三桶/PR（只读计算）
 ├── app/
 │   ├── drafts.py             # Pending/Committed/Discarded、修订版本、幂等凭据、一键重算（01 1.3/1.6）
+│   ├── draft_repo.py         # business_drafts 最小读写：快照/revision/来源/提交凭据（01 1.3）
 │   └── confirm.py            # 幂等→版本检查→领域复查→原子提交（01 1.4/1.5）
 ├── runtime/
 │   ├── agent_factory.py      # PydanticAI 装配：system prompt、工具注册、Harness 参数（08 8.5/8.6）

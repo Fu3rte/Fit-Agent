@@ -1,9 +1,13 @@
-"""FastAPI 工厂 + lifespan：连接/迁移/回环监听/Host-Origin 校验/前端静态托管。
+"""FastAPI 工厂 + lifespan：连接/迁移/回环监听/Host-Origin 校验/业务路由装配。
 
 Stage 0 实现范围：生命周期内打开唯一连接并完成迁移、读取固定配置、
 Host/Origin 校验中间件与健康检查；业务路由（routes_*.py）与前端静态托管
 归后续阶段。启动失败（目录不可建/连接失败/迁移失败）不继续对外提供服务，
 并关闭本应用已建立的连接（S0-02）。
+
+Stage 2 S2-07 装配：只读档案路由与草稿业务路由（纠错/确认/丢弃）在已有路由位置
+接线，错误形状统一由 ``api.dto.install_error_handlers`` 注册；创建草稿、重算、
+聊天/Run 与设置面仍不在此阶段（stage2.md §5 S2-07）。
 """
 
 from collections.abc import AsyncIterator
@@ -13,6 +17,9 @@ from urllib.parse import urlsplit
 
 from fastapi import FastAPI, Request
 
+from api.dto import install_error_handlers
+from api.routes_drafts import router as drafts_router
+from api.routes_readonly import router as readonly_router
 from config import database_path, local_timezone_name, resolve_data_dir
 from storage.db import Database
 from storage.setting_repo import DEFAULT_PROVIDER, SettingRepo
@@ -113,6 +120,9 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
         openapi_url=None,
     )
     app.add_middleware(LoopbackGuardMiddleware)
+    app.include_router(readonly_router)
+    app.include_router(drafts_router)
+    install_error_handlers(app)
 
     @app.get("/healthz")
     async def healthz(request: Request) -> dict[str, object]:

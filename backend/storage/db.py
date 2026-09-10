@@ -35,6 +35,20 @@ _PARAMETER_ECHOING_LOGGERS = ("aiosqlite",)
 T = TypeVar("T")
 
 
+def require_outer_transaction(conn: aiosqlite.Connection, what: str) -> None:
+    """断言 ``conn`` 来自 :meth:`Database.transaction`：本层不自行 BEGIN/COMMIT。
+
+    只接受外层事务连接的 repo 方法（档案读写、动作引用读取、草稿提交凭据写入）用本函数
+    守住调用契约：不在事务内即编程错误，既避免在持锁区间内再取锁（锁不可重入会死锁），
+    也避免把「部分写入 + 由调用方补提交」这种半事务形态留给后续阶段（stage2.md §2）。
+    错误消息带 ``what`` 前缀，便于定位是哪一步被误用。
+    """
+    if not conn.in_transaction:
+        raise RuntimeError(
+            f"{what}必须复用外层事务（Database.transaction()）：本层不自行 BEGIN/COMMIT"
+        )
+
+
 async def _await_settled(
     statement: Coroutine[Any, Any, object],
 ) -> tuple[bool, BaseException | None]:

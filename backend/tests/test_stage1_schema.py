@@ -34,9 +34,10 @@ STAGE0_TABLES = {
     "provider_config",
 }
 STAGE1_TABLES = {"exercises", "user_profile"}
+# Stage 2 S2-02 由 004 迁移建立草稿表（stage2.md §5 S2-02），不再属「后续阶段不建」。
+STAGE2_TABLES = {"business_drafts"}
 # Stage 1 明确不建的表（后续阶段职责，07 章责任边界 + stage1.md §4）
 LATER_STAGE_TABLES = {
-    "business_drafts",
     "plans",
     "plan_snapshots",
     "training_sessions",
@@ -176,7 +177,9 @@ async def test_fresh_database_migrates_to_latest_with_seed_and_no_profile_facts(
         assert await db.pragma_value("user_version") == LATEST_VERSION
 
         tables = await _table_names(db)
-        assert tables == STAGE0_TABLES | STAGE1_TABLES | {"sqlite_sequence"}
+        assert tables == (
+            STAGE0_TABLES | STAGE1_TABLES | STAGE2_TABLES | {"sqlite_sequence"}
+        )
         assert tables & LATER_STAGE_TABLES == set()  # 不建后续阶段业务表
 
         # 003 只写入精选产品种子：结构就位且目录非空，但仍无用户事实

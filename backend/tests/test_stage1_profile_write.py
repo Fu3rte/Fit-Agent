@@ -5,6 +5,7 @@
 不存在档案写入旁路（本阶段不接 HTTP／Agent／CLI，不提供建档旁路）。
 """
 
+import ast
 import re
 from pathlib import Path
 
@@ -26,6 +27,18 @@ _PROFILE_WRITE_SQL = re.compile(
     r"(?is)\b(insert\s+(or\s+\w+\s+)?into|update|delete\s+from|replace\s+into)\s+user_profile\b"
 )
 _PROFILE_WRITE_ALLOWED = "domain/profile/repo.py"
+
+# 唯一获批的 ``context_version`` 推进语句（Stage 2 S2-05）与其方法名、唯一调用方。
+_APPROVED_VERSION_ADVANCE = re.compile(
+    r"context_version\s*=\s*context_version\s*\+\s*1"
+)
+_APPROVED_VERSION_ADVANCE_METHOD = "bump_context_version_in_transaction"
+# 其余任何形式的档案行写入／版本改写仍一律禁止。
+_VERSION_WRITE_SQL = (
+    r"(?is)update\s+user_profile[^;]*context_version",
+    r"(?is)insert\s+into\s+user_profile",
+    r"(?is)set\s+context_version",
+)
 
 
 def _production_sources() -> list[Path]:
@@ -165,23 +178,104 @@ def test_no_profile_write_bypass_in_production_code() -> None:
     assert offenders == [], f"档案写入只允许经 {_PROFILE_WRITE_ALLOWED}：{offenders}"
 
 
+def _string_literals(source: Path) -> list[str]:
+    """源文件里的字符串字面量：SQL 都是字面量，逐条扫描不让相邻语句互相串味。"""
+    tree = ast.parse(source.read_text(encoding="utf-8"))
+    return [
+        node.value
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Constant) and isinstance(node.value, str)
+    ]
+
+
 def test_profile_module_never_writes_context_version() -> None:
-    forbidden = (
-        r"(?is)update\s+user_profile[^;]*context_version",
-        r"(?is)insert\s+into\s+user_profile",
-        r"(?is)set\s+context_version",
-        r"context_version\s*\+",
-    )
+    """Stage 2 显式扩展（不删测试、不放宽）：domain/profile 内不得有第二条版本写入路径。
+
+    原断言为「domain/profile 一律不得写 ``context_version``」。stage2.md §5 S2-05「复用
+    Stage 1 内部档案写入，集中推进版本」要求确认事务推进版本，而本文件上方的写入旁路守卫
+    （``_PROFILE_WRITE_ALLOWED``）与 README 硬规则 3（SQL 只在 repo）已决定 ``user_profile``
+    的 SQL 只在 ``domain/profile/repo.py``。因此本守卫按仍然成立、且覆盖面更强的口径收窄
+    为——版本自增语句全包恰好一处（见 :func:`test_profile_version_advance_stays_single_seam`），
+    其余任何档案行写入／版本改写语句一律不许出现；档案写入本身仍不得顺带推进版本。
+    """
+    advances: list[str] = []
     for source in sorted((BACKEND_ROOT / "domain" / "profile").glob("*.py")):
+        for literal in _string_literals(source):
+            if _APPROVED_VERSION_ADVANCE.search(literal):
+                advances.append(source.name)
+                continue
+            for pattern in _VERSION_WRITE_SQL:
+                assert not re.search(pattern, literal), (
+                    f"{source.name} 命中 {pattern}：{literal!r}"
+                )
+    assert advances == ["repo.py"], f"context_version 推进只允许一处：{advances}"
+
+
+def test_profile_version_advance_stays_single_seam() -> None:
+    """唯一版本推进点：批准方法体内一处语句，且 ``app/`` 内只有确认事务调用它。
+
+    「一次成功确认仅 +1」与「只有确认事务推进版本」（01 1.4、stage2.md §5 S2-05）由本守卫
+    逐条锁死：语句位置、无第二个方法／第二个计数器、唯一调用方。
+    """
+    repo_source = (BACKEND_ROOT / "domain" / "profile" / "repo.py").read_text(
+        encoding="utf-8"
+    )
+    bodies = [
+        ast.get_source_segment(repo_source, node) or ""
+        for node in ast.walk(ast.parse(repo_source))
+        if isinstance(node, ast.AsyncFunctionDef)
+        and node.name == _APPROVED_VERSION_ADVANCE_METHOD
+    ]
+    assert len(bodies) == 1, (
+        f"批准版本推进方法缺失或重名：{_APPROVED_VERSION_ADVANCE_METHOD}"
+    )
+    assert _APPROVED_VERSION_ADVANCE.search(bodies[0]), "自增语句必须在批准的方法体内"
+
+    callers = sorted(
+        source.name
+        for source in (BACKEND_ROOT / "app").glob("*.py")
+        if _APPROVED_VERSION_ADVANCE_METHOD in source.read_text(encoding="utf-8")
+    )
+    assert callers == ["confirm.py"], f"版本推进只允许确认事务调用：{callers}"
+
+
+# Stage 2 接线边界（stage2.md §5 S2-03/S2-05 已批准）：草稿生命周期与确认编排落位
+# app/，必然引用档案领域（同快照基线读取、事务内复查与写入复用）。此处按「显式扩
+# 展断言、不删测试、不放宽」的口径，把 Stage 1 的全禁守卫收窄为仍然成立的边界：
+# runtime/ 仍不得触碰档案领域（归 Stage 4）；app/ 与 api/ 内的接线只允许显式白名单；档案
+# SQL 写入仍由上方旁路守卫锁在 domain/profile/repo.py，版本推进由上方版本守卫锁在同一
+# repo 与确认事务。
+_PROFILE_WIRING_ALLOWED_IN_APP = frozenset({"drafts.py", "confirm.py"})
+
+# S2-07（stage2.md §5）业务 API 接线的同样口径：路由只做传输校验与响应／错误映射
+# （形状见 api/dto.py），读档案走应用层入口 ProfileService.read_formal_profile（S2-01 §3
+# 调用路径映射表），领域规则与 SQL 仍在应用层／repo。白名单只含这两个传输模块，
+# api/ 其余文件仍全禁；改动需显式扩展本白名单。
+_PROFILE_WIRING_ALLOWED_IN_API = frozenset({"dto.py", "routes_readonly.py"})
+_PROFILE_DOMAIN_REFERENCES = ("domain.profile", "ProfileService", "ProfileRepo")
+
+
+def test_profile_wiring_stays_within_the_approved_stage2_seams() -> None:
+    for source in sorted((BACKEND_ROOT / "runtime").rglob("*.py")):
         text = source.read_text(encoding="utf-8")
-        for pattern in forbidden:
-            assert not re.search(pattern, text), f"{source.name} 命中 {pattern}"
-
-
-def test_profile_service_is_not_wired_into_api_app_or_runtime() -> None:
-    for package in ("api", "app", "runtime"):
-        for source in sorted((BACKEND_ROOT / package).rglob("*.py")):
-            text = source.read_text(encoding="utf-8")
-            assert "domain.profile" not in text, source.name
-            assert "ProfileService" not in text, source.name
-            assert "ProfileRepo" not in text, source.name
+        for reference in _PROFILE_DOMAIN_REFERENCES:
+            assert reference not in text, source.name
+    for source in sorted((BACKEND_ROOT / "api").rglob("*.py")):
+        text = source.read_text(encoding="utf-8")
+        if not any(reference in text for reference in _PROFILE_DOMAIN_REFERENCES):
+            continue
+        assert source.name in _PROFILE_WIRING_ALLOWED_IN_API, (
+            f"api/{source.name} 引用档案领域但不在接线白名单：只允许显式扩展"
+        )
+    for source in sorted((BACKEND_ROOT / "app").rglob("*.py")):
+        text = source.read_text(encoding="utf-8")
+        references_profile_domain = (
+            "domain.profile" in text
+            or "ProfileService" in text
+            or "ProfileRepo" in text
+        )
+        if not references_profile_domain:
+            continue
+        assert source.name in _PROFILE_WIRING_ALLOWED_IN_APP, (
+            f"app/{source.name} 引用档案领域但不在接线白名单：只允许显式扩展"
+        )

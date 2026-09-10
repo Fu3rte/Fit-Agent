@@ -6,11 +6,14 @@
 边界（stage1.md §5 S1-04）：
 
 - 只做结构表示与引用校验；限制是否命中动作、红旗是否阻断由 S1-05 判定。
-- 不新增业务必填规则、医学阈值或红旗解除语义：必填只有已拍的 ``body_weight_kg``。
+- 不新增业务必填规则、医学阈值或红旗解除语义：Stage 1 必填只有已拍的
+  ``body_weight_kg``；首次建档完整性按 stage2.md §4.3 已拍 1B 的九项明确回答清单执行，
+  不自行加必填或放宽。
 - 补丁计算不得修改输入对象；错误补丁在构造新档案之前失败，不产生部分修改。
 - 拟议补丁与当次条件是两种类型；当次条件传入补丁接口即拒绝（02 2.4）。
 """
 
+import math
 from collections.abc import Mapping
 from typing import Any
 
@@ -48,7 +51,7 @@ class UnknownExerciseReference(ValueError):
 
 
 def validate_profile_structure(profile: Profile) -> None:
-    """校验档案结构：字段类型与限制结构；不校验值域阈值（未拍，不新增）。"""
+    """校验档案结构：字段类型、数值可表示性（有限浮点）与限制结构；不校验值域阈值（未拍，不新增）。"""
     if not isinstance(profile, Profile):
         raise InvalidProfile(f"不是档案结构：{type(profile).__name__}")
     for name in FACT_FIELDS:
@@ -73,6 +76,25 @@ def _validate_value(name: str, value: Any) -> None:
     if kind == "number":
         if isinstance(value, bool) or not isinstance(value, (int, float)):
             raise InvalidProfile(f"档案字段 {name} 需要数值：{value!r}")
+        # 非有限浮点数不能可靠存取（SQLite json_valid 拒绝 Infinity／NaN，响应编码也拒绝非有限
+        # 浮点）。只对 float 调 isfinite：Python int 本身有限，而 ``math.isfinite(huge_int)`` 会
+        # 抛 OverflowError（变成未映射的 500）。
+        if isinstance(value, float):
+            if not math.isfinite(value):
+                raise InvalidProfile(
+                    f"档案字段 {name} 需要有限数值（JSON 无法表达 NaN／Infinity）：{value!r}"
+                )
+            return
+        # 整数按「能否表示为有限 float」判定：number 事实在读写两侧都以 float 表示
+        # （``domain.profile.schema`` 解码为 float），超出 float 表示范围的整数会落盘成功
+        # 却读不回来（解码抛 OverflowError）。这是与有限性同类的可存取性约束，不是值域阈值
+        # （阈值未拍，不新增）。
+        try:
+            float(value)
+        except OverflowError as exc:
+            raise InvalidProfile(
+                f"档案字段 {name} 需要可表示为有限浮点的数值（整数超出表示范围）"
+            ) from exc
         return
     if kind == "text_list":
         _validate_text_list(name, value)
@@ -126,6 +148,32 @@ def ensure_complete_profile(profile: Profile) -> Profile:
     missing = missing_required_fields(profile)
     if missing:
         raise IncompleteProfile(f"完整档案缺少必填事实：{list(missing)}")
+    return profile
+
+
+def missing_first_time_fields(profile: Profile) -> tuple[str, ...]:
+    """首次建档仍缺的明确回答（结构非法先拒绝，不把非法值算作已回答）。"""
+    validate_profile_structure(profile)
+    return profile.first_time_missing_fields
+
+
+def ensure_first_time_complete(profile: Profile) -> Profile:
+    """首次确认入口的完整性契约：九项事实必须明确回答，缺失即拒绝确认。
+
+    stage2.md §4.3 已拍 1B（2026-09-09）与 2026-09-10 用户拍板 A：目标、经验、频率、时长、
+    器械、体重、动作限制、身体状态与症状询问全部要求明确回答；「明确无」（``denied``）只在
+    ``EXPLICIT_NONE_FACT_FIELDS``（器械、动作限制、身体状态、红旗）上有效，训练目标与训练
+    经验必须是有效文本，未知一律不算完整；数值字段不能以「无」替代有效数值。缺失时拒绝
+    确认且不补造任何字段。
+
+    调用方：正式档案尚未建立（``ProfileSnapshot.profile is None``）时的首次确认事务
+    （S2-05），与 :func:`ensure_complete_profile`（Stage 1 建档过程唯一必填体重、允许
+    保存部分事实）并存而不互相替代。完整性只表示信息齐备：红旗仍由
+    ``domain.profile.safety`` 独立阻断，确认成功不等于安全许可，也不自动解除红旗或限制。
+    """
+    missing = missing_first_time_fields(profile)
+    if missing:
+        raise IncompleteProfile(f"首次建档缺少明确回答的事实：{list(missing)}")
     return profile
 
 

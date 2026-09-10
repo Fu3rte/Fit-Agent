@@ -64,6 +64,8 @@ _SCANNED_TABLES = frozenset(
         # Stage 1 新增的两项业务存储：同样必须被凭据泄漏扫描覆盖
         "exercises",
         "user_profile",
+        # Stage 2 新增的草稿表（S2-02）：同样必须被扫描覆盖
+        "business_drafts",
     }
 )
 
@@ -157,6 +159,9 @@ async def all_text_cells(db: Database) -> list[tuple[str, str, str]]:
         async with conn.execute("SELECT * FROM user_profile") as cursor:
             columns = tuple(str(c[0]) for c in cursor.description)
             cells += _rows_as_cells("user_profile", columns, await cursor.fetchall())
+        async with conn.execute("SELECT * FROM business_drafts") as cursor:
+            columns = tuple(str(c[0]) for c in cursor.description)
+            cells += _rows_as_cells("business_drafts", columns, await cursor.fetchall())
         return cells
 
     return await db.under_lock(op)
