@@ -10,7 +10,7 @@
 | 项 | 值 |
 |---|---|
 | 仓库／分支 | `Fit-Agent`，`main` |
-| Stage 2 交付形态 | **已提交**：本条基线即提交 `backend: Stage 2 档案草稿确认与共用事务（S2-01~S2-07）…`；Windows 侧 clone 后工作树应为**干净**，代码正本即该提交 |
+| Stage 2 交付形态 | **已提交**。代码正本 = Stage 2 交付提交 `4c76737`（`backend: Stage 2 档案草稿确认与共用事务（S2-01~S2-07）`）；其后的提交若只改文档，不改变本阶段代码正本。Windows 侧 clone 后工作树应为**干净** |
 | 迁移 | `001`–`004`（`004_stage2_business_drafts.sql`）；不得改 001–003 |
 | 新增依赖 | 无（`backend/pyproject.toml` / `uv.lock` 未改） |
 | WSL2 实测（同命令） | **396 passed**，退出码 0 |
@@ -21,17 +21,18 @@
 
 - [ ] Python 3.13+；`uv sync --group dev --locked` 成功；`.venv` 指向 `backend/`
 - [ ] `git status --porcelain` 输出为空（clone 后无本地改动；有输出说明基线已被改写，须先弄清来源）
-- [ ] `git log -1 --format=%H` 与 §3.1 记录的 HEAD 一致，且该提交为 Stage 2 交付提交
+- [ ] `git log -1 --format=%H` 记入 §3.1；交付提交 `4c76737` 在历史内，且 `git diff 4c76737 -- backend` 无输出（后续提交未改本阶段代码）
 - [ ] 不触碰真实数据目录（自动化全部使用临时文件库；本阶段**无人工实测任务**，不额外加探针）
 
 ```powershell
 cd <repo>
 git log -1 --format="%H %s"
 git status --porcelain
+git diff 4c76737 -- backend
 git log --oneline -6
 ```
 
-交付提交应包含的文件（`git show --stat HEAD` 应逐条对应）：
+交付提交应包含的文件（`git show --stat 4c76737` 应逐条对应）：
 
 ```text
 backend/README.md
@@ -117,7 +118,8 @@ git rev-parse HEAD
 | 执行日期 | |
 | Windows 版本 / build | |
 | PowerShell / Python / uv / pytest | |
-| HEAD（`git log -1 --format=%H`） | |
+| `git log -1 --format=%H` | |
+| `git diff 4c76737 -- backend` 为空？ | |
 | `git status --porcelain` 为空？ | |
 | 收集数 | |
 | 全量输出末行 | |
