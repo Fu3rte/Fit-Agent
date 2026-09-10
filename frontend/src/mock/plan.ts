@@ -336,8 +336,8 @@ function weekdayOf(date: string): number {
 
 /**
  * 计划草稿展示 Diff（A4：字段级「旧值→新值」；新建计划无旧值 = 全部为新增）。
- * 替换计划（F2-04）传入旧版本与取消清单：版本行写成「旧版 → 新版」，并列出被取消的
- * 旧版未来未锁定日程数（已锁定日程不动，04 4.4）。
+ * 替换计划（F2-04）只写「旧版 → 新版」的版本行；旧版未来未锁定日程取消清单不进产品 UI
+ * 展示（owner 2026-09-10 呈现覆盖），取消本身仍由启用事务写入（04 4.4）。
  */
 export function planDraftDiff(
   plan: PlanVersion,
@@ -345,7 +345,6 @@ export function planDraftDiff(
   schedules: PlanScheduleEntry[],
   replacement?: {
     previous_version: string;
-    cancellations: PlanScheduleEntry[];
   },
 ): FieldDiff[] {
   const rows: FieldDiff[] = [
@@ -364,15 +363,6 @@ export function planDraftDiff(
       field: "每周训练日",
       new_value: `${scope.weekdays.map(weekdayLabel).join(" / ")}，共 ${schedules.length} 个应训练日`,
     },
-    ...(replacement && replacement.cancellations.length > 0
-      ? [
-          {
-            field: "旧版日程",
-            old_value: `${replacement.cancellations.length} 个未来未锁定日程（${replacement.cancellations[0]?.date} 起）`,
-            new_value: "取消（已锁定日程不动）",
-          },
-        ]
-      : []),
     {
       field: "负荷",
       new_value: "无可信训练记录：不给起始重量，每个动作按「需要校准」逐级试重",

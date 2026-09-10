@@ -6,8 +6,10 @@
  * 覆盖：动作候选、纠错后按目录重建身份、预计时长与具体日程重算、展示 Diff 由服务端派生、
  *      日期／训练日／动作／组数／次数区间／RIR 纠错，以及不可推荐、器械不符、限制冲突、
  *      日期非法、同日重复动作的拒绝面与 revise 接线。
- * 不覆盖：真实浏览器渲染走查（F2-06）、确认启用与替换事务（F2-04）、旧版日程取消的生成
- *        （F2-04 只要求本卡展示取消预览，探针只验证渲染入口存在）。
+ * 不覆盖：真实浏览器渲染走查（F2-06）、确认启用与替换事务（F2-04）。
+ * 呈现覆盖（owner 2026-09-10）：旧版未来未锁定日程取消清单与历史版本日程不进产品 UI，
+ *       故本节断言草稿卡／档案页源码不引用取消数据，且替换 Diff 不再输出取消行
+ *       （取消事务与载荷仍由 F2-04／F2-05 探针验证）。
  */
 import { readFileSync } from "node:fs";
 import { CATALOG, isRecommendableCandidate } from "../src/mock/catalog.ts";
@@ -307,7 +309,7 @@ check(
   dupRes.ok ? "仍通过" : dupRes.error,
 );
 
-/* 8. 接入：revise 走同一归一化口径；草稿卡渲染结构化字段与取消预览 */
+/* 8. 接入：revise 走同一归一化口径；草稿卡与档案页不展示取消／历史日程数据 */
 const server = read("../src/mock/server.ts");
 check(
   "revise 计划草稿以服务端存储草稿为基准做归一化并以 400 拒绝非法纠错",
@@ -328,7 +330,7 @@ check(
 );
 const card = read("../src/features/chat/DraftCard.tsx");
 check(
-  "草稿卡展示版本／日期／训练日／处方／校准／日程与旧日程取消预览",
+  "草稿卡展示版本／日期／训练日／处方／校准／日程",
   /计划版本 \{plan\.version\}/.test(card) &&
     /aria-label="计划开始日期"/.test(card) &&
     /aria-label="计划复核日期"/.test(card) &&
@@ -339,8 +341,22 @@ check(
     /需要校准/.test(card) &&
     /校准说明（无可信训练记录：不给起始重量）/.test(card) &&
     /具体日程（/.test(card) &&
-    /旧版未来未锁定日程取消预览/.test(card) &&
+    !/cancellations/.test(card) &&
+    !/取消预览/.test(card) &&
     !/EditablePlanDiff/.test(card),
+);
+check(
+  "替换 Diff 不再输出旧版日程取消行",
+  !/field: "旧版日程"/.test(read("../src/mock/plan.ts")),
+);
+const profilePage = read("../src/features/profile/ProfilePage.tsx");
+check(
+  "档案页只取当前版本未取消日程：无历史版本分组与已取消行",
+  /s\.plan_version === plan\.version && s\.status !== "cancelled"/.test(
+    profilePage,
+  ) &&
+    !/历史，已归档/.test(profilePage) &&
+    !/\{cancellations/.test(profilePage),
 );
 
 console.log(failed === 0 ? "\n全部通过" : `\n${failed} 项失败`);

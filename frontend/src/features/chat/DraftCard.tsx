@@ -92,7 +92,8 @@ const scheduleLine = (s: PlanScheduleEntry) =>
 
 /**
  * 计划草稿结构化卡（F2-03）：计划版本、生效范围、每周安排、动作顺序与处方（组数／次数
- * 区间／目标 RIR／渐进）、校准说明、具体日程与替换取消预览。
+ * 区间／目标 RIR／渐进）、校准说明与具体日程。替换时旧版未锁定日程的取消清单不进产品 UI
+ * 展示（owner 2026-09-10 呈现覆盖；取消事务与载荷不变）。
  * 轻量纠错只改待确认草稿（开始／复核日期、训练日、动作候选、组数、次数区间、目标 RIR），
  * 仍经「提交纠错」走 revise 使 revision+1，不自动提交、不改正式计划；纠错后的预计时长、
  * 具体日程与展示 Diff 一律由服务端按修改后内容重算（本卡不复制排程算法），
@@ -119,7 +120,6 @@ function PlanDraftFields({
     }
     const candidates = payload.candidates ?? [];
     const schedules = payload.schedules ?? [];
-    const cancellations = payload.cancellations ?? [];
     /* 校准说明：本阶段无可信训练记录，全部动作共一条（不给起始重量） */
     const calibration = plan.blocks.flatMap((b) => b.exercises)[0]?.calibration;
 
@@ -367,24 +367,6 @@ function PlanDraftFields({
                     </div>
                 )}
             </div>
-
-            {cancellations.length > 0 && (
-                <div className="rounded-lg border border-destructive/40 bg-destructive/10 p-2.5 text-xs">
-                    <p className="font-medium text-destructive">
-                        旧版未来未锁定日程取消预览
-                    </p>
-                    <ul className="mt-1 space-y-0.5 text-muted-foreground">
-                        {cancellations.map((s) => (
-                            <li key={s.id}>
-                                {s.plan_version} {scheduleLine(s)}
-                            </li>
-                        ))}
-                    </ul>
-                    <p className="mt-1 text-muted-foreground">
-                        已锁定日程不动；取消与新版日程随本草稿确认时同时生效。
-                    </p>
-                </div>
-            )}
         </div>
     );
 }

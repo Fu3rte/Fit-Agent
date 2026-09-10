@@ -14,3 +14,11 @@ PASS 步骤 8 原子切换：档案补丁 + v3 启用 + 新日程 + 旧版未来
 PASS 步骤 8 已锁定日程不动
 PASS 步骤 9 替换提案为结构化载荷（版本只追加）
 PASS 步骤 9 revision 冲突：409 draft_modified 且正式数据不动
+PASS 步骤 9 先提交另一草案：v4 启用、context_version 推进
+PASS 步骤 9 基线落后：409 draft_stale
+PASS 步骤 9 一键重算：新草稿 revision 1、关联旧草稿、旧草稿置 stale、正式计划不动
+PASS 步骤 9 重算后确认：v5 启用且 context_version 仅 +1
+PASS 步骤 9 丢弃后拒绝确认：409 且正式数据与 context_version 不动
+PASS 01 1.3 流式期间推进 context_version：后生成的草稿仍绑定生成时版本，确认返回 409 draft_stale
+
+全部通过

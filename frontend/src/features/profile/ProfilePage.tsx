@@ -192,7 +192,7 @@ function BlockTable({ block }: { block: PlanBlock }) {
 
 /**
  * 使用前安全复核结果（F2-05；04 4.5 整份复核）：只有「可给出基于该计划的指导」与「整份阻断」
- * 两种表达，不存在「部分可用」的中间状态。阻断只影响使用时：计划内容与历史仍按原样展示。
+ * 两种表达，不存在「部分可用」的中间状态。阻断只影响使用时：计划内容仍按原样展示。
  */
 function PlanSafetyNotice({ safety }: { safety: PlanSafetyReview }) {
   if (safety.usable)
@@ -235,7 +235,7 @@ function PlanSafetyNotice({ safety }: { safety: PlanSafetyReview }) {
         </>
       )}
       <p className="mt-1.5 text-muted-foreground">
-        计划内容与历史仍按原样展示；修改请从对话发起修订草稿，确认后生成新版本。
+        当前计划内容仍按原样展示；修改请从对话发起修订草稿，确认后生成新版本。
       </p>
     </div>
   );
@@ -271,7 +271,7 @@ function CalibrationSection({ calibration }: { calibration: Calibration }) {
   );
 }
 
-/** 日程状态徒章：应训练 / 已锁定 / 已取消（取消保留展示，供替换后核对） */
+/** 日程状态徽章：应训练 / 已锁定 / 已取消（cancelled 语义保留在契约与接口投影，产品 UI 不展示） */
 function ScheduleBadge({ status }: { status: PlanScheduleEntry["status"] }) {
   return (
     <Badge
@@ -293,65 +293,30 @@ function ScheduleBadge({ status }: { status: PlanScheduleEntry["status"] }) {
 }
 
 /**
- * 具体日程（04 4.4）：`[开始日期, 复核日期)` 内逐个应训练日，按计划版本分组（当前版本在前）。
- * 旧版本条目保留展示（已取消／已锁定），不隐藏历史；日历休息日不写成应训练日。
+ * 具体日程（04 4.4）：`[开始日期, 复核日期)` 内逐个应训练日，日历休息日不写成应训练日。
+ * owner 2026-09-10 呈现覆盖：只展示当前版本条目；历史版本标题与已取消日程行均不进产品 UI
+ * （取消事务、版本归档与接口投影不变，见 `plans/stage2-evidence.md`）。
  */
-function ScheduleSection({
-  schedules,
-  plan,
-}: {
-  schedules: PlanScheduleEntry[];
-  plan: PlanVersion;
-}) {
-  const versions = [...new Set(schedules.map((s) => s.plan_version))].sort(
-    (a, b) =>
-      a === plan.version ? -1 : b === plan.version ? 1 : b.localeCompare(a),
-  );
+function ScheduleSection({ entries }: { entries: PlanScheduleEntry[] }) {
   return (
     <section>
       <h4 className="text-sm font-medium">具体日程</h4>
       <p className="mt-1 text-xs text-muted-foreground">
-        仅列应训练日（休息日不排）；到期即锁，替换计划只取消旧版未来未锁定日程。
+        仅列当前版本的应训练日（休息日不排）；到期即锁。
       </p>
-      <div className="mt-2 flex flex-col gap-3">
-        {versions.map((version) => {
-          const entries = schedules.filter((s) => s.plan_version === version);
-          const counts = entries.reduce<Record<string, number>>((acc, s) => {
-            acc[s.status] = (acc[s.status] ?? 0) + 1;
-            return acc;
-          }, {});
-          return (
-            <div key={version}>
-              <div className="mb-1.5 flex flex-wrap items-baseline gap-x-2 text-xs text-muted-foreground">
-                <span className="font-medium text-foreground">
-                  {version}
-                  {version === plan.version ? "（当前）" : "（历史，已归档）"}
-                </span>
-                <span>
-                  {entries.length} 个应训练日 ·
-                  {Object.entries(SCHEDULE_STATUS_LABEL)
-                    .filter(([status]) => (counts[status] ?? 0) > 0)
-                    .map(([status, label]) => ` ${label} ${counts[status]}`)
-                    .join(" /")}
-                </span>
-              </div>
-              <ul className="flex flex-wrap gap-1.5">
-                {entries.map((s) => (
-                  <li
-                    key={s.id}
-                    className="inline-flex items-center gap-1.5 rounded-full border py-0.5 pr-1 pl-2 text-xs"
-                  >
-                    <span className="tabular-nums">
-                      {s.date.slice(5)} {WEEKDAYS[s.weekday - 1]}
-                    </span>
-                    <ScheduleBadge status={s.status} />
-                  </li>
-                ))}
-              </ul>
-            </div>
-          );
-        })}
-      </div>
+      <ul className="mt-2 flex flex-wrap gap-1.5">
+        {entries.map((s) => (
+          <li
+            key={s.id}
+            className="inline-flex items-center gap-1.5 rounded-full border py-0.5 pr-1 pl-2 text-xs"
+          >
+            <span className="tabular-nums">
+              {s.date.slice(5)} {WEEKDAYS[s.weekday - 1]}
+            </span>
+            <ScheduleBadge status={s.status} />
+          </li>
+        ))}
+      </ul>
     </section>
   );
 }
@@ -372,6 +337,10 @@ function PlanCard({
   const calibration = plan.blocks
     .flatMap((b) => b.exercises)
     .find((e) => e.calibration.status === "needs_calibration")?.calibration;
+  /* 只取当前版本未取消的日程（owner 2026-09-10 呈现覆盖）：历史版本条目仍保留在接口投影中 */
+  const currentSchedules = schedules.filter(
+    (s) => s.plan_version === plan.version && s.status !== "cancelled",
+  );
   return (
     <Card className="sm:col-span-2">
       <CardHeader>
@@ -392,8 +361,8 @@ function PlanCard({
           <BlockTable key={block.name} block={block} />
         ))}
         {calibration && <CalibrationSection calibration={calibration} />}
-        {schedules.length > 0 && (
-          <ScheduleSection schedules={schedules} plan={plan} />
+        {currentSchedules.length > 0 && (
+          <ScheduleSection entries={currentSchedules} />
         )}
       </CardContent>
     </Card>

@@ -28,3 +28,26 @@ cf2a38be1bcbe9ade081594868ce5a4605e03105c88b3b0248e57ed83ceca88d  scripts/f2-01-
 83775b4c08a2269b0d5274f5e35b392082ff7299eea82a9948059bb60bdfd49d  scripts/f2-04-plan-commit-probe.mjs
 56d703155e7e93653c963b30c500d5c133db566e3578781ec9e0cbaa0306db89  scripts/f2-05-plan-safety-probe.mjs
 45922417a275c849d28771cb4b86fb5c2b6aa1d1348dafa9c75101cfd7417f10  plans/stage2.md
+
+## 复跑产物摘要（2026-09-10 14:18–14:20，对应上列工作树）
+5a2ea72feb8880e1587b4909b70978daa61e8cd1d0db6ea0cb8523d46ee7ddac  plans/stage2-evidence-assets/f2-01-probe-out.txt
+0591917c0eda94b4621e8f9660e754fe32cc83c3f86a03a33413d3c0285f744b  plans/stage2-evidence-assets/f2-02-probe-out.txt
+3e9ec7f359a075d2b4aa4bc235d67753d305d0e9a73ae5164b03ff412577a471  plans/stage2-evidence-assets/f2-03-probe-out.txt
+5f0dab3f0d01c7a6f1b04d39ad22688c662c9fc424238e909fff931cb3b6dabe  plans/stage2-evidence-assets/f2-04-probe-out.txt
+d9d7168b663842f1308ccff2dd4a9ea3cf814d9ba6b32da525855216a0dc2814  plans/stage2-evidence-assets/f2-05-probe-out.txt
+15a722cd2d3441c599c59e9bd728dfd5a2288e9cfe86159b2f2978dfc859a229  plans/stage2-evidence-assets/f2-06-build.log
+## 构建结果
+  ✓ 1979 modules transformed.
+  ✓ built in 3.69s
+
+## 提交锚定（复跑后核对，2026-09-10 14:2x）
+采集本文件时 HEAD 仍为 1ab7970（Stage 2 尚未提交）；其后 Stage 2 前端闭环与证据提交为 e05f288（HEAD 随后为 e46c2c2）。
+复跑所用内容与 HEAD 逐文件 sha256 比对（前 12 位，左=工作树／右=HEAD）——8/8 相等，故证据可锚定 e05f288：
+  f1c2a15b8883 f1c2a15b8883 src/lib/contract.ts
+  001b953c431d 001b953c431d src/mock/server.ts
+  087ec7d8ab15 087ec7d8ab15 src/mock/catalog.ts
+  dc2493322066 dc2493322066 src/mock/plan.ts
+  5a20afb36bc5 5a20afb36bc5 src/features/chat/DraftCard.tsx
+  2b2597790993 2b2597790993 src/features/profile/ProfilePage.tsx
+  56d703155e7e 56d703155e7e scripts/f2-05-plan-safety-probe.mjs
+  45922417a275 45922417a275 plans/stage2.md

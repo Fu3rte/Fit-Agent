@@ -217,7 +217,7 @@ check(
   JSON.stringify(blockedBySpecific.plan_safety?.conflicts),
 );
 check(
-  "阻断时正式计划、日程与历史仍返回（不隐藏、不伪造「部分可用」）",
+  "阻断时正式计划与全部日程（含历史条目）仍由接口投影返回（不隐藏、不伪造「部分可用」）",
   blockedBySpecific.plan?.version === "v1" &&
     blockedBySpecific.schedules.length === 12 &&
     blockedBySpecific.plan_safety.usable === false &&
@@ -240,6 +240,12 @@ check(
 check(
   "阻断文案引导从对话发起修订草稿",
   /修改计划只能从对话发起/.test(dayA.text) && dayA.draft === null,
+);
+check(
+  "阻断文案只声称当前计划与当前日程可查看，不再声称可查看历史（产品 UI 无历史入口）",
+  /正式计划 v1 与它的当前日程仍可在「档案与限制」页查看/.test(dayA.text) &&
+    !/历史/.test(dayA.text) &&
+    dayA.draft === null,
 );
 
 /* ---------- 4. 第 10 步：动作模式限制 → 整份阻断 ---------- */
@@ -317,7 +323,7 @@ check(
     !/组 x /.test(flagSeedGuidance.text),
 );
 
-/* ---------- 6. 替换态：投影一致、旧版日程取消仍可见 ---------- */
+/* ---------- 6. 替换态：投影一致；旧版取消数据只保留在接口投影（产品 UI 不展示，见 F2-03 探针） ---------- */
 await reset("noplan");
 await enablePlanV1("s1");
 const dumbbell = await run("s1", "以后只能用哑铃");
@@ -338,7 +344,7 @@ check(
   `${replaced.plan?.version} / v2 ${v2After.length} 条`,
 );
 check(
-  "旧版未来未锁定日程取消仍在投影中可见（历史不隐藏）",
+  "旧版未来未锁定日程取消仍保留在 /api/profile 投影中（供确认后核对；产品 UI 呈现层不展示）",
   v1After.length === 12 && v1After.every((s) => s.status === "cancelled"),
   byDate(v1After).join(","),
 );

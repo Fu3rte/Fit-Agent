@@ -794,9 +794,7 @@ function replacementPayload(
         plan,
         scope,
         schedules,
-        previous
-          ? { previous_version: previous.version, cancellations }
-          : undefined,
+        previous ? { previous_version: previous.version } : undefined,
       ),
       ...(input.extra_diff ?? []),
     ],
@@ -988,7 +986,6 @@ function dumbbellOnlyReply(state: MockState): { text: string; draft?: Draft } {
       `- 档案器械补丁：${profile.equipment.join("、")} → **哑铃**（长期生效）`,
       `- 拟议计划版本：${payload.plan?.version ?? "—"}${state.plan ? `（旧版 ${state.plan.version} 归档保留）` : "（新建）"}`,
       `- 具体日程：${payload.schedules?.length ?? 0} 个应训练日`,
-      `- 旧版日程取消：${payload.cancellations?.length ?? 0} 个未来未锁定日程（已锁定日程不动）`,
       "",
       "确认前正式档案、计划与日程均不变；确认后档案补丁与新计划版本同时生效。",
     ].join("\n"),
@@ -1069,7 +1066,6 @@ function planScriptReply(state: MockState): { text: string; draft?: Draft } {
       ...rows.map(
         (row) => `- ${row.field}：${row.old_value} → **${row.new_value}**`,
       ),
-      `- 旧版 ${state.plan.version} 归档保留；未锁定且未到期的 ${payload.cancellations?.length ?? 0} 个旧日程将取消（已锁定日程不动）`,
       "",
       "请确认后启用；确认前正式计划与日程不变。",
     ].join("\n"),
@@ -1082,7 +1078,7 @@ function planScriptReply(state: MockState): { text: string; draft?: Draft } {
  * 给出处方前先用最新红旗与限制复核整份计划（04 4.5）：
  * - 红旗症状独立阻断：建议线下专业评估，不给任何常规处方；
  * - 任一动作命中具体动作／动作模式限制：整份阻断，**不**只跳过冲突动作继续给其余动作的处方。
- * 两种阻断都只影响「使用时」：正式计划、日程与历史仍可在 /profile 查看，修订从对话发起。
+ * 两种阻断都只影响「使用时」：当前计划与其当前日程仍可在 /profile 查看，修订从对话发起。
  */
 function planGuidanceReply(state: MockState): string {
   /* 红旗独立阻断（02 2.3）：与有没有计划无关，先于计划检查——不生成、也不给出任何常规处方 */
@@ -1112,7 +1108,7 @@ function planGuidanceReply(state: MockState): string {
           `- 冲突：${c.exercise_name} 命中限制「${c.restriction.name}」（${c.restriction.scope === "specific_action" ? "具体动作" : "动作模式"}）`,
       ),
       "",
-      `正式计划 ${plan.version}、日程与历史仍可在「档案与限制」页查看（不隐藏、不改写，也不标为「部分可用」）。`,
+      `正式计划 ${plan.version} 与它的当前日程仍可在「档案与限制」页查看（不隐藏、不改写，也不标为「部分可用」）。`,
       "修改计划只能从对话发起：说明你要调整的内容，我给出修订草稿，确认后生成新版本。",
     ].join("\n");
   }
@@ -3116,7 +3112,7 @@ function createHandler(state: MockState, hub: SseHub) {
               state.plan_history.length > 0
                 ? `（${state.plan_history[state.plan_history.length - 1]?.version} 归档保留）`
                 : "（新建）",
-              `：新建日程 ${committed.created} 个，取消旧版未来未锁定日程 ${committed.cancelled} 个`,
+              `：新建日程 ${committed.created} 个`,
               patch ? "，长期档案补丁同次写入" : "",
             ].join(""),
           };
