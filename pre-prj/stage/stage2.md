@@ -235,11 +235,11 @@ $LASTEXITCODE
 
 - [x] 阶段边界及验收方式已确认。
 - [x] 本轮前置事项已确认：首次建档完整字段清单、安全相关内容可纠错、安全询问通俗化、纠错／确认按钮互斥、无业务变化拒绝首次提交。
-- [ ] S2-01–07 已实现，档案链路确实落盘，不只是 API 空壳或 mock。
-- [ ] 草稿隔离、Diff、revision、幂等、过期、原子回滚及并发用例通过。
-- [ ] 正式业务版本只有确认事务推进，无旁路写入、嵌套锁或客户端覆盖基线。
+- [x] S2-01–07 已实现，档案链路确实落盘，不只是 API 空壳或 mock：档案、限制、版本与提交凭据均为真实 SQLite 临时库读写（确认后重开库仍可读回），HTTP 面只暴露已交付的 5 个端点，无创建草稿／档案直写／`/recalc` 路由。
+- [x] 草稿隔离、Diff、revision、幂等、过期、原子回滚及并发用例通过（Windows 全量 396 passed；逐组落点见 `evidence/S2-evidence-windows.md` §2）。
+- [x] 正式业务版本只有确认事务推进，无旁路写入、嵌套锁或客户端覆盖基线：`bump_context_version_in_transaction` 与 `write_profile_in_transaction` 的唯一调用方均为 `app/confirm.py`，事务内读取一律走 `*_in_transaction`（`require_outer_transaction` 拒绝非事务调用）；`test_stage1_profile_write.py` 全仓守卫扫描仍覆盖档案写入面。
 - [x] Windows 全量自动化通过并有同版本／差异证据（`evidence/S2-evidence-windows.md` §1／§3：396 收集、396 passed、退出码 0；`git diff 4c76737 -- backend` 为空）。
-- [ ] S2-08 交接完成，前端契约差异与 Stage 3/4 后续责任明确。
-- [ ] 未修改项目及设计正本，未把计划组合、Agent 或重算冒充本阶段交付。
+- [x] S2-08 交接完成，前端契约差异与 Stage 3/4 后续责任明确：DTO／错误码／前端待改清单见 `evidence/S2-07-api-contract-handoff.md`，唯一写入入口／事务内约束／版本负责人／第 01 章未完成项见 `evidence/S2-evidence-windows.md` §4。
+- [x] 未修改项目及设计正本，未把计划组合、Agent 或重算冒充本阶段交付：`PLAN.md`、`pre-prj/architecture*`、`pre-prj/design-decisions.md`、`pre-prj/stage/stage1.md` 在本阶段提交范围内无改动；后端无计划／日程／Agent／重算路由（测试逐条断言 404/405）。
 
 本阶段结项只表示“档案草稿确认与共用事务达到本阶段门槛”，不是完整产品、完整第 01 章或真实对话建档已完成。
