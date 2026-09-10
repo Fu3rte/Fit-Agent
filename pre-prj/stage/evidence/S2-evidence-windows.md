@@ -1,9 +1,13 @@
 # Stage 2 S2-08：Windows 全量自动化证据
 
-> 状态：**待 Windows 执行**。本文件创建时只预填「执行基线」（§0）、「覆盖矩阵」（§2）与「交接说明」
-> （§4）；§1、§3、§5 的通过结果与产出**不预填**，由执行者在 Windows 端跑完填写（`stage2.md` §6）。
+> 状态：**已执行（2026-09-10，Windows 本机，通过）**。§1、§3 已按 Windows 实测填写；§0、§2、§4 保持交付时预填。
 > 阶段门槛（`stage2.md` §1、§6）：Windows 全量自动化**完整收集、全部通过、退出码 0**；
 > 不以 Linux/WSL2 结果替代。本文件不改 `PLAN.md`、设计正本、Stage 1 与 `stage2.md`。
+
+执行摘要（2026-09-10，Windows 11 Pro build 26200 本机）：`git diff 4c76737 -- backend` 为空、
+`git status --porcelain` 为空；`--collect-only -q` → **396 tests collected**；
+全量 `pytest tests -q -W error::pytest.PytestUnhandledThreadExceptionWarning` → **396 passed in 18.04s**，
+`$LASTEXITCODE = 0`。与 §0 WSL2 基线（396 passed）逐项一致，无本机差异、无 skip／xfail／deselected。
 
 ## 0. 执行基线（本次 WSL2 交付实测，Windows 侧须一致）
 
@@ -19,10 +23,10 @@
 
 前置条件（Windows 侧开工前核对）：
 
-- [ ] Python 3.13+；`uv sync --group dev --locked` 成功；`.venv` 指向 `backend/`
-- [ ] `git status --porcelain` 输出为空（clone 后无本地改动；有输出说明基线已被改写，须先弄清来源）
-- [ ] `git log -1 --format=%H` 记入 §3.1；交付提交 `4c76737` 在历史内，且 `git diff 4c76737 -- backend` 无输出（后续提交未改本阶段代码）
-- [ ] 不触碰真实数据目录（自动化全部使用临时文件库；本阶段**无人工实测任务**，不额外加探针）
+- [x] Python 3.13+；`uv sync --group dev --locked` 成功；`.venv` 指向 `backend/`
+- [x] `git status --porcelain` 输出为空（clone 后无本地改动；有输出说明基线已被改写，须先弄清来源）
+- [x] `git log -1 --format=%H` 记入 §3.1；交付提交 `4c76737` 在历史内，且 `git diff 4c76737 -- backend` 无输出（后续提交未改本阶段代码）
+- [x] 不触碰真实数据目录（自动化全部使用临时文件库；本阶段**无人工实测任务**，不额外加探针）
 
 ```powershell
 cd <repo>
@@ -78,10 +82,10 @@ uv sync --group dev --locked
 $LASTEXITCODE
 ```
 
-- [ ] 收集数 = **396**（先跑 `--collect-only`，防「只跑新增用例」即称全量通过）
-- [ ] 完整输出以 `396 passed` 结尾，`$LASTEXITCODE = 0`
-- [ ] 无 `skipped`／`xfailed`／`xfail`／`deselected`；`-W error::pytest.PytestUnhandledThreadExceptionWarning` 门未触发
-- [ ] 失败处理口径：记录**用例名 + 完整 traceback**；修复后重跑**全量**；不得删测试、放宽断言或新增 skip／xfail 以达到门槛
+- [x] 收集数 = **396**（先跑 `--collect-only`，防「只跑新增用例」即称全量通过）
+- [x] 完整输出以 `396 passed` 结尾，`$LASTEXITCODE = 0`
+- [x] 无 `skipped`／`xfailed`／`xfail`／`deselected`；`-W error::pytest.PytestUnhandledThreadExceptionWarning` 门未触发
+- [x] 失败处理口径：记录**用例名 + 完整 traceback**；修复后重跑**全量**；不得删测试、放宽断言或新增 skip／xfail 以达到门槛（本轮无失败，无需修复）
 
 ## 2. 覆盖矩阵 → 测试文件（本次实际落点）
 
@@ -113,28 +117,69 @@ uv --version
 git rev-parse HEAD
 ```
 
-| 项 | 实测值（待填） |
+| 项 | 实测值 |
 |---|---|
-| 执行日期 | |
-| Windows 版本 / build | |
-| PowerShell / Python / uv / pytest | |
-| `git log -1 --format=%H` | |
-| `git diff 4c76737 -- backend` 为空？ | |
-| `git status --porcelain` 为空？ | |
-| 收集数 | |
-| 全量输出末行 | |
-| `$LASTEXITCODE` | |
+| 执行日期 | 2026-09-10 |
+| Windows 版本 / build | Windows NT 10.0.26200.0（Windows 11 Pro）/ build 26200 |
+| PowerShell / Python / uv / pytest | PowerShell 5.1.26100.8328；Python 3.13.13（`backend/.venv`，`uv sync --group dev --locked`）；uv 0.11.28；pytest 9.1.1 |
+| `git log -1 --format=%H` | `e46c2c2add7ded131251d7cc34d05b7dd73e6b13`（`docs: S2-08 Windows 清单钉住交付提交 4c76737…`） |
+| `git diff 4c76737 -- backend` 为空？ | 是（无输出；后续 3 个提交均为文档／前端，未改本阶段后端代码） |
+| `git status --porcelain` 为空？ | 是（clone 后无本地改动） |
+| 收集数 | 396 tests collected in 3.28s |
+| 全量输出末行 | `396 passed in 18.04s` |
+| `$LASTEXITCODE` | 0 |
+
+逐文件收集数（与 §2 覆盖矩阵一致；Stage 2 新增 7 个文件合计 152 例）：
+
+```text
+39 tests/test_stage2_profile_first_time_complete.py   27 tests/test_stage2_business_api.py
+24 tests/test_stage2_draft_storage.py                  24 tests/test_stage2_draft_revise_discard.py
+18 tests/test_stage2_profile_confirm.py                11 tests/test_stage2_draft_create_diff.py
+ 9 tests/test_stage2_draft_stale.py
+54 tests/test_stage1_profile_safety.py                 43 tests/test_stage1_profile_facts.py
+17 tests/test_run_repo.py                              16 tests/test_stage1_profile_patch.py
+12 tests/test_stage1_schema.py                         12 tests/test_stage1_profile_restrictions.py
+12 tests/test_provider_settings.py                     11 tests/test_migrations.py
+11 tests/test_db.py                                    10 tests/test_stage1_actions_seed.py
+10 tests/test_stage1_actions_catalog.py                 9 tests/test_stage1_profile_write.py
+ 9 tests/test_stage1_actions_rules.py                   7 tests/test_timezone.py
+ 6 tests/test_config.py                                 5 tests/test_app.py
+```
 
 ### 3.2 判定
 
 | # | 步骤 | 退出码 | 实际输出 | 判定 |
 |---|---|---|---|---|
-| 1 | `--collect-only -q` | | | ☐通过 ☐不通过 |
-| 2 | 全量 `pytest tests -q -W error::...` | | | ☐通过 ☐不通过 |
+| 1 | `--collect-only -q` | 0 | `396 tests collected in 3.28s` | ☑通过 ☐不通过 |
+| 2 | 全量 `pytest tests -q -W error::...` | 0 | 6 行进度点（18/36/54/72/90/100%），末行 `396 passed in 18.04s` | ☑通过 ☐不通过 |
 
-- 失败记录（用例名 / traceback 摘要 / 修复提交或改动 / 复跑结果）：待填
-- 结论：☐ 通过（Stage 2 可结项） ☐ 不通过（记录阻断项，不以其他平台结果替代）
+- 失败记录（用例名 / traceback 摘要 / 修复提交或改动 / 复跑结果）：无失败，无修复，无需复跑。
+- 结论：☑ 通过（Stage 2 可结项） ☐ 不通过（记录阻断项，不以其他平台结果替代）
 - 未覆盖范围：见 §5（Windows 侧如实转写，不改写成通过）
+
+原始命令与实际输出（Windows PowerShell，`backend/` 目录）：
+
+```powershell
+PS> uv sync --group dev --locked
+Resolved 34 packages in 32ms
+Checked 32 packages in 14ms
+
+PS> .\.venv\Scripts\python.exe -m pytest tests --collect-only -q
+... (396 行 usecase id)
+396 tests collected in 3.28s
+
+PS> .\.venv\Scripts\python.exe -m pytest tests -q -W error::pytest.PytestUnhandledThreadExceptionWarning
+........................................................................ [ 18%]
+........................................................................ [ 36%]
+........................................................................ [ 54%]
+........................................................................ [ 72%]
+........................................................................ [ 90%]
+....................................                                     [100%]
+396 passed in 18.04s
+
+PS> $LASTEXITCODE
+0
+```
 
 ## 4. Stage 3/4 接入说明（交接）
 
@@ -191,8 +236,9 @@ git rev-parse HEAD
 - **无真实对话生成草稿入口**：草稿由测试内部应用层准备；**不得**据此声称聊天闭环已打通。
 - 前端未切换到真实后端（另行执行）；`frontend/**` 改动不在本阶段验收范围。
 - `/recalc`、计划／日程／记录／统计、Agent 运行时均未接入（Stage 3/4）。
-- Windows 侧若有本机差异（如 pytest 收集数 ≠ 396、Windows 特有失败），逐条记录用例名与 traceback，
-  不以「Linux 通过」代替判定。
+- Windows 侧本机差异：**无**。收集数 396 与 WSL2 基线一致，全量 396 通过、退出码 0，无 Windows 特有失败、
+  无 skip／xfail／deselected、无警告门触发。（若后续复跑出现本机差异，逐条记录用例名与 traceback，
+  不以「Linux 通过」代替判定。）
 - 其余残留风险与 flake 观察见 `S1-evidence-linux-2026-09-09.md` §8（Stage 1 遗留，未在本阶段复验）。
 
 ## 6. 声明
