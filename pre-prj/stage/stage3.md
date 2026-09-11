@@ -30,7 +30,7 @@ Stage 3 按 PLAN 粗略阶段路线实现核心业务流：**计划与训练指�
 | [06 统计与复盘](../architecture/06-stats-reviews.md) | 完成率、三桶、PR、复盘快照与 stale |
 | [07 数据与持久化](../architecture/07-data-persistence.md) | 单连接单锁、编号迁移、固定业务时区 |
 | [设计决策](../design-decisions.md)「架构不变量」 | 正式事实只经确认；不新增第二套版本计数器 |
-| [Stage 2 证据](evidence/S2-evidence-windows.md) §4 | 唯一写入入口、事务内约束、版本负责人 |
+| [Stage 2 证据](evidence/S2-evidence-2026-09-10.md) §4 | 唯一写入入口、事务内约束、版本负责人 |
 | [前端契约](../../frontend/src/lib/contract.ts)、[前端 Stage2 计划 mock](../../frontend/plans/stage2.md) | 计划/日程/安排/记录/统计 DTO 形状与已拍校准口径；mock 不是后端正本 |
 | [test/business-table](../../test/business-table/) spike | 表职责探索参考；**不作为生产 schema 正本**，字段以本阶段迁移与架构章节为准 |
 
