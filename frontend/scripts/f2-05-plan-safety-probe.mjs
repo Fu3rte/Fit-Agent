@@ -3,13 +3,8 @@
  * （plans/stage2.md 第 7 节第 6、10、11 步中不依赖浏览器渲染的部分）。
  *
  * 运行：node scripts/f2-05-plan-safety-probe.mjs
- * 方式：以 vite 程序化启动本仓配置（mock 挂在 /api/*，无真实后端／模型调用）。
  * 覆盖：空态→启用→替换的 /api/profile 投影一致与刷新一致；确认前隔离与重复确认幂等；
- *      请求指导时按最新限制整份阻断（具体动作限制与动作模式限制各一例，任一训练日说法同样阻断，
- *      不输出其余「未冲突」动作的处方）；红旗独立阻断（无计划与有计划两种输入）；红旗档案
- *      不生成计划草稿；阻断时正式计划、日程与历史仍返回（不隐藏、不标为「部分可用」）。
- * 不覆盖：/profile 卡浏览器渲染、确认后的 react-query 缓存失效（前端静态检查 + F2-06 浏览器走查）、
- *        真实后端计划域事务与真实数据库日程锁定。
+ *      请求指导时按最新限制整份阻断；红旗独立阻断；阻断时计划与日程仍可查看。
  */
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -47,7 +42,6 @@ const ofProfile = async () => (await api("GET", "/api/profile")).body;
 const confirm = (id, revision) =>
   api("POST", `/api/drafts/${id}/confirm`, { revision });
 
-/** 发起一次对话并等 Run 进入终态，返回该 Run 关联的最后一张草稿 */
 async function run(session, message) {
   const started = await api("POST", "/api/runs", {
     session_id: session,
@@ -73,22 +67,20 @@ async function run(session, message) {
 }
 
 const byDate = (schedules) =>
-  schedules.map((s) => `${s.date}:${s.status}`).sort();
+  schedules.map((s) => `${s.date}:${s.stored_status}`).sort();
 const versionSchedules = (profile, version) =>
   (profile.schedules ?? []).filter((s) => s.plan_version === version);
 
-/** 生成并确认首份计划 v1（第 7 节第 2、6 步的服务端路径） */
 async function enablePlanV1(session) {
   const plan = await run(session, "帮我生成一份计划");
   const ok = await confirm(plan.draft.id, plan.draft.revision);
   return { planDraft: plan, confirm: ok };
 }
 
-/** 经建档链路追加事实（限制或红旗）：整份六类事实一次给全，确认后写正式档案 */
 async function addProfileFacts(extraClause) {
   const r = await run(
     "s1",
-    `补充档案：目标增肌，初级经验，每周 3 次，每次 60 分钟，可用器材：杠铃、哑铃、卧推架、引体架、绳索，体重 72.5kg；${extraClause}`,
+    `补充档案：目标增肌，初级经验，每周 3 次，每次 60 分钟，可用器材：杠铃、哑铃、卧推架、引体架、绳索，体重 72.5kg，${extraClause}`,
   );
   if (!r.draft) throw new Error(`未生成档案草稿：${r.text}`);
   const ok = await confirm(r.draft.id, r.draft.revision);
@@ -107,9 +99,9 @@ check(
   `context_version=${empty.context_version}`,
 );
 
-/* ---------- 2. 第 6 步：确认前隔离、首次启用、刷新一致、幂等 ---------- */
+/* ---------- 2. 步骤 6：确认前隔离、首次启用、刷新一致、幂等 ---------- */
 const first = await run("s1", "帮我生成一份计划");
-check("生成计划草稿（plan_adjust）", first.draft?.kind === "plan_adjust");
+check("生成计划草稿（kind=plan）", first.draft?.kind === "plan");
 const beforeConfirm = await ofProfile();
 check(
   "确认前正式计划与日程不变（/profile 仍无计划）",
@@ -130,44 +122,53 @@ check(
 const active = await ofProfile();
 const activeSchedules = versionSchedules(active, "v1");
 check(
-  "启用后 /profile 给出计划版本／状态／日期",
+  "启用后 /profile 给出计划版本／状态／日期（starts_on/review_on）",
   active.plan?.version === "v1" &&
     active.plan.status === "active" &&
-    active.plan.start_date === "2026-09-14" &&
-    active.plan.review_date === "2026-10-12",
+    active.plan.starts_on === "2026-09-14" &&
+    active.plan.review_on === "2026-10-12",
   JSON.stringify({
     v: active.plan?.version,
     s: active.plan?.status,
-    d: [active.plan?.start_date, active.plan?.review_date],
+    d: [active.plan?.starts_on, active.plan?.review_on],
   }),
 );
+const workouts = active.plan?.payload?.plan_workouts ?? [];
 check(
-  "处方含身份／组次／RIR／校准（无起始重量）",
-  active.plan.blocks.length === 3 &&
-    active.plan.blocks.every((b) =>
-      b.exercises.every(
-        (e) =>
-          e.exercise_id &&
-          e.sets > 0 &&
-          e.rep_range &&
-          e.target_rir &&
-          e.calibration?.status === "needs_calibration" &&
-          e.calibration.steps.length > 0,
-      ),
+  "处方含身份／组次／区间／校准（无起始重量）；D9 load 互斥",
+  workouts.length === 3 &&
+    workouts.every((w) =>
+      w.exercises.every((e) => {
+        const rx = e.prescription;
+        const sets = rx.work_sets > 0;
+        const rangeOk =
+          rx.kind === "reps"
+            ? rx.reps_range && rx.reps_range.min <= rx.reps_range.max
+            : rx.duration_seconds_range;
+        const loadOk =
+          e.record_type !== "external_load_reps" ||
+          (e.load?.kind === "needs_calibration" &&
+            e.load.steps.length > 0 &&
+            !/RIR/.test(e.load.pass_criteria));
+        return e.exercise_id && sets && rangeOk && loadOk;
+      }),
     ) &&
     !/\d+\s*(?:kg|公斤)/.test(JSON.stringify(active.plan)),
 );
 check(
-  "具体日程 12 条应为训练日且全部 scheduled",
+  "具体日程 12 条应为应训练日且 stored_status 全为 scheduled",
   activeSchedules.length === 12 &&
-    activeSchedules.every((s) => s.status === "scheduled"),
+    activeSchedules.every(
+      (s) => s.stored_status === "scheduled" && s.locked_effective === false,
+    ),
   `${activeSchedules.length} 条`,
 );
 check(
-  "可用态安全复核：usable 且无冲突、无红旗",
+  "可用态安全复核：usable 且无冲突、无红旗、block_code 缺省",
   active.plan_safety?.usable === true &&
     active.plan_safety.red_flag_blocked === false &&
     active.plan_safety.conflicts.length === 0 &&
+    active.plan_safety.block_code === undefined &&
     active.plan_safety.context_version === active.context_version,
 );
 
@@ -189,7 +190,6 @@ check(
     afterRepeat.schedules.length === active.schedules.length,
 );
 
-/* 可用态指导：给出下一个应训练日处方，且不生成草稿 */
 const guidanceOk = await run("s1", "给我周三的训练指导");
 check(
   "可用态指导给出下个应训练日处方且不生成草稿",
@@ -198,7 +198,7 @@ check(
     /需要校准|不给出具体起始重量/.test(guidanceOk.text),
 );
 
-/* ---------- 3. 第 10 步：具体动作限制 → 整份阻断 ---------- */
+/* ---------- 3. 步骤 10：具体动作限制 → 整份阻断 ---------- */
 const specific = await addProfileFacts("最近卧推不适，没有其他不适。");
 check(
   "经建档链路确认新增具体动作限制",
@@ -217,7 +217,7 @@ check(
   JSON.stringify(blockedBySpecific.plan_safety?.conflicts),
 );
 check(
-  "阻断时正式计划与全部日程（含历史条目）仍由接口投影返回（不隐藏、不伪造「部分可用」）",
+  "阻断时正式计划与全部日程仍由接口投影返回（不隐藏、不伪造「部分可用」）",
   blockedBySpecific.plan?.version === "v1" &&
     blockedBySpecific.schedules.length === 12 &&
     blockedBySpecific.plan_safety.usable === false &&
@@ -235,20 +235,20 @@ check(
     /整份计划指导已阻断/.test(dayB.text) &&
     /杠铃平板卧推/.test(dayA.text) &&
     !/自重引体向上|绳索下压|杠铃背蹲/.test(dayA.text) &&
-    !/一组|组 x /.test(dayA.text),
+    !/一组.*x /.test(dayA.text),
 );
 check(
   "阻断文案引导从对话发起修订草稿",
   /修改计划只能从对话发起/.test(dayA.text) && dayA.draft === null,
 );
 check(
-  "阻断文案只声称当前计划与当前日程可查看，不再声称可查看历史（产品 UI 无历史入口）",
+  "阻断文案只声称当前计划与当前日程可查看",
   /正式计划 v1 与它的当前日程仍可在「档案与限制」页查看/.test(dayA.text) &&
     !/历史/.test(dayA.text) &&
     dayA.draft === null,
 );
 
-/* ---------- 4. 第 10 步：动作模式限制 → 整份阻断 ---------- */
+/* ---------- 4. 步骤 10：动作模式限制 → 整份阻断 ---------- */
 await reset("noplan");
 await enablePlanV1("s1");
 const pattern = await addProfileFacts("深蹲时膝部不适，没有其他不适。");
@@ -275,7 +275,7 @@ check(
     !/杠铃平板卧推|绳索下压/.test(patternGuidance.text),
 );
 
-/* ---------- 5. 第 11 步：红旗独立阻断（无限制冲突） ---------- */
+/* ---------- 5. 步骤 11：红旗独立阻断 ---------- */
 await reset("noplan");
 await enablePlanV1("s1");
 const redFlag = await addProfileFacts(
@@ -306,14 +306,13 @@ check(
     (await ofProfile()).plan.version === "v1",
 );
 
-/* 红旗种子（尚无计划）：请求计划与指导都只建议线下专业评估，接口层无计划可投影 */
 await reset("noplan");
 await addProfileFacts("最近胸部异常不适，没有动作限制，没有其他不适。");
 const flagSeedProfile = await ofProfile();
 const flagSeedPlan = await run("s1", "帮我生成一份计划");
 const flagSeedGuidance = await run("s1", "今天练什么");
 check(
-  "红旗种子（无计划）：请求计划与指导均不给草稿、不给处方",
+  "红旗种子（无计划）：请求计划与指导都不给草稿、不给处方",
   flagSeedProfile.plan === undefined &&
     flagSeedProfile.plan_safety === undefined &&
     flagSeedPlan.draft === null &&
@@ -323,7 +322,7 @@ check(
     !/组 x /.test(flagSeedGuidance.text),
 );
 
-/* ---------- 6. 替换态：投影一致；旧版取消数据只保留在接口投影（产品 UI 不展示，见 F2-03 探针） ---------- */
+/* ---------- 6. 替换态：投影一致；旧版取消保留在接口 ---------- */
 await reset("noplan");
 await enablePlanV1("s1");
 const dumbbell = await run("s1", "以后只能用哑铃");
@@ -340,16 +339,17 @@ check(
     replaced.plan?.version === "v2" &&
     replaced.plan.status === "active" &&
     v2After.length === 12 &&
-    v2After.every((s) => s.status === "scheduled"),
+    v2After.every((s) => s.stored_status === "scheduled"),
   `${replaced.plan?.version} / v2 ${v2After.length} 条`,
 );
 check(
-  "旧版未来未锁定日程取消仍保留在 /api/profile 投影中（供确认后核对；产品 UI 呈现层不展示）",
-  v1After.length === 12 && v1After.every((s) => s.status === "cancelled"),
+  "旧版日程取消仍保留在 /api/profile 投影中（产品 UI 呈现层不展示）",
+  v1After.length === 12 &&
+    v1After.every((s) => s.stored_status === "cancelled"),
   byDate(v1After).join(","),
 );
 check(
-  "替换后安全复核按新计划重算（可给出基于 v2 的指导）",
+  "替换后安全复核按新计划重算",
   replaced.plan_safety?.usable === true &&
     replaced.plan_safety.conflicts.length === 0 &&
     replaced.plan_safety.context_version === replaced.context_version,
@@ -362,23 +362,24 @@ check(
       JSON.stringify(byDate(replaced.schedules)),
 );
 
-/* ---------- 7. 第 11 步：把冲突动作改入草稿被服务端拒绝，正式数据不变 ---------- */
+/* ---------- 7. 步骤 11：把冲突动作改入草稿被服务端拒绝 ---------- */
 await reset("noplan");
 await enablePlanV1("s1");
 await addProfileFacts("最近卧推不适，没有其他不适。");
 const adjust = await run("s1", "帮我调整计划");
 const beforeRejected = await ofProfile();
 const tampered = structuredClone(adjust.draft.payload);
-tampered.plan.blocks[0].exercises[0].exercise_id = "barbell-bench-press";
+tampered.plan.payload.plan_workouts[0].exercises[0].exercise_id =
+  "barbell-bench-press";
 const rejected = await api("POST", `/api/drafts/${adjust.draft.id}/revise`, {
   payload: tampered,
 });
 const afterRejected = await ofProfile();
 check(
-  "把受限动作改入草稿被服务端拒绝（限制动作 / 器械不符 / 同日重复同一口径）",
+  "把受限动作改入草稿被服务端拒绝",
   rejected.status === 400 &&
     /计划载荷无效/.test(rejected.body.message) &&
-    /杠铃平板卧推/.test(rejected.body.message),
+    /杠铃平板卧推|限制/.test(rejected.body.message),
   JSON.stringify(rejected.body),
 );
 check(

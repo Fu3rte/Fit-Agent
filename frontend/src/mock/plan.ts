@@ -1,54 +1,84 @@
 /**
- * mock 计划生成与安全前置校验（stage2 F2-02；plans/stage2.md §3.1–3.3）
+ * mock 计划生成与安全前置校验（对齐 stage3 D9 / backend domain/plan）
  *
- * 输入 = 正式档案 + 当前有效限制，输出 = 拟议 PPL 计划版本、生效范围与具体日程。
- * 缺档案、档案含红旗症状、或排不进档案约束时一律不给处方（fail-closed），只说明原因。
- *
+ * 输入 = 正式档案 + 当前有效限制，输出 = 拟议 D9 PlanPayload（plan_workouts + calendar_cycle）。
  * - 数据形状一律来自 src/lib/contract.ts（D1A），不另写第二份形状。
- * - 动作身份一律取自 ./catalog.ts 已拍 24 项（`planExercise` 构造期即拒绝目录外身份），
- *   再按可推荐最小标准、档案器械、具体动作／动作模式限制过滤（3.1）。
- * - 无可信训练记录：所有动作标为「需要校准」，不生成也不暗示具体起始重量（3.2）。
- * - 不建立覆盖任意频率的通用排程算法：候选日期与每周训练日按 3.3 已拍固定值给出（3.3）。
- * - 只依赖相对路径与 type-only 契约导入，因此可被 `node scripts/*.mjs` 直接探针。
+ * - 动作身份一律取自 ./catalog.ts 已拍 24 项（planExercise 构造期即拒绝目录外身份）。
+ * - 无可信训练记录：external_load_reps 一律 needs_calibration，不得出现 VerifiedLoad（D3）。
+ * - 校准 pass 文案：稳定完成该组处方次数下限；RIR 不作通过硬性条件（D3）。
+ * - 轻量纠错：开始/复核日期、训练日（cycle slot）、动作候选、组数、次数区间、目标 RIR。
  */
 import type {
-  Calibration,
+  CalendarCycle,
+  CycleSlot,
+  DisplaySnapshot,
   FieldDiff,
-  PlanBlock,
+  IntRange,
+  NeedsCalibration,
   PlanCandidate,
   PlanDraftPayload,
-  PlanExercise,
+  PlanExerciseItem,
+  PlanPayload,
+  PlanPrescription,
   PlanScheduleEntry,
   PlanSafetyConflict,
   PlanSafetyReview,
-  PlanScope,
   PlanVersion,
+  PlanWorkout,
+  PrescriptionRecordType,
+  Progression,
+  ProgressionMethod,
   Profile,
+  RepsPrescription,
   Restriction,
 } from "../lib/contract";
+import {
+  derivePlanBlocks,
+  deriveRangeLabel,
+  isIsoDate,
+  progressionLabel,
+  projectSchedules,
+  rebuildCycleSlots,
+} from "../lib/planView.ts";
 import { CATALOG, isRecommendableCandidate } from "./catalog.ts";
 
-/**
- * 3.2 已拍校准口径（本阶段 mock 无可信训练记录）：不生成也不暗示具体起始重量，
- * 只给逐级试重步骤与通过／停止标准；基于可信历史的负荷建议留到记录数据接入后的阶段。
- * 所有可执行计划动作统一引用本常量，不逐条手写、不伪造已校准重量。
- */
-export const NEEDS_CALIBRATION: Calibration = {
-  status: "needs_calibration",
-  steps: [
-    "从该动作最轻可用档位（自重动作取最轻辅助档）完成一组热身",
-    "逐级加重，每级做 5 次，观察动作是否稳定",
-    "以能稳定完成处方次数下限且落在目标 RIR 区间的档位为起始负荷",
-  ],
-  pass_criteria: "稳定完成处方次数下限，且落在目标 RIR 区间",
-  stop_criteria:
-    "出现疼痛或其他不适、动作明显失稳，或无法满足目标 RIR 时停止，不继续加重",
+/** 目录 record_type → 处方 record_type（rules.CATALOG_RECORD_TYPE_TO_PRESCRIPTION） */
+export const CATALOG_TO_PRESCRIPTION: Record<
+  string,
+  PrescriptionRecordType
+> = {
+  reps_weight: "external_load_reps",
+  reps_bodyweight: "bodyweight_reps",
+  time: "timed",
+};
+
+/** 渐进规则文本（抄后端 PROGRESSION_RULES；custom 也必须有 rule） */
+export const PROGRESSION_RULES: Record<ProgressionMethod, string> = {
+  double_progression:
+    "在次数区间内稳定完成全部工作组后先加次数；达到区间上限后按器械允许的最小增量加重，并回到次数下限",
+  repetition_progression:
+    "先增加次数，达到次数区间上限后按最小增量加重（自重动作改增加次数或难度），并回到次数下限",
+  duration_progression:
+    "稳定达到时长区间上限后，按最小档位增加负荷或难度，并回到时长下限",
+  custom: "按训练者与教练约定的明确规则渐进（须在本字段写清）",
 };
 
 /**
- * 目录器械变式 → 档案器械词与展示文案（沿用 stage1 建档短语表词表，不引入新器械名）。
- * 档案器械里出现任一别名即视为该变式可用；未列出的变式一律视为不可用（fail-closed）。
+ * D3 校准口径：pass = 稳定完成该组处方次数下限；stop = 疼痛/失稳/完不成下限。
+ * RIR 只作展示参考，不作通过硬性条件；结构上不携带任何重量。
  */
+export const NEEDS_CALIBRATION: NeedsCalibration = {
+  kind: "needs_calibration",
+  steps: [
+    "从该动作最轻可用档位（自重动作取最轻辅助档）完成一组热身",
+    "逐级加重，每级做 5 次，观察动作是否稳定",
+    "以能稳定完成处方次数下限的档位为起始负荷",
+  ],
+  pass_criteria: "稳定完成该组处方次数下限",
+  stop_criteria: "出现疼痛或其他不适、动作明显失稳，或无法完成处方次数下限时停止，不继续加重",
+};
+
+/** 目录器械变式 → 档案器械词与展示文案 */
 const EQUIPMENT: Record<string, { label: string; aliases: string[] }> = {
   barbell: { label: "杠铃", aliases: ["杠铃"] },
   dumbbell: { label: "哑铃", aliases: ["哑铃", "哑铃凳"] },
@@ -58,185 +88,257 @@ const EQUIPMENT: Record<string, { label: string; aliases: string[] }> = {
   sled_machine: { label: "器械", aliases: ["器械", "固定器械"] },
 };
 
-/** 每周训练日展示文案（1-7，周一起） */
-const WEEKDAY_LABELS = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"];
+export { weekdayLabel } from "../lib/planView.ts";
 
-export function weekdayLabel(weekday: number): string {
-  return WEEKDAY_LABELS[weekday - 1] ?? String(weekday);
-}
-
-/** 计划动作处方（身份与展示文案由目录给出，调用方只给处方与渐进方式） */
+/** 计划动作处方（构造器入参） */
 export interface PlanExerciseRx {
-  sets: number;
-  rep_range: string;
-  target_rir: string;
-  progression: string;
+  work_sets: number;
+  reps: IntRange;
+  target_rir?: IntRange;
+  /** 计时型：秒区间；给出时忽略 reps */
+  duration_seconds?: IntRange;
+  progression_method: ProgressionMethod;
 }
 
-/**
- * 按目录身份构造计划动作：name／variant／equipment／modes 一律取自 CATALOG（唯一身份来源），
- * 身份不在已拍 24 项内时构造期即失败，使「可执行计划一律引用目录 ID」成为结构性约束，
- * 而不是靠人工核对（F2-01 种子与 F2-02 生成共用本构造器）。
- */
-export function planExercise(
-  exercise_id: string,
-  rx: PlanExerciseRx,
-): PlanExercise {
+/** 目录 → 处方口径 + 展示快照冻结 */
+function snapshotOf(exercise_id: string): {
+  catalog: (typeof CATALOG)[number];
+  record_type: PrescriptionRecordType;
+  display_snapshot: DisplaySnapshot;
+} {
   const catalog = CATALOG.find((e) => e.id === exercise_id);
   if (!catalog)
     throw new Error(
       `计划引用了目录外动作身份：${exercise_id}（不得手写第二份身份）`,
     );
-  const equipment = EQUIPMENT[catalog.equipment_variant];
-  if (!equipment)
-    throw new Error(
-      `目录动作缺少器械变式映射：${exercise_id}（${catalog.equipment_variant}）`,
-    );
+  const record_type = CATALOG_TO_PRESCRIPTION[catalog.record_type];
+  if (!record_type)
+    throw new Error(`目录记录口径无法映射处方口径：${catalog.record_type}`);
   return {
-    exercise_id: catalog.id,
-    name: catalog.standard_name_zh,
-    variant: equipment.label,
-    equipment: catalog.equipment_variant,
-    modes: [...catalog.modes],
-    sets: rx.sets,
-    rep_range: rx.rep_range,
-    target_rir: rx.target_rir,
-    progression: rx.progression,
-    calibration: NEEDS_CALIBRATION,
+    catalog,
+    record_type,
+    display_snapshot: {
+      name: catalog.standard_name_zh,
+      equipment_variant: catalog.equipment_variant,
+      load_convention: catalog.load_convention,
+    },
   };
 }
 
 /**
- * 3.3 已拍候选日期（mock 当前日期 2026-09-10）：开始 2026-09-14、周一／周三／周五、
- * 复核 2026-10-12；只生成 `[开始日期, 复核日期)` 内的应训练日。
- * 该组合只服务本阶段确定性剧本，不是覆盖任意频率的通用排程算法。
+ * 按目录身份构造 D9 PlanExerciseItem：item_key 由调给定（workout 内唯一）；
+ * 无可信记录时 external_load_reps 一律 needs_calibration。
  */
+export function planExercise(
+  item_key: string,
+  exercise_id: string,
+  rx: PlanExerciseRx,
+): PlanExerciseItem {
+  const { record_type, display_snapshot } = snapshotOf(exercise_id);
+  const progression: Progression = {
+    method: rx.progression_method,
+    rule: PROGRESSION_RULES[rx.progression_method],
+  };
+  let prescription: PlanPrescription;
+  if (record_type === "timed") {
+    prescription = {
+      kind: "timed",
+      work_sets: rx.work_sets,
+      duration_seconds_range: rx.duration_seconds ?? { min: 30, max: 60 },
+    };
+  } else {
+    const reps: RepsPrescription = {
+      kind: "reps",
+      work_sets: rx.work_sets,
+      reps_range: rx.reps,
+    };
+    if (rx.target_rir) reps.target_rir = rx.target_rir;
+    prescription = reps;
+  }
+  const item: PlanExerciseItem = {
+    item_key,
+    exercise_id,
+    display_snapshot,
+    record_type,
+    prescription,
+    progression,
+  };
+  if (record_type === "external_load_reps") {
+    item.load = { ...NEEDS_CALIBRATION };
+  }
+  return item;
+}
+
+/** 候选日期（mock 当前 2026-09-10）：开始 2026-09-14（周一）、复核 2026-10-12 */
 export const PLAN_CANDIDATE = {
-  start_date: "2026-09-14",
-  review_date: "2026-10-12",
-  /** 周一 / 周三 / 周五 */
-  weekdays: [1, 3, 5],
+  starts_on: "2026-09-14",
+  review_on: "2026-10-12",
 };
 
-/**
- * PPL 首版模板（每周 3 个训练日）。动作身份全部来自已拍 24 项；同一训练日内不重复身份，
- * 跨训练日复用同一身份（悬垂举腿在拉日与腿日各一次）不判冲突（F2-02 已确认口径）。
- */
-const PPL_TEMPLATE: readonly {
+/** PPL 首版模板（与后端 service.PPL_CALENDAR_SLOTS 对齐）：push/rest/pull/rest/legs/rest/rest */
+export const PPL_TEMPLATE_KEY = "ppl";
+
+interface TemplateExercise {
+  id: string;
+  rx: PlanExerciseRx;
+}
+
+const PPL_WORKOUTS: readonly {
+  workout_key: string;
   name: string;
-  weekday: number;
-  exercises: readonly ({ id: string } & PlanExerciseRx)[];
+  exercises: readonly TemplateExercise[];
 }[] = [
   {
+    workout_key: "push",
     name: "推日",
-    weekday: 1,
     exercises: [
       {
         id: "barbell-bench-press",
-        sets: 4,
-        rep_range: "6-8",
-        target_rir: "1-3",
-        progression: "双重渐进",
+        rx: {
+          work_sets: 4,
+          reps: { min: 6, max: 8 },
+          target_rir: { min: 1, max: 3 },
+          progression_method: "double_progression",
+        },
       },
       {
         id: "seated-dumbbell-shoulder-press",
-        sets: 3,
-        rep_range: "8-12",
-        target_rir: "1-3",
-        progression: "双重渐进",
+        rx: {
+          work_sets: 3,
+          reps: { min: 8, max: 12 },
+          target_rir: { min: 1, max: 3 },
+          progression_method: "double_progression",
+        },
       },
       {
         id: "parallel-bar-dip",
-        sets: 3,
-        rep_range: "8-12",
-        target_rir: "1-3",
-        progression: "次数递增",
+        rx: {
+          work_sets: 3,
+          reps: { min: 8, max: 12 },
+          target_rir: { min: 1, max: 3 },
+          progression_method: "repetition_progression",
+        },
       },
       {
         id: "cable-pushdown",
-        sets: 3,
-        rep_range: "10-15",
-        target_rir: "1-3",
-        progression: "次数递增",
+        rx: {
+          work_sets: 3,
+          reps: { min: 10, max: 15 },
+          target_rir: { min: 1, max: 3 },
+          progression_method: "repetition_progression",
+        },
       },
     ],
   },
   {
+    workout_key: "pull",
     name: "拉日",
-    weekday: 3,
     exercises: [
       {
         id: "pull-up",
-        sets: 3,
-        rep_range: "6-10",
-        target_rir: "1-3",
-        progression: "次数递增",
+        rx: {
+          work_sets: 3,
+          reps: { min: 6, max: 10 },
+          target_rir: { min: 1, max: 3 },
+          progression_method: "repetition_progression",
+        },
       },
       {
         id: "barbell-bent-over-row",
-        sets: 4,
-        rep_range: "8-10",
-        target_rir: "1-3",
-        progression: "双重渐进",
+        rx: {
+          work_sets: 4,
+          reps: { min: 8, max: 10 },
+          target_rir: { min: 1, max: 3 },
+          progression_method: "double_progression",
+        },
       },
       {
         id: "dumbbell-biceps-curl",
-        sets: 3,
-        rep_range: "10-12",
-        target_rir: "1-3",
-        progression: "次数递增",
+        rx: {
+          work_sets: 3,
+          reps: { min: 10, max: 12 },
+          target_rir: { min: 1, max: 3 },
+          progression_method: "repetition_progression",
+        },
       },
       {
         id: "hanging-leg-raise",
-        sets: 3,
-        rep_range: "10-15",
-        target_rir: "1-3",
-        progression: "次数递增",
+        rx: {
+          work_sets: 3,
+          reps: { min: 10, max: 15 },
+          target_rir: { min: 1, max: 3 },
+          progression_method: "repetition_progression",
+        },
       },
     ],
   },
   {
+    workout_key: "legs",
     name: "腿日",
-    weekday: 5,
     exercises: [
       {
         id: "barbell-back-squat",
-        sets: 4,
-        rep_range: "6-8",
-        target_rir: "1-3",
-        progression: "双重渐进",
+        rx: {
+          work_sets: 4,
+          reps: { min: 6, max: 8 },
+          target_rir: { min: 1, max: 3 },
+          progression_method: "double_progression",
+        },
       },
       {
         id: "barbell-romanian-deadlift",
-        sets: 3,
-        rep_range: "8-10",
-        target_rir: "1-3",
-        progression: "双重渐进",
+        rx: {
+          work_sets: 3,
+          reps: { min: 8, max: 10 },
+          target_rir: { min: 1, max: 3 },
+          progression_method: "double_progression",
+        },
       },
       {
         id: "bulgarian-split-squat",
-        sets: 3,
-        rep_range: "8-12",
-        target_rir: "1-3",
-        progression: "次数递增",
+        rx: {
+          work_sets: 3,
+          reps: { min: 8, max: 12 },
+          target_rir: { min: 1, max: 3 },
+          progression_method: "repetition_progression",
+        },
       },
       {
         id: "hanging-leg-raise",
-        sets: 3,
-        rep_range: "10-15",
-        target_rir: "1-3",
-        progression: "次数递增",
+        rx: {
+          work_sets: 3,
+          reps: { min: 10, max: 15 },
+          target_rir: { min: 1, max: 3 },
+          progression_method: "repetition_progression",
+        },
       },
     ],
   },
 ];
 
-/** 预计时长口径（确定性，不做个体建模）：热身 8 分钟 + 每组 3 分钟 */
-function estimatedMinutes(exercises: PlanExercise[]): number {
-  return 8 + 3 * exercises.reduce((n, e) => n + e.sets, 0);
+/** 标准 PPL 7 日循环：push/rest/pull/rest/legs/rest/rest */
+export const PPL_CALENDAR_SLOTS: readonly CycleSlot[] = [
+  { kind: "workout", workout_key: "push" },
+  { kind: "rest" },
+  { kind: "workout", workout_key: "pull" },
+  { kind: "rest" },
+  { kind: "workout", workout_key: "legs" },
+  { kind: "rest" },
+  { kind: "rest" },
+];
+
+/** 预计时长口径（确定性）：热身 8 分钟 + 每组 3 分钟 */
+function estimatedMinutes(exercises: PlanExerciseItem[]): number {
+  return (
+    8 +
+    3 *
+      exercises.reduce(
+        (n, e) => n + e.prescription.work_sets,
+        0,
+      )
+  );
 }
 
-/** 档案器械是否覆盖该目录器械变式 */
 function equipmentAvailable(
   equipment_variant: string,
   profile_equipment: string[],
@@ -246,10 +348,6 @@ function equipmentAvailable(
   return entry.aliases.some((alias) => profile_equipment.includes(alias));
 }
 
-/**
- * 单个目录动作违反档案约束的原因（undefined = 可用）。生成过滤与草稿校验共用本口径：
- * 只接受可推荐目录动作，并逐项比对档案器械、具体动作限制（同名）与动作模式限制（模式交集）。
- */
 function catalogViolation(
   exercise_id: string,
   profile: Profile,
@@ -271,10 +369,6 @@ function catalogViolation(
   return undefined;
 }
 
-/**
- * 计划草稿的可替换动作候选（F2-03）：只列当前档案器械与限制都放行的目录动作。
- * 草稿卡只用于「换动作」，不是完整目录浏览器；完整候选资格仍由 `planPayloadError` 把关。
- */
 export function planCandidates(
   profile: Profile,
   restrictions: Restriction[],
@@ -289,64 +383,18 @@ export function planCandidates(
 }
 
 /**
- * 具体日程：`[开始日期, 复核日期)` 内逐个应训练日（日历休息日不写成应训练日）。
- * 新生成计划的日程一律 scheduled；锁定（到期即锁）与取消（替换旧版）由启用事务写入。
- */
-export function buildSchedules(
-  plan_version: string,
-  scope: PlanScope,
-): PlanScheduleEntry[] {
-  const out: PlanScheduleEntry[] = [];
-  for (
-    let date = scope.start_date;
-    date < scope.review_date;
-    date = dayAfter(date)
-  ) {
-    const weekday = weekdayOf(date);
-    if (!scope.weekdays.includes(weekday)) continue;
-    out.push({
-      id: `sched-${plan_version}-${date}`,
-      plan_version,
-      weekday,
-      date,
-      status: "scheduled",
-    });
-  }
-  return out;
-}
-
-/** 日期（YYYY-MM-DD）后一天；只按日历日推进，不做时区／夏令时换算 */
-function dayAfter(date: string): string {
-  const d = new Date(`${date}T00:00:00Z`);
-  d.setUTCDate(d.getUTCDate() + 1);
-  return d.toISOString().slice(0, 10);
-}
-
-/** 有效日历日期（YYYY-MM-DD），且非 2026-02-31 之类的“看起来像日期”的字符串 */
-function isIsoDate(date: string): boolean {
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return false;
-  const d = new Date(`${date}T00:00:00Z`);
-  return !Number.isNaN(d.getTime()) && d.toISOString().slice(0, 10) === date;
-}
-
-/** 每周第几天（1-7，周一起） */
-function weekdayOf(date: string): number {
-  return ((new Date(`${date}T00:00:00Z`).getUTCDay() + 6) % 7) + 1;
-}
-
-/**
- * 计划草稿展示 Diff（A4：字段级「旧值→新值」；新建计划无旧值 = 全部为新增）。
- * 替换计划（F2-04）只写「旧版 → 新版」的版本行；旧版未来未锁定日程取消清单不进产品 UI
- * 展示（owner 2026-09-10 呈现覆盖），取消本身仍由启用事务写入（04 4.4）。
+ * 展示 Diff（A4）：按 D9 payload 派生字段级「旧值→新值」。
  */
 export function planDraftDiff(
   plan: PlanVersion,
-  scope: PlanScope,
   schedules: PlanScheduleEntry[],
-  replacement?: {
-    previous_version: string;
-  },
+  replacement?: { previous_version: string },
 ): FieldDiff[] {
+  const blocks = derivePlanBlocks(plan.payload);
+  const weekdays = blocks
+    .map((b) => b.weekday)
+    .filter((w): w is number => w !== undefined)
+    .sort((a, b) => a - b);
   const rows: FieldDiff[] = [
     replacement
       ? {
@@ -357,36 +405,41 @@ export function planDraftDiff(
       : { field: "计划 · 版本", new_value: `${plan.version}（新建）` },
     {
       field: "生效范围",
-      new_value: `${scope.start_date} 起，复核日期 ${scope.review_date}`,
+      new_value: `${plan.starts_on} 起，复核日期 ${plan.review_on}`,
     },
     {
       field: "每周训练日",
-      new_value: `${scope.weekdays.map(weekdayLabel).join(" / ")}，共 ${schedules.length} 个应训练日`,
+      new_value: `${[...new Set(weekdays)].join(" / ")}，共 ${schedules.length} 个应训练日`,
     },
     {
       field: "负荷",
-      new_value: "无可信训练记录：不给起始重量，每个动作按「需要校准」逐级试重",
+      new_value:
+        "无可信训练记录：不给起始重量，外加负重动作按「需要校准」逐级试重",
     },
   ];
-  for (const block of plan.blocks) {
+  for (const block of blocks) {
     rows.push({
       field: `${block.name} · 动作（预计 ${block.estimated_minutes} 分钟）`,
       new_value: block.exercises
-        .map(
-          (e) =>
-            `${e.name} ${e.sets} 组 x ${e.rep_range} 次，目标 RIR ${e.target_rir}（${e.progression}）`,
-        )
+        .map((e) => {
+          const rir =
+            e.prescription.kind === "reps"
+              ? `，目标 RIR ${deriveRangeLabel(e.prescription.target_rir)}`
+              : "";
+          const sets = e.prescription.work_sets;
+          const range =
+            e.prescription.kind === "reps"
+              ? deriveRangeLabel(e.prescription.reps_range)
+              : `${deriveRangeLabel(e.prescription.duration_seconds_range)} 秒`;
+          return `${e.display_snapshot.name} ${sets} 组 x ${range}${rir}（${progressionLabel(e.progression.method)}）`;
+        })
         .join(" → "),
     });
   }
   return rows;
 }
 
-/**
- * 六类安全症状（02 2.3 清单；plans/stage1.md §8 已拍：清单外继续澄清、不判定安全，
- * 不扩充医学规则）。只在读取时对 `body_conditions` 原文做确定性匹配——存储层不做医学判断，
- * 分类不写档案、不新增／解除限制。
- */
+/** 六类安全症状（02 2.3）：读取时对 body_conditions 原文做确定性匹配 */
 const SAFETY_SYMPTOM_PATTERNS: readonly { label: string; pattern: RegExp }[] = [
   { label: "胸部异常不适", pattern: /胸部(?:异常|明显|持续)(?:不适|闷|痛)/ },
   { label: "晕厥", pattern: /晕厥|昏厥|晕倒/ },
@@ -397,16 +450,10 @@ const SAFETY_SYMPTOM_PATTERNS: readonly { label: string; pattern: RegExp }[] = [
 ];
 
 export interface BodyConditionClassification {
-  /** 命中六类清单的原文子句（非空即阻断，建议线下专业评估） */
   confirmed: string[];
-  /** 未命中清单的原文子句（不判定安全、需澄清；不得当作红旗阻断） */
   unlisted: string[];
 }
 
-/**
- * 读取时安全分类（02 2.3；本文件唯一分类入口）：按 `body_conditions` 原文逐条匹配六类清单。
- * 空数组 = 用户明确表示无身体情况；普通身体情况非空但未命中六类时不判红旗。
- */
 export function classifyBodyConditions(
   body_conditions: readonly string[] | undefined,
 ): BodyConditionClassification {
@@ -424,28 +471,59 @@ export function classifyBodyConditions(
 
 export interface PlanDraftBlocked {
   ok: false;
-  /** no_profile = 尚未建档；red_flag = 身体情况命中安全症状；unschedulable = 排不进档案约束 */
   code: "no_profile" | "red_flag" | "unschedulable";
   reason: string;
-  /** code = red_flag 时给出命中六类清单的原文（文案由调用方组织，本模块不写对话文案） */
   red_flags: string[];
 }
 
 export interface PlanDraftReady {
   ok: true;
   plan: PlanVersion;
-  scope: PlanScope;
   schedules: PlanScheduleEntry[];
   payload: PlanDraftPayload;
 }
 
 export type PlanDraftBuild = PlanDraftBlocked | PlanDraftReady;
 
-/**
- * 从正式档案与当前有效限制生成 PPL 计划草稿（F2-02）。
- * 缺档案或身体情况命中六类安全症状时不生成任何处方；按 3.1 过滤后任一块没有可用动作、
- * 或生成结果未通过 `planPayloadError` 自检时同样不给处方（fail-closed）。
- */
+/** 构造 PPL PlanPayload（不写库；workout 被器械/限制过滤后整体 fail-closed） */
+function buildPplPayload(
+  profile: Profile,
+  restrictions: Restriction[],
+  anchor_date: string,
+): { payload: PlanPayload } | { error: string } {
+  const plan_workouts: PlanWorkout[] = [];
+  for (const template of PPL_WORKOUTS) {
+    const exercises: PlanExerciseItem[] = [];
+    template.exercises.forEach((e, i) => {
+      if (catalogViolation(e.id, profile, restrictions) === undefined) {
+        exercises.push(
+          planExercise(`${template.workout_key}-${i + 1}`, e.id, e.rx),
+        );
+      }
+    });
+    if (exercises.length === 0)
+      return { error: `${template.name}的动作全部被器械或限制过滤，没有可用动作` };
+    plan_workouts.push({
+      workout_key: template.workout_key,
+      name: template.name,
+      estimated_minutes: estimatedMinutes(exercises),
+      exercises,
+    });
+  }
+  return {
+    payload: {
+      schema_version: 1,
+      template_key: PPL_TEMPLATE_KEY,
+      plan_workouts,
+      calendar_cycle: {
+        anchor_date,
+        slots: PPL_CALENDAR_SLOTS.map((s) => ({ ...s })),
+      },
+    },
+  };
+}
+
+/** 从正式档案与当前有效限制生成 PPL 计划草稿（D9） */
 export function buildPplDraft(input: {
   profile: Profile | null;
   restrictions: Restriction[];
@@ -466,62 +544,54 @@ export function buildPplDraft(input: {
       reason: `身体情况命中安全症状：${red_flags.join("、")}`,
       red_flags,
     };
-  if (profile.weekly_frequency < PLAN_CANDIDATE.weekdays.length)
+
+  const built = buildPplPayload(
+    profile,
+    restrictions,
+    PLAN_CANDIDATE.starts_on,
+  );
+  if ("error" in built)
     return {
       ok: false,
       code: "unschedulable",
-      reason: `档案每周频率 ${profile.weekly_frequency} 次，排不进候选的 ${PLAN_CANDIDATE.weekdays.length} 个训练日`,
+      reason: built.error,
       red_flags: [],
     };
 
-  const blocks: PlanBlock[] = [];
-  for (const template of PPL_TEMPLATE) {
-    const exercises = template.exercises
-      .filter(
-        (e) => catalogViolation(e.id, profile, restrictions) === undefined,
-      )
-      .map((e) => planExercise(e.id, e));
-    if (exercises.length === 0)
-      return {
-        ok: false,
-        code: "unschedulable",
-        reason: `${template.name}的动作全部被器械或限制过滤，没有可用动作`,
-        red_flags: [],
-      };
-    blocks.push({
-      name: template.name,
-      weekday: template.weekday,
-      estimated_minutes: estimatedMinutes(exercises),
-      exercises,
-    });
-  }
+  const payload = built.payload;
+  /* 循环训练日折合每周次数 = workout 槽数；超档案频率即 fail-closed */
+  const workoutDays = payload.calendar_cycle.slots.filter(
+    (s) => s.kind === "workout",
+  ).length;
+  if (workoutDays > profile.weekly_frequency)
+    return {
+      ok: false,
+      code: "unschedulable",
+      reason: `档案每周频率 ${profile.weekly_frequency} 次，排不进循环的 ${workoutDays} 个训练日`,
+      red_flags: [],
+    };
 
   const plan: PlanVersion = {
     version: "v1",
-    start_date: PLAN_CANDIDATE.start_date,
-    review_date: PLAN_CANDIDATE.review_date,
+    starts_on: PLAN_CANDIDATE.starts_on,
+    review_on: PLAN_CANDIDATE.review_on,
+    mode: "regular",
     status: "active",
-    blocks,
+    payload,
   };
-  const scope: PlanScope = {
-    start_date: PLAN_CANDIDATE.start_date,
-    review_date: PLAN_CANDIDATE.review_date,
-    weekdays: [...PLAN_CANDIDATE.weekdays],
-  };
-  const schedules = buildSchedules(plan.version, scope);
-  const payload: PlanDraftPayload = {
+  const schedules = projectSchedules(plan.version, payload, {
+    starts_on: plan.starts_on,
+    review_on: plan.review_on,
+  });
+  const draftPayload: PlanDraftPayload = {
     title: `PPL 训练计划（新建 ${plan.version}）`,
-    diff: planDraftDiff(plan, scope, schedules),
+    diff: planDraftDiff(plan, schedules),
     plan,
-    scope,
     schedules,
-    /** 首次生成计划没有旧版日程需要取消（替换计划的取消清单属后续阶段） */
     cancellations: [],
-    /** 草稿卡「换动作」候选（F2-03）：按当前档案与限制过滤，不扩目录 */
     candidates: planCandidates(profile, restrictions),
   };
-
-  const invalid = planPayloadError(payload, { profile, restrictions });
+  const invalid = planPayloadError(draftPayload, { profile, restrictions });
   if (invalid)
     return {
       ok: false,
@@ -529,19 +599,20 @@ export function buildPplDraft(input: {
       reason: `生成的计划未通过安全前置校验：${invalid}`,
       red_flags: [],
     };
-  return { ok: true, plan, scope, schedules, payload };
+  return { ok: true, plan, schedules, payload: draftPayload };
 }
 
 /**
- * 计划草稿的确定性安全前置校验（F2-02；生成自检与后续纠错／确认提交共用同一口径）。
- * 返回 undefined = 通过；否则返回具体违规说明。覆盖：缺档案／安全症状、频率、每次预计时长、
- * 器械、具体动作与动作模式限制、同一训练日重复动作身份（同一 weekday 跨板块一并去重；
- * 跨训练日复用不判冲突）、
- * 只引用可推荐目录动作、无可信记录一律校准（无起始重量）、日程与生效范围严格一致。
+ * 计划草稿的确定性安全前置校验（生成自检与纠错／确认共用）。
+ * 返回 undefined = 通过；否则返回具体违规说明。
  */
 export function planPayloadError(
   payload: PlanDraftPayload,
-  ctx: { profile: Profile | null; restrictions: Restriction[]; today?: string },
+  ctx: {
+    profile: Profile | null;
+    restrictions: Restriction[];
+    today?: string;
+  },
 ): string | undefined {
   const { profile, restrictions } = ctx;
   if (!profile) return "尚未建档：不生成计划处方";
@@ -549,79 +620,153 @@ export function planPayloadError(
   if (redFlags.length > 0)
     return `身体情况命中安全症状（${redFlags.join("、")}）：不生成常规计划处方`;
 
-  const { plan, scope, schedules } = payload;
-  if (!plan || !scope || !schedules)
-    return "缺少结构化计划载荷（计划版本／生效范围／具体日程）";
-  if (
-    plan.start_date !== scope.start_date ||
-    plan.review_date !== scope.review_date
-  )
-    return "计划版本与生效范围的开始／复核日期不一致";
-  if (!isIsoDate(scope.start_date) || !isIsoDate(scope.review_date))
+  const plan = payload.plan;
+  const schedules = payload.schedules;
+  if (!plan || !schedules)
+    return "缺少结构化计划载荷（计划版本／具体日程）";
+  if (!isIsoDate(plan.starts_on) || !isIsoDate(plan.review_on))
     return "开始／复核日期须为有效日期（YYYY-MM-DD）";
-  if (ctx.today !== undefined && scope.start_date < ctx.today)
-    return `开始日期 ${scope.start_date} 早于当前日期 ${ctx.today}`;
-  if (scope.start_date >= scope.review_date)
+  if (ctx.today !== undefined && plan.starts_on < ctx.today)
+    return `开始日期 ${plan.starts_on} 早于当前日期 ${ctx.today}`;
+  if (plan.starts_on >= plan.review_on)
     return "生效范围须满足开始日期早于复核日期（[开始日期, 复核日期)）";
-  if (scope.weekdays.length === 0) return "缺每周训练日";
-  if (new Set(scope.weekdays).size !== scope.weekdays.length)
-    return "每周训练日重复";
-  if (scope.weekdays.some((w) => !Number.isInteger(w) || w < 1 || w > 7))
-    return "每周训练日须在 1-7 内";
-  if (scope.weekdays.length > profile.weekly_frequency)
-    return `每周训练日 ${scope.weekdays.length} 天超过档案每周频率 ${profile.weekly_frequency} 次`;
-  if (plan.blocks.length === 0) return "计划没有任何训练日板块";
+  if (plan.mode !== "regular" && plan.mode !== "return")
+    return `计划模式不在已拍集合内：${plan.mode}`;
+  if (plan.payload.schema_version !== 1)
+    return `payload schema_version 必须为 1：${plan.payload.schema_version}`;
+  if (plan.payload.plan_workouts.length === 0)
+    return "计划没有任何 plan_workouts";
 
-  /* 同一训练日 = 同一 weekday：按 weekday 跨板块去重，同一训练日的多个板块不得重复同一动作身份 */
-  const seenByWeekday = new Map<number, string[]>();
-  for (const block of plan.blocks) {
-    if (
-      !Number.isInteger(block.weekday) ||
-      block.weekday < 1 ||
-      block.weekday > 7
-    )
-      return `${block.name}的训练日须为每周第 1-7 天`;
-    if (!scope.weekdays.includes(block.weekday))
-      return `${block.name}的训练日不在每周训练日内`;
-    if (!(block.estimated_minutes > 0)) return `${block.name}缺预计时长`;
-    if (block.estimated_minutes > profile.session_minutes)
-      return `${block.name}预计 ${block.estimated_minutes} 分钟超过档案单次可用时长 ${profile.session_minutes} 分钟`;
-    if (block.exercises.length === 0) return `${block.name}没有动作`;
-    const seen = seenByWeekday.get(block.weekday) ?? [];
-    seenByWeekday.set(block.weekday, seen);
-    for (const ex of block.exercises) {
-      if (seen.includes(ex.exercise_id))
-        return `${block.name}在同一训练日重复同一动作身份：${ex.exercise_id}`;
-      seen.push(ex.exercise_id);
-      const violation = catalogViolation(ex.exercise_id, profile, restrictions);
-      if (violation) return `${block.name}：${violation}`;
-      if (!(ex.sets > 0))
-        return `${block.name}动作组数须为正数：${ex.exercise_id}`;
-      if (!/^\d+(-\d+)?$/.test(ex.rep_range))
-        return `${block.name}动作次数区间须为「次数」或「下限-上限」：${ex.exercise_id}`;
-      if (!/^\d+(-\d+)?$/.test(ex.target_rir))
-        return `${block.name}动作目标 RIR 须为「值」或「下限-上限」：${ex.exercise_id}`;
-      const calibration: Calibration | undefined = ex.calibration;
-      if (
-        !calibration ||
-        calibration.status !== "needs_calibration" ||
-        calibration.steps.length === 0 ||
-        calibration.pass_criteria.trim() === "" ||
-        calibration.stop_criteria.trim() === ""
-      )
-        return `${block.name}动作须给出完整校准说明且不得预设起始重量：${ex.exercise_id}`;
+  const cycle = plan.payload.calendar_cycle;
+  if (!isIsoDate(cycle.anchor_date)) return "日历循环锚点须为有效日期";
+  if (cycle.slots.length === 0) return "日历循环 slots 不能为空";
+  const workoutKeys = new Set(
+    plan.payload.plan_workouts.map((w) => w.workout_key),
+  );
+  let hasWorkoutSlot = false;
+  for (const slot of cycle.slots) {
+    if (slot.kind === "workout") {
+      if (!workoutKeys.has(slot.workout_key))
+        return `循环槽引用了不存在的 workout_key：${slot.workout_key}`;
+      hasWorkoutSlot = true;
+    }
+  }
+  if (!hasWorkoutSlot) return "日历循环至少要有一个 workout 槽";
+
+  for (const workout of plan.payload.plan_workouts) {
+    if (!workout.workout_key.trim()) return "workout_key 不能为空";
+    if (!workout.name.trim()) return `${workout.workout_key} 缺名称`;
+    if (!(workout.estimated_minutes > 0))
+      return `${workout.name}缺预计时长`;
+    if (workout.estimated_minutes > profile.session_minutes)
+      return `${workout.name}预计 ${workout.estimated_minutes} 分钟超过档案单次可用时长 ${profile.session_minutes} 分钟`;
+    if (workout.exercises.length === 0) return `${workout.name}没有动作`;
+    const itemKeys = new Set<string>();
+    const exerciseIds = new Set<string>();
+    for (const ex of workout.exercises) {
+      if (itemKeys.has(ex.item_key))
+        return `${workout.name}内 item_key 重复：${ex.item_key}`;
+      itemKeys.add(ex.item_key);
+      if (exerciseIds.has(ex.exercise_id))
+        return `${workout.name}重复同一动作身份：${ex.exercise_id}`;
+      exerciseIds.add(ex.exercise_id);
+      const violation = catalogViolation(
+        ex.exercise_id,
+        profile,
+        restrictions,
+      );
+      if (violation) return `${workout.name}：${violation}`;
+      const err = itemStructuralError(ex, workout.name);
+      if (err) return err;
     }
   }
 
-  return scheduleViolation(plan, scope, schedules);
+  return scheduleViolation(plan, schedules);
+}
+
+function itemStructuralError(
+  ex: PlanExerciseItem,
+  label: string,
+): string | undefined {
+  if (!ex.item_key.trim()) return `${label}动作缺 item_key`;
+  if (!ex.display_snapshot.name.trim())
+    return `${label}动作缺展示名`;
+  if (ex.record_type === "timed") {
+    if (ex.prescription.kind !== "timed")
+      return `${label} timed 处方必须是计时型：${ex.item_key}`;
+    if (!(ex.prescription.work_sets > 0))
+      return `${label}动作组数须为正数：${ex.item_key}`;
+    const r = ex.prescription.duration_seconds_range;
+    if (!(r.min >= 1 && r.max >= r.min))
+      return `${label}时长区间须满足 1 ≤ min ≤ max：${ex.item_key}`;
+    if (ex.load !== undefined)
+      return `${label} 计时型不得携带负荷：${ex.item_key}`;
+  } else {
+    if (ex.prescription.kind !== "reps")
+      return `${label} ${ex.record_type} 处方必须是次数型：${ex.item_key}`;
+    if (!(ex.prescription.work_sets > 0))
+      return `${label}动作组数须为正数：${ex.item_key}`;
+    const r = ex.prescription.reps_range;
+    if (!(r.min >= 1 && r.max >= r.min))
+      return `${label}次数区间须满足 1 ≤ min ≤ max：${ex.item_key}`;
+    const rir = ex.prescription.target_rir;
+    if (rir && !(rir.min >= 0 && rir.max >= rir.min))
+      return `${label}目标 RIR 须满足 0 ≤ min ≤ max：${ex.item_key}`;
+  }
+  if (ex.record_type === "external_load_reps") {
+    const load = ex.load;
+    if (!load || load.kind !== "needs_calibration")
+      return `${label}外加负重动作在无可信记录时必须为 needs_calibration（不猜重）：${ex.item_key}`;
+    if (
+      load.steps.length === 0 ||
+      load.pass_criteria.trim() === "" ||
+      load.stop_criteria.trim() === ""
+    )
+      return `${label}动作须给出完整校准说明：${ex.item_key}`;
+    if (/RIR/.test(load.pass_criteria))
+      return `${label}校准通过标准不得把 RIR 当硬性条件（D3）：${ex.item_key}`;
+  } else if (ex.load !== undefined) {
+    return `${label} load 仅用于外加负重动作：${ex.item_key}`;
+  }
+  const allowed: ProgressionMethod[] =
+    ex.record_type === "external_load_reps"
+      ? ["double_progression", "repetition_progression", "custom"]
+      : ex.record_type === "bodyweight_reps"
+        ? ["repetition_progression", "custom"]
+        : ["duration_progression", "custom"];
+  if (!allowed.includes(ex.progression.method))
+    return `${label}渐进方式 ${ex.progression.method} 与 ${ex.record_type} 不匹配：${ex.item_key}`;
+  if (!ex.progression.rule.trim())
+    return `${label}渐进规则文本不能为空：${ex.item_key}`;
+  return undefined;
+}
+
+/** 具体日程须与 payload 投影严格一致（新生成一律 scheduled） */
+function scheduleViolation(
+  plan: PlanVersion,
+  schedules: PlanScheduleEntry[],
+): string | undefined {
+  const expected = projectSchedules(plan.version, plan.payload, {
+    starts_on: plan.starts_on,
+    review_on: plan.review_on,
+  });
+  if (schedules.length !== expected.length)
+    return `具体日程 ${schedules.length} 条，与生效范围应有的 ${expected.length} 条不一致`;
+  for (const e of expected) {
+    const hit = schedules.find((s) => s.date === e.date);
+    if (!hit) return `具体日程缺 ${e.date}`;
+    if (hit.plan_workout_key !== e.plan_workout_key)
+      return `具体日程 ${e.date} 的训练日引用不一致`;
+    if (hit.plan_version !== plan.version)
+      return `具体日程 ${e.date} 归属计划版本不一致`;
+    if (hit.stored_status !== "scheduled")
+      return `新生成计划的日程状态须为 scheduled：${e.date}`;
+  }
+  return undefined;
 }
 
 /**
- * 使用时整份安全复核（F2-05；04 4.5、02 2.2/2.3）：按最新红旗与限制重查当前计划的全部动作。
- * 任一动作命中具体动作限制（同名）或动作模式限制（模式交集）即整份不可用（`usable: false`），
- * 不输出其余「未冲突」动作的处方；身体情况命中安全症状时独立阻断（`red_flag_blocked`）。
- * 复核只产出投影、不改写计划内容，也不新增计划状态：限制解除后重新复核即可恢复可用。
- * `context_version` 记录本次复核依据的业务版本（/profile 与指导请求都在请求时重算，不缓存结果）。
+ * 使用时整份安全复核：目录身份读不到 → usable=false 且 block_code=plan_action_unavailable（S3-07）。
  */
 export function reviewPlanSafety(input: {
   plan: PlanVersion;
@@ -630,15 +775,19 @@ export function reviewPlanSafety(input: {
   context_version: number;
 }): PlanSafetyReview {
   const conflicts: PlanSafetyConflict[] = [];
-  for (const block of input.plan.blocks) {
-    for (const ex of block.exercises) {
+  let catalogMissing = false;
+  for (const workout of input.plan.payload.plan_workouts) {
+    for (const ex of workout.exercises) {
       const catalog = CATALOG.find((c) => c.id === ex.exercise_id);
-      const name = catalog?.standard_name_zh ?? ex.name;
-      const modes = catalog?.modes ?? ex.modes;
+      if (!catalog) {
+        catalogMissing = true;
+        continue;
+      }
+      const name = catalog.standard_name_zh;
       const restriction = input.restrictions.find((r) =>
         r.scope === "specific_action"
           ? r.name === name
-          : modes.includes(r.name),
+          : catalog.modes.includes(r.name),
       );
       if (restriction)
         conflicts.push({
@@ -648,137 +797,159 @@ export function reviewPlanSafety(input: {
         });
     }
   }
-  /* 读取时分类（同一入口）：普通身体情况非空但未命中六类**不**阻断（02 2.3） */
   const red_flag_blocked =
     classifyBodyConditions(input.profile?.body_conditions).confirmed.length > 0;
+  const usable =
+    input.profile !== null &&
+    !red_flag_blocked &&
+    conflicts.length === 0 &&
+    !catalogMissing;
   return {
     context_version: input.context_version,
     reviewed_at: new Date().toISOString(),
     red_flag_blocked,
-    /* 未建档（无可复核依据）一律不可用（fail-closed），不猜「应该没问题」 */
-    usable:
-      input.profile !== null && !red_flag_blocked && conflicts.length === 0,
+    usable,
     conflicts,
+    ...(catalogMissing
+      ? ({ block_code: "plan_action_unavailable" } as const)
+      : {}),
   };
 }
 
-/** 具体日程须与生效范围严格一致：`[开始日期, 复核日期)` 内每个每周训练日各一条 */
-function scheduleViolation(
-  plan: PlanVersion,
-  scope: PlanScope,
-  schedules: PlanScheduleEntry[],
-): string | undefined {
-  const expected = buildSchedules(plan.version, scope);
-  if (schedules.length !== expected.length)
-    return `具体日程 ${schedules.length} 条，与生效范围应有的 ${expected.length} 条不一致`;
-  for (const e of expected) {
-    const hit = schedules.find((s) => s.date === e.date);
-    if (!hit) return `具体日程缺 ${e.date}`;
-    if (hit.weekday !== e.weekday)
-      return `具体日程 ${e.date} 的训练日与生效范围不一致`;
-    if (hit.plan_version !== plan.version)
-      return `具体日程 ${e.date} 归属计划版本不一致`;
-    if (hit.status !== "scheduled")
-      return `新生成计划的日程状态须为 scheduled：${e.date}`;
+/** 纠错后的计划动作：身份与展示文案按目录重建；目录外身份原样保留 */
+function canonicalExercise(
+  item_key: string,
+  ex: PlanExerciseItem,
+): PlanExerciseItem | { error: string } {
+  const catalog = CATALOG.find((c) => c.id === ex.exercise_id);
+  if (!catalog) return ex; // 交由校验以「目录外」拒绝
+  try {
+    const rx: PlanExerciseRx =
+      ex.prescription.kind === "timed"
+        ? {
+            work_sets: ex.prescription.work_sets,
+            reps: { min: 1, max: 1 },
+            duration_seconds: ex.prescription.duration_seconds_range,
+            progression_method: ex.progression.method,
+          }
+        : {
+            work_sets: ex.prescription.work_sets,
+            reps: ex.prescription.reps_range,
+            target_rir: ex.prescription.target_rir,
+            progression_method: ex.progression.method,
+          };
+    return planExercise(item_key, ex.exercise_id, rx);
+  } catch (e) {
+    return { error: e instanceof Error ? e.message : "动作重建失败" };
   }
-  return undefined;
 }
 
-/** 纠错后的计划动作：身份与展示文案按目录重建；目录外身份原样保留，交由校验以「目录外」拒绝 */
-function canonicalExercise(e: PlanExercise): PlanExercise {
-  if (!CATALOG.some((c) => c.id === e.exercise_id)) return e;
-  return planExercise(e.exercise_id, e);
-}
-
-/** 计划载荷纠错结果：ok = false 时带具体违规说明，调用方不得落库、不得递增 revision */
 export type PlanPayloadRevision =
   | { ok: true; payload: PlanDraftPayload }
   | { ok: false; error: string };
 
 /**
  * 计划草稿纠错后的服务端归一化与复检（F2-03；`/api/drafts/:id/revise` 唯一入口）。
- * `stored` = 服务端当前草稿载荷，`requested` = 客户端提交的载荷。只从 `requested` 取
- * 允许纠错的字段：生效范围开始／复核日期、每个训练日板块的星期、每个动作的目录身份、
- * 组数、次数区间与目标 RIR；其余（标题、计划版本与状态、板块名、动作展示文案、渐进方式、
- * 校准、旧日程取消清单、档案补丁、Diff、日程、候选）一律以服务端存储／目录／档案为准，
- * 不从客户端接收（F2-03 只开放轻量纠错，没有完整编辑器）。因此纠错不能增删板块或动作，
- * 也不能改计划版本、状态或取消清单。
- * 归一化后：动作身份与文案按目录重建（`planExercise`），板块预计时长与具体日程按生效范围
- * 重算，展示 Diff 由归一化后的内容派生，动作候选按当前档案与限制刷新；任一项不通过即拒绝
- * （fail-closed）。每周训练日取自各板块的星期，因此训练日数量与板块数量始终一致；
- * 要改训练日数量属计划重构，不在轻量纠错内。
+ * 只从 requested 取允许纠错的字段：starts_on/review_on、各 workout 的展示 weekday
+ * （经 cycle 重建）、每个动作的目录身份、组数、次数区间与目标 RIR；其余以服务端存储为准。
  */
 export function normalizePlanPayload(
   stored: PlanDraftPayload,
   requested: PlanDraftPayload,
-  ctx: { profile: Profile | null; restrictions: Restriction[]; today: string },
+  ctx: {
+    profile: Profile | null;
+    restrictions: Restriction[];
+    today: string;
+  },
 ): PlanPayloadRevision {
   const basePlan = stored.plan;
-  const baseScope = stored.scope;
   const plan = requested.plan;
-  const scope = requested.scope;
-  if (!basePlan || !baseScope)
+  if (!basePlan)
     return {
       ok: false,
-      error: "待确认草稿缺少结构化计划载荷（计划版本／生效范围／具体日程）",
+      error: "待确认草稿缺少结构化计划载荷（计划版本）",
     };
-  if (!plan || !scope)
+  if (!plan)
     return {
       ok: false,
-      error: "缺少结构化计划载荷（计划版本／生效范围／具体日程）",
+      error: "缺少结构化计划载荷（计划版本）",
     };
-  if (!isIsoDate(scope.start_date) || !isIsoDate(scope.review_date))
+  if (!isIsoDate(plan.starts_on) || !isIsoDate(plan.review_on))
     return { ok: false, error: "开始／复核日期须为有效日期（YYYY-MM-DD）" };
-  /* 板块数与每板块动作数固定：增删板块／动作属完整编辑器，不在轻量纠错内 */
   if (
-    plan.blocks.length !== basePlan.blocks.length ||
-    plan.blocks.some(
-      (b, i) => b.exercises.length !== basePlan.blocks[i]?.exercises.length,
-    )
+    plan.payload.plan_workouts.length !== basePlan.payload.plan_workouts.length
   )
-    return {
-      ok: false,
-      error: "轻量纠错不得增删训练日板块或动作",
-    };
+    return { ok: false, error: "轻量纠错不得增删训练日" };
 
-  const blocks: PlanBlock[] = basePlan.blocks.map((baseBlock, bi) => {
-    const requestedBlock = plan.blocks[bi];
-    const exercises: PlanExercise[] = baseBlock.exercises.map(
-      (baseExercise, ei) => {
-        const requestedExercise = requestedBlock.exercises[ei];
-        return canonicalExercise({
-          ...baseExercise,
-          exercise_id: requestedExercise.exercise_id,
-          sets: requestedExercise.sets,
-          rep_range: requestedExercise.rep_range,
-          target_rir: requestedExercise.target_rir,
-        });
-      },
-    );
-    return {
-      ...baseBlock,
-      weekday: requestedBlock.weekday,
+  const blocks = derivePlanBlocks(basePlan.payload);
+  const plan_workouts: PlanWorkout[] = [];
+  for (let bi = 0; bi < basePlan.payload.plan_workouts.length; bi++) {
+    const baseWorkout = basePlan.payload.plan_workouts[bi];
+    const requestedWorkout = plan.payload.plan_workouts[bi];
+    if (!baseWorkout || !requestedWorkout)
+      return { ok: false, error: "轻量纠错不得增删训练日" };
+    if (requestedWorkout.exercises.length !== baseWorkout.exercises.length)
+      return { ok: false, error: "轻量纠错不得增删动作" };
+    const exercises: PlanExerciseItem[] = [];
+    for (let ei = 0; ei < baseWorkout.exercises.length; ei++) {
+      const baseEx = baseWorkout.exercises[ei];
+      const requestedEx = requestedWorkout.exercises[ei];
+      if (!baseEx || !requestedEx)
+        return { ok: false, error: "轻量纠错不得增删动作" };
+      const rebuilt = canonicalExercise(baseEx.item_key, {
+        ...baseEx,
+        exercise_id: requestedEx.exercise_id,
+        prescription: requestedEx.prescription,
+      });
+      if ("error" in rebuilt) return { ok: false, error: rebuilt.error };
+      exercises.push(rebuilt);
+    }
+    plan_workouts.push({
+      ...baseWorkout,
       exercises,
       estimated_minutes: estimatedMinutes(exercises),
-    };
-  });
+    });
+  }
+
+  /* 训练日：按 requested 各 workout 的展示 weekday 重建 cycle（anchor = starts_on） */
+  const weekdays = plan_workouts.map((w, i) => ({
+    workout_key: w.workout_key,
+    weekday:
+      derivePlanBlocks(plan.payload).find(
+        (b) => b.workout_key === w.workout_key,
+      )?.weekday ??
+      blocks[i]?.weekday ??
+      1,
+  }));
+  /* 若 requested 未改 weekday（同 key 同 weekday），保留原 cycle 相位（anchor 不动） */
+  const sameWeekdays = weekdays.every(
+    (w, i) => w.weekday === blocks[i]?.weekday,
+  );
+  const calendar_cycle: CalendarCycle = sameWeekdays
+    ? { ...basePlan.payload.calendar_cycle }
+    : {
+        anchor_date: plan.starts_on,
+        slots: rebuildCycleSlots(plan.starts_on, weekdays),
+      };
+
+  const nextPayload: PlanPayload = {
+    ...basePlan.payload,
+    plan_workouts,
+    calendar_cycle,
+  };
   const nextPlan: PlanVersion = {
     ...basePlan,
-    start_date: scope.start_date,
-    review_date: scope.review_date,
-    blocks,
+    starts_on: plan.starts_on,
+    review_on: plan.review_on,
+    payload: nextPayload,
   };
-  const nextScope: PlanScope = {
-    ...baseScope,
-    start_date: scope.start_date,
-    review_date: scope.review_date,
-    weekdays: [...new Set(blocks.map((b) => b.weekday))].sort((a, b) => a - b),
-  };
-  const schedules = buildSchedules(nextPlan.version, nextScope);
+  const schedules = projectSchedules(nextPlan.version, nextPayload, {
+    starts_on: nextPlan.starts_on,
+    review_on: nextPlan.review_on,
+  });
   const payload: PlanDraftPayload = {
     ...stored,
     plan: nextPlan,
-    scope: nextScope,
     schedules,
     ...(ctx.profile
       ? { candidates: planCandidates(ctx.profile, ctx.restrictions) }
@@ -790,7 +961,7 @@ export function normalizePlanPayload(
     ok: true,
     payload: {
       ...payload,
-      diff: planDraftDiff(nextPlan, nextScope, schedules),
+      diff: planDraftDiff(nextPlan, schedules),
     },
   };
 }

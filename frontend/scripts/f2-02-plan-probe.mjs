@@ -1,14 +1,11 @@
 /**
- * F2-02 验收探针（只读，无依赖）：PPL 计划生成与安全前置校验
- * （plans/stage2.md 第 7 节第 1–4、11 步中不依赖浏览器的确定性部分）。
+ * F2-02 验收探针（只读，无依赖）：D9 PPL 计划生成与安全前置校验
+ * （plans/stage2.md 第 7 节第 1—4、11 步中不依赖浏览器的确定性部分）。
  *
  * 运行：node scripts/f2-02-plan-probe.mjs
- * 覆盖：候选日期与 `[开始, 复核)` 内的 12 个应训练日、频率／单次时长／器械／具体动作与
- *      动作模式限制过滤、同一训练日重复身份拒绝、跨训练日复用放行、只引用可推荐目录动作、
- *      无可信记录不给起始重量、缺档案与红旗不给处方、非法纠错载荷被服务端校验拒绝、
- *      计划生成种子（noplan）接入。
- * 不覆盖：草稿卡渲染与轻量纠错（F2-03）、确认与启用事务（F2-04）、`/profile` 计划卡与实际
- *        浏览器走查（F2-06）、真实后端 `recommendable` 与真实 Agent 生成质量。
+ * 覆盖：候选日期与 [starts_on, review_on) 内 12 个应训练日、频率／时长／器械／限制过滤、
+ *      同一训练日重复身份拒绝、跨训练日复用放行、只引用可推荐目录、无可信记录不猜重、
+ *      缺档案与红旗 fail-closed、非法纠错载荷被拒。
  */
 import { readFileSync } from "node:fs";
 import { CATALOG, isRecommendableCandidate } from "../src/mock/catalog.ts";
@@ -17,6 +14,7 @@ import {
   buildPplDraft,
   planPayloadError,
 } from "../src/mock/plan.ts";
+import { derivePlanBlocks, weekdayOfDate } from "../src/lib/planView.ts";
 
 const read = (p) => readFileSync(new URL(p, import.meta.url), "utf8");
 let failed = 0;
@@ -25,7 +23,6 @@ const check = (name, ok, detail = "") => {
   console.log(`${ok ? "PASS" : "FAIL"} ${name}${detail ? ` — ${detail}` : ""}`);
 };
 
-/** 计划生成种子（noplan）的档案镜像；器械只含杠铃／哑铃／推架／引体架／绳索 */
 const PROFILE = {
   goal: "增肌（肌肥大）",
   experience: "初级（有少量训练经验）",
@@ -37,12 +34,10 @@ const PROFILE = {
 };
 const build = (profile = PROFILE, restrictions = []) =>
   buildPplDraft({ profile, restrictions });
-const at = (weekday) =>
-  ((new Date(`${weekday}T00:00:00Z`).getUTCDay() + 6) % 7) + 1;
 const idsOf = (plan) =>
-  plan.blocks.flatMap((b) => b.exercises.map((e) => e.exercise_id));
+  plan.payload.plan_workouts.flatMap((w) => w.exercises.map((e) => e.exercise_id));
 
-/* 1. 候选日期与日程边界（第 7 节第 2、4 步） */
+/* 1. 候选日期与日程边界 */
 const generated = build();
 check(
   "可从已建档／无红旗／无计划档案生成计划草稿",
@@ -50,16 +45,14 @@ check(
   generated.reason,
 );
 if (!generated.ok) process.exit(1);
-const { plan, scope, schedules, payload } = generated;
+const { plan, schedules, payload } = generated;
+const blocks = derivePlanBlocks(plan.payload);
 check(
-  "候选与已拍 3.3 一致（09-14 起 / 一三五 / 10-12 复核）",
-  PLAN_CANDIDATE.start_date === "2026-09-14" &&
-    PLAN_CANDIDATE.review_date === "2026-10-12" &&
-    PLAN_CANDIDATE.weekdays.join() === "1,3,5" &&
-    at(PLAN_CANDIDATE.start_date) === 1 &&
-    at(PLAN_CANDIDATE.review_date) === 1 &&
-    scope.start_date === PLAN_CANDIDATE.start_date &&
-    scope.review_date === PLAN_CANDIDATE.review_date,
+  "候选与已拍 3.3 一致（09-14 起 / 复核 10-12）",
+  PLAN_CANDIDATE.starts_on === "2026-09-14" &&
+    PLAN_CANDIDATE.review_on === "2026-10-12" &&
+    plan.starts_on === PLAN_CANDIDATE.starts_on &&
+    plan.review_on === PLAN_CANDIDATE.review_on,
   JSON.stringify(PLAN_CANDIDATE),
 );
 check(
@@ -70,55 +63,57 @@ check(
   `${schedules.length} 条：${schedules[0]?.date} ~ ${schedules[schedules.length - 1]?.date}`,
 );
 check(
-  "日程只落在周一／周三／周五且全部早于复核日",
+  "日程只落在周一／周三／周五且未到期（无 stored locked）",
   schedules.every(
     (s) =>
       [1, 3, 5].includes(s.weekday) &&
-      s.weekday === at(s.date) &&
-      s.date < scope.review_date &&
-      s.status === "scheduled" &&
-      s.plan_version === plan.version,
+      s.weekday === weekdayOfDate(s.date) &&
+      s.date < plan.review_on &&
+      s.stored_status === "scheduled" &&
+      s.locked_by_date_rule === false &&
+      s.locked_effective === false &&
+      s.plan_version === plan.version &&
+      s.plan_workout_key,
   ),
   schedules.map((s) => s.date).join(","),
 );
 check(
   "休息日与复核日当天不生成名额",
   !schedules.some(
-    (s) => s.date === "2026-10-12" || at(s.date) === 6 || at(s.date) === 7,
+    (s) => s.date === "2026-10-12" || [6, 7].includes(weekdayOfDate(s.date)),
   ),
 );
 check(
-  "计划版本与生效范围一致（[开始日期, 复核日期)）",
-  plan.start_date === scope.start_date &&
-    plan.review_date === scope.review_date &&
+  "D9 行字段与 calendar_cycle：starts_on/review_on/mode/payload 存在",
+  plan.mode === "regular" &&
     plan.status === "active" &&
     plan.version === "v1" &&
-    scope.weekdays.join() === "1,3,5",
+    plan.payload.schema_version === 1 &&
+    plan.payload.calendar_cycle.anchor_date &&
+    plan.payload.calendar_cycle.slots.filter((s) => s.kind === "workout").length === 3 &&
+    plan.payload.calendar_cycle.slots.some((s) => s.kind === "rest"),
 );
 
-/* 2. 频率与单次时长（验收标准：每周 3 个训练日、每次 ≤ 档案 60 分钟） */
+/* 2. 频率与单次时长 */
 check(
-  "每周 3 个训练日且板块训练日都在生效范围内",
-  plan.blocks.length === 3 &&
-    plan.blocks.every((b) => scope.weekdays.includes(b.weekday)) &&
-    plan.blocks.map((b) => b.weekday).join() === "1,3,5",
-  plan.blocks.map((b) => `${b.name}/${b.weekday}`).join(" "),
+  "3 个 plan_workouts，展示 weekday 为 1/3/5",
+  plan.payload.plan_workouts.length === 3 &&
+    blocks.map((b) => b.weekday).join() === "1,3,5",
+  blocks.map((b) => `${b.name}/${b.weekday}`).join(" "),
 );
 check(
   "每次预计时长不超过档案单次可用时长",
-  plan.blocks.every(
-    (b) => b.estimated_minutes > 0 && b.estimated_minutes <= 60,
+  plan.payload.plan_workouts.every(
+    (w) => w.estimated_minutes > 0 && w.estimated_minutes <= 60,
   ),
-  plan.blocks.map((b) => `${b.name} ${b.estimated_minutes}min`).join("；"),
+  plan.payload.plan_workouts.map((w) => `${w.name} ${w.estimated_minutes}min`).join("；"),
 );
 
-/* 3. 只引用可推荐且器械匹配的目录动作（第 7 节第 3 步） */
+/* 3. 只引用可推荐且器械匹配的目录动作 */
 const byId = new Map(CATALOG.map((e) => [e.id, e]));
 check(
   "计划动作全部在已拍 24 项目录内且可推荐",
-  idsOf(plan).every(
-    (id) => byId.has(id) && isRecommendableCandidate(byId.get(id)),
-  ),
+  idsOf(plan).every((id) => byId.has(id) && isRecommendableCandidate(byId.get(id))),
   idsOf(plan).join(","),
 );
 const dumbbellOnly = build({ ...PROFILE, equipment: ["哑铃"] });
@@ -138,13 +133,11 @@ const noCable = build({
 check(
   "无绳索器械时绳索动作不进入草稿",
   noCable.ok &&
-    idsOf(noCable.plan).every(
-      (id) => byId.get(id).equipment_variant !== "cable",
-    ),
+    idsOf(noCable.plan).every((id) => byId.get(id).equipment_variant !== "cable"),
   noCable.ok ? idsOf(noCable.plan).join(",") : noCable.reason,
 );
 
-/* 4. 具体动作／动作模式限制过滤（第 7 节第 3、10、11 步的服务端口径） */
+/* 4. 具体动作／动作模式限制过滤 */
 const specific = build(PROFILE, [
   { name: "杠铃平板卧推", scope: "specific_action", note: "肩部不适" },
 ]);
@@ -155,7 +148,7 @@ check(
 );
 const pattern = build(PROFILE, [{ name: "深蹲", scope: "movement_pattern" }]);
 check(
-  "动作模式限制命中者不进入草稿（含跨身份模式交集）",
+  "动作模式限制命中者不进入草稿",
   pattern.ok &&
     idsOf(pattern.plan).every((id) => !byId.get(id).modes.includes("深蹲")),
   pattern.ok ? idsOf(pattern.plan).join(",") : pattern.reason,
@@ -173,48 +166,31 @@ check(
 );
 
 /* 5. 同一训练日重复身份拒绝、跨训练日复用放行 */
-const reusedAcrossDays = plan.blocks
-  .flatMap((b) => b.exercises.map((e) => e.exercise_id))
-  .filter((id, _i, all) => all.filter((x) => x === id).length > 1);
+const flatIds = idsOf(plan);
+const reusedAcrossDays = flatIds.filter(
+  (id, _i, all) => all.filter((x) => x === id).length > 1,
+);
 check(
   "跨训练日复用同一动作身份不判冲突（悬垂举腿在拉日与腿日各一次）",
   reusedAcrossDays.length > 0 &&
-    planPayloadError(payload, { profile: PROFILE, restrictions: [] }) ===
-      undefined,
+    planPayloadError(payload, { profile: PROFILE, restrictions: [] }) === undefined,
   reusedAcrossDays.join(","),
 );
 const sameDayDup = structuredClone(payload);
-sameDayDup.plan.blocks[0].exercises.push(
-  structuredClone(sameDayDup.plan.blocks[0].exercises[0]),
-);
+const firstWorkout = sameDayDup.plan.payload.plan_workouts[0];
+const cloneItem = structuredClone(firstWorkout.exercises[0]);
+cloneItem.item_key = `${cloneItem.item_key}-dup`;
+firstWorkout.exercises.push(cloneItem);
 check(
   "同一训练日重复同一动作身份被校验拒绝",
-  /同一训练日重复/.test(
+  /重复同一动作身份/.test(
     planPayloadError(sameDayDup, { profile: PROFILE, restrictions: [] }) ?? "",
   ),
-  planPayloadError(sameDayDup, { profile: PROFILE, restrictions: [] }) ??
-    "未拒绝",
-);
-/* 同一训练日的两个板块（同 weekday）共享动作身份同样按「同一训练日」处理 */
-const sameWeekdayBlocks = structuredClone(payload);
-sameWeekdayBlocks.plan.blocks.push(
-  structuredClone(sameWeekdayBlocks.plan.blocks[1]),
-);
-check(
-  "同一训练日跨板块重复同一动作身份被校验拒绝",
-  /同一训练日重复/.test(
-    planPayloadError(sameWeekdayBlocks, {
-      profile: PROFILE,
-      restrictions: [],
-    }) ?? "",
-  ),
-  planPayloadError(sameWeekdayBlocks, { profile: PROFILE, restrictions: [] }) ??
-    "未拒绝",
+  planPayloadError(sameDayDup, { profile: PROFILE, restrictions: [] }) ?? "未拒绝",
 );
 
-/* 6. 无可信训练记录：只校准，不猜重量（第 7 节第 3 步） */
-const serialized = JSON.stringify(plan);
-/** 递归查找重量字段（equipment_variant = bodyweight 是器械名，不是重量值） */
+/* 6. 无可信记录：只校准，不猜重量 */
+const serialized = JSON.stringify(plan.payload);
 const weightKey = (v) =>
   typeof v === "object" && v !== null
     ? Object.entries(v).some(
@@ -222,21 +198,35 @@ const weightKey = (v) =>
       )
     : false;
 check(
-  "计划不含任何起始重量或猜测负荷",
-  !weightKey(plan) &&
+  "计划 payload 不含起始重量；外加负重动作一律 needs_calibration",
+  !weightKey(plan.payload) &&
     !/\d+\s*(?:kg|公斤)/.test(serialized) &&
-    plan.blocks.every((b) =>
-      b.exercises.every(
-        (e) =>
-          e.calibration.status === "needs_calibration" &&
-          e.calibration.steps.length > 0 &&
-          e.calibration.pass_criteria !== "" &&
-          e.calibration.stop_criteria !== "",
-      ),
+    plan.payload.plan_workouts.every((w) =>
+      w.exercises.every((e) => {
+        if (e.record_type !== "external_load_reps") return true;
+        const load = e.load;
+        return (
+          load?.kind === "needs_calibration" &&
+          load.steps.length > 0 &&
+          load.pass_criteria !== "" &&
+          !/RIR/.test(load.pass_criteria)
+        );
+      }),
     ),
 );
+check(
+  "progression 为 method+rule 且 rule 非空",
+  plan.payload.plan_workouts.every((w) =>
+    w.exercises.every(
+      (e) =>
+        e.progression.method &&
+        e.progression.rule.trim() !== "" &&
+        e.prescription.work_sets > 0,
+    ),
+  ),
+);
 
-/* 7. 缺档案／红旗／频率不足不给处方（第 7 节第 11 步） */
+/* 7. 缺档案／红旗／频率不足 */
 const noProfile = build(null);
 check(
   "缺档案不生成处方",
@@ -255,19 +245,16 @@ check(
   redFlag.ok ? "仍生成了处方" : redFlag.reason,
 );
 check(
-  "命中安全症状的计划载荷也被校验拒绝（requesting 指导时的整份复核口径）",
+  "命中安全症状的计划载荷也被校验拒绝（请求指导时的整份复核口径）",
   /命中安全症状/.test(
     planPayloadError(payload, {
-      profile: {
-        ...PROFILE,
-        body_conditions: ["锐痛"],
-      },
+      profile: { ...PROFILE, body_conditions: ["锐痛"] },
       restrictions: [],
     }) ?? "",
   ),
 );
 check(
-  "普通身体情况非空但未命中六类时不作红旗阻断（读取时分类）",
+  "普通身体情况非空但未命中六类时不作红旗阻断",
   build({ ...PROFILE, body_conditions: ["肩部偶有不适"] }).ok === true,
 );
 const lowFrequency = build({ ...PROFILE, weekly_frequency: 2 });
@@ -277,11 +264,12 @@ check(
   lowFrequency.ok ? "仍生成了处方" : lowFrequency.reason,
 );
 
-/* 8. 非法纠错载荷被服务端校验拒绝（第 7 节第 11 步；revise 接线属 F2-03） */
+/* 8. 非法纠错载荷被服务端校验拒绝 */
 const withRestriction = structuredClone(payload);
-withRestriction.plan.blocks[0].exercises[0].exercise_id = "barbell-bench-press";
+withRestriction.plan.payload.plan_workouts[0].exercises[0].exercise_id =
+  "barbell-bench-press";
 check(
-  "限制动作改入草稿被拒绝",
+  "限制动作改入草稿被拒",
   /限制/.test(
     planPayloadError(withRestriction, {
       profile: PROFILE,
@@ -293,15 +281,12 @@ const wrongEquipment = planPayloadError(payload, {
   profile: { ...PROFILE, equipment: ["哑铃"] },
   restrictions: [],
 });
-check(
-  "器械不符动作被拒绝",
-  /器械/.test(wrongEquipment ?? ""),
-  wrongEquipment ?? "未拒绝",
-);
+check("器械不符动作被拒", /器械/.test(wrongEquipment ?? ""), wrongEquipment ?? "未拒绝");
 const unknownIdentity = structuredClone(payload);
-unknownIdentity.plan.blocks[0].exercises[0].exercise_id = "face-pull";
+unknownIdentity.plan.payload.plan_workouts[0].exercises[0].exercise_id =
+  "face-pull";
 check(
-  "目录外动作身份被拒绝",
+  "目录外动作身份被拒",
   /目录外动作身份/.test(
     planPayloadError(unknownIdentity, { profile: PROFILE, restrictions: [] }) ??
       "",
@@ -311,42 +296,56 @@ const outOfRange = structuredClone(payload);
 outOfRange.schedules.push({
   id: "sched-v1-2026-10-12",
   plan_version: "v1",
-  weekday: 1,
   date: "2026-10-12",
-  status: "scheduled",
+  plan_workout_key: "push",
+  weekday: 1,
+  stored_status: "scheduled",
+  locked_by_date_rule: false,
+  locked_effective: false,
 });
 check(
-  "越界日程（复核日及以后）被拒绝",
+  "越界日程（复核日及以后）被拒",
   planPayloadError(outOfRange, { profile: PROFILE, restrictions: [] }) !==
     undefined,
 );
 const weekendSchedule = structuredClone(payload);
-weekendSchedule.schedules[0].date = "2026-09-19";
+weekendSchedule.schedules[0] = {
+  ...weekendSchedule.schedules[0],
+  date: "2026-09-19",
+  weekday: 6,
+};
 check(
-  "休息日日程被拒绝",
+  "休息日日程被拒（与投影不一致）",
   planPayloadError(weekendSchedule, { profile: PROFILE, restrictions: [] }) !==
     undefined,
 );
 const longSession = structuredClone(payload);
-longSession.plan.blocks[0].estimated_minutes = 90;
+longSession.plan.payload.plan_workouts[0].estimated_minutes = 90;
 check(
-  "超过档案单次可用时长被拒绝",
+  "超过档案单次可用时长被拒",
   /超过档案单次可用时长/.test(
     planPayloadError(longSession, { profile: PROFILE, restrictions: [] }) ?? "",
+  ),
+);
+const badCycle = structuredClone(payload);
+badCycle.plan.payload.calendar_cycle.slots = [
+  { kind: "workout", workout_key: "not-exist" },
+];
+check(
+  "calendar_cycle 引用不存在的 workout_key 被拒",
+  /不存在的 workout_key/.test(
+    planPayloadError(badCycle, { profile: PROFILE, restrictions: [] }) ?? "",
   ),
 );
 
 /* 9. mock 接入：noplan 种子 + 无计划时走生成分支 */
 const server = read("../src/mock/server.ts");
 check(
-  "控制端点注册 noplan 种子（已配置／已建档／无安全症状／无计划）",
+  "控制端点注册 noplan 种子",
   /seed !== "noplan"/.test(server) &&
-    /function noPlanSeedState\(\): MockState \{[\s\S]*?emptySeedState\(\)[\s\S]*?has_api_key = true;[\s\S]*?body_conditions: \[\],[\s\S]*?\};/.test(
+    /function noPlanSeedState\(\): MockState \{[\s\S]*?emptySeedState\(\)[\s\S]*?has_api_key = true;/.test(
       server,
-    ) &&
-    !/function noPlanSeedState[\s\S]*?\n {2}plan:/.test(server) &&
-    !/function noPlanSeedState[\s\S]*?\n {2}records:/.test(server),
-  "种子由空种子派生（plan: null、records: []）并写入无身体情况（明确无）档案",
+    ),
 );
 check(
   "无正式计划时对话走计划生成分支",

@@ -19,23 +19,21 @@ import { getProfile } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import type { ReactNode } from "react";
 import type {
-  Calibration,
-  PlanBlock,
+  NeedsCalibration,
   PlanSafetyReview,
   PlanScheduleEntry,
   PlanVersion,
   Profile,
   Restriction,
 } from "@/lib/contract";
-
-const WEEKDAYS = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"];
-
-/** 日程状态展示文案（契约状态语义：应训练 / 到期即锁 / 替换计划时旧版未来未锁定日程取消） */
-const SCHEDULE_STATUS_LABEL: Record<PlanScheduleEntry["status"], string> = {
-  scheduled: "应训练",
-  locked: "已锁定",
-  cancelled: "已取消",
-};
+import {
+  derivePlanBlocks,
+  deriveRangeLabel,
+  prescriptionLabel,
+  progressionLabel,
+  weekdayLabel,
+  type DisplayBlock,
+} from "@/lib/planView";
 
 function Loading({ text }: { text: string }) {
   return <p className="mt-10 text-sm text-muted-foreground">{text}…</p>;
@@ -68,8 +66,6 @@ function ProfileCard({ profile }: { profile: Profile }) {
     { label: "体重", value: `${profile.body_weight_kg} kg` },
     {
       label: "身体情况",
-      // 逐条显示用户报告原文；空数组 = 用户确认无。阻断状态只看安全复核投影
-      // （PlanSafetyNotice / red_flag_blocked），不按本列表是否非空推断。
       value:
         profile.body_conditions.length > 0 ? (
           <span className="flex flex-col items-end gap-0.5">
@@ -103,7 +99,7 @@ function ProfileCard({ profile }: { profile: Profile }) {
   );
 }
 
-/** 动作限制卡：当前有效限制一律红色「暂禁」徽章（展示文案，不代表新增限制状态语义） */
+/** 动作限制卡 */
 function RestrictionsCard({ restrictions }: { restrictions: Restriction[] }) {
   return (
     <Card>
@@ -140,17 +136,18 @@ function RestrictionsCard({ restrictions }: { restrictions: Restriction[] }) {
   );
 }
 
-/** 单个板块（推/拉/腿）的动作表 */
-function BlockTable({ block }: { block: PlanBlock }) {
+/** 单个训练日的动作表（展示派生 DisplayBlock） */
+function BlockTable({ block }: { block: DisplayBlock }) {
   return (
     <div>
       <div className="mb-2 flex items-baseline justify-between">
         <h4 className="text-sm font-medium">{block.name}</h4>
         <span className="text-xs text-muted-foreground">
-          每周{WEEKDAYS[block.weekday - 1] ?? `第 ${block.weekday} 天`}
+          {block.weekday !== undefined
+            ? `每周${weekdayLabel(block.weekday)}`
+            : "未排入循环"}
         </span>
       </div>
-      {/* table-fixed + 固定列宽：三个板块是三张独立表，自动布局会按各自内容算列宽，导致跨表不对齐 */}
       <table className="w-full table-fixed text-sm">
         <thead>
           <tr className="border-b text-left text-xs text-muted-foreground">
@@ -161,36 +158,39 @@ function BlockTable({ block }: { block: PlanBlock }) {
           </tr>
         </thead>
         <tbody>
-          {block.exercises.map((ex) => (
-            <tr
-              key={`${ex.name}·${ex.variant}`}
-              className="border-b last:border-0"
-            >
-              <td className="py-2 pr-3">
-                {ex.name}
-                <span className="ml-1.5 text-xs text-muted-foreground">
-                  {ex.variant}
-                </span>
-              </td>
-              <td className="py-2 pr-3 tabular-nums">
-                {ex.sets} × {ex.rep_range}
-              </td>
-              <td className="py-2 pr-3 tabular-nums">{ex.target_rir}</td>
-              <td className="py-2 text-xs text-muted-foreground">
-                {ex.progression}
-              </td>
-            </tr>
-          ))}
+          {block.exercises.map((ex) => {
+            const rir =
+              ex.prescription.kind === "reps"
+                ? deriveRangeLabel(ex.prescription.target_rir)
+                : "—";
+            return (
+              <tr
+                key={ex.item_key}
+                className="border-b last:border-0"
+              >
+                <td className="py-2 pr-3">
+                  {ex.display_snapshot.name}
+                  <span className="ml-1.5 text-xs text-muted-foreground">
+                    {ex.display_snapshot.equipment_variant}
+                  </span>
+                </td>
+                <td className="py-2 pr-3 tabular-nums">
+                  {prescriptionLabel(ex.prescription)}
+                </td>
+                <td className="py-2 pr-3 tabular-nums">{rir}</td>
+                <td className="py-2 text-xs text-muted-foreground">
+                  {progressionLabel(ex.progression.method)}
+                </td>
+              </tr>
+            );
+          })}
         </tbody>
       </table>
     </div>
   );
 }
 
-/**
- * 使用前安全复核结果（F2-05；04 4.5 整份复核）：只有「可给出基于该计划的指导」与「整份阻断」
- * 两种表达，不存在「部分可用」的中间状态。阻断只影响使用时：计划内容仍按原样展示。
- */
+/** 使用前安全复核结果（04 4.5 整份复核） */
 function PlanSafetyNotice({ safety }: { safety: PlanSafetyReview }) {
   if (safety.usable)
     return (
@@ -208,6 +208,11 @@ function PlanSafetyNotice({ safety }: { safety: PlanSafetyReview }) {
         <ShieldAlert className="size-4 shrink-0" aria-hidden />
         整份计划指导已阻断
       </p>
+      {safety.block_code === "plan_action_unavailable" && (
+        <p className="mt-1.5">
+          计划引用的动作目录身份缺失（plan_action_unavailable）：无法安全给出基于该计划的处方。
+        </p>
+      )}
       {safety.red_flag_blocked && (
         <p className="mt-1.5">
           档案身体情况命中需线下评估的安全性症状：不给任何基于该计划的处方，请先完成线下专业评估。
@@ -238,8 +243,8 @@ function PlanSafetyNotice({ safety }: { safety: PlanSafetyReview }) {
   );
 }
 
-/** 校准说明（3.2）：无可信记录不给起始重量，只给逐级试重步骤与通过／停止标准 */
-function CalibrationSection({ calibration }: { calibration: Calibration }) {
+/** 校准说明（D3）：pass = 稳定完成处方次数下限；RIR 不作通过硬性条件 */
+function CalibrationSection({ calibration }: { calibration: NeedsCalibration }) {
   return (
     <section>
       <div className="mb-2 flex items-center gap-2">
@@ -260,7 +265,7 @@ function CalibrationSection({ calibration }: { calibration: Calibration }) {
         <span className="text-muted-foreground">通过标准：</span>
         {calibration.pass_criteria}
       </p>
-      <p className="text-sm">
+      <p className="mt-2 text-sm">
         <span className="text-muted-foreground">停止条件：</span>
         {calibration.stop_criteria}
       </p>
@@ -268,38 +273,35 @@ function CalibrationSection({ calibration }: { calibration: Calibration }) {
   );
 }
 
-/** 日程状态徽章：应训练 / 已锁定 / 已取消（cancelled 语义保留在契约与接口投影，产品 UI 不展示） */
-function ScheduleBadge({ status }: { status: PlanScheduleEntry["status"] }) {
+/**
+ * 日程状态徽章（锁定双态）：effective 锁定优先展示「已锁定」；
+ * stored cancelled 展示「已取消」；其余为应训练。
+ */
+function ScheduleBadge({ entry }: { entry: PlanScheduleEntry }) {
+  const label = entry.locked_effective
+    ? "已锁定"
+    : entry.stored_status === "cancelled"
+      ? "已取消"
+      : "应训练";
+  const cancelled = entry.stored_status === "cancelled";
+  const locked = entry.locked_effective && !cancelled;
   return (
     <Badge
-      variant={
-        status === "cancelled"
-          ? "secondary"
-          : status === "locked"
-            ? "outline"
-            : "default"
-      }
-      className={cn(
-        "py-1",
-        status === "cancelled" && "line-through opacity-70",
-      )}
+      variant={cancelled ? "secondary" : locked ? "outline" : "default"}
+      className={cn("py-1", cancelled && "line-through opacity-70")}
     >
-      {SCHEDULE_STATUS_LABEL[status]}
+      {label}
     </Badge>
   );
 }
 
-/**
- * 具体日程（04 4.4）：`[开始日期, 复核日期)` 内逐个应训练日，日历休息日不写成应训练日。
- * owner 2026-09-10 呈现覆盖：只展示当前版本条目；历史版本标题与已取消日程行均不进产品 UI
- * （取消事务、版本归档与接口投影不变，见 `plans/stage2-evidence.md`）。
- */
+/** 具体日程（04 4.2/4.4）：当前版本条目；锁定用 locked_effective */
 function ScheduleSection({ entries }: { entries: PlanScheduleEntry[] }) {
   return (
     <section>
       <h4 className="text-sm font-medium">具体日程</h4>
       <p className="mt-1 text-xs text-muted-foreground">
-        仅列当前版本的应训练日（休息日不排）；到期即锁。
+        仅列当前版本的应训练日（休息日不排）；到期即锁（存储标记 ∪ 日期规则）。
       </p>
       <ul className="mt-2 flex flex-wrap gap-1.5">
         {entries.map((s) => (
@@ -308,9 +310,9 @@ function ScheduleSection({ entries }: { entries: PlanScheduleEntry[] }) {
             className="inline-flex items-center gap-1.5 rounded-full border py-0.5 pr-1 pl-2 text-xs"
           >
             <span className="tabular-nums">
-              {s.date.slice(5)} {WEEKDAYS[s.weekday - 1]}
+              {s.date.slice(5)} {weekdayLabel(s.weekday)}
             </span>
-            <ScheduleBadge status={s.status} />
+            <ScheduleBadge entry={s} />
           </li>
         ))}
       </ul>
@@ -319,8 +321,8 @@ function ScheduleSection({ entries }: { entries: PlanScheduleEntry[] }) {
 }
 
 /**
- * 当前计划卡（F2-05）：状态／版本／日期、安全复核结果、按板块分组的处方、校准说明与具体日程。
- * 只读：处方修改只能从对话发起草稿并确认后生成新版本，本页无任何直接编辑入口。
+ * 当前计划卡：状态／版本／日期、安全复核结果、按训练日分组的处方（展示经 derive）、
+ * 校准说明与具体日程（effective 锁定）。
  */
 function PlanCard({
   plan,
@@ -331,12 +333,12 @@ function PlanCard({
   schedules: PlanScheduleEntry[];
   safety?: PlanSafetyReview;
 }) {
-  const calibration = plan.blocks
-    .flatMap((b) => b.exercises)
-    .find((e) => e.calibration.status === "needs_calibration")?.calibration;
-  /* 只取当前版本未取消的日程（owner 2026-09-10 呈现覆盖）：历史版本条目仍保留在接口投影中 */
+  const blocks = derivePlanBlocks(plan.payload);
+  const calibration = plan.payload.plan_workouts
+    .flatMap((w) => w.exercises)
+    .find((e) => e.load?.kind === "needs_calibration")?.load;
   const currentSchedules = schedules.filter(
-    (s) => s.plan_version === plan.version && s.status !== "cancelled",
+    (s) => s.plan_version === plan.version && s.stored_status !== "cancelled",
   );
   return (
     <Card className="sm:col-span-2">
@@ -348,16 +350,18 @@ function PlanCard({
           </Badge>
         </div>
         <CardDescription>
-          {plan.version} · 开始 {plan.start_date} · 复核 {plan.review_date}
+          {plan.version} · 开始 {plan.starts_on} · 复核 {plan.review_on}
           ；处方修改须经对话草稿确认并生成新版本
         </CardDescription>
       </CardHeader>
       <CardContent className="flex flex-col gap-6">
         {safety && <PlanSafetyNotice safety={safety} />}
-        {plan.blocks.map((block) => (
-          <BlockTable key={block.name} block={block} />
+        {blocks.map((block) => (
+          <BlockTable key={block.workout_key} block={block} />
         ))}
-        {calibration && <CalibrationSection calibration={calibration} />}
+        {calibration && calibration.kind === "needs_calibration" && (
+          <CalibrationSection calibration={calibration} />
+        )}
         {currentSchedules.length > 0 && (
           <ScheduleSection entries={currentSchedules} />
         )}
@@ -384,7 +388,6 @@ export default function ProfilePage() {
       {profile.isPending && <Loading text="正在加载档案" />}
       {profile.isError && <LoadError text={profile.error.message} />}
 
-      {/* 未建档：契约 profile = null；对话是唯一建档入口，本页无任何编辑入口（PRD §5.2） */}
       {profile.data && profile.data.profile === null && (
         <Card className="mt-6">
           <CardHeader>

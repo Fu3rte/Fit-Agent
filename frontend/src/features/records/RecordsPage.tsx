@@ -21,14 +21,14 @@ function KindBadge({ kind }: { kind: TrainingRecord["kind"] }) {
   );
 }
 
-/** 状态徽章：正式 / 待补全（待补全不参与 PR 与完成率） */
+/** 状态徽章：valid / incomplete（incomplete 不参与 PR 与完成率） */
 function StatusBadge({ status }: { status: TrainingRecord["status"] }) {
-  return status === "pending_completion" ? (
+  return status === "incomplete" ? (
     <Badge variant="outline" className="border-dashed text-muted-foreground">
       待补全
     </Badge>
   ) : (
-    <Badge variant="outline">正式</Badge>
+    <Badge variant="outline">有效</Badge>
   );
 }
 
