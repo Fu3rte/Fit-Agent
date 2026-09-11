@@ -92,6 +92,7 @@ function RecordCard({ record }: { record: TrainingRecord }) {
         )}
         <div className="flex justify-end">
           <Button
+            className="cursor-pointer"
             variant="outline"
             size="sm"
             onClick={() =>

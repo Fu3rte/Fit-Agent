@@ -34,14 +34,14 @@ Agent 运行时、前端静态托管、"打开数据目录"按钮、数据库在
   发布打包（`[build-system]` 与 `[project.scripts]` 入口）待 Stage 5 补，届时删掉 `package = false`（见第 9 节）。
   该声明是 `uv sync` 可复制的前提：若恢复 `[build-system] = uv_build` 而没有 `src/backend/__init__.py`，同步会失败。
 
-Linux / macOS（本轮实际执行，退出码 `0`，见 `evidence/S0-08-linux-wsl2-2026-09-09.md` 第 3.1 节）：
+Linux / macOS（本轮实际执行，退出码 `0`，见 `evidence/S0-08-evidence-2026-09-09.md`）：
 
 ```bash
 cd backend
 uv sync --group dev --locked   # 按 uv.lock 生成 .venv 并安装依赖 + pytest
 ```
 
-Windows PowerShell（**未实测**，与上面同一条命令、同一 `uv.lock`）：
+Windows PowerShell（已实测 exit `0`，与上面同一条命令、同一 `uv.lock`，见 `evidence/S0-08-evidence-2026-09-09.md` Windows 行）：
 
 ```powershell
 cd backend
@@ -50,7 +50,7 @@ uv sync --group dev --locked   # 生成 .venv\Scripts\python.exe
 
 ## 3. 测试命令
 
-Linux（本轮实际执行，见 `evidence/S0-08-linux-wsl2-2026-09-09.md` 第 6.2 节）：
+Linux（本轮实际执行，见 `evidence/S0-08-evidence-2026-09-09.md`）：
 
 ```bash
 cd backend
@@ -64,7 +64,7 @@ timeout 120s .venv/bin/python -m pytest tests/test_provider_settings.py -q   # S
 该门把这类“测试通过但收尾漏关闭连接”的噪声变成硬失败。Linux 已实测：加门后 `69 passed`、退出码 `0`；
 同代码不加门复跑亦 `69 passed`、无告警。
 
-Windows（**未实测**，与上面同一套测试、同一版本，命令只差解释器路径）：
+Windows（已实测：`69 passed`、`$LASTEXITCODE=0`，与上面同一套测试，命令只差解释器路径，见 `evidence/S0-08-evidence-2026-09-09.md`）：
 
 ```powershell
 cd backend
@@ -317,14 +317,10 @@ $LASTEXITCODE
 
 ## 8. 版本标识与工作区差异隔离
 
-见 `pre-prj/stage/evidence/S0-08-linux-wsl2-2026-09-09.md`：本轮证据的代码版本为 HEAD `16165572e8339e79b8115a72def01936b1570b26`
-加未跟踪的 Stage 0 文件；工作区还包含与本阶段无关的既有改动（`PLAN.md`、`frontend/`、`spike/`、`pre-prj/` 文档搬迁等），
-本阶段未修改、未提交、未 `git add` 任何文件，Windows 实测须按同一 HEAD + 同一 Stage 0 文件清单执行，或对差异逐项说明。
-
-首轮后 reviewer 三项 P1 的修复与回归测试（`api/app.py` 的 lifespan `try/finally`、`storage/db.py` 的 `_await_settled` 与
-`parameter_echo_suppressed`、`storage/setting_repo.py` 凭据写入窗口、`tests/**` 新增 6 个用例）同样落在未跟踪的 Stage 0 文件内，
-HEAD 未变；复验证据见证据文件第 6 节。本阶段仍未 commit、未 push、未 `git add`。Windows 实测须取该修复后版本（69 用例，
-含 `-W` 门），不得拿首轮 63 用例的快照比对。
+见 `pre-prj/stage/evidence/S0-08-evidence-2026-09-09.md`：Linux 侧记录的代码版本为 HEAD `16165572e8339e79b8115a72def01936b1570b26`
+（当时 Stage 0 文件尚未提交）；Windows 实测取 Stage 0 入库后 HEAD `60a30c9fe088535a7b687ebe998db4af9e31df84`（`f82517d` 含 Stage 0，
+其后 commit 仅 frontend），`git status --porcelain` 为空。两侧全量均为修复后 **69 用例** + `-W` 门 exit 0；
+不得拿首轮 63 用例的快照比对。
 
 ## 9. 后续接入点（交接给 Stage 1–5）
 

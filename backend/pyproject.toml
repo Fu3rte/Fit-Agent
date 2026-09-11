@@ -31,7 +31,13 @@ package = false
 [dependency-groups]
 dev = [
     "pytest>=9.1",
+    "ruff>=0.16",
 ]
+
+# 显式钉死规则集：Ruff 0.16 的默认 select 已扩到 300+ 条规则，会把 agent_core 等
+# 既有代码刷出几十条与本阶段无关的告警。用显式最小集，保证 Linux/Windows 复现一致。
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I"]
 
 [tool.pytest.ini_options]
 norecursedirs = ["archive"]  # 归档的 pi 移植残留不参与收集

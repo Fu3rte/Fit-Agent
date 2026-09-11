@@ -24,7 +24,7 @@ from typing import Any
 
 import aiosqlite
 
-from app.draft_repo import Draft, DraftRepo
+from app.draft_repo import PROFILE_UPDATE_KIND, Draft, DraftRepo
 from domain.actions.repo import ExerciseRepo
 from domain.actions.service import ActionCatalogService
 from domain.profile.repo import ProfileRepo
@@ -66,6 +66,39 @@ class DraftRevisionConflict(ValueError):
 
 class DraftNotDiscardable(ValueError):
     """已提交草稿不可被丢弃撤销（正式事实不回滚，01 1.3）。"""
+
+
+class DraftKindMismatch(ValueError):
+    """草稿 kind 与该入口服务的载荷形状不符：档案草稿入口只服务 ``profile_update``。
+
+    Stage 2 的公开草稿端点（查询／纠错／确认／丢弃）与档案草稿形状一一对应；计划草稿的
+    载荷形状不同（stage3.md §5 S3-04；计划载荷 DTO 映射归 S3-14）。若不分派 kind，计划
+    草稿会被按档案形状解码（错数据），或在写入后才报错（脏写入）：两者都不得发生，
+    故每个入口在任何写入之前先判 kind。计划草稿的纠错／丢弃归 S3-05、确认归 S3-06。
+    """
+
+
+async def require_draft_source(
+    runs: RunRepo, *, conversation_id: str, run_id: str | None
+) -> None:
+    """来源关联必须成立：会话存在；Run 存在且属于同一会话（来源不混淆）。
+
+    外键只保证引用存在；会话与 Run 的从属关系在这里校验，避免把 A 会话的草稿
+    记到 B 会话的 Run 上。档案草稿（S2-03）与计划草稿（S3-04）创建同口径。
+    """
+    if await runs.get_conversation(conversation_id) is None:
+        raise UnknownDraftSource(f"来源会话不存在：{conversation_id}")
+    if run_id is None:
+        return
+    run = await runs.get_run(run_id)
+    if run is None:
+        raise UnknownDraftSource(f"来源 Run 不存在：{run_id}")
+    run_conversation = str(run["conversation_id"])
+    if run_conversation != conversation_id:
+        raise UnknownDraftSource(
+            f"来源 Run {run_id} 属于会话 {run_conversation}，"
+            f"不属于草稿会话 {conversation_id}"
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -183,16 +216,23 @@ class DraftService:
         return self._to_view(draft)
 
     async def get_draft(self, draft_id: str) -> DraftView | None:
-        """按身份读取当前草稿（含结构化 Diff）；不存在返回 None，不创建新草稿。"""
+        """按身份读取档案草稿（含结构化 Diff）；不存在返回 None。
+
+        只服务 ``kind='profile_update'``：其他 kind 明确报错，不按档案形状解码。
+        """
         draft = await self._drafts.get(draft_id)
         return None if draft is None else self._to_view(draft)
 
     async def list_drafts(self, conversation_id: str) -> tuple[DraftView, ...]:
-        """该会话已持久化草稿的当前状态，各带结构化 Diff（01 1.2：不依赖历史通知）。"""
-        return tuple(
-            self._to_view(draft)
-            for draft in await self._drafts.list_for_conversation(conversation_id)
+        """该会话已持久化**档案草稿**的当前状态（01 1.2：不依赖历史通知）。
+
+        按 kind 过滤：计划／记录／安排草稿的载荷形状不同，不由本入口解码（各自查询入口归
+        S3-04/S3-08/S3-10），也不因存在其他 kind 而让整张列表失败。
+        """
+        drafts = await self._drafts.list_for_conversation(
+            conversation_id, kind=PROFILE_UPDATE_KIND
         )
+        return tuple(self._to_view(draft) for draft in drafts)
 
     async def revise_profile_draft(
         self, *, draft_id: str, seen_revision: int, proposed: Profile
@@ -219,6 +259,12 @@ class DraftService:
             draft = await self._drafts.get_in_transaction(conn, draft_id)
             if draft is None:
                 raise UnknownDraft(f"草稿不存在：{draft_id}")
+            # kind 分派必须在任何写入之前（见 DraftKindMismatch）。
+            if draft.kind != PROFILE_UPDATE_KIND:
+                raise DraftKindMismatch(
+                    f"档案草稿纠错只适用于 kind={PROFILE_UPDATE_KIND}，"
+                    f"收到 kind={draft.kind}：{draft_id}"
+                )
             if not draft.is_pending:
                 raise DraftNotCorrectable(
                     f"草稿已 {draft.status}，不可继续纠错：{draft_id}"
@@ -251,6 +297,12 @@ class DraftService:
             draft = await self._drafts.get_in_transaction(conn, draft_id)
             if draft is None:
                 raise UnknownDraft(f"草稿不存在：{draft_id}")
+            # kind 分派必须在任何写入之前（见 DraftKindMismatch）。
+            if draft.kind != PROFILE_UPDATE_KIND:
+                raise DraftKindMismatch(
+                    f"档案草稿丢弃只适用于 kind={PROFILE_UPDATE_KIND}，"
+                    f"收到 kind={draft.kind}：{draft_id}"
+                )
             if draft.status == "committed":
                 raise DraftNotDiscardable(f"已提交草稿不可被丢弃撤销：{draft_id}")
             if draft.status == "discarded":
@@ -293,27 +345,21 @@ class DraftService:
     async def _require_source(
         self, *, conversation_id: str, run_id: str | None
     ) -> None:
-        """来源关联必须成立：会话存在；Run 存在且属于同一会话（来源不混淆）。
-
-        外键只保证引用存在；会话与 Run 的从属关系在这里校验，避免把 A 会话的草稿
-        记到 B 会话的 Run 上。
-        """
-        if await self._runs.get_conversation(conversation_id) is None:
-            raise UnknownDraftSource(f"来源会话不存在：{conversation_id}")
-        if run_id is None:
-            return
-        run = await self._runs.get_run(run_id)
-        if run is None:
-            raise UnknownDraftSource(f"来源 Run 不存在：{run_id}")
-        run_conversation = str(run["conversation_id"])
-        if run_conversation != conversation_id:
-            raise UnknownDraftSource(
-                f"来源 Run {run_id} 属于会话 {run_conversation}，"
-                f"不属于草稿会话 {conversation_id}"
-            )
+        """来源关联必须成立：会话存在；Run 存在且属于同一会话（来源不混淆）。"""
+        await require_draft_source(
+            self._runs, conversation_id=conversation_id, run_id=run_id
+        )
 
     def _to_view(self, draft: Draft) -> DraftView:
-        """行 → 查询形态：解码快照并计算 Diff；解码失败即草稿数据损坏，显式失败。"""
+        """行 → 查询形态：解码快照并计算 Diff；解码失败即草稿数据损坏，显式失败。
+
+        只接受档案草稿形状：其他 kind 是 kind 分派遗漏（:class:`DraftKindMismatch`），
+        不得把其他 kind 静默按档案形状发出（api/dto.py 同口径）。
+        """
+        if draft.kind != PROFILE_UPDATE_KIND:
+            raise DraftKindMismatch(
+                f"档案草稿形状不适用于 kind={draft.kind}：{draft.id}"
+            )
         base_profile = (
             None
             if draft.base_profile_json is None

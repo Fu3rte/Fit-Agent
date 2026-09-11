@@ -355,6 +355,10 @@ def _encode_fact(fact: Fact[Any]) -> dict[str, Any]:
     return {"state": fact.state, "value": encoded if fact.is_known else None}
 
 
+def _encode_restriction(restriction: ActionRestriction) -> dict[str, str]:
+    return {"scope": restriction.scope, "target": restriction.target}
+
+
 def _decode_fact(name: str, raw: Any) -> Fact[Any]:
     if not isinstance(raw, dict):
         raise InvalidProfileRow(f"档案字段 {name} 不是三态对象：{raw!r}")
@@ -424,3 +428,71 @@ def _decode_restriction(raw: Any) -> ActionRestriction:
     return ActionRestriction(
         scope=scope, target=_require_text("restriction", raw["target"])
     )
+
+
+def patch_to_json(patch: ProfilePatch) -> str:
+    """长期拟议补丁 → ``business_drafts.proposed_profile_patch_json`` 文本。
+
+    只输出三类可表达项：字段事实（补丁不表达 unknown，由 rules.validate_patch 保证）、
+    限制增删。当次条件（``SessionConditions``）不是补丁，不在这里伪造字段。
+    """
+    return json.dumps(
+        {
+            "facts": {
+                name: _encode_fact(fact) for name, fact in sorted(patch.facts.items())
+            },
+            "add_restrictions": [
+                _encode_restriction(item) for item in patch.add_restrictions
+            ],
+            "remove_restrictions": [
+                _encode_restriction(item) for item in patch.remove_restrictions
+            ],
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+    )
+
+
+def patch_from_json(raw: str) -> ProfilePatch:
+    """``proposed_profile_patch_json`` 文本 → 补丁（与 :func:`patch_to_json` 互为逆）。
+
+    只做结构解码：字段集与三态形状不符即抛 :class:`InvalidProfileRow`；补丁语义
+    （不允许改为 unknown、限制只用增删表达、同项不增删并存）仍归 ``rules.validate_patch``。
+    """
+    try:
+        payload = json.loads(raw)
+    except (TypeError, ValueError) as exc:
+        raise InvalidProfileRow(f"拟议补丁 JSON 无法解析：{raw!r}") from exc
+    if not isinstance(payload, dict):
+        raise InvalidProfileRow(f"拟议补丁 JSON 不是对象：{raw!r}")
+    unknown_keys = sorted(
+        set(payload) - {"facts", "add_restrictions", "remove_restrictions"}
+    )
+    if unknown_keys:
+        raise InvalidProfileRow(f"拟议补丁含未登记字段：{unknown_keys}")
+    missing_keys = sorted(
+        {"facts", "add_restrictions", "remove_restrictions"} - set(payload)
+    )
+    if missing_keys:
+        raise InvalidProfileRow(f"拟议补丁缺字段：{missing_keys}")
+    raw_facts = payload["facts"]
+    if not isinstance(raw_facts, dict):
+        raise InvalidProfileRow(f"拟议补丁 facts 不是对象：{raw_facts!r}")
+    unknown_facts = sorted(set(raw_facts) - set(FACT_FIELDS))
+    if unknown_facts:
+        raise InvalidProfileRow(f"拟议补丁含未登记字段：{unknown_facts}")
+    return ProfilePatch(
+        facts={name: _decode_fact(name, fact) for name, fact in raw_facts.items()},
+        add_restrictions=_decode_restriction_list(
+            "add_restrictions", payload["add_restrictions"]
+        ),
+        remove_restrictions=_decode_restriction_list(
+            "remove_restrictions", payload["remove_restrictions"]
+        ),
+    )
+
+
+def _decode_restriction_list(label: str, raw: Any) -> tuple[ActionRestriction, ...]:
+    if not isinstance(raw, list):
+        raise InvalidProfileRow(f"拟议补丁 {label} 需要限制数组：{raw!r}")
+    return tuple(_decode_restriction(item) for item in raw)

@@ -23,11 +23,11 @@ export type ConnectionLostReason = "timeout" | "error" | "stale";
 type ConnectionListener = (reason: ConnectionLostReason) => void;
 
 export interface UseChatEventsOptions {
- /**
-  * 连接中断回调（08 8.7 规则 1/5/7）：仅通知，不自动重连，调用方据此转查询恢复。
-  * 不传时连接治理照常执行（close + 计时器清理），只是无人接收通知。
-  */
- onConnectionLost?: (reason: ConnectionLostReason) => void;
+  /**
+   * 连接中断回调（08 8.7 规则 1/5/7）：仅通知，不自动重连，调用方据此转查询恢复。
+   * 不传时连接治理照常执行（close + 计时器清理），只是无人接收通知。
+   */
+  onConnectionLost?: (reason: ConnectionLostReason) => void;
 }
 
 /** 无事件判死阈值（08 8.7 规则 5；heartbeat 每 15 秒一次，3 个周期无事件即断线） */
@@ -35,15 +35,15 @@ const NO_EVENT_TIMEOUT_MS = 45_000;
 
 /** 契约 v1 事件全集（contract.ts SseEvent，08 8.7） */
 const EVENT_NAMES = [
- "run.started",
- "message.delta",
- "draft.proposed",
- "context.compacting",
- "context.compacted",
- "run.completed",
- "run.cancelled",
- "run.failed",
- "heartbeat",
+  "run.started",
+  "message.delta",
+  "draft.proposed",
+  "context.compacting",
+  "context.compacted",
+  "run.completed",
+  "run.cancelled",
+  "run.failed",
+  "heartbeat",
 ] as const;
 
 let source: EventSource | null = null;
@@ -56,33 +56,33 @@ const listeners = new Set<Listener>();
 const connectionListeners = new Set<ConnectionListener>();
 
 function clearWatchdog(): void {
- if (watchdog === null) return;
- clearTimeout(watchdog);
- watchdog = null;
+  if (watchdog === null) return;
+  clearTimeout(watchdog);
+  watchdog = null;
 }
 
 /** 收到事件（含 heartbeat）：更新最后接收时间并重新计时（08 8.7 规则 4/5） */
 function touch(): void {
- lastReceivedAt = Date.now();
- clearWatchdog();
- watchdog = setTimeout(() => {
-  watchdog = null;
-  dropConnection("timeout");
- }, NO_EVENT_TIMEOUT_MS);
+  lastReceivedAt = Date.now();
+  clearWatchdog();
+  watchdog = setTimeout(() => {
+    watchdog = null;
+    dropConnection("timeout");
+  }, NO_EVENT_TIMEOUT_MS);
 }
 
 function closeSource(): void {
- if (!source) return;
- source.close();
- source = null;
+  if (!source) return;
+  source.close();
+  source = null;
 }
 
 /** 关闭连接并通知调用方转查询；不重连（08 8.7 规则 5） */
 function dropConnection(reason: ConnectionLostReason): void {
- clearWatchdog();
- closeSource();
- // 快照遍历：回调内可能退订，不能边遍历活动 Set 边调用
- for (const listener of [...connectionListeners]) listener(reason);
+  clearWatchdog();
+  closeSource();
+  // 快照遍历：回调内可能退订，不能边遍历活动 Set 边调用
+  for (const listener of [...connectionListeners]) listener(reason);
 }
 
 /**
@@ -91,47 +91,47 @@ function dropConnection(reason: ConnectionLostReason): void {
  * 只通知不重连——重连是查询恢复路径之外的第二个动作，本切片不做。
  */
 function handleVisibilityChange(): void {
- if (document.visibilityState !== "visible") return;
- const stale = Date.now() - lastReceivedAt >= NO_EVENT_TIMEOUT_MS;
- const gone = !source || source.readyState === EventSource.CLOSED;
- if (gone || stale) dropConnection("stale");
+  if (document.visibilityState !== "visible") return;
+  const stale = Date.now() - lastReceivedAt >= NO_EVENT_TIMEOUT_MS;
+  const gone = !source || source.readyState === EventSource.CLOSED;
+  if (gone || stale) dropConnection("stale");
 }
 
 function ensureSource(): void {
- if (source) return;
- source = createEventSource();
- for (const name of EVENT_NAMES) {
-  source.addEventListener(name, (e) => {
-   const message = e as MessageEvent<string>;
-   // 活性判定看「收到事件」，与载荷能否解析无关（heartbeat 按契约无载荷）
-   touch();
-   let data: object = {};
-   if (message.data) {
-    try {
-     data = JSON.parse(message.data) as object;
-    } catch {
-     return;
-    }
-   }
-   const event = { event: name, ...data } as SseEvent;
-   for (const listener of listeners) listener(event);
+  if (source) return;
+  source = createEventSource();
+  for (const name of EVENT_NAMES) {
+    source.addEventListener(name, (e) => {
+      const message = e as MessageEvent<string>;
+      // 活性判定看「收到事件」，与载荷能否解析无关（heartbeat 按契约无载荷）
+      touch();
+      let data: object = {};
+      if (message.data) {
+        try {
+          data = JSON.parse(message.data) as object;
+        } catch {
+          return;
+        }
+      }
+      const event = { event: name, ...data } as SseEvent;
+      for (const listener of listeners) listener(event);
+    });
+  }
+  // 原生 error（含浏览器准备自动重连前的那一次）立即关闭转查询（08 8.7 规则 5）
+  source.addEventListener("error", () => {
+    dropConnection("error");
   });
- }
- // 原生 error（含浏览器准备自动重连前的那一次）立即关闭转查询（08 8.7 规则 5）
- source.addEventListener("error", () => {
-  dropConnection("error");
- });
- document.addEventListener("visibilitychange", handleVisibilityChange);
- // 建连即开始计时：连不上、或连上后服务端静默，都会在 45 秒内被发现
- touch();
+  document.addEventListener("visibilitychange", handleVisibilityChange);
+  // 建连即开始计时：连不上、或连上后服务端静默，都会在 45 秒内被发现
+  touch();
 }
 
 /** 关闭连接 + 清理全部计时器与可见性监听；不通知（清理不是断线事件） */
 function teardown(): void {
- clearWatchdog();
- closeSource();
- document.removeEventListener("visibilitychange", handleVisibilityChange);
- lastReceivedAt = 0;
+  clearWatchdog();
+  closeSource();
+  document.removeEventListener("visibilitychange", handleVisibilityChange);
+  lastReceivedAt = 0;
 }
 
 /**
@@ -140,28 +140,28 @@ function teardown(): void {
  * 重新订阅会重建单例，旧计时器不会泄漏（08 8.7 规则 7）。
  */
 export function useChatEvents(
- onEvent: Listener,
- options: UseChatEventsOptions = {},
+  onEvent: Listener,
+  options: UseChatEventsOptions = {},
 ): void {
- const eventRef = useRef(onEvent);
- const optionsRef = useRef(options);
- useEffect(() => {
-  eventRef.current = onEvent;
-  optionsRef.current = options;
- }, [onEvent, options]);
- useEffect(() => {
-  const listener: Listener = (event) => eventRef.current(event);
-  const connectionListener: ConnectionListener = (reason) =>
-   optionsRef.current.onConnectionLost?.(reason);
-  listeners.add(listener);
-  connectionListeners.add(connectionListener);
-  ensureSource();
-  return () => {
-   listeners.delete(listener);
-   connectionListeners.delete(connectionListener);
-   if (listeners.size === 0) teardown();
-  };
- }, []);
+  const eventRef = useRef(onEvent);
+  const optionsRef = useRef(options);
+  useEffect(() => {
+    eventRef.current = onEvent;
+    optionsRef.current = options;
+  }, [onEvent, options]);
+  useEffect(() => {
+    const listener: Listener = (event) => eventRef.current(event);
+    const connectionListener: ConnectionListener = (reason) =>
+      optionsRef.current.onConnectionLost?.(reason);
+    listeners.add(listener);
+    connectionListeners.add(connectionListener);
+    ensureSource();
+    return () => {
+      listeners.delete(listener);
+      connectionListeners.delete(connectionListener);
+      if (listeners.size === 0) teardown();
+    };
+  }, []);
 }
 
 /**
@@ -170,5 +170,5 @@ export function useChatEvents(
  * ——刻意不提供「重开」入口，重连属浏览器自动重连之外的另一条路径，须先拍。
  */
 export function closeChatEvents(): void {
- teardown();
+  teardown();
 }

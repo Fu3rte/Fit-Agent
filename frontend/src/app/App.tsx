@@ -59,7 +59,7 @@ function ThemeToggle() {
     setThemeState(next);
   };
   return (
-    <SidebarMenuButton onClick={toggle}>
+    <SidebarMenuButton onClick={toggle} className="cursor-pointer">
       {theme === "light" ? (
         <Moon className="size-4" aria-hidden />
       ) : (
@@ -93,14 +93,14 @@ function SessionNav() {
             <SidebarMenuButton
               onClick={() => create.mutate()}
               disabled={create.isPending}
-              className="font-medium"
+              className="font-medium cursor-pointer"
             >
               <Plus aria-hidden />
               <span>新对话</span>
             </SidebarMenuButton>
           </SidebarMenuItem>
         </SidebarMenu>
-        <div className="mt-1 max-h-56 overflow-y-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+        <div className="mt-1 max-h-56 overflow-y-auto scrollbar-none [&::-webkit-scrollbar]:hidden">
           <SidebarMenu>
             {sessions.data?.map((s) => (
               <SidebarMenuItem key={s.id}>
@@ -134,7 +134,7 @@ function SidebarToggle() {
         state === "collapsed" ? "left-6" : "left-50",
       )}
     >
-      <SidebarTrigger />
+      <SidebarTrigger className="cursor-pointer"/>
     </div>
   );
 }
@@ -190,9 +190,6 @@ export default function App() {
 
           <SidebarFooter className="px-3 pb-4">
             <ThemeToggle />
-            <div className="px-3 pb-2 text-xs text-muted-foreground">
-              本地部署 · 单用户
-            </div>
           </SidebarFooter>
         </Sidebar>
 

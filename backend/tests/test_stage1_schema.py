@@ -36,17 +36,20 @@ STAGE0_TABLES = {
 STAGE1_TABLES = {"exercises", "user_profile"}
 # Stage 2 S2-02 由 004 迁移建立草稿表（stage2.md §5 S2-02），不再属「后续阶段不建」。
 STAGE2_TABLES = {"business_drafts"}
-# Stage 1 明确不建的表（后续阶段职责，07 章责任边界 + stage1.md §4）
-LATER_STAGE_TABLES = {
-    "plans",
-    "plan_snapshots",
+# Stage 3 S3-02 由 005 迁移建立计划侧三表（stage3.md §5 S3-02），不再属「后续阶段不建」。
+STAGE3_PLAN_TABLES = {"plan_versions", "scheduled_sessions", "arrangement_revisions"}
+# Stage 3 S3-09 由 009 迁移建立记录侧四表（stage3.md §5 S3-09）。
+STAGE3_RECORD_TABLES = {
     "training_sessions",
+    "session_revisions",
+    "exercise_logs",
     "training_sets",
-    "stats_daily",
 }
+# 仍未建的后续阶段表（统计／复盘侧归 S3-12／S3-13；07 章责任边界）。
+LATER_STAGE_TABLES = {"reviews", "pr_candidates"}
 
 LATEST_VERSION = len(load_migrations())
-# 003 精选种子行数（已拍 24 项清单；见 evidence/S1-evidence-linux-2026-09-09.md §5）
+# 003 精选种子行数（已拍 24 项清单；见 evidence/S1-evidence-2026-09-09.md）
 SEEDED_EXERCISE_COUNT = 24
 FAKE_KEY = "sk-fitagent-fake-s102-not-a-real-key"
 
@@ -123,6 +126,16 @@ async def _table_names(db: Database) -> set[str]:
     return await db.under_lock(op)
 
 
+async def _column_names(db: Database, table: str) -> set[str]:
+    """逐表列名（表名来自库内 sqlite_master，不是外部输入）。"""
+
+    async def op(conn):
+        async with conn.execute(f"PRAGMA table_info({table})") as cursor:
+            return {str(row["name"]) for row in await cursor.fetchall()}
+
+    return await db.under_lock(op)
+
+
 async def _exercise_count(db: Database) -> int:
     async def op(conn):
         async with conn.execute("SELECT COUNT(*) FROM exercises") as cursor:
@@ -178,9 +191,14 @@ async def test_fresh_database_migrates_to_latest_with_seed_and_no_profile_facts(
 
         tables = await _table_names(db)
         assert tables == (
-            STAGE0_TABLES | STAGE1_TABLES | STAGE2_TABLES | {"sqlite_sequence"}
+            STAGE0_TABLES
+            | STAGE1_TABLES
+            | STAGE2_TABLES
+            | STAGE3_PLAN_TABLES
+            | STAGE3_RECORD_TABLES
+            | {"sqlite_sequence"}
         )
-        assert tables & LATER_STAGE_TABLES == set()  # 不建后续阶段业务表
+        assert tables & LATER_STAGE_TABLES == set()  # 不建统计／复盘侧业务表
 
         # 003 只写入精选产品种子：结构就位且目录非空，但仍无用户事实
         assert await _exercise_count(db) == SEEDED_EXERCISE_COUNT
@@ -491,11 +509,18 @@ async def test_catalog_activity_never_advances_context_version(tmp_path: Path) -
             ) as cursor:
                 return [str(row["id"]) for row in await cursor.fetchall()]
 
-        assert await db.under_lock(read_candidates) == ["ex-1"]
+        # 系统迁移已将已核对 24 项种子置为可推荐（S3-02/D2），新增目录行进入同一筛选
+        candidates = await db.under_lock(read_candidates)
+        assert "ex-1" in candidates
+        assert len(candidates) == SEEDED_EXERCISE_COUNT + 1
         assert await _profile_row(db) == (1, None, 0)
-        # 不存在独立版本计数器表（版本载体与档案同一行、同一快照）
+        # 不存在第二套业务版本计数器：统一业务版本（context_version）只在档案行上；
+        # Stage 3 的 plan_versions 是计划版本序列，不是业务版本计数器（01 1.4/D9）
         tables = await _table_names(db)
-        assert not {t for t in tables if "version" in t}
+        for table in sorted(tables):
+            if table == "user_profile":
+                continue
+            assert "context_version" not in await _column_names(db, table), table
 
 
 async def test_flag_columns_reject_non_boolean_and_standard_name_stays_unique(

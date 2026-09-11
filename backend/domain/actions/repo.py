@@ -29,6 +29,18 @@ async def _read_by_id(conn: aiosqlite.Connection, exercise_id: str) -> Exercise 
     return None if row is None else Exercise.from_row(dict(row))
 
 
+async def _read_recommendable(conn: aiosqlite.Connection) -> tuple[Exercise, ...]:
+    """用给定连接读推荐候选（未停用且已检查标记可推荐）；连接由调用方决定。"""
+    async with conn.execute(
+        "SELECT id, standard_name_zh, equipment_variant, record_type,"
+        " load_convention, unilateral, recommendable, active, aliases_json,"
+        " modes_json, source_ref, attribution, instructions_zh"
+        " FROM exercises WHERE active = 1 AND recommendable = 1 ORDER BY id"
+    ) as cursor:
+        rows = await cursor.fetchall()
+    return tuple(Exercise.from_row(dict(row)) for row in rows)
+
+
 class ExerciseRepo:
     """exercises 表读取；写入口只在编号迁移内（不在本类提供）。"""
 
@@ -92,18 +104,19 @@ class ExerciseRepo:
 
     async def list_recommendable(self) -> tuple[Exercise, ...]:
         """推荐候选：未停用且已检查标记可推荐（03 3.2；未检查不得自动进入）。"""
+        return await self._db.under_lock(_read_recommendable)
 
-        async def op(conn: aiosqlite.Connection) -> tuple[Exercise, ...]:
-            async with conn.execute(
-                "SELECT id, standard_name_zh, equipment_variant, record_type,"
-                " load_convention, unilateral, recommendable, active, aliases_json,"
-                " modes_json, source_ref, attribution, instructions_zh"
-                " FROM exercises WHERE active = 1 AND recommendable = 1 ORDER BY id"
-            ) as cursor:
-                rows = await cursor.fetchall()
-            return tuple(Exercise.from_row(dict(row)) for row in rows)
+    async def list_recommendable_in_transaction(
+        self, conn: aiosqlite.Connection
+    ) -> tuple[Exercise, ...]:
+        """在**外层事务**内读推荐候选（同一快照，不嵌套取锁）。
 
-        return await self._db.under_lock(op)
+        ``conn`` 必须是 ``Database.transaction()`` 交出的连接：生成输入准备要在同一快照内
+        读档案、候选与当前计划；:meth:`list_recommendable` 会自行取锁（锁不可重入），
+        事务内调用即死锁。
+        """
+        require_outer_transaction(conn, "推荐候选读取")
+        return await _read_recommendable(conn)
 
     async def list_all(self) -> tuple[Exercise, ...]:
         """目录全量（含停用）；仅用于目录核对与统计，不用于推荐。"""

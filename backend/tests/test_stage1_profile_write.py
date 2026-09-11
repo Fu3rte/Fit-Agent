@@ -245,7 +245,28 @@ def test_profile_version_advance_stays_single_seam() -> None:
 # runtime/ 仍不得触碰档案领域（归 Stage 4）；app/ 与 api/ 内的接线只允许显式白名单；档案
 # SQL 写入仍由上方旁路守卫锁在 domain/profile/repo.py，版本推进由上方版本守卫锁在同一
 # repo 与确认事务。
-_PROFILE_WIRING_ALLOWED_IN_APP = frozenset({"drafts.py", "confirm.py"})
+# S3-04（stage3.md §5）：计划草稿创建在单一快照内读正式档案与限制，并以可选受限组合补丁
+# 的拟议条件保存草稿（01 1.5），故 `plan_drafts.py` 同口径引用档案领域；它只读正式档案
+# 与版本、不写档案、不推进 `context_version`（写入与推进仍由上方守卫锁死）。
+# S3-07（stage3.md §5）：计划只读投影与「基于计划的指导」前置安全复核要按最新正式条件
+# （限制与身体情况）复核整份计划（04 4.5），故 `plan_reads.py` 同口径引用档案领域；它只读
+# 档案快照、不写档案、不推进版本（仍由上方两道守卫锁死）。
+# S3-08（stage3.md §5）：安排草稿准备在同一快照内读正式档案与 `context_version`，并把准备
+# 时的正式档案作为快照保存（01 1.3），故 `arrangement_drafts.py` 同口径引用档案领域；它只读
+# 档案、不写档案、不推进版本，接受落盘仍只经 confirm.py 的确认事务。
+# S3-10（stage3.md §5）：记录草稿准备在同一快照内读正式档案与 `context_version` 并作为快照
+# 保存（01 1.3），故 `record_drafts.py` 同口径引用档案领域；它只读档案、不写档案、不推进
+# 版本，记录侧正式写入（确认追加修订与切换指针）仍归 S3-11 的确认事务。
+_PROFILE_WIRING_ALLOWED_IN_APP = frozenset(
+    {
+        "drafts.py",
+        "confirm.py",
+        "plan_drafts.py",
+        "plan_reads.py",
+        "arrangement_drafts.py",
+        "record_drafts.py",
+    }
+)
 
 # S2-07（stage2.md §5）业务 API 接线的同样口径：路由只做传输校验与响应／错误映射
 # （形状见 api/dto.py），读档案走应用层入口 ProfileService.read_formal_profile（S2-01 §3

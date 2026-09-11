@@ -2,11 +2,12 @@
 
 验收对照（stage1.md §5 S1-03）：记录类型／负重口径／模式归属逐条核对来源；种子由
 编号迁移增量维护，重复导入不制造重复身份或覆盖停用状态；种子导入不修改用户档案或
-``context_version``；未检查动作 ``recommendable=0``。
+``context_version``；003 种子写入 ``recommendable=0``，Stage 3 S3-02 的系统迁移（007）
+再把已核对 24 项置 1（D2 A）。
 
 ``SEED_ROWS`` 是**逐项来源核对表**（核对依据：数据集 instructions.zh / equipment /
 target 与动作定义一致，不是名称相似）；证据文件
-``pre-prj/stage/evidence/S1-evidence-linux-2026-09-09.md`` 同步记录同一张表。
+``pre-prj/stage/evidence/S1-evidence-2026-09-09.md`` 同步记录同一张表。
 所有用例只操作 ``tmp_path`` 下的临时文件库与临时迁移目录。
 """
 
@@ -428,8 +429,13 @@ async def test_seed_covers_decided_catalog_except_unmatched_item(
     tmp_path: Path,
 ) -> None:
     async with open_database(tmp_path / "app.db") as db:
+        # 系统迁移（007）已将 Stage 1 已核对的 24 项置为可推荐（S3-02/D2 A）：
+        # 推荐候选恰为核对清单本身，不多置一项、不新增目录行。
         catalog = await ActionCatalogService(db).recommendation_candidates()
-        assert catalog == ()  # 未检查不得进推荐候选
+        assert {exercise.id for exercise in catalog} == {
+            str(row["id"]) for row in SEED_ROWS
+        }
+        assert len(catalog) == SEEDED_EXERCISE_COUNT
         exercises = await ExerciseRepo(db).list_all()
         names = {exercise.standard_name_zh for exercise in exercises}
         assert names == set(rules.CATALOG_STANDARD_NAMES) - set(UNMATCHED_CATALOG_NAMES)
@@ -448,7 +454,8 @@ async def test_seed_modes_and_flags_follow_decided_contract(tmp_path: Path) -> N
             else:
                 assert exercise.load_convention is None
             assert exercise.unilateral is rules.is_unilateral(exercise.standard_name_zh)
-            assert exercise.recommendable is False  # 未通过可推荐检查
+            # 003 种子写入 recommendable=0；007 系统迁移将已核对 24 项置 1（S3-02/D2 A）
+            assert exercise.recommendable is True
             assert exercise.active is True
             assert exercise.source_ref.startswith("exercises-dataset:")
             for alias in exercise.aliases:
@@ -504,14 +511,15 @@ async def test_later_numbered_migration_can_extend_seed_incrementally(
 
 
 async def test_seed_import_keeps_context_version_untouched(tmp_path: Path) -> None:
-    """种子导入不推进统一业务版本，也不建立独立计数器（S1-02/S1-03 边界）。"""
+    """种子导入与系统迁移不推进统一业务版本，也不建立独立计数器（S1-02/S1-03 边界）。"""
     async with open_database(tmp_path / "app.db") as db:
         # 用生产迁移全量版本（含后续阶段新增编号迁移）：种子导入不建立用户事实。
         assert await db.migrate() == len(load_migrations())
         assert await _profile_row(db) == USER_PROFILE_ROW
         service = ActionCatalogService(db)
         assert await service.resolve("barbell full squat")
-        assert await service.recommendation_candidates() == ()
+        # 007 系统迁移置已核对 24 项为可推荐，但不动正式档案与 context_version
+        assert len(await service.recommendation_candidates()) == SEEDED_EXERCISE_COUNT
         assert await _profile_row(db) == USER_PROFILE_ROW
 
 

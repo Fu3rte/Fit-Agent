@@ -53,19 +53,27 @@ STAGE0_TABLES = {
     "provider_config",
 }
 STAGE1_TABLES = {"exercises", "user_profile"}
-# S2-02 只新增这一张表（stage2.md §5 S2-02 边界）：计划／统计等仍属后续阶段。
+# S2-02 只新增这一张表（stage2.md §5 S2-02 边界）。
 STAGE2_TABLES = {"business_drafts"}
-LATER_STAGE_TABLES = {
-    "plans",
-    "plan_snapshots",
+# S3-02 由 005 迁移新增计划侧三表（stage3.md §5 S3-02 边界）。
+STAGE3_PLAN_TABLES = {"plan_versions", "scheduled_sessions", "arrangement_revisions"}
+# S3-09 由 009 迁移新增记录侧四表（stage3.md §5 S3-09 边界）。
+STAGE3_RECORD_TABLES = {
     "training_sessions",
+    "session_revisions",
+    "exercise_logs",
     "training_sets",
-    "stats_daily",
+}
+# 统计／复盘侧表仍属后续阶段（S3-12／S3-13）
+LATER_STAGE_TABLES = {
+    "reviews",
+    "pr_candidates",
 }
 
 LATEST_VERSION = len(load_migrations())
 STAGE0_VERSION = 1
 STAGE1_VERSION = 3
+STAGE2_VERSION = 4  # 004_stage2_business_drafts.sql 执行后的 user_version
 SEEDED_EXERCISE_COUNT = 24  # 003 精选种子行数（stage1.md §5 S1-03：已拍 24 项清单）
 FAKE_KEY = "sk-fitagent-fake-s202-not-a-real-key"
 
@@ -235,9 +243,14 @@ async def test_fresh_database_creates_only_the_draft_table_beyond_stage1(
 
         tables = await _table_names(db)
         assert tables == (
-            STAGE0_TABLES | STAGE1_TABLES | STAGE2_TABLES | {"sqlite_sequence"}
+            STAGE0_TABLES
+            | STAGE1_TABLES
+            | STAGE2_TABLES
+            | STAGE3_PLAN_TABLES
+            | STAGE3_RECORD_TABLES
+            | {"sqlite_sequence"}
         )
-        assert tables & LATER_STAGE_TABLES == set()  # 计划／统计等仍不得建
+        assert tables & LATER_STAGE_TABLES == set()  # 统计／复盘侧表仍不得建
 
         # 迁移只建表，不预填草稿、不预填用户事实、不推进版本
         assert await _draft_count(db) == 0
@@ -408,7 +421,8 @@ async def test_failed_draft_migration_leaves_no_partial_structure(
         broken.write_text(
             "CREATE TABLE business_drafts (id TEXT PRIMARY KEY);", encoding="utf-8"
         )
-        assert await db.migrate() == LATEST_VERSION
+        # 临时迁移目录只含 001–004：修复后只跑到本阶段版本（不把生产新增编号算进来）
+        assert await db.migrate() == STAGE2_VERSION
         assert "business_drafts" in await _table_names(db)
 
 

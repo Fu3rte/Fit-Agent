@@ -32,7 +32,6 @@ import {
   getSessions,
   recalcDraft,
   reviseDraft,
-  type ApiError,
 } from "@/lib/api";
 import type {
   ActiveRunInfo,
@@ -44,23 +43,20 @@ import type {
   RunStatus,
   SseEvent,
 } from "@/lib/contract";
+import { toApiError } from "./apiError";
 import { DraftCard } from "./DraftCard";
 import { Markdown } from "./Markdown";
+import {
+  RECOVERY_HINT,
+  RECOVERY_UNKNOWN_CAUSE,
+  RUN_STATUS_COPY,
+  failureReasonCopy,
+  runPhaseCopy,
+} from "./runCopy";
 import { useChatEvents, type ConnectionLostReason } from "./useChatEvents";
 
 /** Run 完成后需失效的数据类 query（records/profile/stats/review 由各看板页消费） */
 const DATA_QUERY_KEYS = ["records", "stats", "profile", "review"] as const;
-
-/** api.ts 抛出的是 Error & Partial<ApiError>；安全取回机器错误信息 */
-const toApiError = (error: unknown): ApiError => {
-  const err = error as Partial<ApiError> | null;
-  return {
-    http_status: err?.http_status ?? 0,
-    error_code: err?.error_code ?? "invalid_request",
-    message: err?.message ?? "请求失败",
-    detail: err?.detail,
-  };
-};
 
 interface ActiveRun {
   runId: string;
@@ -128,34 +124,6 @@ function ChatEventsBridge({
   return null;
 }
 
-/* ------------------- 08 8.8 显示映射（仅显示，不新增后端状态） ------------------- */
-
-/** RunStatus → 展示文案；pending/running 统一「处理中」 */
-const RUN_STATUS_COPY: Record<RunStatus, string> = {
-  pending: "处理中",
-  running: "处理中",
-  completed: "已完成",
-  cancelled: "已取消",
-  failed: "未完成",
-};
-
-/** 「处理中」的次要文案：pending = 受理中，running = 执行中 */
-const runPhaseCopy = (started: boolean): string =>
-  started ? "执行中" : "受理中";
-
-/** run.failed 原因码 → 可理解文案（未列出者走兜底，不暴露错误码给用户） */
-const FAILURE_REASON_COPY: Partial<Record<ErrorCode, string>> = {
-  interrupted_by_restart: "服务重启导致执行中断",
-  not_configured: "模型未配置或不可用",
-  conversation_busy: "已有正在进行的对话",
-  invalid_request: "请求无效",
-  draft_stale: "依据的业务数据已变更",
-  draft_modified: "草稿已被修改",
-};
-
-const failureReasonCopy = (code: ErrorCode): string =>
-  FAILURE_REASON_COPY[code] ?? "执行过程中断";
-
 /** 压缩快速完成判定窗口（08 8.8 验收 10：3 秒内完成 → 轻提示 3 秒消失） */
 const FAST_COMPACTION_MS = 3000;
 
@@ -172,15 +140,6 @@ const recoveryBackoffMs = (failures: number): number =>
   RECOVERY_BACKOFF_MS[
     Math.min(Math.max(failures, 0), RECOVERY_BACKOFF_MS.length - 1)
   ];
-
-/** 断线/刷新恢复期的常驻提示（08 8.7 规则 1：只提示，不取消、不重跑、不判失败） */
-const RECOVERY_HINT = "连接中断，正在恢复";
-
-/**
- * 查询不到终态时的兜底原因（规则 1：连接不可用本身不判 Run 失败，
- * 但服务端已无此 Run 可查时停止等待，不自动恢复执行）。
- */
-const RECOVERY_UNKNOWN_CAUSE = "无法查询到该任务的最终状态，已停止等待";
 
 export default function ChatPage() {
   const navigate = useNavigate();

@@ -34,6 +34,7 @@ from app.confirm import (
     ProfileCommitResult,
 )
 from app.drafts import (
+    DraftKindMismatch,
     DraftNotCorrectable,
     DraftNotDiscardable,
     DraftRevisionConflict,
@@ -57,9 +58,6 @@ from domain.profile.schema import (
     ProfileSnapshot,
     RestrictionScope,
 )
-
-# 本阶段只有档案草稿（stage2.md §3 不做计划／记录草稿）；草稿类型沿用前端契约的取值。
-PROFILE_UPDATE_KIND = "profile_update"
 
 _STALE_DETAIL_NO_FIELD_CHANGE = "业务版本已变化，当前快照无字段差异"
 
@@ -125,13 +123,16 @@ def _field_diff_dto(item: ProfileFieldDiff) -> dict[str, Any]:
 def draft_dto(view: DraftView) -> dict[str, Any]:
     """草稿查询形态 → 传输对象：当前内容、revision、状态、结构化 Diff 与已提交结果。
 
-    ``committed_revision``／``committed_business_version`` 只在已提交草稿上有值，就是持久化的
-    提交凭据（后续业务版本变化不改写它）；Diff 由后端按基线与拟议快照计算，不接受客户端传入。
+    ``kind`` 取草稿行保存的类型（非传输层常量）；``payload`` 当前只映射档案形状——
+    计划／记录／安排载荷的形状映射归 S3-04/S3-08/S3-10，未接入前不得把别的 kind
+    静默按档案形状发出。``committed_revision``／``committed_business_version`` 只在
+    已提交草稿上有值，就是持久化的提交凭据（后续业务版本变化不改写它）；Diff 由后端
+    按基线与拟议快照计算，不接受客户端传入。
     """
     draft = view.draft
     return {
         "id": draft.id,
-        "kind": PROFILE_UPDATE_KIND,
+        "kind": draft.kind,
         "status": draft.status,
         "revision": draft.revision,
         "base_business_version": draft.base_business_version,
@@ -265,6 +266,7 @@ _ERROR_STATUS: tuple[tuple[type[Exception], int, str], ...] = (
     (DraftStale, 409, "draft_stale"),
     (DraftNotCorrectable, 409, "invalid_request"),
     (DraftNotDiscardable, 409, "invalid_request"),
+    (DraftKindMismatch, 409, "invalid_request"),
     (DraftDiscarded, 409, "invalid_request"),
     (NoBusinessChange, 409, "invalid_request"),
     (InvalidProfile, 422, "invalid_request"),

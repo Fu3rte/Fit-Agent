@@ -24,7 +24,7 @@
 | [03 动作目录](../architecture/03-action-catalog.md) 3.1–3.2、跨模块约束 | 标准身份、三类记录口径、停用保留、检查后方可推荐、种子为系统写入、本地媒体不随应用再分发 |
 | [01 共用应用层](../architecture/01-shared-transaction.md) 1.2–1.5 | 正式事实必须经草稿按钮确认；统一业务版本由确认事务递增；补丁后条件复查；本阶段不实现该流程 |
 | [设计决策记录](../design-decisions.md)「架构不变量（全局硬约束）」 | 单进程、SQLite 事实源、无旁路正式写入；新增依赖和业务模块须拍板 |
-| [Stage 0](stage0.md) 第 8 节、[Windows 证据](evidence/S0-08-windows-2026-09-09.md) | 底座已按记录结项；Windows 系统时区切换已豁免但仍未验证，不转写为通过 |
+| [Stage 0](stage0.md) 第 8 节、[S0-08 证据](evidence/S0-08-evidence-2026-09-09.md) | 底座已按记录结项；Windows 系统时区切换已豁免但仍未验证，不转写为通过 |
 | [Stage 0 交接](stage0-handover.md) 第 1–3 节 | 复用连接、锁、迁移、生命周期与 pytest 入口；交接正文部分“Windows 待验”是较早状态，阶段结项状态见上行 |
 | [前端 Stage 1](../../frontend/plans/stage1.md) 第 8 节（2026-09-09 已拍） | 前端在 mock 上并行推进建档闭环，业务语义同批拍板：红旗清单外症状只继续澄清不判安全、限制不新增状态语义、体重必填；后端领域规则须与之一致，不各自发明 |
 
@@ -261,7 +261,7 @@ Harness、web_search、Agent 测评预算、P1 与最终发布清单沿用 PLAN 
 - [x] 动作身份、候选歧义、三类口径、受检推荐与停用保留达到本阶段验收范围。
 - [x] 档案缺失信息、拟议补丁与当次条件隔离验证通过；无正式事实写入旁路或独立版本递增。
 - [x] 两类限制、已明确红旗阻断及不自动解除测试通过；清单外症状返回“未知/需澄清”，不被宣称已安全判定。
-- [x] Stage 0 回归与新增测试通过；按批准的阶段门槛提供同版本平台证据，未验证项明确保留。**（Linux 243 passed；Windows 243 passed + 隔离库人工实测通过，见 `evidence/S1-windows-checklist.md` §3）**
+- [x] Stage 0 回归与新增测试通过；按批准的阶段门槛提供同版本平台证据，未验证项明确保留。**（Linux 243 passed；Windows 243 passed + 隔离库人工实测通过，见 `evidence/S1-evidence-2026-09-09.md`）**
 - [x] Stage 2 确认事务、Stage 3 业务流、Stage 4 Agent 及前端接线责任清晰；未擅改项目契约或设计正本。
 
 阶段完成仅表示“动作目录、档案与安全规则基础达到已确认门槛”，不代表已能对话建档、确认业务变更或安全生成完整训练计划。
@@ -282,7 +282,7 @@ Harness、web_search、Agent 测评预算、P1 与最终发布清单沿用 PLAN 
 
 ### 9.2 已完成并验证通过
 
-- **S1-01 开工基线与契约核对：已交付并通过独立只读复审（无 P1 阻断）。** 证据：`evidence/S1-evidence-linux-2026-09-09.md`（合并正本，含字段映射与 12 条未拍依赖）。
+- **S1-01 开工基线与契约核对：已交付并通过独立只读复审（无 P1 阻断）。** 证据：`evidence/S1-evidence-2026-09-09.md`（合并正本）。
 - 开工基线（实跑，非沿用文档）：HEAD `dd168bb`；WSL2 Linux；Python 3.13.15；uv 0.12.3；pytest 9.1.1；**全量 69 passed**（带 `-W error::pytest.PytestUnhandledThreadExceptionWarning` 门）。
 - 可复用入口与约束（逐项核对属实）：`storage/migrations.py:load_migrations` 要求编号自 1 **连续**，Stage 1 迁移只能从 `002_*.sql` 起且不得修改 001；`backend/domain/actions/`、`backend/domain/profile/` 当时均为单行 docstring 空壳（不视为功能已实现）；写入隔离：`FIT_AGENT_DATA_DIR` 仅出现在 `config.py` 与 `tests/support.py`，无测试命中真实用户库路径；Stage 0 测试为 7 个 `test_*.py` 模块共 69 个用例（与本文件 §2 所称“自动化基线为 69 个用例”一并对上：数字一致，区别是本轮已实跑重确，不再沿用旧文档记录）。
 - 隔离约束实测未越界：`git diff --cached --name-only` 始终为空；并行轨道的 `frontend/**` 10 个文件经 `md5sum -c` 两次核验逐字节未变（前端 Stage 1 由另一条工作流推进，不属本轨道）。
@@ -292,7 +292,7 @@ Harness、web_search、Agent 测评预算、P1 与最终发布清单沿用 PLAN 
 - 曾实现：`002_stage1_actions_profile.sql`（66 行，只建 `exercises` + `user_profile`，`record_type` CHECK 恰三类，无种子、无用户事实、无媒体字段）+ `tests/test_stage1_schema.py`（12 用例）+ 3 处 Stage 0 测试参数化；当时全量 **81 passed**（基线 69 + 12）；schema 探针 `migrate=2 / user_version=2`、`exercises` 0 行、`user_profile=(1, None, 0)`。
 - 回退实测（备份后原地对比，非推定）：三处 Stage 0 测试全部回退 HEAD → **5 failed / 76 passed**；只回退 `test_provider_settings.py` → **2 failed / 79 passed**；可单独回退且不红的文件数 **0**。
 - 回退后现状（已核）：`git status --porcelain -- backend` 为空；`storage/migrations/` 只剩 `001_*.sql` + `README.md`；全量恢复 **69 passed**；本文件头部所称“本轮不建表、不写业务代码”与当前工作区一致。
-- 归档：`/tmp/stage1-revert-20260909-224719/`（含 `MD5`）；S1-02 的交付/回退历史见 §9.3/§9.5 与 `evidence/S1-evidence-linux-2026-09-09.md` §0。
+- 归档：`/tmp/stage1-revert-20260909-224719/`（含 `MD5`）；S1-02 的交付/回退历史见 §9.3/§9.5 与 `evidence/S1-evidence-2026-09-09.md` 子记录行。
 
 ### 9.4 未开始与不得误读
 
@@ -311,7 +311,7 @@ Harness、web_search、Agent 测评预算、P1 与最终发布清单沿用 PLAN 
 
 ### 9.6 S1-03 / S1-04 交付（2026-09-09，人拍后）
 
-- **S1-03 动作目录与受检种子**：003 编号迁移只 INSERT 写入 24 行；`domain/actions` 提供身份读取、别名候选（多身份保留候选）、变式与口径区分、推荐筛选、停用保留；共享词表契约见 `evidence/S1-evidence-linux-2026-09-09.md` §6。实测 **110 passed**（81 基线 + 29 新增），独立只读 reviewer verdict pass（无 P0/P1）。
+- **S1-03 动作目录与受检种子**：003 编号迁移只 INSERT 写入 24 行；`domain/actions` 提供身份读取、别名候选（多身份保留候选）、变式与口径区分、推荐筛选、停用保留；共享词表契约见 `evidence/S1-evidence-2026-09-09.md` §接入点。实测 **110 passed**（81 基线 + 29 新增），独立只读 reviewer verdict pass（无 P0/P1）。
 - **2026-09-09 人拍（S1-03 执行中）**：① 哑铃分腿蹲移出清单（方案 C）→ 清单 24 项、共享词表同步；② 可推荐保持全 0（方案 C）；③ `leverage machine` 保持插销口径（方案 A）。落地后复跑 **189 passed**。
 - **S1-04 档案事实与拟议补丁隔离**：`domain/profile` 三态事实、唯一必填 `body_weight_kg`、两类限制引用校验、拟议补丁纯内存应用、事务内写入不推进 `context_version`；实测 **189 passed**（110 + 79 新增），reviewer verdict pass（无 P0/P1）。
 - **观察（残留风险）**：一次 `test_app.py` 进程内用例 flake（1/11；随后 8 次连跑全绿），非 S1-04 改动引起，留 S1-07 Windows 轮复现并记录。
@@ -330,7 +330,7 @@ Harness、web_search、Agent 测评预算、P1 与最终发布清单沿用 PLAN 
 
 ### 9.8 S1-07 阶段验证与交接（2026-09-09）
 
-- **交接正本**：`evidence/S1-evidence-linux-2026-09-09.md`（合并证据与交接）+ `evidence/S1-windows-checklist.md`（Windows 步骤与回传模板）。
+- **交接正本**：`evidence/S1-evidence-2026-09-09.md`（Linux + Windows 合并证据与交接）。
 - **实测**：全量 **243 passed，退出码 0**（Stage 0 69 / S1-02 12 / S1-03 29 / S1-04 79 / S1-05 54）；临时库探针（空库/升级/重开/`user_version=99` 拒绝）通过；`test_app` ×10 未复现 flake。
 - **reviewer**：首轮判 blocked（2 条 P1 均为单行文字错：backend 差异 21→23、引用不存在的 `ProfileModule`）；父会话核实后修正，另修 2 条 P2。
 - **结论**：交接完成；方案 A 的 Windows 侧于 §9.9 补验通过后，Stage 1 结项。
@@ -340,5 +340,5 @@ Harness、web_search、Agent 测评预算、P1 与最终发布清单沿用 PLAN 
 - **平台**：Windows 11 Pro build 26200，PowerShell 5.1.26100.8328，Python 3.13.13，uv 0.11.28；代码版本 `1a31876`（`d93fec3` + `1a31876` 均在历史内），`git status --porcelain -- backend pre-prj/stage` 为空。
 - **自动化**：`pytest tests -q -W error::pytest.PytestUnhandledThreadExceptionWarning` → **243 passed in 10.61s，退出码 0**，`-W` 门无触发。
 - **隔离库人工**（`FIT_AGENT_DATA_DIR` 指向 TEMP，未触碰 `%LOCALAPPDATA%\Fit-Agent`）：空库 `migrate=3`/`user_version=3`/`exercises=24`/`user_profile=(1,None,0)`；Stage 0 库升级 `1→3` 且会话/时区保留；`/healthz` ok、`Host`/`Origin` 均 `403`、仅 `127.0.0.1`、`Ctrl+C` 优雅收尾、重开时区不重取样；种子 24 项名称与属性逐条一致。
-- **证据**：`evidence/S1-windows-checklist.md` §3（逐条判定通过）；`evidence/S0-08-windows-2026-09-09.md` 平台信息同步补全。
+- **证据**：`evidence/S1-evidence-2026-09-09.md` Windows 隔离库人工表（逐条判定通过）；`evidence/S0-08-evidence-2026-09-09.md` Windows 行平台信息。
 - **结论**：**Stage 1 结项**（方案 A 满足）。残留：Stage 2–4 接线未做；2 条 P2 与 flake 观察保留；Stage 0 系统时区切换仍豁免未验。

@@ -1,8 +1,9 @@
 """S0-04：编号迁移、user_version 与最小存储结构约束。
 
 生产迁移经 storage/migrations/001_*.sql（Stage 0）、002_*.sql（Stage 1 两项业务
-存储）与 004_*.sql（Stage 2 草稿表）；升级/失败/重跑语义用临时注入的迁移目录验证
-（不向生产迁移目录塞测试用假迁移）。
+存储）、004_*.sql（Stage 2 草稿表）、005–007_*.sql（Stage 3 计划侧表、草稿 kind
+扩展、可推荐系统迁移）与 008–009_*.sql（Stage 3 安排草稿载荷、记录侧四表）；
+升级/失败/重跑语义用临时注入的迁移目录验证（不向生产迁移目录塞测试用假迁移）。
 """
 
 import sqlite3
@@ -24,10 +25,20 @@ EXPECTED_RUNTIME_TABLES = {
     "app_config",
     "provider_config",
 }
-# Stage 1 只新增这两项业务存储（stage1.md §3）；plans/records/stats 仍不得建。
+# Stage 1 只新增这两项业务存储（stage1.md §3）。
 STAGE1_TABLES = {"exercises", "user_profile"}
 # Stage 2 S2-02 只新增草稿表这一项（stage2.md §5 S2-02 边界）。
 STAGE2_TABLES = {"business_drafts"}
+# Stage 3 S3-02 只新增计划侧三表（stage3.md §5 S3-02）；记录侧四表由 S3-09 的 009 迁移新增。
+STAGE3_PLAN_TABLES = {"plan_versions", "scheduled_sessions", "arrangement_revisions"}
+STAGE3_RECORD_TABLES = {
+    "training_sessions",
+    "session_revisions",
+    "exercise_logs",
+    "training_sets",
+}
+# 仍未建的后续阶段表（统计／复盘侧归 S3-12／S3-13；07 章责任边界）。
+LATER_STAGE_TABLES = {"reviews", "pr_candidates"}
 LATEST_VERSION = len(load_migrations())
 
 
@@ -46,16 +57,15 @@ async def test_fresh_initialize_creates_runtime_tables(tmp_path: Path) -> None:
         assert await db.migrate() == LATEST_VERSION
         assert await db.pragma_value("user_version") == LATEST_VERSION
         tables = await _table_names(db)
-        assert tables >= EXPECTED_RUNTIME_TABLES | STAGE1_TABLES | STAGE2_TABLES
-        # 不创建后续阶段业务表（07 章责任边界）：库中表恰为运行时四表 +
-        # app_config/provider_config + Stage 1 的动作目录与档案 + Stage 2 的草稿表
-        # （sqlite_sequence 来自 AUTOINCREMENT）
         assert tables == (
             EXPECTED_RUNTIME_TABLES
             | STAGE1_TABLES
             | STAGE2_TABLES
+            | STAGE3_PLAN_TABLES
+            | STAGE3_RECORD_TABLES
             | {"sqlite_sequence"}
         )
+        assert tables & LATER_STAGE_TABLES == set()  # 不建统计／复盘侧表
 
 
 async def test_repeated_start_does_not_rerun_migrations(tmp_path: Path) -> None:

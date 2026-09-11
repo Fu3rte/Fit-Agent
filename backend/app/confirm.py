@@ -1,7 +1,8 @@
 """确认事务编排：幂等返回 → 基线／revision 检查 → 事务内领域复查 → 原子提交（01 1.4/1.5）。
 
 正本：architecture/01 1.4/1.5（确认顺序、原子性、幂等凭据、版本唯一推进点）、
-stage2.md §4.2（逐步顺序）、§5 S2-05、§8 已拍「无业务变化首次确认」方案 A。
+stage2.md §4.2（逐步顺序）、§5 S2-05、§8 已拍「无业务变化首次确认」方案 A；
+stage3.md §4.2（计划草稿确认的额外步骤）/§5 S3-06。
 
 单连接、唯一锁、同一事务（07 7.1）内依次执行 §4.2：
 
@@ -12,12 +13,12 @@ stage2.md §4.2（逐步顺序）、§5 S2-05、§8 已拍「无业务变化首�
    revision。事务内读取只经 repo 的 ``*_in_transaction`` 入口：在持锁事务内调用自取锁方法
    会死锁（锁不可重入，stage2.md §2）。
 4. 对数据库保存的最终草稿内容重新做事务内确定性复查：结构、动作／模式引用、首次建档
-   完整性（§4.3 已拍 1B）。本阶段草稿内容就是完整档案而非增量补丁，因此没有补丁复查项；
-   计划草稿的补丁复查归 Stage 3。
-5. 写正式档案（复用 Stage 1 内部写入）→ ``context_version`` 恰好 +1 → 草稿 Committed 与
+   完整性（§4.3 已拍 1B）、计划草稿的结构／目录引用／频率／时长／器械／限制／同日重复
+   动作与生效范围。
+5. 写正式事实（档案／计划版本与日程）→ ``context_version`` 恰好 +1 → 草稿 Committed 与
    不可变提交凭据。
 6. COMMIT 之后才把结果交给调用方；任一步异常或取消由 ``Database.transaction()`` 整体回滚，
-   不留部分档案、版本、草稿状态或凭据。
+   不留部分档案、计划、版本、日程、草稿状态或凭据。
 
 过期拦截（S2-06）：首次确认业务基线不符时抛 :class:`DraftStale`，并按保存的业务基线与当前
 正式档案快照算出**可核实的字段变化**一并带出（只列确有差异的字段，版本已变但快照无字段差异
@@ -26,31 +27,80 @@ stage2.md §4.2（逐步顺序）、§5 S2-05、§8 已拍「无业务变化首�
 时，按 §4.2 步骤 3 的先后先报 :class:`DraftStale`（结果是确定的，不因 revision 更旧而改变拦截
 口径）。重算归 Stage 4，本模块不提供。
 
+计划草稿确认（S3-06）在步骤 4–5 之间额外做的，全部在同一事务内：
+- 有拟议档案补丁时先校验补丁，再按**应用补丁后的拟议条件**复查计划（不能只按旧条件）；
+  确认前不改正式档案（01 1.5）。
+- 替换：保留旧版本历史（不重激活、不物理删除），只取消旧版未来未锁定日程（按固定业务时区
+  的**业务日期规则**重算，不照搬草稿保存的取消预览），再写新版本与投影日程。
+- 组合提交（档案补丁＋计划）只推进 ``context_version`` 一次；草稿 Committed 与凭据同事务。
+- 计划版本与日程 id 由本编排生成；版本号由 ``plan_versions`` 只追加、恰好 +1 得出。
+
 事务内只做本地确定性计算与数据库操作：不调用模型、工具执行或 SSE，不新增第二把业务数据库
 锁，也不新增第二个版本计数器。本模块不做传输校验与 HTTP 错误码映射（S2-07）。
+
+安排草稿确认（S3-08）在同一事务内只做：复查存储的当次目标快照（结构、绑定版本与训练日、
+只改已拍可变字段）→ 追加一条 ``arrangement_revisions``（完整目标快照、来源草稿、**真实
+``accepted_at``**）→ ``context_version`` 恰好 +1 → 草稿 Committed 与凭据。**不写**
+``plan_versions``／``scheduled_sessions``／``user_profile``：临时调整不改长期计划（04 4.3）；
+日程锁定与当次处方接受分离，已到期锁定的日程仍可接受减组等调整，已取消的日程拒结。
 """
 
 from dataclasses import dataclass
+from datetime import UTC, date, datetime
+from uuid import uuid4
 
 import aiosqlite
-from domain.actions.repo import ExerciseRepo
-from domain.profile.repo import ProfileRepo
-from domain.profile.rules import (
-    UnknownExerciseReference,
-    ensure_first_time_complete,
-    validate_profile_structure,
-)
-from domain.profile.schema import Profile, profile_from_json
-from domain.profile.service import ProfileService
-from storage.db import Database
 
-from app.draft_repo import Draft, DraftRepo, InvalidDraftRow
+from app.arrangement_drafts import ARRANGEMENT_DRAFT_KIND, require_arrangement_binding
+from app.draft_repo import PROFILE_UPDATE_KIND, Draft, DraftRepo, InvalidDraftRow
 from app.drafts import (
+    DraftKindMismatch,
     DraftRevisionConflict,
     ProfileFieldDiff,
     UnknownDraft,
     profile_diff,
 )
+from app.plan_drafts import (
+    PLAN_DRAFT_KIND,
+    proposed_cancellations,
+    require_valid_proposal_fields,
+)
+from domain.actions.repo import ExerciseRepo
+from domain.plan.repo import (
+    ArrangementRevisionRecord,
+    PlanRepo,
+    PlanVersionRecord,
+)
+from domain.plan.rules import (
+    InvalidArrangementTarget,
+    InvalidPlanPayload,
+    project_sessions,
+    validate_arrangement_target,
+)
+from domain.plan.schema import (
+    arrangement_target_from_json,
+    proposal_from_json,
+)
+from domain.plan.service import plan_limit_violations
+from domain.profile.repo import ProfileRepo
+from domain.profile.rules import (
+    UnknownExerciseReference,
+    apply_patch,
+    ensure_first_time_complete,
+    validate_patch,
+    validate_profile_structure,
+)
+from domain.profile.schema import (
+    Profile,
+    patch_from_json,
+    profile_from_json,
+)
+from domain.profile.service import ProfileService
+from storage.db import Database
+
+
+def _now() -> str:
+    return datetime.now(UTC).isoformat()
 
 
 class DraftDiscarded(ValueError):
@@ -151,6 +201,79 @@ def _committed_result(draft: Draft) -> ProfileCommitResult:
     )
 
 
+@dataclass(frozen=True, slots=True)
+class PlanCommitResult:
+    """一次计划确认提交的不可变结果（01 1.3「提交凭据」＋该次确认建立的计划版本）。
+
+    凭据部分与 :class:`ProfileCommitResult` 同口径（写成草稿行后不再被改写）；
+    ``plan_version_id``／``plan_version`` 指向**首次确认**建立的版本，由
+    ``plan_versions.source_draft_id`` 唯一确定（不取「最新版本」，后续替换不会改变本结果），
+    因此重复确认、关闭重开、后续业务版本变化后重试都返回同一份数据。日程实例 id 不回传：
+    它们是投影结果，可由版本与日期确定，客户端要看日程时另查只读接口。
+    """
+
+    draft_id: str
+    committed_revision: int
+    committed_business_version: int
+    plan_version_id: str
+    plan_version: int
+
+
+def _plan_commit_result(draft: Draft, record: PlanVersionRecord) -> PlanCommitResult:
+    """已 Committed 草稿行＋该次建立的计划版本 → 计划提交结果。"""
+    revision = draft.committed_revision
+    version = draft.committed_business_version
+    if revision is None or version is None:
+        raise InvalidDraftRow(f"已 Committed 草稿缺少提交凭据：{draft.id}")
+    return PlanCommitResult(
+        draft_id=draft.id,
+        committed_revision=revision,
+        committed_business_version=version,
+        plan_version_id=record.id,
+        plan_version=record.version,
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class ArrangementCommitResult:
+    """一次安排确认提交的不可变结果（01 1.3「提交凭据」＋该次接受的安排修订）。
+
+    凭据部分与 :class:`PlanCommitResult` 同口径（写成草稿行后不再被改写）；
+    ``arrangement_revision_id``／``arrangement_revision_no``／``accepted_at`` 指向**首次
+    确认**写下的那条修订，由 ``arrangement_revisions.source_draft_id`` 唯一确定（不取「最新
+    修订」，后续再次接受不会改变本结果），因此重复确认、关闭重开、后续业务版本变化后重试
+    都返回同一份数据。``accepted_at`` 是接受时的**真实时间**（不得倒填），与训练发生的
+    时间、训练记录与更正确认时间分列保存（v1 L88–95）。
+    """
+
+    draft_id: str
+    committed_revision: int
+    committed_business_version: int
+    arrangement_revision_id: str
+    arrangement_revision_no: int
+    scheduled_session_id: str
+    accepted_at: str
+
+
+def _arrangement_commit_result(
+    draft: Draft, record: ArrangementRevisionRecord
+) -> ArrangementCommitResult:
+    """已 Committed 草稿行＋该次写下的安排修订 → 安排提交结果。"""
+    revision = draft.committed_revision
+    version = draft.committed_business_version
+    if revision is None or version is None:
+        raise InvalidDraftRow(f"已 Committed 草稿缺少提交凭据：{draft.id}")
+    return ArrangementCommitResult(
+        draft_id=draft.id,
+        committed_revision=revision,
+        committed_business_version=version,
+        arrangement_revision_id=record.id,
+        arrangement_revision_no=record.revision_no,
+        scheduled_session_id=record.scheduled_session_id,
+        accepted_at=record.accepted_at,
+    )
+
+
 class ConfirmService:
     """档案草稿确认事务编排（S2-05）：幂等返回、基线／revision 拦截、原子提交。
 
@@ -164,6 +287,7 @@ class ConfirmService:
         self._profiles = ProfileRepo(db)
         self._writes = ProfileService(db)
         self._exercises = ExerciseRepo(db)
+        self._plans = PlanRepo(db)
 
     async def confirm_profile_draft(
         self, *, draft_id: str, seen_revision: int
@@ -173,11 +297,21 @@ class ConfirmService:
         ``seen_revision`` 只用于「首次确认」的乐观并发检查；草稿已 Committed 时忽略它并直接
         返回原凭据（§4.2 步骤 1：重试不因旧业务版本或旧 revision 失败）。确认请求不携带业务
         内容——写入的永远是数据库保存的最终草稿（§4.2：不信任客户端传入可替换内容）。
+
+        只服务 ``kind='profile_update'``：确认入口按 kind 分派，计划草稿的确认归 S3-06，
+        不得在本事务里把计划草稿的 ``proposed_profile_json`` 当正式档案提交（那会把受限组合
+        的补丁当成一次独立档案变更，单独推进 ``context_version`` 而不建计划）。
         """
         async with self._db.transaction() as conn:
             draft = await self._drafts.get_in_transaction(conn, draft_id)
             if draft is None:
                 raise UnknownDraft(f"草稿不存在：{draft_id}")
+            # kind 分派必须在任何读写之前：非档案草稿走各自确认编排（S3-06/S3-08）。
+            if draft.kind != PROFILE_UPDATE_KIND:
+                raise DraftKindMismatch(
+                    f"档案草稿确认只适用于 kind={PROFILE_UPDATE_KIND}，"
+                    f"收到 kind={draft.kind}：{draft_id}"
+                )
             if draft.status == "committed":
                 result = _committed_result(draft)
             elif draft.status == "discarded":
@@ -233,6 +367,330 @@ class ConfirmService:
             committed_business_version=committed_version,
         )
         return _committed_result(committed)
+
+    async def confirm_plan_draft(
+        self, *, draft_id: str, seen_revision: int, business_date: date
+    ) -> PlanCommitResult:
+        """确认计划草稿身份＋用户所见 revision；返回该次提交的不可变结果（S3-06）。
+
+        迁移与档案草稿确认同口径：幂等已提交 → 拒绝已丢弃 → 基线／revision → 事务内领域复查
+        → 原子写入 → COMMIT 之后才响应。额外步骤（stage3.md §4.2）：
+
+        1. 有拟议档案补丁时先校验补丁，再按**应用补丁后的拟议条件**复查计划；确认前不改正式
+           档案（01 1.5）。
+        2. 复查计划结构、目录引用、频率／时长／器械／限制／同日重复动作与生效范围（S3-03 同口径）。
+        3. 替换：保留旧版本历史 → 只取消旧版**未来未锁定**日程（按固定业务时区的业务日期规则
+           重算，不照搬草稿保存的取消预览）→ 写新版本与投影日程。
+        4. 有补丁时写正式档案；``context_version`` 恰好 +1；草稿 Committed 与凭据。
+
+        ``business_date`` 是确认当刻的**固定业务时区日期**（07 7.3），只用于「已到期即锁定」
+        的规则判定：``business_date >= scheduled_on`` 的旧日程即使未写存储锁定标记也不取消；
+        调用方（S3-14）负责按业务时区算出这个日期，本编排不自己取「今天」（可注入、可测试）。
+
+        只服务 ``kind='plan'``：档案草稿与安排／记录草稿的确认走各自入口；不得在本事务里把
+        计划草稿的拟议条件当一次独立档案变更提交（受限组合只推一次 ``context_version``）。
+        """
+        if type(business_date) is not date:
+            raise InvalidPlanPayload(
+                f"business_date 必须是 date 日期：{business_date!r}"
+            )
+        async with self._db.transaction() as conn:
+            draft = await self._drafts.get_in_transaction(conn, draft_id)
+            if draft is None:
+                raise UnknownDraft(f"草稿不存在：{draft_id}")
+            # kind 分派必须在任何读写之前：非计划草稿走各自确认编排（S2-05/S3-08）。
+            if draft.kind != PLAN_DRAFT_KIND:
+                raise DraftKindMismatch(
+                    f"计划草稿确认只适用于 kind={PLAN_DRAFT_KIND}，"
+                    f"收到 kind={draft.kind}：{draft_id}"
+                )
+            if draft.status == "committed":
+                result = await self._committed_plan_result(conn, draft)
+            elif draft.status == "discarded":
+                raise DraftDiscarded(f"草稿已丢弃，不可确认：{draft_id}")
+            else:
+                result = await self._commit_pending_plan(
+                    conn, draft, seen_revision, business_date
+                )
+        # 事务已 COMMIT（或本就不需要写）：只有到这里才把结果交给调用方（「提交后再响应」）。
+        return result
+
+    async def _committed_plan_result(
+        self, conn: aiosqlite.Connection, draft: Draft
+    ) -> PlanCommitResult:
+        """已 Committed 计划草稿的幂等返回（§4.2 步骤 1）。
+
+        不重查基线、不重算领域规则、不重复建版本或日程；该次建立的计划版本由
+        ``source_draft_id`` 唯一确定，因此凭据可以指向首次确认那一版（而不是「当前最新」）。
+        缺版本行即数据损坏，显式失败不静默兜底（与 :class:`InvalidDraftRow` 同口径）。
+        """
+        record = await self._plans.read_by_source_draft_in_transaction(conn, draft.id)
+        if record is None:
+            raise InvalidDraftRow(
+                f"已 Committed 计划草稿没有对应的计划版本：{draft.id}"
+            )
+        return _plan_commit_result(draft, record)
+
+    async def _commit_pending_plan(
+        self,
+        conn: aiosqlite.Connection,
+        draft: Draft,
+        seen_revision: int,
+        business_date: date,
+    ) -> PlanCommitResult:
+        """§4.2 步骤 3–5 的计划版：基线／revision → 复查 → 原子写入 → 读回凭据。"""
+        snapshot = await self._profiles.read_in_transaction(conn)
+        if snapshot.context_version != draft.base_business_version:
+            base_profile = (
+                None
+                if draft.base_profile_json is None
+                else profile_from_json(draft.base_profile_json)
+            )
+            raise DraftStale(
+                draft_id=draft.id,
+                base_business_version=draft.base_business_version,
+                current_business_version=snapshot.context_version,
+                base_profile=base_profile,
+                current_profile=snapshot.profile,
+                changes=verifiable_field_changes(base_profile, snapshot.profile),
+            )
+        if draft.revision != seen_revision:
+            raise DraftRevisionConflict(
+                f"所见 revision {seen_revision} 与草稿当前 revision "
+                f"{draft.revision} 不符：{draft.id}"
+            )
+        # 复查数据库保存的最终草稿（不信任客户端传入内容）：缺档案时 fail-closed 不给处方。
+        if draft.proposed_plan_json is None:
+            raise InvalidDraftRow(f"计划草稿缺少拟议载荷：{draft.id}")
+        proposal = proposal_from_json(draft.proposed_plan_json)
+        if snapshot.profile is None:
+            raise InvalidPlanPayload(
+                f"尚未建立正式档案：不给结构化处方，计划草稿不可确认：{draft.id}"
+            )
+        patch = (
+            None
+            if draft.proposed_profile_patch_json is None
+            else patch_from_json(draft.proposed_profile_patch_json)
+        )
+        if patch is not None:
+            validate_patch(patch)
+        proposed_profile = (
+            apply_patch(snapshot.profile, patch)
+            if patch is not None
+            else snapshot.profile
+        )
+        # 拟议条件必须能从「本事务正式档案＋草稿补丁」重建；不一致即草稿数据损坏。
+        if profile_from_json(draft.proposed_profile_json) != proposed_profile:
+            raise InvalidDraftRow(
+                f"计划草稿的拟议条件与正式档案＋拟议补丁不一致：{draft.id}"
+            )
+        await self._require_known_restriction_targets(conn, proposed_profile)
+        candidates = await self._exercises.list_recommendable_in_transaction(conn)
+        # 计划结构／目录引用／日程与生效范围，以及按补丁后条件的限制／红旗／器械复查。
+        require_valid_proposal_fields(
+            starts_on=proposal.starts_on,
+            review_on=proposal.review_on,
+            payload=proposal.payload,
+            base_profile=snapshot.profile,
+            candidates=candidates,
+            patch=patch,
+        )
+        limit_violations = plan_limit_violations(proposed_profile, proposal.payload)
+        if limit_violations:
+            raise InvalidPlanPayload(
+                "计划与拟议条件的频率／时长上限冲突，不确认："
+                + "；".join(limit_violations)
+            )
+        # 只替换「当刻正式计划」：草稿绑定的来源版本与它不一致时拒结，否则会把未基于该版本的
+        # 草稿用在当前版本上（取消错版本日程、留下两份未取消的未来日程）。
+        current = await self._plans.read_current_in_transaction(conn)
+        if proposal.source_plan_version_id != (None if current is None else current.id):
+            raise InvalidPlanPayload(
+                f"计划草稿绑定的来源版本 {proposal.source_plan_version_id!r} 与当刻正式计划"
+                f" {None if current is None else current.id!r} 不一致：{draft.id}"
+            )
+        now = _now()
+        if current is not None:
+            old_sessions = await self._plans.list_sessions_in_transaction(
+                conn, current.id
+            )
+            # 按当刻业务日期重算取消集（仅未来未锁定），不照搬草稿里的取消预览。
+            cancel_ids = tuple(
+                item.scheduled_session_id
+                for item in proposed_cancellations(
+                    old_sessions, business_date=business_date
+                )
+            )
+            await self._plans.cancel_sessions_in_transaction(
+                conn, session_ids=cancel_ids, cancelled_at=now
+            )
+        plan_version_id = uuid4().hex
+        record = await self._plans.append_version_in_transaction(
+            conn,
+            plan_version_id=plan_version_id,
+            source_plan_version_id=proposal.source_plan_version_id,
+            starts_on=proposal.starts_on,
+            review_on=proposal.review_on,
+            mode=proposal.mode,
+            payload=proposal.payload,
+            source_draft_id=draft.id,
+            confirmed_at=now,
+        )
+        projected = project_sessions(
+            proposal.payload, starts_on=proposal.starts_on, review_on=proposal.review_on
+        )
+        await self._plans.insert_sessions_in_transaction(
+            conn,
+            sessions=tuple(
+                (uuid4().hex, plan_version_id, item.plan_workout_key, item.scheduled_on)
+                for item in projected
+            ),
+        )
+        if patch is not None:
+            await self._writes.write_profile_in_transaction(conn, proposed_profile)
+        committed_version = await self._profiles.bump_context_version_in_transaction(
+            conn
+        )
+        committed = await self._drafts.record_commit_in_transaction(
+            conn,
+            draft_id=draft.id,
+            committed_revision=draft.revision,
+            committed_business_version=committed_version,
+        )
+        return _plan_commit_result(committed, record)
+
+    async def confirm_arrangement_draft(
+        self, *, draft_id: str, seen_revision: int
+    ) -> ArrangementCommitResult:
+        """确认安排草稿身份＋用户所见 revision；返回该次提交的不可变结果（S3-08）。
+
+        迁移与档案／计划草稿确认同口径：幂等已提交 → 拒绝已丢弃 → 基线／revision → 事务内
+        领域复查 → 原子写入 → COMMIT 之后才响应。额外步骤只有一步：把存储的当次目标
+        **完整**快照写入 ``arrangement_revisions``（不只差异补丁，04 4.3）。
+
+        - **接受即落盘的真实时间**：``accepted_at`` 取本事务的当刻 UTC 时间，不接受调用方
+          传入，也不从训练日或草稿时间倒推（PRD §5.5：不得先在会话中视为已接受、等打卡时
+          再补写）。训练发生时间、系统接受时间、记录与更正确认时间分列保存。
+        - **临时调整不改长期计划版本**：本事务不写 ``plan_versions``、不写
+          ``scheduled_sessions``、不改正式档案，只追加安排修订并将 ``context_version``
+          恰好 +1（01 1.4、04 4.3）。
+        - **锁定与处方接受分离**：已到期锁定的日程仍可接受减组等调整（04 4.2/4.3），只要
+          它未被取消；已取消的日程不再是应训练义务，拒结（04 4.2）。
+        - **只用内部分派**：只服务 ``kind='arrangement'``；档案与计划草稿的确认走各自入口。
+          安排草稿不接受档案补丁，也不推进计划版本（不得把当次目标当长期计划提交）。
+        """
+        async with self._db.transaction() as conn:
+            draft = await self._drafts.get_in_transaction(conn, draft_id)
+            if draft is None:
+                raise UnknownDraft(f"草稿不存在：{draft_id}")
+            # kind 分派必须在任何读写之前：非安排草稿走各自确认编排（S2-05/S3-06）。
+            if draft.kind != ARRANGEMENT_DRAFT_KIND:
+                raise DraftKindMismatch(
+                    f"安排草稿确认只适用于 kind={ARRANGEMENT_DRAFT_KIND}，"
+                    f"收到 kind={draft.kind}：{draft_id}"
+                )
+            if draft.status == "committed":
+                result = await self._committed_arrangement_result(conn, draft)
+            elif draft.status == "discarded":
+                raise DraftDiscarded(f"草稿已丢弃，不可确认：{draft_id}")
+            else:
+                result = await self._commit_pending_arrangement(
+                    conn, draft, seen_revision
+                )
+        # 事务已 COMMIT（或本就不需要写）：只有到这里才把结果交给调用方（「提交后再响应」）。
+        return result
+
+    async def _committed_arrangement_result(
+        self, conn: aiosqlite.Connection, draft: Draft
+    ) -> ArrangementCommitResult:
+        """已 Committed 安排草稿的幂等返回（§4.2 步骤 1）。
+
+        不重查基线、不重算领域规则、不重复追加修订；该次写下的安排修订由
+        ``arrangement_revisions.source_draft_id`` 唯一确定，因此 ``accepted_at`` 就是首次
+        接受时间，后续再次接受不会改写它（不得倒填）。缺修订行即数据损坏，显式失败不静默
+        兕底（与 :class:`InvalidDraftRow` 同口径）。
+        """
+        record = await self._plans.read_arrangement_by_source_draft_in_transaction(
+            conn, draft.id
+        )
+        if record is None:
+            raise InvalidDraftRow(
+                f"已 Committed 安排草稿没有对应的安排修订：{draft.id}"
+            )
+        return _arrangement_commit_result(draft, record)
+
+    async def _commit_pending_arrangement(
+        self,
+        conn: aiosqlite.Connection,
+        draft: Draft,
+        seen_revision: int,
+    ) -> ArrangementCommitResult:
+        """§4.2 步骤 3–5 的安排版：基线／revision → 绑定与结构复查 → 写入修订 → 读回凭据。"""
+        snapshot = await self._profiles.read_in_transaction(conn)
+        if snapshot.context_version != draft.base_business_version:
+            base_profile = (
+                None
+                if draft.base_profile_json is None
+                else profile_from_json(draft.base_profile_json)
+            )
+            raise DraftStale(
+                draft_id=draft.id,
+                base_business_version=draft.base_business_version,
+                current_business_version=snapshot.context_version,
+                base_profile=base_profile,
+                current_profile=snapshot.profile,
+                changes=verifiable_field_changes(base_profile, snapshot.profile),
+            )
+        if draft.revision != seen_revision:
+            raise DraftRevisionConflict(
+                f"所见 revision {seen_revision} 与草稿当前 revision "
+                f"{draft.revision} 不符：{draft.id}"
+            )
+        # 复查数据库保存的最终草稿（不信任客户端传入内容）。
+        if draft.proposed_arrangement_json is None:
+            raise InvalidDraftRow(f"安排草稿缺少目标快照：{draft.id}")
+        target = arrangement_target_from_json(draft.proposed_arrangement_json)
+        version = await self._plans.read_version_in_transaction(
+            conn, target.plan_version_id
+        )
+        if version is None:
+            raise InvalidArrangementTarget(
+                f"当次目标绑定的计划版本不存在：{target.plan_version_id}"
+            )
+        session = await self._plans.read_session_in_transaction(
+            conn, target.scheduled_session_id
+        )
+        if session is None:
+            raise InvalidArrangementTarget(
+                f"当次目标绑定的应训练名额不存在：{target.scheduled_session_id}"
+            )
+        if session.cancelled_at is not None:
+            # 已取消日程不再是应训练义务，接受新安排拒结（04 4.2）；查询仍可看历史草稿。
+            raise InvalidArrangementTarget(
+                f"已取消的日程不再是应训练义务，不接受当次安排：{session.id}"
+            )
+        # 绑定与训练日复查：返回绑定版本里的该训练日。
+        workout = require_arrangement_binding(target, version=version, session=session)
+        validate_arrangement_target(target, workout=workout)
+        accepted_at = _now()
+        record = await self._plans.append_arrangement_revision_in_transaction(
+            conn,
+            arrangement_revision_id=uuid4().hex,
+            scheduled_session_id=target.scheduled_session_id,
+            target=target,
+            source_draft_id=draft.id,
+            accepted_at=accepted_at,
+        )
+        committed_version = await self._profiles.bump_context_version_in_transaction(
+            conn
+        )
+        committed = await self._drafts.record_commit_in_transaction(
+            conn,
+            draft_id=draft.id,
+            committed_revision=draft.revision,
+            committed_business_version=committed_version,
+        )
+        return _arrangement_commit_result(committed, record)
 
     async def _require_known_restriction_targets(
         self, conn: aiosqlite.Connection, proposed: Profile

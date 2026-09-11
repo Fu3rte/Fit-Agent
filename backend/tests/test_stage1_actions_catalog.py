@@ -205,7 +205,10 @@ async def test_unilateral_items_keep_per_side_convention(tmp_path: Path) -> None
 async def test_recommendation_candidates_require_checked_flag(tmp_path: Path) -> None:
     async with open_database(tmp_path / "app.db") as db:
         service = ActionCatalogService(db)
-        assert await service.recommendation_candidates() == ()  # 种子全部未检查
+        # 系统迁移（007）已将已核对 24 项种子置 1（S3-02/D2 A）；本用例关心的是
+        # 未检查的目录行不得混入候选。
+        seeded = {e.id for e in await service.recommendation_candidates()}
+        assert seeded  # 已核对种子已在候选中
 
         async with db.transaction() as conn:
             await _insert_exercise(
@@ -222,8 +225,9 @@ async def test_recommendation_candidates_require_checked_flag(tmp_path: Path) ->
                 aliases=("test unchecked",),
                 recommendable=0,
             )
-        candidates = await service.recommendation_candidates()
-        assert [e.id for e in candidates] == ["test-only-checked"]
+        candidates = {e.id for e in await service.recommendation_candidates()}
+        assert candidates == seeded | {"test-only-checked"}
+        assert "test-only-unchecked" not in candidates
 
 
 async def test_stopped_exercise_keeps_semantics_but_leaves_recommendations(
@@ -240,9 +244,10 @@ async def test_stopped_exercise_keeps_semantics_but_leaves_recommendations(
         )
     async with open_database(path) as db:
         service = ActionCatalogService(db)
-        assert [e.id for e in await service.recommendation_candidates()] == [
-            "test-only-stopped"
-        ]
+        # 系统迁移后的种子候选也在此集合内；本用例只关心测试虚构动作的进出
+        assert "test-only-stopped" in {
+            e.id for e in await service.recommendation_candidates()
+        }
         async with db.transaction() as conn:
             await conn.execute(
                 "UPDATE exercises SET active = 0 WHERE id = 'test-only-stopped'"
@@ -257,7 +262,9 @@ async def test_stopped_exercise_keeps_semantics_but_leaves_recommendations(
         assert stopped.aliases == ("test stopped",)
         assert stopped.load_convention == "dumbbell_per_hand"
         assert stopped.recommendable is True  # 已检查标记不被停用重置
-        assert await service.recommendation_candidates() == ()
+        assert "test-only-stopped" not in {
+            e.id for e in await service.recommendation_candidates()
+        }
         resolution = await service.resolve("test stopped")
         assert [e.id for e in resolution.exercises] == ["test-only-stopped"]
 

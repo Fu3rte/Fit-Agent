@@ -66,6 +66,15 @@ _SCANNED_TABLES = frozenset(
         "user_profile",
         # Stage 2 新增的草稿表（S2-02）：同样必须被扫描覆盖
         "business_drafts",
+        # Stage 3 新增的计划侧三表（S3-02）：同样必须被扫描覆盖
+        "plan_versions",
+        "scheduled_sessions",
+        "arrangement_revisions",
+        # Stage 3 新增的记录侧四表（S3-09）：同样必须被扫描覆盖
+        "training_sessions",
+        "session_revisions",
+        "exercise_logs",
+        "training_sets",
     }
 )
 
@@ -162,6 +171,35 @@ async def all_text_cells(db: Database) -> list[tuple[str, str, str]]:
         async with conn.execute("SELECT * FROM business_drafts") as cursor:
             columns = tuple(str(c[0]) for c in cursor.description)
             cells += _rows_as_cells("business_drafts", columns, await cursor.fetchall())
+        async with conn.execute("SELECT * FROM plan_versions") as cursor:
+            columns = tuple(str(c[0]) for c in cursor.description)
+            cells += _rows_as_cells("plan_versions", columns, await cursor.fetchall())
+        async with conn.execute("SELECT * FROM scheduled_sessions") as cursor:
+            columns = tuple(str(c[0]) for c in cursor.description)
+            cells += _rows_as_cells(
+                "scheduled_sessions", columns, await cursor.fetchall()
+            )
+        async with conn.execute("SELECT * FROM arrangement_revisions") as cursor:
+            columns = tuple(str(c[0]) for c in cursor.description)
+            cells += _rows_as_cells(
+                "arrangement_revisions", columns, await cursor.fetchall()
+            )
+        async with conn.execute("SELECT * FROM training_sessions") as cursor:
+            columns = tuple(str(c[0]) for c in cursor.description)
+            cells += _rows_as_cells(
+                "training_sessions", columns, await cursor.fetchall()
+            )
+        async with conn.execute("SELECT * FROM session_revisions") as cursor:
+            columns = tuple(str(c[0]) for c in cursor.description)
+            cells += _rows_as_cells(
+                "session_revisions", columns, await cursor.fetchall()
+            )
+        async with conn.execute("SELECT * FROM exercise_logs") as cursor:
+            columns = tuple(str(c[0]) for c in cursor.description)
+            cells += _rows_as_cells("exercise_logs", columns, await cursor.fetchall())
+        async with conn.execute("SELECT * FROM training_sets") as cursor:
+            columns = tuple(str(c[0]) for c in cursor.description)
+            cells += _rows_as_cells("training_sets", columns, await cursor.fetchall())
         return cells
 
     return await db.under_lock(op)
