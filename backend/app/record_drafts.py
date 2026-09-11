@@ -33,6 +33,7 @@ from app.draft_repo import Draft, DraftRepo, InvalidDraftRow
 from app.drafts import (
     DraftKindMismatch,
     DraftNotCorrectable,
+    DraftNotDiscardable,
     DraftRevisionConflict,
     UnknownDraft,
     require_draft_source,
@@ -281,6 +282,35 @@ class RecordDraftService:
             )
         return await self._to_view(updated)
 
+    async def discard_record_draft(self, *, draft_id: str) -> RecordDraftView:
+        """丢弃 Pending 记录草稿：只改变草稿状态，正式记录与业务版本不变（01 1.3）。
+
+        - 已 Committed 记录草稿不可被丢弃撤销（正式修订不回滚、不物理删除，05 5.3）；已
+          Discarded 重复丢弃幂等返回已丢弃结果：不再写入、不刷新更新时间。
+        - 与 :meth:`~app.plan_drafts.PlanDraftService.discard_plan_draft` 同口径（S3-05/
+          S3-10）：kind 分派先于任何写入，终态不可纠错也不可恢复。
+        """
+        async with self._db.transaction() as conn:
+            draft = await self._drafts.get_in_transaction(conn, draft_id)
+            if draft is None:
+                raise UnknownDraft(f"草稿不存在：{draft_id}")
+            # kind 分派必须在任何写入之前（见 DraftKindMismatch）。
+            if draft.kind != RECORD_DRAFT_KIND:
+                raise DraftKindMismatch(
+                    f"记录草稿丢弃只适用于 kind={RECORD_DRAFT_KIND}，"
+                    f"收到 kind={draft.kind}：{draft_id}"
+                )
+            if draft.status == "committed":
+                raise DraftNotDiscardable(f"已提交草稿不可被丢弃撤销：{draft_id}")
+            updated = (
+                draft
+                if draft.status == "discarded"
+                else await self._drafts.record_discard_in_transaction(
+                    conn, draft_id=draft_id
+                )
+            )
+        return await self._to_view(updated)
+
     async def _require_amendable_session(self, training_session_id: str | None) -> None:
         """归属指向的既有训练身份必须存在且已有当前修订（更正需要可对照的基线）。
 
@@ -324,7 +354,7 @@ class RecordDraftService:
     async def _require_arrangement_match(self, payload: RecordDraftPayload) -> None:
         """显式给出的安排关联必须存在，且目标项与动作准确对应（不推断关联）。"""
         arrangement = await self._read_arrangement(payload.arrangement_revision_id)
-        _require_target_items_match(payload, arrangement)
+        require_target_items_match(payload, arrangement)
 
     async def _require_arrangement_match_in_transaction(
         self, conn: aiosqlite.Connection, payload: RecordDraftPayload
@@ -333,7 +363,7 @@ class RecordDraftService:
         arrangement = await self._read_arrangement_in_transaction(
             conn, payload.arrangement_revision_id
         )
-        _require_target_items_match(payload, arrangement)
+        require_target_items_match(payload, arrangement)
 
     async def _read_arrangement(
         self, arrangement_revision_id: str | None
@@ -435,7 +465,7 @@ def _require_record_json(draft: Draft) -> str:
     return draft.proposed_record_json
 
 
-def _require_target_items_match(
+def require_target_items_match(
     payload: RecordDraftPayload, arrangement: ArrangementRevisionRecord | None
 ) -> None:
     """关联安排时的准确对应：目标项必须存在且指向同一动作身份（不做模糊匹配）。"""

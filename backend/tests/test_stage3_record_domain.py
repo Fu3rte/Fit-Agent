@@ -11,6 +11,7 @@
 test_stage3_record_migrations.py。所有用例只操作 ``tmp_path`` 下的临时文件库，不触碰真实用户库。
 """
 
+from datetime import date
 from decimal import Decimal
 
 import pytest
@@ -23,15 +24,18 @@ from domain.records.rules import (
     comparison_key,
     load_kg_key,
     optional_rir,
+    validate_record_draft,
 )
 from domain.records.schema import (
     ASSISTANCE_VALUES,
     LOAD_UNITS,
     SET_TYPES,
     Assistance,
+    DraftExerciseLog,
     ExerciseLogFacts,
     LoadComparisonKey,
     RawLoad,
+    RecordDraftPayload,
     SetFacts,
 )
 
@@ -212,3 +216,119 @@ def test_comparison_key_is_null_without_load_and_rejects_unknown_notation() -> N
             load_notation="barbell_total",  # 目录外拼写
             load=RawLoad("60", "kg"),
         )
+
+
+# ---------- 组级负重只在外加负重次数型上成立（05 5.2、009 CHECK 的领域侧同口径） ----------
+
+
+def test_load_is_rejected_on_non_reps_weight_exercises() -> None:
+    """自重次数型与计时型不得携带组级负重（不虚构 0kg、不混口径）；外加负重次数型仍放行。"""
+    occurred_on = date(2026, 9, 16)
+    weighted = RecordDraftPayload(
+        occurred_on=occurred_on,
+        training_session_id=None,
+        exercises=(
+            DraftExerciseLog(
+                position=1,
+                facts=ExerciseLogFacts(
+                    exercise_id="barbell-back-squat",
+                    record_type="reps_weight",
+                    load_notation="barbell_includes_bar_total",
+                ),
+                sets=(
+                    SetFacts(
+                        set_no=1, set_type="work", load=RawLoad("60", "kg"), reps=8
+                    ),
+                ),
+            ),
+        ),
+    )
+    validate_record_draft(weighted)  # 不抛即允许
+    for record_type, single in (
+        (
+            "reps_bodyweight",
+            SetFacts(set_no=1, set_type="work", load=RawLoad("60", "kg"), reps=8),
+        ),
+        (
+            "time",
+            SetFacts(
+                set_no=1, set_type="work", load=RawLoad("60", "kg"), duration_seconds=60
+            ),
+        ),
+    ):
+        with pytest.raises(InvalidRecordFact):
+            validate_record_draft(
+                RecordDraftPayload(
+                    occurred_on=occurred_on,
+                    training_session_id=None,
+                    exercises=(
+                        DraftExerciseLog(
+                            position=1,
+                            facts=ExerciseLogFacts(
+                                exercise_id="pull-up",
+                                record_type=record_type,  # type: ignore[arg-type]
+                            ),
+                            sets=(single,),
+                        ),
+                    ),
+                )
+            )
+
+
+def test_assisted_reps_requires_assisted_marking() -> None:
+    """携带 ``assisted_reps`` 的组必须显式标记 ``assistance='assisted'``（06 6.3「排除人工辅助组」）。
+
+    否则只按 ``assistance`` 过滤的 PR 视图会把「含实际发力帮助」的组当独立完成计入
+    （S3-12 残留⑦ 的生产校验侧一致性）。
+    """
+    occurred_on = date(2026, 9, 16)
+
+    def payload(single: SetFacts) -> RecordDraftPayload:
+        return RecordDraftPayload(
+            occurred_on=occurred_on,
+            training_session_id=None,
+            exercises=(
+                DraftExerciseLog(
+                    position=1,
+                    facts=ExerciseLogFacts(
+                        exercise_id="barbell-back-squat",
+                        record_type="reps_weight",
+                        load_notation="barbell_includes_bar_total",
+                    ),
+                    sets=(single,),
+                ),
+            ),
+        )
+
+    # 明确「实际帮助」时允许携带 assisted_reps
+    validate_record_draft(
+        payload(
+            SetFacts(
+                set_no=1,
+                set_type="work",
+                load=RawLoad("110", "kg"),
+                reps=3,
+                assistance="assisted",
+                assisted_reps=2,
+            )
+        )
+    )
+    # 未标记／错误标记辅助却携带 assisted_reps：拒绝
+    for assistance in (None, "none", "spotter_only"):
+        with pytest.raises(InvalidRecordFact, match="assisted_reps"):
+            validate_record_draft(
+                payload(
+                    SetFacts(
+                        set_no=1,
+                        set_type="work",
+                        load=RawLoad("110", "kg"),
+                        reps=3,
+                        assistance=assistance,  # type: ignore[arg-type]
+                        assisted_reps=2,
+                    )
+                )
+            )
+    # 不带 assisted_reps 时未标记辅助仍允许（未申报 ≠ 实际帮助）
+    validate_record_draft(
+        payload(SetFacts(set_no=1, set_type="work", load=RawLoad("110", "kg"), reps=3))
+    )

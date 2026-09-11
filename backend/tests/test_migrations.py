@@ -2,7 +2,8 @@
 
 生产迁移经 storage/migrations/001_*.sql（Stage 0）、002_*.sql（Stage 1 两项业务
 存储）、004_*.sql（Stage 2 草稿表）、005–007_*.sql（Stage 3 计划侧表、草稿 kind
-扩展、可推荐系统迁移）与 008–009_*.sql（Stage 3 安排草稿载荷、记录侧四表）；
+扩展、可推荐系统迁移）、008–010_*.sql（Stage 3 安排草稿载荷、记录侧四表、统计侧
+``pr_candidates`` 视图）与 011_*.sql（Stage 3 复盘两表）；
 升级/失败/重跑语义用临时注入的迁移目录验证（不向生产迁移目录塞测试用假迁移）。
 """
 
@@ -37,8 +38,10 @@ STAGE3_RECORD_TABLES = {
     "exercise_logs",
     "training_sets",
 }
-# 仍未建的后续阶段表（统计／复盘侧归 S3-12／S3-13；07 章责任边界）。
-LATER_STAGE_TABLES = {"reviews", "pr_candidates"}
+# S3-13 由 011 迁移新增的复盘两表：正文／快照本体与精确来源修订引用。
+STAGE3_REVIEW_TABLES = {"reviews", "review_source_revisions"}
+# Stage 3 表已全部落地：统计侧 ``pr_candidates`` 是视图（010），不在 type='table' 扫描内。
+LATER_STAGE_TABLES: set[str] = set()
 LATEST_VERSION = len(load_migrations())
 
 
@@ -63,6 +66,7 @@ async def test_fresh_initialize_creates_runtime_tables(tmp_path: Path) -> None:
             | STAGE2_TABLES
             | STAGE3_PLAN_TABLES
             | STAGE3_RECORD_TABLES
+            | STAGE3_REVIEW_TABLES
             | {"sqlite_sequence"}
         )
         assert tables & LATER_STAGE_TABLES == set()  # 不建统计／复盘侧表

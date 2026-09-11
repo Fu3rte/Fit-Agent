@@ -35,6 +35,7 @@ from domain.plan.schema import (
     InvalidPlanRow,
     PlanMode,
     PlanPayload,
+    _decode_int,
     arrangement_target_from_json,
     arrangement_target_to_json,
     payload_from_json,
@@ -108,7 +109,7 @@ def _row_to_arrangement(row: aiosqlite.Row) -> ArrangementRevisionRecord:
     return ArrangementRevisionRecord(
         id=str(row["id"]),
         scheduled_session_id=str(row["scheduled_session_id"]),
-        revision_no=int(row["revision_no"]),
+        revision_no=_decode_int("revision_no", row["revision_no"]),
         target=arrangement_target_from_json(str(row["target_snapshot_json"])),
         source_draft_id=str(row["source_draft_id"]),
         accepted_at=str(row["accepted_at"]),
@@ -172,7 +173,7 @@ def _row_to_version(row: aiosqlite.Row) -> PlanVersionRecord:
     source = row["source_plan_version_id"]
     return PlanVersionRecord(
         id=str(row["id"]),
-        version=int(row["version"]),
+        version=_decode_int("version", row["version"]),
         source_plan_version_id=None if source is None else str(source),
         starts_on=_iso_date("starts_on", row["starts_on"]),
         review_on=_iso_date("review_on", row["review_on"]),
@@ -313,6 +314,24 @@ class PlanRepo:
         require_outer_transaction(conn, "安排修订来源读取")
         return await _read_arrangement_by_source_draft(conn, draft_id)
 
+    async def list_arrangement_revision_ids_in_transaction(
+        self, conn: aiosqlite.Connection, scheduled_session_id: str
+    ) -> tuple[str, ...]:
+        """在**外层事务**内列出该日程的全部安排修订身份（含历史修订，按 ``revision_no``）。
+
+        统计侧要用「执行时**实际依据**的安排修订」判断该日程是否已完成（S3-08 交接⑦）：
+        记录绑定的是接受那一刻的那一条修订，后续再次接受只推进「当前安排」（最大
+        ``revision_no``），所以不能只认最新一条——只认最新会把早先依据下的完成漏掉。
+        """
+        require_outer_transaction(conn, "安排修订身份列表读取")
+        async with conn.execute(
+            "SELECT id FROM arrangement_revisions WHERE scheduled_session_id = ?"
+            " ORDER BY revision_no",
+            (scheduled_session_id,),
+        ) as cursor:
+            rows = await cursor.fetchall()
+        return tuple(str(row["id"]) for row in rows)
+
     async def read_latest_arrangement(
         self, scheduled_session_id: str
     ) -> ArrangementRevisionRecord | None:
@@ -348,6 +367,7 @@ class PlanRepo:
             row = await cursor.fetchone()
         if row is None:  # 聚合查询恒返回一行；缺失即连接异常
             raise RuntimeError("安排修订号读取失败")
+        revision_no = _decode_int("下一个安排修订号", row[0])
         await conn.execute(
             "INSERT INTO arrangement_revisions (id, scheduled_session_id, revision_no,"
             " target_snapshot_json, source_draft_id, accepted_at)"
@@ -355,7 +375,7 @@ class PlanRepo:
             (
                 arrangement_revision_id,
                 scheduled_session_id,
-                int(row[0]),
+                revision_no,
                 arrangement_target_to_json(target),
                 source_draft_id,
                 accepted_at,
@@ -441,13 +461,14 @@ class PlanRepo:
             row = await cursor.fetchone()
         if row is None:  # 聚合查询恒返回一行；缺失即连接异常
             raise RuntimeError("计划版本号读取失败")
+        version = _decode_int("下一个计划版本号", row[0])
         await conn.execute(
             "INSERT INTO plan_versions (id, version, source_plan_version_id,"
             " starts_on, review_on, mode, payload_json, source_draft_id, confirmed_at)"
             " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 plan_version_id,
-                int(row[0]),
+                version,
                 source_plan_version_id,
                 starts_on.isoformat(),
                 review_on.isoformat(),

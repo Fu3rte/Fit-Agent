@@ -64,11 +64,10 @@ STAGE3_RECORD_TABLES = {
     "exercise_logs",
     "training_sets",
 }
-# 统计／复盘侧表仍属后续阶段（S3-12／S3-13）
-LATER_STAGE_TABLES = {
-    "reviews",
-    "pr_candidates",
-}
+# S3-13 由 011 迁移新增复盘两表（stage3.md §5 S3-13 边界）。
+STAGE3_REVIEW_TABLES = {"reviews", "review_source_revisions"}
+# Stage 3 表已全部落地：统计侧 ``pr_candidates`` 是视图（010），不在 type='table' 扫描内。
+LATER_STAGE_TABLES: set[str] = set()
 
 LATEST_VERSION = len(load_migrations())
 STAGE0_VERSION = 1
@@ -248,6 +247,7 @@ async def test_fresh_database_creates_only_the_draft_table_beyond_stage1(
             | STAGE2_TABLES
             | STAGE3_PLAN_TABLES
             | STAGE3_RECORD_TABLES
+            | STAGE3_REVIEW_TABLES
             | {"sqlite_sequence"}
         )
         assert tables & LATER_STAGE_TABLES == set()  # 统计／复盘侧表仍不得建

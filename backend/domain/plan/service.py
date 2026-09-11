@@ -333,6 +333,7 @@ def evaluate_plan_safety(
     payload: PlanPayload,
     *,
     catalog: Mapping[str, Exercise],
+    session_exercise_ids: Sequence[str] = (),
 ) -> PlanSafetyRecheck:
     """按**最新条件**复核整份计划（04 4.5；S3-07）：不只查当天训练日的动作。
 
@@ -340,15 +341,22 @@ def evaluate_plan_safety(
     命中按动作模式集合与限制求交，必须拿到目录行；读不到的身份记入
     ``unknown_exercise_ids`` 并阻断，不静默跳过（跳过会把「无法复核」读成「无冲突」）。
 
+    ``session_exercise_ids`` 是「当次条件」——某条已接受安排（04 4.3）在执行时实际要做的
+    动作身份：未来安排使用时仍须按最新限制与红旗复核，故与整份计划一并评估（去重，同一
+    身份只算一次）。调用方负责把当次条件的身份解析进来（S3-14 指导端点）。
+
     纯确定性、只读：不写正式事实、不改计划、不取消日程，也不替代生成侧（S3-03）与确认
     事务（S3-06）写入前的复查——本函数服务于「使用当前计划给出指导」这一时点。
     """
     validate_payload(payload)
     referenced = tuple(
         dict.fromkeys(
-            item.exercise_id
-            for workout in payload.plan_workouts
-            for item in workout.exercises
+            [
+                item.exercise_id
+                for workout in payload.plan_workouts
+                for item in workout.exercises
+            ]
+            + list(session_exercise_ids)
         )
     )
     actions = tuple(catalog[item_id] for item_id in referenced if item_id in catalog)

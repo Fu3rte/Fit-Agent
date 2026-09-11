@@ -57,8 +57,10 @@ STAGE3_RECORD_TABLES = {
     "exercise_logs",
     "training_sets",
 }
-# 仍未建的后续阶段表（统计／复盘侧归 S3-12／S3-13）。
-LATER_STAGE_TABLES = {"reviews", "pr_candidates"}
+# S3-13 由 011 迁移新增的复盘两表（表集合断言显式扩展、不删测试）。
+STAGE3_REVIEW_TABLES = {"reviews", "review_source_revisions"}
+# Stage 3 表已全部落地：统计侧 ``pr_candidates`` 是视图（010），不在 type='table' 扫描内。
+LATER_STAGE_TABLES: set[str] = set()
 DRAFT_PAYLOAD_COLUMNS = (
     "proposed_plan_json",
     "proposed_profile_patch_json",
@@ -336,6 +338,7 @@ async def test_empty_database_creates_stage3_plan_tables_without_statistics_side
             | STAGE2_TABLES
             | STAGE3_PLAN_TABLES
             | STAGE3_RECORD_TABLES
+            | STAGE3_REVIEW_TABLES
             | {"sqlite_sequence"}
         )
         assert tables & LATER_STAGE_TABLES == set()  # 统计／复盘侧表归 S3-12／S3-13
@@ -592,13 +595,16 @@ async def test_failed_stage3_migration_rolls_back_and_can_be_retried(
         assert await db.pragma_value("user_version") == STAGE2_VERSION
         await RunRepo(db).create_conversation("c1")
 
-    # 临时目录补上 005–009（005 故意损坏）：与生产目录同编号，不动生产目录
+    # 临时目录补上 005–012（005 故意损坏）：与生产目录同编号，不动生产目录
     for name in (
         "005_stage3_plan_tables.sql",
         "006_stage3_draft_kinds.sql",
         "007_stage3_recommendable_seed.sql",
         "008_stage3_arrangement_draft_payload.sql",
         "009_stage3_record_tables.sql",
+        "010_stage3_pr_candidates_view.sql",
+        "011_stage3_reviews.sql",
+        "012_stage3_pr_candidates_assisted_reps.sql",
     ):
         shutil.copy(DEFAULT_MIGRATIONS_DIR / name, directory / name)
     broken = directory / PLAN_TABLES_MIGRATION_FILE
@@ -610,7 +616,7 @@ async def test_failed_stage3_migration_rolls_back_and_can_be_retried(
         encoding="utf-8",
     )
 
-    # 重跑时 005 失败：版本停在 004，005 的半套结构回滚，006–009 不执行
+    # 重跑时 005 失败：版本停在 004，005 的半套结构回滚，006–012 不执行
     async with open_database(path, migrate=False, migrations_dir=directory) as db:
         with pytest.raises(MigrationError, match="005"):
             await db.migrate()
@@ -620,7 +626,7 @@ async def test_failed_stage3_migration_rolls_back_and_can_be_retried(
         assert "kind" not in await _column_names(db, "business_drafts")
         assert await _row_count(db, "conversations") == 1  # 旧数据保留
 
-        # 修复迁移后重跑：不需要删库，005–009 依序补齐
+        # 修复迁移后重跑：不需要删库，005–012 依序补齐
         broken.write_text(original, encoding="utf-8")
         assert await db.migrate() == LATEST_VERSION
         assert await db.pragma_value("user_version") == LATEST_VERSION

@@ -21,17 +21,23 @@ SQL 与事务编排都不在这里：路由调用应用层（``app/drafts.py``�
 """
 
 import json
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
+from dataclasses import fields, is_dataclass
+from datetime import date, datetime
 from typing import Any, cast
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
+from app.arrangement_drafts import ArrangementDraftView
 from app.confirm import (
+    ArrangementCommitResult,
     DraftDiscarded,
     DraftStale,
     NoBusinessChange,
+    PlanCommitResult,
     ProfileCommitResult,
+    RecordCommitResult,
 )
 from app.drafts import (
     DraftKindMismatch,
@@ -42,6 +48,23 @@ from app.drafts import (
     ProfileFieldDiff,
     UnknownDraft,
 )
+from app.plan_drafts import PlanDraftView
+from app.plan_reads import (
+    PlanGuidance,
+    PlanScheduleView,
+    ScheduledSessionView,
+)
+from app.record_drafts import RecordDraftView
+from app.review_store import ReviewView
+from domain.plan.rules import InvalidArrangementTarget, InvalidPlanPayload
+from domain.plan.schema import (
+    InvalidPlanRow,
+    PlanPayload,
+    arrangement_target_to_json,
+    payload_from_json,
+    payload_to_json,
+)
+from domain.plan.service import PlanSafetyRecheck
 from domain.profile.rules import (
     IncompleteProfile,
     InvalidProfile,
@@ -58,12 +81,33 @@ from domain.profile.schema import (
     ProfileSnapshot,
     RestrictionScope,
 )
+from domain.records.rules import InvalidRecordFact
+from domain.records.schema import (
+    InvalidRecordRow,
+    RecordDraftPayload,
+    record_draft_from_json,
+    record_draft_to_json,
+)
+from domain.records.service import TrainingRecordView
+from domain.stats.schema import (
+    TargetJudgement,
+    WeekCompletion,
+    review_basis_to_json,
+)
 
 _STALE_DETAIL_NO_FIELD_CHANGE = "业务版本已变化，当前快照无字段差异"
 
 
 class InvalidRequestShape(ValueError):
     """请求体不是接口约定的 JSON 形状：在触碰应用层之前即拒绝（400 ``invalid_request``）。"""
+
+
+class UnknownResource(ValueError):
+    """按身份读取的只读资源不存在（计划版本／记录／复盘）：404 ``invalid_request``。
+
+    与 :class:`~app.drafts.UnknownDraft` 同口径（明确未找到，不创建资源、不伪造空结果），
+    不新增前端契约之外的 ``error_code``。
+    """
 
 
 def _reject_json_constant(literal: str) -> object:
@@ -151,6 +195,38 @@ def commit_result_dto(result: ProfileCommitResult) -> dict[str, Any]:
         "committed_revision": result.committed_revision,
         "committed_business_version": result.committed_business_version,
     }
+
+
+def any_commit_result_dto(result: Any) -> dict[str, Any]:
+    """按提交结果类型补充各自建立的正式事实身份（计划版本／安排修订／训练修订）。
+
+    公共凭据部分与档案确认同形状；额外字段都是**首次确认**建立的那一条（不取「最新」，
+    重复确认与后续业务版本变化返回同一份数据）。
+    """
+    base = commit_result_dto(result)
+    if isinstance(result, PlanCommitResult):
+        return {
+            **base,
+            "plan_version_id": result.plan_version_id,
+            "plan_version": result.plan_version,
+        }
+    if isinstance(result, ArrangementCommitResult):
+        return {
+            **base,
+            "arrangement_revision_id": result.arrangement_revision_id,
+            "arrangement_revision_no": result.arrangement_revision_no,
+            "scheduled_session_id": result.scheduled_session_id,
+            "accepted_at": result.accepted_at,
+        }
+    if isinstance(result, RecordCommitResult):
+        return {
+            **base,
+            "training_session_id": result.training_session_id,
+            "session_revision_id": result.session_revision_id,
+            "revision_no": result.revision_no,
+            "revision_status": result.status,
+        }
+    return base
 
 
 # ---------- 请求体 → 应用层载体 ----------
@@ -272,6 +348,10 @@ _ERROR_STATUS: tuple[tuple[type[Exception], int, str], ...] = (
     (InvalidProfile, 422, "invalid_request"),
     (IncompleteProfile, 422, "invalid_request"),
     (UnknownExerciseReference, 422, "invalid_request"),
+    (UnknownResource, 404, "invalid_request"),
+    (InvalidPlanPayload, 422, "invalid_request"),
+    (InvalidArrangementTarget, 422, "invalid_request"),
+    (InvalidRecordFact, 422, "invalid_request"),
 )
 
 
@@ -306,3 +386,359 @@ def install_error_handlers(app: FastAPI) -> None:
     """按 :data:`_ERROR_STATUS` 注册异常处理器：全部业务端点共享同一错误形状。"""
     for exc_type, status, error_code in _ERROR_STATUS:
         app.add_exception_handler(exc_type, _handler_for(status, error_code))
+
+
+# ---------- Stage 3：计划／日程只读投影（04 4.2/4.5；S3-14） ----------
+
+
+def _jsonable(value: Any) -> Any:
+    """领域值 → JSON 可序列化的传输值（dataclass／date／tuple／Mapping 递归）。
+
+    与 ``domain.plan.schema`` 的存储编码同口径：``None`` 字段省略、日期输出 ISO 文本。
+    用于 Diff 的 before／after 与没有单独文本契约的结构（安排的计划训练日）。
+    """
+    if isinstance(value, (datetime, date)):
+        return value.isoformat()
+    if is_dataclass(value) and not isinstance(value, type):
+        return {
+            item.name: _jsonable(getattr(value, item.name))
+            for item in fields(value)
+            if getattr(value, item.name) is not None
+        }
+    if isinstance(value, (tuple, list)):
+        return [_jsonable(item) for item in value]
+    if isinstance(value, dict):
+        return {str(key): _jsonable(item) for key, item in value.items()}
+    return value
+
+
+def _roundtrip_json(text: str) -> Any:
+    """存储契约文本 → JSON 传输形状：解析本模块调用的 ``*_to_json`` 刚生成的文本。
+
+    文本来自同一路径的 ``json.dumps``，正常编码不可能产出解析不了的 JSON；真解析失败只能是
+    服务端编码器坏了，因此显式翻译为 ``ValueError``——它不在 :data:`_ERROR_STATUS` 里，保持
+    500 服务端故障，不伪装成客户端 400（同模块「未登记异常不映射」口径）。
+    """
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"内部载荷不是合法 JSON：{exc}") from exc
+
+
+def schedule_dto(item: ScheduledSessionView) -> dict[str, Any]:
+    """一条应训练名额 → 传输对象：存储锁定与到期判定分别给出，``effective`` 是拒绝改期的依据。
+
+    ``weekday`` 由 ``scheduled_on`` 派生（1=周一；D9：weekday 不进 payload）；``status`` 取
+    ``cancelled``／``locked``／``scheduled`` 三值，取消优先（取消的名额不再是应训练义务）。
+    """
+    session = item.session
+    return {
+        "id": session.id,
+        "plan_version_id": session.plan_version_id,
+        "plan_workout_key": session.plan_workout_key,
+        "scheduled_on": session.scheduled_on.isoformat(),
+        "weekday": session.scheduled_on.isoweekday(),
+        "cancelled": item.cancelled,
+        "cancelled_at": session.cancelled_at,
+        "locked_at": session.locked_at,
+        "lock": {
+            "stored": item.lock.stored,
+            "by_business_date": item.lock.by_business_date,
+            "effective": item.lock.effective,
+        },
+        "status": (
+            "cancelled"
+            if item.cancelled
+            else ("locked" if item.lock.effective else "scheduled")
+        ),
+    }
+
+
+def plan_view_dto(view: PlanScheduleView) -> dict[str, Any]:
+    """一个计划版本（当前或历史）→ 传输对象：行字段 + D9 payload + 全部日程（含取消／锁定）。
+
+    payload 直接以 D9 文本契约形状给出（``payload_to_json`` 的 JSON），不另造第二份计划
+    结构；``is_current`` 区分当前与历史（历史不重激活，仅可查看）。
+    """
+    version = view.version
+    return {
+        "id": version.id,
+        "version": version.version,
+        "source_plan_version_id": version.source_plan_version_id,
+        "starts_on": version.starts_on.isoformat(),
+        "review_on": version.review_on.isoformat(),
+        "mode": version.mode,
+        "is_current": view.is_current,
+        "confirmed_at": version.confirmed_at,
+        "template_key": version.payload.template_key,
+        "plan": _roundtrip_json(payload_to_json(version.payload)),
+        "schedules": [schedule_dto(item) for item in view.sessions],
+    }
+
+
+def plan_safety_dto(
+    safety: PlanSafetyRecheck, *, context_version: int, reviewed_at: str
+) -> dict[str, Any]:
+    """整份计划安全复核 → 传输对象（04 4.5；已拍：目录身份读不到给具体阻断）。
+
+    限制冲突与红旗各自独立可读；``unknown_exercise_ids`` 非空时给具体用户可见安全阻断
+    ``block_code='plan_action_unavailable'``（不降级为「需澄清」、不当作「无冲突」），且
+    ``usable=false``。``clarifications`` 只是需澄清项，不等于安全放行。
+    """
+    return {
+        "context_version": context_version,
+        "reviewed_at": reviewed_at,
+        "usable": not safety.is_blocked,
+        "red_flag_blocked": safety.red_flags.is_blocked,
+        "conflicts": [
+            {
+                "exercise_id": hit.exercise_id,
+                "exercise_name": hit.standard_name,
+                "restriction": {
+                    "scope": hit.restriction.scope,
+                    "target": hit.restriction.target,
+                },
+                "matched_modes": list(hit.matched_modes),
+            }
+            for hit in safety.restriction_conflicts
+        ],
+        "action_unavailable": bool(safety.unknown_exercise_ids),
+        "block_code": (
+            "plan_action_unavailable" if safety.unknown_exercise_ids else None
+        ),
+        "unknown_exercise_ids": list(safety.unknown_exercise_ids),
+        "reasons": list(safety.blocking_reasons),
+        "clarifications": list(safety.clarification_reasons),
+    }
+
+
+def guidance_dto(guidance: PlanGuidance, *, reviewed_at: str) -> dict[str, Any]:
+    """「基于计划的指导」前置复核 → 传输对象：计划投影 + 安全复核（不给绕过复核的指导）。"""
+    return {
+        "plan": plan_view_dto(guidance.plan),
+        "safety": plan_safety_dto(
+            guidance.safety,
+            context_version=guidance.context_version,
+            reviewed_at=reviewed_at,
+        ),
+    }
+
+
+# ---------- Stage 3：记录与统计只读（05／06；S3-14） ----------
+
+
+def record_dto(view: TrainingRecordView) -> dict[str, Any]:
+    """一次训练 → 传输对象：稳定身份 + 当前修订摘要 + 当前修订完整事实（06 只消费当前修订）。"""
+    session = view.session
+    current = session.current
+    return {
+        "id": session.id,
+        "created_at": session.created_at,
+        "revision": (
+            None
+            if current is None
+            else {
+                "id": current.id,
+                "revision_no": current.revision_no,
+                "status": current.status,
+                "occurred_on": current.occurred_on.isoformat(),
+            }
+        ),
+        "record": _roundtrip_json(record_draft_to_json(view.payload)),
+    }
+
+
+def target_judgement_dto(judgement: TargetJudgement) -> dict[str, Any]:
+    """组级三桶判定 → 传输对象；三桶用契约用语 met／unmet／pending（无对照时全零）。"""
+    counts = judgement.counts
+    return {
+        "session_revision_id": judgement.session_revision_id,
+        "has_comparison": judgement.has_comparison,
+        "is_return_phase": judgement.is_return_phase,
+        "buckets": {
+            "met": counts.fit,
+            "unmet": counts.unmet,
+            "pending": counts.incomplete,
+        },
+    }
+
+
+def week_completion_dto(completion: WeekCompletion) -> dict[str, Any]:
+    """一个计划周完成率 → 传输对象；分母为零的「暂无」由服务返回 None，本函数不伪造。"""
+    return {
+        "plan_version_id": completion.plan_version_id,
+        "week_no": completion.week_no,
+        "week_start": completion.week_start.isoformat(),
+        "week_end": completion.week_end.isoformat(),
+        "planned": completion.denominator,
+        "completed": completion.numerator,
+        "rate": (
+            None
+            if completion.denominator == 0
+            else completion.numerator / completion.denominator
+        ),
+    }
+
+
+def review_dto(view: ReviewView) -> dict[str, Any]:
+    """一条复盘 → 传输对象：Markdown 正文 + 生成时快照 + 现算 stale（不静默改写正文）。"""
+    return {
+        "id": view.id,
+        "body_markdown": view.body_markdown,
+        "stale": view.stale,
+        "generated_at": view.generated_at,
+        "source_revision_ids": list(view.source_revision_ids),
+        "basis": _roundtrip_json(review_basis_to_json(view.basis)),
+    }
+
+
+# ---------- Stage 3：草稿载荷映射（计划／记录／安排；S3-14） ----------
+
+
+def _draft_row_dto(draft: Any) -> dict[str, Any]:
+    """草稿行的传输字段（与档案草稿同一形状）：身份、kind、状态、revision 与提交凭据。"""
+    return {
+        "id": draft.id,
+        "kind": draft.kind,
+        "status": draft.status,
+        "revision": draft.revision,
+        "base_business_version": draft.base_business_version,
+        "committed_revision": draft.committed_revision,
+        "committed_business_version": draft.committed_business_version,
+    }
+
+
+def _structured_diff_dto(items: Sequence[Any]) -> list[dict[str, Any]]:
+    """结构化字段 Diff → 传输对象：保留字段名与 before／after 结构，不压成文本 diff。"""
+    return [
+        {
+            "field": item.field,
+            "before": _jsonable(item.before),
+            "after": _jsonable(item.after),
+            "changed": item.changed,
+        }
+        for item in items
+    ]
+
+
+def plan_draft_dto(view: PlanDraftView) -> dict[str, Any]:
+    """计划草稿 → 传输对象：拟议计划（D9 文本契约形状）＋日程／取消预览／档案补丁 + 结构化 Diff。
+
+    计划行字段（``starts_on``／``review_on``／``mode``／``source_plan_version_id``）与 payload
+    分开给出（D9：关系字段不进 payload）；``cancellations`` 只是拟议预览，正式取消在确认事务
+    内按当刻规则重算。
+    """
+    proposal = view.proposal
+    return {
+        **_draft_row_dto(view.draft),
+        "payload": {
+            "starts_on": proposal.starts_on.isoformat(),
+            "review_on": proposal.review_on.isoformat(),
+            "mode": proposal.mode,
+            "source_plan_version_id": proposal.source_plan_version_id,
+            "plan": _roundtrip_json(payload_to_json(proposal.payload)),
+            "schedules": _jsonable(view.schedules),
+            "cancellations": _jsonable(proposal.cancellations),
+            "proposed_profile": profile_facts_dto(view.proposed_profile),
+            "profile_patch": (
+                None
+                if view.proposed_profile_patch is None
+                else _jsonable(view.proposed_profile_patch)
+            ),
+        },
+        "diff": _structured_diff_dto(view.plan_diff),
+        "profile_diff": (
+            None
+            if view.profile_diff is None
+            else [_field_diff_dto(item) for item in view.profile_diff]
+        ),
+    }
+
+
+def record_draft_dto(view: RecordDraftView) -> dict[str, Any]:
+    """记录草稿 → 传输对象：拟议载荷（存储契约形状）＋派生修订状态 + 结构化 Diff。
+
+    Diff 由后端按存储载荷与库内基线现算，不接受客户端 before／after。
+    """
+    return {
+        **_draft_row_dto(view.draft),
+        "payload": {
+            "record": _roundtrip_json(record_draft_to_json(view.payload)),
+            "status": view.status,
+        },
+        "diff": _structured_diff_dto(view.diff),
+    }
+
+
+def arrangement_draft_dto(view: ArrangementDraftView) -> dict[str, Any]:
+    """安排草稿 → 传输对象：当次完整目标（快照形状）＋绑定版本该训练日（原计划对照）。"""
+    return {
+        **_draft_row_dto(view.draft),
+        "payload": {
+            "target": _roundtrip_json(arrangement_target_to_json(view.target)),
+            "planned_workout": _jsonable(view.planned_workout),
+        },
+        "session": _jsonable(view.session),
+        "plan_version": {
+            "id": view.plan_version.id,
+            "version": view.plan_version.version,
+        },
+    }
+
+
+def any_draft_dto(view: Any) -> dict[str, Any]:
+    """按草稿视图类型分派载荷映射（计划／记录／安排／档案），不把别的 kind 按错形状发出。"""
+    if isinstance(view, PlanDraftView):
+        return plan_draft_dto(view)
+    if isinstance(view, RecordDraftView):
+        return record_draft_dto(view)
+    if isinstance(view, ArrangementDraftView):
+        return arrangement_draft_dto(view)
+    return draft_dto(cast(DraftView, view))
+
+
+# ---------- Stage 3：草稿纠错请求体解码 ----------
+
+
+def _date_from_dto(name: str, value: object) -> date:
+    if not isinstance(value, str):
+        raise InvalidRequestShape(f"{name} 必须是 ISO 日期文本：{value!r}")
+    try:
+        return date.fromisoformat(value)
+    except ValueError as exc:
+        raise InvalidRequestShape(f"{name} 不是 ISO 日期：{value!r}") from exc
+
+
+def plan_revision_from_dto(body: dict[str, Any]) -> tuple[date, date, PlanPayload]:
+    """计划纠错载荷 → （starts_on, review_on, D9 payload）。
+
+    只做形状解码：payload 用 D9 文本契约（``payload_from_json``），不符合契约按传输形状拒绝
+    （400）；业务规则（区间、引用、限制）由应用层领域校验拒绝（422），这里不重复实现。
+    """
+    payload = body["payload"]
+    if not isinstance(payload, dict) or set(payload) != {
+        "starts_on",
+        "review_on",
+        "plan",
+    }:
+        raise InvalidRequestShape(
+            "payload 必须是只含 starts_on／review_on／plan 的 JSON 对象"
+        )
+    starts_on = _date_from_dto("starts_on", payload["starts_on"])
+    review_on = _date_from_dto("review_on", payload["review_on"])
+    try:
+        plan = payload_from_json(json.dumps(payload["plan"], ensure_ascii=False))
+    except InvalidPlanRow as exc:
+        raise InvalidRequestShape(f"计划载荷形状不合法：{exc}") from exc
+    return starts_on, review_on, plan
+
+
+def record_payload_from_dto(body: dict[str, Any]) -> RecordDraftPayload:
+    """记录纠错载荷 → :class:`RecordDraftPayload`（存储契约形状；形状不符按 400 拒绝）。"""
+    payload = body["payload"]
+    if not isinstance(payload, dict):
+        raise InvalidRequestShape("payload 必须是 JSON 对象")
+    try:
+        return record_draft_from_json(json.dumps(payload, ensure_ascii=False))
+    except InvalidRecordRow as exc:
+        raise InvalidRequestShape(f"记录载荷形状不合法：{exc}") from exc

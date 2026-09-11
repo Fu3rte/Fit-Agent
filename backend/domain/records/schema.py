@@ -18,6 +18,7 @@
 """
 
 import json
+import math
 from collections.abc import Mapping
 from dataclasses import dataclass, fields, is_dataclass
 from datetime import date, datetime
@@ -408,7 +409,15 @@ def _decode_optional_number(label: str, value: Any) -> float | None:
         return None
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise InvalidRecordRow(f"{label} 必须是数值：{value!r}")
-    return float(value)
+    # 非有限浮点不是可用的事实值（JSON 解析器默认接受 NaN／Infinity，须在此挡住）；
+    # 只对 float 判 isfinite：int 本身有限，而 math.isfinite(超大 int) 会 OverflowError。
+    if isinstance(value, float) and not math.isfinite(value):
+        raise InvalidRecordRow(f"{label} 必须是有限数值：{value!r}")
+    # 上面的类型与有限性检查已排除溢出输入，转换实际不会抛；仍显式翻译，保持拒绝路径统一。
+    try:
+        return float(value)
+    except (OverflowError, ValueError) as exc:
+        raise InvalidRecordRow(f"{label} 无法换算为浮点：{value!r}") from exc
 
 
 def _decode_bool(label: str, value: Any) -> bool:

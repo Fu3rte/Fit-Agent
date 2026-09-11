@@ -45,8 +45,10 @@ STAGE3_RECORD_TABLES = {
     "exercise_logs",
     "training_sets",
 }
-# 仍未建的后续阶段表（统计／复盘侧归 S3-12／S3-13；07 章责任边界）。
-LATER_STAGE_TABLES = {"reviews", "pr_candidates"}
+# Stage 3 S3-13 由 011 迁移建立复盘两表（stage3.md §5 S3-13）。
+STAGE3_REVIEW_TABLES = {"reviews", "review_source_revisions"}
+# Stage 3 表已全部落地：统计侧 ``pr_candidates`` 是视图（010），不在 type='table' 扫描内。
+LATER_STAGE_TABLES: set[str] = set()
 
 LATEST_VERSION = len(load_migrations())
 # 003 精选种子行数（已拍 24 项清单；见 evidence/S1-evidence-2026-09-09.md）
@@ -196,6 +198,7 @@ async def test_fresh_database_migrates_to_latest_with_seed_and_no_profile_facts(
             | STAGE2_TABLES
             | STAGE3_PLAN_TABLES
             | STAGE3_RECORD_TABLES
+            | STAGE3_REVIEW_TABLES
             | {"sqlite_sequence"}
         )
         assert tables & LATER_STAGE_TABLES == set()  # 不建统计／复盘侧业务表

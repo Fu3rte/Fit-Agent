@@ -15,6 +15,7 @@
   给出：整份计划按最新限制与红旗确定性复核，阻断时只返回原因，不修改任何数据。
 """
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import date
 
@@ -62,14 +63,16 @@ class PlanScheduleView:
 
 @dataclass(frozen=True, slots=True)
 class PlanGuidance:
-    """「基于计划的指导」前置复核结果：当前计划投影 + 整份计划安全复核（04 4.5）。
+    """「基于计划的指导」前置复核结果：计划投影 + 整份计划安全复核（04 4.5）。
 
-    ``safety.is_blocked`` 为真时整份计划不得作为可执行训练建议，计划与历史仍可查看；
-    本结果不做任何写入，也不产生替代处方。
+    ``context_version`` 是复核所依据的业务版本（限制／身体情况变更后必须重新复核，
+    S3-14 传输层要把它带给前端）；``safety.is_blocked`` 为真时整份计划不得作为可执行训练
+    建议，计划与历史仍可查看；本结果不做任何写入，也不产生替代处方。
     """
 
     plan: PlanScheduleView
     safety: PlanSafetyRecheck
+    context_version: int
 
 
 class PlanReadService:
@@ -115,33 +118,92 @@ class PlanReadService:
             )
 
     async def read_current_plan_guidance(
-        self, *, business_date: date
+        self, *, business_date: date, session_exercise_ids: Sequence[str] = ()
     ) -> PlanGuidance | None:
         """请求「基于计划的指导」前的整份计划安全复核；尚无正式计划时返回 None。
 
         复核按**最新**正式条件（当刻档案的限制与身体情况）与目录动作模式执行，不只查当天
         训练日；限制冲突与红旗各自独立阻断，计划内动作读不到目录行同样 fail-closed。正式
         限制未收集时只给需澄清项，不当作「无冲突」。
+
+        ``session_exercise_ids`` 是当次条件（某条已接受安排实际要做的动作身份，04 4.3）：
+        未来安排使用时同样按最新限制与红旗复核，故一并评估；缺省只复核当前计划。
         """
         async with self._db.transaction() as conn:
             current = await self._plans.read_current_in_transaction(conn)
             if current is None:
                 return None
-            snapshot = await self._profiles.read_in_transaction(conn)
-            if snapshot.profile is None:
-                # 计划只能经确认事务建立，而确认要求正式档案；到这里即库内状态损坏，显式失败。
+            return await self._guidance_in_transaction(
+                conn,
+                current,
+                business_date=business_date,
+                session_exercise_ids=session_exercise_ids,
+            )
+
+    async def read_arrangement_guidance(
+        self, arrangement_revision_id: str, *, business_date: date
+    ) -> PlanGuidance | None:
+        """按**已接受安排**（当次条件）复核它绑定的计划版本与当次目标（04 4.3；S3-14）。
+
+        安排绑定具体计划版本与训练日，因此复核针对**绑定版本**的 payload（不是「当刻最新
+        计划」），并把它当次目标的动作身份作为 ``session_exercise_ids`` 一并复核——未来安排
+        使用时仍须按最新限制和红旗状态阻断（04 4.3），提前接受不绕过复核。安排修订不存在
+        返回 None（调用方映射 404，不伪造「无冲突」）。
+        """
+        async with self._db.transaction() as conn:
+            arrangement = await self._plans.read_arrangement_revision_in_transaction(
+                conn, arrangement_revision_id
+            )
+            if arrangement is None:
+                return None
+            version = await self._plans.read_version_in_transaction(
+                conn, arrangement.target.plan_version_id
+            )
+            if version is None:
                 raise InvalidPlanRow(
-                    f"存在正式计划却没有正式档案，无法复核计划安全：{current.id}"
+                    f"安排修订绑定的计划版本不存在：{arrangement.target.plan_version_id}"
                 )
-            plan = await self._build_view(
-                conn, current, is_current=True, business_date=business_date
+            current = await self._plans.read_current_in_transaction(conn)
+            return await self._guidance_in_transaction(
+                conn,
+                version,
+                business_date=business_date,
+                session_exercise_ids=tuple(
+                    item.exercise_id for item in arrangement.target.exercises
+                ),
+                is_current=current is not None and current.id == version.id,
             )
-            safety = evaluate_plan_safety(
-                snapshot.profile,
-                current.payload,
-                catalog=await self._plan_catalog_in_transaction(conn, current.payload),
+
+    async def _guidance_in_transaction(
+        self,
+        conn: aiosqlite.Connection,
+        version: PlanVersionRecord,
+        *,
+        business_date: date,
+        session_exercise_ids: Sequence[str],
+        is_current: bool = True,
+    ) -> PlanGuidance:
+        """单一事务快照内构造指导投影：计划视图 + 整份计划（含当次条件）安全复核。"""
+        snapshot = await self._profiles.read_in_transaction(conn)
+        if snapshot.profile is None:
+            # 计划只能经确认事务建立，而确认要求正式档案；到这里即库内状态损坏，显式失败。
+            raise InvalidPlanRow(
+                f"存在正式计划却没有正式档案，无法复核计划安全：{version.id}"
             )
-        return PlanGuidance(plan=plan, safety=safety)
+        plan = await self._build_view(
+            conn, version, is_current=is_current, business_date=business_date
+        )
+        safety = evaluate_plan_safety(
+            snapshot.profile,
+            version.payload,
+            catalog=await self._plan_catalog_in_transaction(
+                conn, version.payload, session_exercise_ids
+            ),
+            session_exercise_ids=session_exercise_ids,
+        )
+        return PlanGuidance(
+            plan=plan, safety=safety, context_version=snapshot.context_version
+        )
 
     async def _build_view(
         self,
@@ -169,17 +231,23 @@ class PlanReadService:
         )
 
     async def _plan_catalog_in_transaction(
-        self, conn: aiosqlite.Connection, payload: PlanPayload
+        self,
+        conn: aiosqlite.Connection,
+        payload: PlanPayload,
+        session_exercise_ids: Sequence[str] = (),
     ) -> dict[str, Exercise]:
-        """计划引用动作的目录投影（含停用动作）；读不到的身份不补造，留给复核记入缺失集。"""
+        """计划（及当次条件）引用动作的目录投影（含停用动作）；读不到的身份不补造。"""
+        referenced = dict.fromkeys(
+            [
+                item.exercise_id
+                for workout in payload.plan_workouts
+                for item in workout.exercises
+            ]
+            + list(session_exercise_ids)
+        )
         catalog: dict[str, Exercise] = {}
-        for workout in payload.plan_workouts:
-            for item in workout.exercises:
-                if item.exercise_id in catalog:
-                    continue
-                exercise = await self._exercises.get_by_id_in_transaction(
-                    conn, item.exercise_id
-                )
-                if exercise is not None:
-                    catalog[item.exercise_id] = exercise
+        for exercise_id in referenced:
+            exercise = await self._exercises.get_by_id_in_transaction(conn, exercise_id)
+            if exercise is not None:
+                catalog[exercise_id] = exercise
         return catalog

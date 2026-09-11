@@ -75,6 +75,9 @@ _SCANNED_TABLES = frozenset(
         "session_revisions",
         "exercise_logs",
         "training_sets",
+        # Stage 3 新增的复盘两表（S3-13）：同样必须被扫描覆盖
+        "reviews",
+        "review_source_revisions",
     }
 )
 
@@ -200,6 +203,14 @@ async def all_text_cells(db: Database) -> list[tuple[str, str, str]]:
         async with conn.execute("SELECT * FROM training_sets") as cursor:
             columns = tuple(str(c[0]) for c in cursor.description)
             cells += _rows_as_cells("training_sets", columns, await cursor.fetchall())
+        async with conn.execute("SELECT * FROM reviews") as cursor:
+            columns = tuple(str(c[0]) for c in cursor.description)
+            cells += _rows_as_cells("reviews", columns, await cursor.fetchall())
+        async with conn.execute("SELECT * FROM review_source_revisions") as cursor:
+            columns = tuple(str(c[0]) for c in cursor.description)
+            cells += _rows_as_cells(
+                "review_source_revisions", columns, await cursor.fetchall()
+            )
         return cells
 
     return await db.under_lock(op)

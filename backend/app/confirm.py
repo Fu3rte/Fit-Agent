@@ -43,6 +43,14 @@ stage3.md §4.2（计划草稿确认的额外步骤）/§5 S3-06。
 ``accepted_at``**）→ ``context_version`` 恰好 +1 → 草稿 Committed 与凭据。**不写**
 ``plan_versions``／``scheduled_sessions``／``user_profile``：临时调整不改长期计划（04 4.3）；
 日程锁定与当次处方接受分离，已到期锁定的日程仍可接受减组等调整，已取消的日程拒结。
+
+训练记录草稿确认与作废（S3-11）在同一事务内只做：复查存储的最终载荷（结构、动作身份、
+安排目标项对应）→ 按显式归属建立新训练身份或追加到既有身份（完整修订 + 动作事实 + 逐组
+事实，只追加不删除）→ 原子切换 ``training_sessions.current_revision_id`` → ``context_version``
+恰好 +1 → 草稿 Committed 与凭据。不写计划／安排／档案：记录只由训练本身驱动。确认把**数据库
+保存的最终草稿**原样落盘（01 1.4）：显式声明的 ``assistance='none'`` 落成 ``none``，未明确
+的保持 NULL（不代替确认卡归类，05 5.5）；关联的安排修订取草稿里**执行时所依据**的那一条，
+不重解析「当刻最新」。
 """
 
 from dataclasses import dataclass
@@ -65,6 +73,7 @@ from app.plan_drafts import (
     proposed_cancellations,
     require_valid_proposal_fields,
 )
+from app.record_drafts import RECORD_DRAFT_KIND, require_target_items_match
 from domain.actions.repo import ExerciseRepo
 from domain.plan.repo import (
     ArrangementRevisionRecord,
@@ -96,6 +105,13 @@ from domain.profile.schema import (
     profile_from_json,
 )
 from domain.profile.service import ProfileService
+from domain.records.repo import RecordRepo, SessionRevisionRecord
+from domain.records.rules import (
+    InvalidRecordFact,
+    record_draft_status,
+    validate_record_draft,
+)
+from domain.records.schema import RecordDraftPayload, record_draft_from_json
 from storage.db import Database
 
 
@@ -274,6 +290,45 @@ def _arrangement_commit_result(
     )
 
 
+@dataclass(frozen=True, slots=True)
+class RecordCommitResult:
+    """一次训练记录确认（或作废）提交的不可变结果（01 1.3「提交凭据」＋该次写下的修订）。
+
+    凭据部分与:class:`PlanCommitResult` 同口径（写成草稿行后不再被改写）；
+    ``training_session_id`` 是该次训练身份（新增或补充的既有身份），
+    ``session_revision_id``／``revision_no``／``status`` 指向**首次确认**写下的那条修订，
+    由 ``session_revisions.source_draft_id`` 唯一确定（不取「当前修订」，后续更正／作废不会改
+    变本结果），因此重复确认、关闭重开、后续业务版本变化后重试都返回同一份数据。
+    """
+
+    draft_id: str
+    committed_revision: int
+    committed_business_version: int
+    training_session_id: str
+    session_revision_id: str
+    revision_no: int
+    status: str
+
+
+def _record_commit_result(
+    draft: Draft, record: SessionRevisionRecord
+) -> RecordCommitResult:
+    """已 Committed 草稿行＋该次写下的训练修订 → 记录提交结果。"""
+    revision = draft.committed_revision
+    version = draft.committed_business_version
+    if revision is None or version is None:
+        raise InvalidDraftRow(f"已 Committed 草稿缺少提交凭据：{draft.id}")
+    return RecordCommitResult(
+        draft_id=draft.id,
+        committed_revision=revision,
+        committed_business_version=version,
+        training_session_id=record.session_id,
+        session_revision_id=record.id,
+        revision_no=record.revision_no,
+        status=record.status,
+    )
+
+
 class ConfirmService:
     """档案草稿确认事务编排（S2-05）：幂等返回、基线／revision 拦截、原子提交。
 
@@ -288,6 +343,7 @@ class ConfirmService:
         self._writes = ProfileService(db)
         self._exercises = ExerciseRepo(db)
         self._plans = PlanRepo(db)
+        self._records = RecordRepo(db)
 
     async def confirm_profile_draft(
         self, *, draft_id: str, seen_revision: int
@@ -691,6 +747,209 @@ class ConfirmService:
             committed_business_version=committed_version,
         )
         return _arrangement_commit_result(committed, record)
+
+    async def confirm_record_draft(
+        self, *, draft_id: str, seen_revision: int
+    ) -> RecordCommitResult:
+        """确认训练记录草稿（S3-11）：新增训练身份或追加完整修订。
+
+        迁移与档案／计划／安排草稿确认同口径：幂等已提交 → 拒绝已丢弃 → 基线／revision →
+        事务内领域复查 → 原子写入 → COMMIT 之后才响应。额外步骤只有一步：把存储的最终载荷
+        落成完整修订。
+
+        - **稳定身份与同日多练**（05 5.1／5.4）：载荷的 ``training_session_id`` 是显式归属——
+          ``None`` 时**新建**一个 ``training_sessions`` 身份（同日多练各自身份，不按日期合并），
+          给出 id 时向该身份**追加**修订（补充同次不增加训练次数）。本编排不按日期、安排或
+          当前计划推断归属。
+        - **完整修订与原子切换**（05 5.3）：每笔写完整动作与逐组事实，随即把
+          ``current_revision_id`` 切到新修订；旧修订保留（只追加不删除），旧修订不再是当前事实。
+        - **原样落盘**（01 1.4）：写入的永远是数据库保存的最终草稿——显式 ``assistance='none'``
+          落成 ``none``，未明确的可空事实保持 NULL（不替确认卡归类，05 5.5）；
+          ``arrangement_revision_id`` 是执行时所依据的那条安排修订，不重解析「当刻最新」。
+        - **一次确认只推一次版本**：``context_version`` 恰好 +1，草稿 Committed 与凭据同事务。
+        """
+        return await self._confirm_record(
+            draft_id=draft_id, seen_revision=seen_revision, void=False
+        )
+
+    async def void_record_draft(
+        self, *, draft_id: str, seen_revision: int
+    ) -> RecordCommitResult:
+        """作废整次训练（S3-11）：向同一身份追加 ``voided`` 修订并切换当前指针。
+
+        与 :meth:`confirm_record_draft` 同一套拦截与事务，只在写入时把修订状态定为
+        ``voided``（事实仍完整落盘便于审计）。
+
+        - **不物理删除、不回退**（05 5.3）：旧修订与其动作／组事实全部保留；当前修订为作废时
+          整次退出统计，**不回退采用**旧有效版本（统计口径归 S3-12）。
+        - **必须绑定既有身份**：尚未建立的训练无法「作废」（新增即作废是无意义的空事实），
+          载荷 ``training_session_id=None`` 时拒结。
+        - 身份与次数不变（不新增 ``training_sessions``）、``context_version`` 恰好 +1、
+          重复确认返回原凭据且不重复追加修订。
+        """
+        return await self._confirm_record(
+            draft_id=draft_id, seen_revision=seen_revision, void=True
+        )
+
+    async def _confirm_record(
+        self, *, draft_id: str, seen_revision: int, void: bool
+    ) -> RecordCommitResult:
+        """记录确认／作废的共同事务形状：幂等返回 → 状态分派 → 事务内复查与写入。"""
+        async with self._db.transaction() as conn:
+            draft = await self._drafts.get_in_transaction(conn, draft_id)
+            if draft is None:
+                raise UnknownDraft(f"草稿不存在：{draft_id}")
+            # kind 分派必须在任何读写之前：非记录草稿走各自确认编排（S2-05/S3-06/S3-08）。
+            if draft.kind != RECORD_DRAFT_KIND:
+                raise DraftKindMismatch(
+                    f"记录草稿确认只适用于 kind={RECORD_DRAFT_KIND}，"
+                    f"收到 kind={draft.kind}：{draft_id}"
+                )
+            if draft.status == "committed":
+                result = await self._committed_record_result(conn, draft)
+            elif draft.status == "discarded":
+                raise DraftDiscarded(f"草稿已丢弃，不可确认：{draft_id}")
+            else:
+                result = await self._commit_pending_record(
+                    conn, draft, seen_revision, void=void
+                )
+        # 事务已 COMMIT（或本就不需要写）：只有到这里才把结果交给调用方（「提交后再响应」）。
+        return result
+
+    async def _committed_record_result(
+        self, conn: aiosqlite.Connection, draft: Draft
+    ) -> RecordCommitResult:
+        """已 Committed 记录草稿的幂等返回（§4.2 步骤 1）。
+
+        不重查基线、不重算领域规则、不重复追加修订；该次写下的修订由 ``source_draft_id``
+        唯一确定，因此结果指向首次确认那一笔（不是后续更正／作废后的「当前修订」）。缺修订行
+        即数据损坏，显式失败不静默兜底（与:class:`InvalidDraftRow` 同口径）。
+        """
+        record = await self._records.read_by_source_draft_in_transaction(conn, draft.id)
+        if record is None:
+            raise InvalidDraftRow(
+                f"已 Committed 记录草稿没有对应的训练修订：{draft.id}"
+            )
+        return _record_commit_result(draft, record)
+
+    async def _commit_pending_record(
+        self,
+        conn: aiosqlite.Connection,
+        draft: Draft,
+        seen_revision: int,
+        *,
+        void: bool,
+    ) -> RecordCommitResult:
+        """§4.2 步骤 3–5 的记录版：基线／revision → 复查 → 追加修订并切换指针 → 读回凭据。"""
+        snapshot = await self._profiles.read_in_transaction(conn)
+        if snapshot.context_version != draft.base_business_version:
+            base_profile = (
+                None
+                if draft.base_profile_json is None
+                else profile_from_json(draft.base_profile_json)
+            )
+            raise DraftStale(
+                draft_id=draft.id,
+                base_business_version=draft.base_business_version,
+                current_business_version=snapshot.context_version,
+                base_profile=base_profile,
+                current_profile=snapshot.profile,
+                changes=verifiable_field_changes(base_profile, snapshot.profile),
+            )
+        if draft.revision != seen_revision:
+            raise DraftRevisionConflict(
+                f"所见 revision {seen_revision} 与草稿当前 revision "
+                f"{draft.revision} 不符：{draft.id}"
+            )
+        # 复查数据库保存的最终草稿（不信任客户端传入内容，§4.2 步骤 4）。
+        if draft.proposed_record_json is None:
+            raise InvalidDraftRow(f"记录草稿缺少拟议载荷：{draft.id}")
+        payload = record_draft_from_json(draft.proposed_record_json)
+        validate_record_draft(payload)
+        for item in payload.exercises:
+            if (
+                await self._exercises.get_by_id_in_transaction(
+                    conn, item.facts.exercise_id
+                )
+                is None
+            ):
+                raise UnknownExerciseReference(
+                    f"记录动作不在目录内：{item.facts.exercise_id}"
+                )
+        if payload.arrangement_revision_id is not None:
+            arrangement = await self._plans.read_arrangement_revision_in_transaction(
+                conn, payload.arrangement_revision_id
+            )
+            if arrangement is None:
+                raise InvalidArrangementTarget(
+                    f"安排修订不存在：{payload.arrangement_revision_id}"
+                )
+            require_target_items_match(payload, arrangement)
+        now = _now()
+        session_id, previous_revision_id, revision_no = await self._resolve_target(
+            conn, draft, payload, void=void, created_at=now
+        )
+        record = await self._records.append_revision_in_transaction(
+            conn,
+            revision_id=uuid4().hex,
+            session_id=session_id,
+            revision_no=revision_no,
+            previous_revision_id=previous_revision_id,
+            status="voided" if void else record_draft_status(payload),
+            source_draft_id=draft.id,
+            confirmed_at=now,
+            payload=payload,
+        )
+        committed_version = await self._profiles.bump_context_version_in_transaction(
+            conn
+        )
+        committed = await self._drafts.record_commit_in_transaction(
+            conn,
+            draft_id=draft.id,
+            committed_revision=draft.revision,
+            committed_business_version=committed_version,
+        )
+        return _record_commit_result(committed, record)
+
+    async def _resolve_target(
+        self,
+        conn: aiosqlite.Connection,
+        draft: Draft,
+        payload: RecordDraftPayload,
+        *,
+        void: bool,
+        created_at: str,
+    ) -> tuple[str, str | None, int]:
+        """把显式归属解析成（训练身份 id、被替换的当前修订、本笔修订号）。
+
+        ``payload.training_session_id is None`` 是显式的「新增一次训练」：同事务建立新身份，
+        本笔为 ``revision_no=1`` 且无前序修订。给出 id 时只向该既有身份追加：修订号按当前修订
+        +1（只追加、恰好 +1），``previous_revision_id`` 取当前修订（历史链不断），绝不按日期
+        挑选身份（05 5.4）。作废不能作用在尚未建立的训练上。
+        """
+        training_session_id = payload.training_session_id
+        if training_session_id is None:
+            if void:
+                raise InvalidRecordFact(
+                    f"作废必须绑定既有训练身份，不能作废尚未建立的训练：{draft.id}"
+                )
+            session_id = uuid4().hex
+            await self._records.create_session_in_transaction(
+                conn, session_id=session_id, created_at=created_at
+            )
+            return (session_id, None, 1)
+        session = await self._records.read_session_in_transaction(
+            conn, training_session_id
+        )
+        if session is None or session.current is None:
+            raise InvalidDraftRow(
+                f"记录草稿绑定的训练身份不存在或没有当前修订：{training_session_id}"
+            )
+        return (
+            session.id,
+            session.current_revision_id,
+            session.current.revision_no + 1,
+        )
 
     async def _require_known_restriction_targets(
         self, conn: aiosqlite.Connection, proposed: Profile

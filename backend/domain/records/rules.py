@@ -65,7 +65,12 @@ def _scaled_kg_key(value_text: str, unit: str) -> int:
     scaled = value * LOAD_KEY_SCALE
     if scaled > MAX_LOAD_KG_KEY:
         raise InvalidRecordFact(f"负重超出可存储范围：{value_text!r}")
-    key = int(scaled.quantize(Decimal(1), rounding=ROUND_HALF_EVEN))
+    # 守卫已排除 NaN／Infinity 与超限值，量化与取整实际不会抛；仍显式翻译，
+    # 保证任何路径都以 InvalidRecordFact 拒绝（不向调用方漏出 Decimal／int 原生异常）。
+    try:
+        key = int(scaled.quantize(Decimal(1), rounding=ROUND_HALF_EVEN))
+    except (InvalidOperation, OverflowError, ValueError) as exc:
+        raise InvalidRecordFact(f"负重无法换算为整数键：{value_text!r}") from exc
     return key
 
 
@@ -105,15 +110,19 @@ def optional_rir(rir: float | None) -> float | None:
         raise InvalidRecordFact(f"RIR 必须为数值或空：{rir!r}")
     if not math.isfinite(rir) or rir < 0:
         raise InvalidRecordFact(f"RIR 必须为非负有限数值：{rir!r}")
-    return float(rir)
+    # 上面的有限性检查已排除溢出输入，转换实际不会抛；仍显式翻译，保持拒绝路径统一。
+    try:
+        return float(rir)
+    except (OverflowError, ValueError) as exc:
+        raise InvalidRecordFact(f"RIR 无法换算为浮点：{rir!r}") from exc
 
 
 def validate_record_draft(payload: RecordDraftPayload) -> None:
     """记录草稿结构校验：只拒绝结构上不合法的事实，不要求必填事实完整。
 
-    - 词汇与形态：``record_type`` 落在目录三类；``load_notation`` 只属于外加负重次数型
-      （同 009 的库内 CHECK 与 002 目录口径），其余类型为空；``set_type``／``assistance``
-      落在已拍词表，未明确时为 ``None``（不静默认定热身组、无辅助）；
+    - 词汇与形态：``record_type`` 落在目录三类；``load_notation``／组级 ``load`` 只属于外加
+      负重次数型（同 009 的库内 CHECK 与 002 目录口径），其余类型为空；``set_type``／
+      ``assistance`` 落在已拍词表，未明确时为 ``None``（不静默认定热身组、无辅助）；
     - 顺序连续：动作 ``position`` 与组 ``set_no`` 各自 1 起连续，修订内不重号（与
       ``exercise_logs``／``training_sets`` 的唯一约束同口径，读回顺序稳定）；
     - 数值：次数／时长／辅助次数 ≥ 1；RIR 非负有限或空；负重原文能换算（:func:`load_kg_key`）；
@@ -179,10 +188,10 @@ def _validate_exercise(item: DraftExerciseLog) -> None:
     if [single.set_no for single in item.sets] != expected_set_numbers:
         raise InvalidRecordFact("组序号 set_no 必须从 1 起连续且不重号")
     for single in item.sets:
-        _validate_set(single)
+        _validate_set(single, record_type=facts.record_type)
 
 
-def _validate_set(single: SetFacts) -> None:
+def _validate_set(single: SetFacts, *, record_type: str) -> None:
     if not isinstance(single, SetFacts):
         raise InvalidRecordFact(f"需要记录草稿组结构：{type(single).__name__}")
     if single.set_type is not None and single.set_type not in SET_TYPES:
@@ -197,6 +206,13 @@ def _validate_set(single: SetFacts) -> None:
         if value is not None and (isinstance(value, bool) or value < 1):
             raise InvalidRecordFact(f"{label} 必须为 ≥1 的整数或空：{value!r}")
     optional_rir(single.rir)
+    # assisted_reps 表示该组含实际发力帮助：必须显式标记 ``assistance='assisted'``（06 6.3
+    # 「排除人工辅助组」）。否则只按 ``assistance`` 过滤时这类组会被当独立完成计入 PR。
+    if single.assisted_reps is not None and single.assistance != "assisted":
+        raise InvalidRecordFact(
+            "携带 assisted_reps 的组必须显式标记 assistance='assisted'："
+            f"{single.assistance!r}"
+        )
     if single.target_set_key is not None:
         _require_text("target_set_key", single.target_set_key)
     if single.quality_text is not None:
@@ -204,6 +220,9 @@ def _validate_set(single: SetFacts) -> None:
     if single.load is not None:
         if not isinstance(single.load, RawLoad):
             raise InvalidRecordFact(f"负重必须是原始值结构：{single.load!r}")
+        # 负重只属于外加负重次数型：自重次数型与计时型不虚构 0kg、不带负重（05 5.2、009 CHECK）。
+        if record_type != "reps_weight":
+            raise InvalidRecordFact(f"非外加负重次数型不得携带负重：{record_type!r}")
         load_kg_key(single.load)
 
 

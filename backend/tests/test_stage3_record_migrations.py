@@ -46,14 +46,18 @@ STAGE3_RECORD_TABLES = {
     "exercise_logs",
     "training_sets",
 }
-# 统计／复盘侧表（S3-12／S3-13）：S3-09 不得建。
-LATER_STAGE_TABLES = {"reviews", "pr_candidates"}
+# S3-13 由 011 迁移新增的复盘两表。
+STAGE3_REVIEW_TABLES = {"reviews", "review_source_revisions"}
 
 STAGE2_VERSION = 4  # 004_stage2_business_drafts.sql 执行后的 user_version
 STAGE3_PLAN_VERSION = (
     8  # 008_stage3_arrangement_draft_payload.sql 执行后的 user_version
 )
 RECORD_MIGRATION_FILE = "009_stage3_record_tables.sql"
+# 紧接 009 的迁移（S3-12 统计侧视图、S3-13 复盘两表、S3-14 视图修正）：临时目录与生产目录同编号
+PR_CANDIDATES_MIGRATION_FILE = "010_stage3_pr_candidates_view.sql"
+REVIEWS_MIGRATION_FILE = "011_stage3_reviews.sql"
+PR_CANDIDATES_FIX_MIGRATION_FILE = "012_stage3_pr_candidates_assisted_reps.sql"
 LATEST_VERSION = len(load_migrations())
 SEEDED_EXERCISE_ID = "barbell-back-squat"  # 目录种子内动作（003）
 
@@ -298,9 +302,9 @@ async def test_empty_database_creates_record_tables_with_minimum_indexes(
             | STAGE2_TABLES
             | STAGE3_PLAN_TABLES
             | STAGE3_RECORD_TABLES
+            | STAGE3_REVIEW_TABLES
             | {"sqlite_sequence"}
         )
-        assert tables & LATER_STAGE_TABLES == set()  # 统计／复盘侧表归 S3-12／S3-13
 
         # 迁移只建结构：四表为空
         assert set(await _record_row_counts(db)) == STAGE3_RECORD_TABLES
@@ -592,7 +596,10 @@ async def test_stage3_plan_upgrade_keeps_plan_facts_and_adds_record_tables(
     async with open_database(path) as db:
         assert await db.migrate() == LATEST_VERSION
         assert await _table_names(db) >= STAGE3_RECORD_TABLES
-        assert await _table_names(db) & LATER_STAGE_TABLES == set()
+        # 记录侧四表由 009 建立：009 本身不建复盘表（归 011，另有 S3-13 用例）
+        assert "CREATE TABLE reviews" not in (
+            DEFAULT_MIGRATIONS_DIR / RECORD_MIGRATION_FILE
+        ).read_text(encoding="utf-8")
 
         async def op(conn):
             async with conn.execute(
@@ -635,6 +642,18 @@ async def test_failed_record_migration_rolls_back_and_can_be_retried(
         DEFAULT_MIGRATIONS_DIR / RECORD_MIGRATION_FILE,
         directory / RECORD_MIGRATION_FILE,
     )
+    shutil.copy(
+        DEFAULT_MIGRATIONS_DIR / PR_CANDIDATES_MIGRATION_FILE,
+        directory / PR_CANDIDATES_MIGRATION_FILE,
+    )
+    shutil.copy(
+        DEFAULT_MIGRATIONS_DIR / REVIEWS_MIGRATION_FILE,
+        directory / REVIEWS_MIGRATION_FILE,
+    )
+    shutil.copy(
+        DEFAULT_MIGRATIONS_DIR / PR_CANDIDATES_FIX_MIGRATION_FILE,
+        directory / PR_CANDIDATES_FIX_MIGRATION_FILE,
+    )
     broken = directory / RECORD_MIGRATION_FILE
     original = (DEFAULT_MIGRATIONS_DIR / RECORD_MIGRATION_FILE).read_text(
         encoding="utf-8"
@@ -652,7 +671,7 @@ async def test_failed_record_migration_rolls_back_and_can_be_retried(
         assert tables & STAGE3_RECORD_TABLES == set()  # 半套结构已回滚
         assert await RunRepo(db).get_conversation("c1") is not None  # 旧数据保留
 
-        # 修复迁移后重跑：不需要删库，009 补齐
+        # 修复迁移后重跑：不需要删库，009 补齐（并继续到最新迁移）
         broken.write_text(original, encoding="utf-8")
         assert await db.migrate() == LATEST_VERSION
         assert await db.pragma_value("user_version") == LATEST_VERSION
@@ -679,8 +698,12 @@ async def test_record_migration_is_contiguous_after_arrangement_payload(
 ) -> None:
     """编号连续（S3-02 同口径）：009 紧接 008，且不新增业务版本计数器。"""
     names = sorted(path.name for path in DEFAULT_MIGRATIONS_DIR.glob("*.sql"))
-    assert names[-1] == RECORD_MIGRATION_FILE
-    assert int(names[-1].split("_", 1)[0]) == int(names[-2].split("_", 1)[0]) + 1
+    position = names.index(RECORD_MIGRATION_FILE)
+    assert position >= 1
+    assert (
+        int(names[position].split("_", 1)[0])
+        == int(names[position - 1].split("_", 1)[0]) + 1
+    )
     sql = (DEFAULT_MIGRATIONS_DIR / RECORD_MIGRATION_FILE).read_text(encoding="utf-8")
     body = "\n".join(
         line for line in sql.splitlines() if not line.strip().startswith("--")
