@@ -321,14 +321,22 @@ _STAGE1_MIGRATION_FILES = (
     "002_stage1_actions_profile.sql",
     "003_stage1_action_seed.sql",
 )
+# 动作目录的增量补充迁移（主要肌群）：目录读取列包含 ``muscle``，临时迁移目录必须带上它，
+# 否则不是「只跑 Stage 1 迁移」的等价环境。临时目录要求编号从 1 连续，故按 004 复制。
+_ACTION_MUSCLE_MIGRATION = (
+    "013_stage4_action_muscle.sql",
+    "004_action_muscle.sql",
+)
 
 
 def _migration_dir(tmp_path: Path) -> Path:
-    """复制生产迁移（001–003）到临时目录；后续可再追加临时迁移。"""
+    """复制生产迁移（001–003）与目录增量迁移到临时目录；后续可再追加临时迁移。"""
     directory = tmp_path / "migrations"
     directory.mkdir(exist_ok=True)
     for name in _STAGE1_MIGRATION_FILES:
         shutil.copy(DEFAULT_MIGRATIONS_DIR / name, directory / name)
+    source, target = _ACTION_MUSCLE_MIGRATION
+    shutil.copy(DEFAULT_MIGRATIONS_DIR / source, directory / target)
     return directory
 
 
@@ -472,16 +480,16 @@ async def test_reimporting_seed_via_later_migration_is_rejected_atomically(
     path = tmp_path / "app.db"
     directory = _migration_dir(tmp_path)
     async with open_database(path, migrations_dir=directory) as db:
-        assert await db.migrate() == 3
+        assert await db.migrate() == 4
         await _stop_exercise(db, "barbell-back-squat")
 
-    (directory / "004_duplicate_seed.sql").write_text(
+    (directory / "005_duplicate_seed.sql").write_text(
         DUPLICATE_SEED_SQL, encoding="utf-8"
     )
     async with open_database(path, migrate=False, migrations_dir=directory) as db:
-        with pytest.raises(MigrationError, match="004_duplicate_seed"):
+        with pytest.raises(MigrationError, match="005_duplicate_seed"):
             await db.migrate()
-        assert await db.pragma_value("user_version") == 3
+        assert await db.pragma_value("user_version") == 4
         assert await _exercise_count(db) == SEEDED_EXERCISE_COUNT
         stopped = await ActionCatalogService(db).get_by_id("barbell-back-squat")
         assert stopped is not None and stopped.active is False
@@ -495,14 +503,14 @@ async def test_later_numbered_migration_can_extend_seed_incrementally(
     path = tmp_path / "app.db"
     directory = _migration_dir(tmp_path)
     async with open_database(path, migrations_dir=directory) as db:
-        assert await db.migrate() == 3
+        assert await db.migrate() == 4
         await _stop_exercise(db, "hanging-leg-raise")
 
-    (directory / "004_extra_catalog_entry.sql").write_text(
+    (directory / "005_extra_catalog_entry.sql").write_text(
         EXTRA_CATALOG_ENTRY_SQL, encoding="utf-8"
     )
     async with open_database(path, migrations_dir=directory) as db:
-        assert await db.migrate() == 4
+        assert await db.migrate() == 5
         assert await _exercise_count(db) == SEEDED_EXERCISE_COUNT + 1
         added = await ActionCatalogService(db).get_by_id("test-only-exercise")
         assert added is not None and added.recommendable is False

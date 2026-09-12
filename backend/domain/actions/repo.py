@@ -15,13 +15,20 @@ import aiosqlite
 from domain.actions.schema import Exercise
 from storage.db import Database, require_outer_transaction
 
+#: exercises 列清单：本模块所有读取共用同一份，避免漏列（列顺序即 Exercise.from_row 读取的键）。
+_COLUMNS = (
+    "id, standard_name_zh, equipment_variant, record_type, load_convention,"
+    " unilateral, recommendable, active, aliases_json, modes_json, source_ref,"
+    " attribution, instructions_zh, muscle"
+)
+
 
 async def _read_by_id(conn: aiosqlite.Connection, exercise_id: str) -> Exercise | None:
     """用给定连接按稳定身份读取；连接由调用方决定（语句为字面量并参数化）。"""
     async with conn.execute(
         "SELECT id, standard_name_zh, equipment_variant, record_type,"
         " load_convention, unilateral, recommendable, active, aliases_json,"
-        " modes_json, source_ref, attribution, instructions_zh"
+        " modes_json, source_ref, attribution, instructions_zh, muscle"
         " FROM exercises WHERE id = ?",
         (exercise_id,),
     ) as cursor:
@@ -34,7 +41,7 @@ async def _read_recommendable(conn: aiosqlite.Connection) -> tuple[Exercise, ...
     async with conn.execute(
         "SELECT id, standard_name_zh, equipment_variant, record_type,"
         " load_convention, unilateral, recommendable, active, aliases_json,"
-        " modes_json, source_ref, attribution, instructions_zh"
+        " modes_json, source_ref, attribution, instructions_zh, muscle"
         " FROM exercises WHERE active = 1 AND recommendable = 1 ORDER BY id"
     ) as cursor:
         rows = await cursor.fetchall()
@@ -72,10 +79,7 @@ class ExerciseRepo:
 
         async def op(conn: aiosqlite.Connection) -> Exercise | None:
             async with conn.execute(
-                "SELECT id, standard_name_zh, equipment_variant, record_type,"
-                " load_convention, unilateral, recommendable, active, aliases_json,"
-                " modes_json, source_ref, attribution, instructions_zh"
-                " FROM exercises WHERE standard_name_zh = ?",
+                "SELECT " + _COLUMNS + " FROM exercises WHERE standard_name_zh = ?",
                 (standard_name,),
             ) as cursor:
                 row = await cursor.fetchone()
@@ -88,10 +92,7 @@ class ExerciseRepo:
 
         async def op(conn: aiosqlite.Connection) -> tuple[Exercise, ...]:
             async with conn.execute(
-                "SELECT id, standard_name_zh, equipment_variant, record_type,"
-                " load_convention, unilateral, recommendable, active, aliases_json,"
-                " modes_json, source_ref, attribution, instructions_zh"
-                " FROM exercises WHERE EXISTS ("
+                "SELECT " + _COLUMNS + " FROM exercises WHERE EXISTS ("
                 "   SELECT 1 FROM json_each(exercises.aliases_json)"
                 "   WHERE lower(trim(json_each.value)) = lower(trim(?)))"
                 " ORDER BY id",
@@ -118,15 +119,27 @@ class ExerciseRepo:
         require_outer_transaction(conn, "推荐候选读取")
         return await _read_recommendable(conn)
 
+    async def list_all_in_transaction(
+        self, conn: aiosqlite.Connection
+    ) -> tuple[Exercise, ...]:
+        """在**外层事务**内读目录全量（含停用）：确认事务内复查计划引用与替换等价用。
+
+        与 :meth:`list_recommendable_in_transaction` 同一约束：``conn`` 必须是
+        ``Database.transaction()`` 交出的连接，本方法不自行取锁。
+        """
+        require_outer_transaction(conn, "目录全量读取")
+        async with conn.execute(
+            "SELECT " + _COLUMNS + " FROM exercises ORDER BY id"
+        ) as cursor:
+            rows = await cursor.fetchall()
+        return tuple(Exercise.from_row(dict(row)) for row in rows)
+
     async def list_all(self) -> tuple[Exercise, ...]:
         """目录全量（含停用）；仅用于目录核对与统计，不用于推荐。"""
 
         async def op(conn: aiosqlite.Connection) -> tuple[Exercise, ...]:
             async with conn.execute(
-                "SELECT id, standard_name_zh, equipment_variant, record_type,"
-                " load_convention, unilateral, recommendable, active, aliases_json,"
-                " modes_json, source_ref, attribution, instructions_zh"
-                " FROM exercises ORDER BY id"
+                "SELECT " + _COLUMNS + " FROM exercises ORDER BY id"
             ) as cursor:
                 rows = await cursor.fetchall()
             return tuple(Exercise.from_row(dict(row)) for row in rows)

@@ -38,6 +38,19 @@ PLAN_PROPOSAL_SCHEMA_VERSION = 1
 # 当次安排目标快照的 schema 版本（S3-08；结构变更必须新版本号，不原地改写语义）。
 ARRANGEMENT_TARGET_SCHEMA_VERSION = 1
 
+# 当次安排的逐项处置恰四类（04 4.3 已拍）：保留、减载（方案 1–3）、同等刺激替换、局部
+# 跳过。快照始终保存该项的**完整最终目标**，处置只是标注，不是差异补丁；未标注（既有的
+# S3-08 快照与计划 payload）为 None，按保守规则校验，不改已存数据。
+ArrangementItemDisposition = Literal[
+    "keep", "deload", "equivalent_replace", "local_skip"
+]
+ARRANGEMENT_ITEM_DISPOSITIONS: tuple[ArrangementItemDisposition, ...] = (
+    "keep",
+    "deload",
+    "equivalent_replace",
+    "local_skip",
+)
+
 # 计划模式（D9 行字段）：常规 / 接回。关系字段不进 payload，见 :class:`PlanProposal`。
 PlanMode = Literal["regular", "return"]
 PLAN_MODES: tuple[PlanMode, ...] = ("regular", "return")
@@ -144,7 +157,12 @@ class DisplaySnapshot:
 
 @dataclass(frozen=True, slots=True)
 class PlanExerciseItem:
-    """一个计划动作：目录稳定身份 + 处方 + 负荷 + 渐进（D9）。"""
+    """一个计划动作：目录稳定身份 + 处方 + 负荷 + 渐进（D9）。
+
+    ``disposition``／``replacement_exercise_id`` 只由当次安排快照填写（04 4.3 四种处置：
+    保留、减载、同等刺激替换、局部跳过）；计划 payload 不带处置，既有快照不带这两个字段时
+    解码为 ``None``（视为未标注的既有形态），因此本结构的扩展不改已存数据的解码。
+    """
 
     item_key: str
     exercise_id: str
@@ -153,6 +171,10 @@ class PlanExerciseItem:
     prescription: RepsPrescription | TimedPrescription
     load: Load | None
     progression: Progression
+    #: 当次安排的该项处置；计划 payload 与既有快照为 None（未标注，按保守规则校验）。
+    disposition: ArrangementItemDisposition | None = None
+    #: 同等刺激替换的替代动作身份；只有 ``disposition='equivalent_replace'`` 时出现。
+    replacement_exercise_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -503,12 +525,19 @@ def _decode_item(decoded: Any) -> PlanExerciseItem:
                 "progression",
             }
         ),
-        optional=frozenset({"load"}),
+        optional=frozenset({"load", "disposition", "replacement_exercise_id"}),
     )
     record_type = obj["record_type"]
     if record_type not in PRESCRIPTION_RECORD_TYPES:
         raise InvalidPlanRow(f"处方 record_type 不在三类内：{record_type!r}")
     raw_load = obj.get("load")
+    raw_disposition = obj.get("disposition")
+    if (
+        raw_disposition is not None
+        and raw_disposition not in ARRANGEMENT_ITEM_DISPOSITIONS
+    ):
+        raise InvalidPlanRow(f"处置不在已拍四类内：{raw_disposition!r}")
+    raw_replacement = obj.get("replacement_exercise_id")
     return PlanExerciseItem(
         item_key=_decode_text("item_key", obj["item_key"]),
         exercise_id=_decode_text("exercise_id", obj["exercise_id"]),
@@ -517,6 +546,16 @@ def _decode_item(decoded: Any) -> PlanExerciseItem:
         prescription=_decode_prescription(record_type, obj["prescription"]),
         load=None if raw_load is None else _decode_load(raw_load),
         progression=_decode_progression(obj["progression"]),
+        disposition=(
+            None
+            if raw_disposition is None
+            else cast(ArrangementItemDisposition, raw_disposition)
+        ),
+        replacement_exercise_id=(
+            None
+            if raw_replacement is None
+            else _decode_text("replacement_exercise_id", raw_replacement)
+        ),
     )
 
 

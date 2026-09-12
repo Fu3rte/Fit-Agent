@@ -19,6 +19,10 @@ dependencies = [
     # tzdata 提供 Windows（无系统 tz 数据库）下 ZoneInfo 解析地区规则所需的 IANA 数据
     "tzlocal>=5",
     "tzdata>=2024.1",
+    # Provider SDK（S4-01，2026-09-12 用户授权新增）：pydantic-ai 的 OpenAI 兼容 provider
+    # （含 DeepSeek）依赖它；缺它则无法构造 provider，也无法验证 SDK 层隐式重试。
+    # 生产接缝显式 max_retries=0（runtime/provider.py）：SDK 默认值 2 会静默重发请求。
+    "openai>=3.8,<4",
 ]
 
 # Stage 0 不是可安装的 Python 包：源码以 backend/ 下的顶层包（config.py、main.py、

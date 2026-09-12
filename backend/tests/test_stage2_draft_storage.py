@@ -578,6 +578,9 @@ async def test_source_must_reference_existing_conversation_and_run(
         # Run 存在但属于另一会话：组合外键（conversation_id, run_id）在库层拒绝，
         # 两个身份各自存在也救不了跨会话来源（stage2.md §4.1：不同来源关联不混淆）
         await runs.create_conversation("c-other")
+        # 08 8.2：同时只允许一个活跃 Run；本用例需要两个既有 Run 行，故先让 r-raw 结束
+        # （结束只改状态、不删行，外键目标仍在）。
+        await runs.cancel_run("r-raw")
         await runs.create_run_with_user_message(
             "c-other", "r-other", "cri-other", "另一会话的请求"
         )
@@ -669,6 +672,8 @@ async def test_create_pending_rejects_run_from_another_conversation(
         assert await _draft_count(db) == 0
 
         # 正例对照：Run 与会话同属时创建成功（repo 路径的非空 run_id）
+        # 08 8.2：先让 c2 的 Run 结束，才能再创建一个活跃 Run
+        await runs.cancel_run("r2")
         await runs.create_run_with_user_message("c1", "r1", "cri1", "c1 的请求")
         paired = await drafts.create_pending(
             draft_id="d-paired",

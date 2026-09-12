@@ -16,7 +16,7 @@
 """
 
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date
 
 import aiosqlite
@@ -28,6 +28,7 @@ from domain.plan.rules import SessionLockState, session_lock_state
 from domain.plan.schema import InvalidPlanRow, PlanPayload
 from domain.plan.service import PlanSafetyRecheck, evaluate_plan_safety
 from domain.profile.repo import ProfileRepo
+from domain.profile.schema import Profile
 from storage.db import Database
 
 
@@ -118,13 +119,24 @@ class PlanReadService:
             )
 
     async def read_current_plan_guidance(
-        self, *, business_date: date, session_exercise_ids: Sequence[str] = ()
+        self,
+        *,
+        business_date: date,
+        session_exercise_ids: Sequence[str] = (),
+        safety_profile: Profile | None = None,
+        message_red_flags: Sequence[str] = (),
     ) -> PlanGuidance | None:
         """请求「基于计划的指导」前的整份计划安全复核；尚无正式计划时返回 None。
 
         复核按**最新**正式条件（当刻档案的限制与身体情况）与目录动作模式执行，不只查当天
         训练日；限制冲突与红旗各自独立阻断，计划内动作读不到目录行同样 fail-closed。正式
         限制未收集时只给需澄清项，不当作「无冲突」。
+
+        ``safety_profile`` 是会话内**待确认档案草稿**的拟议条件（有则用它代替正式档案做
+        安全复核，fail-closed）：未确认的红旗同样不得放出可执行处方（决策 a，2026-09-12）；
+        ``context_version`` 仍取正式业务版本（草稿不是正式事实）。``message_red_flags`` 是
+        当前 Run 最新用户消息命中的 C 层兜底红旗词（2026-09-12 拍板）：合并进安全复核，
+        命中即本 Run ``usable=false``；只做精确子串文本兜底，不解析否定句。
 
         ``session_exercise_ids`` 是当次条件（某条已接受安排实际要做的动作身份，04 4.3）：
         未来安排使用时同样按最新限制与红旗复核，故一并评估；缺省只复核当前计划。
@@ -138,6 +150,8 @@ class PlanReadService:
                 current,
                 business_date=business_date,
                 session_exercise_ids=session_exercise_ids,
+                safety_profile=safety_profile,
+                message_red_flags=message_red_flags,
             )
 
     async def read_arrangement_guidance(
@@ -182,8 +196,15 @@ class PlanReadService:
         business_date: date,
         session_exercise_ids: Sequence[str],
         is_current: bool = True,
+        safety_profile: Profile | None = None,
+        message_red_flags: Sequence[str] = (),
     ) -> PlanGuidance:
-        """单一事务快照内构造指导投影：计划视图 + 整份计划（含当次条件）安全复核。"""
+        """单一事务快照内构造指导投影：计划视图 + 整份计划（含当次条件）安全复核。
+
+        ``safety_profile`` 给定时用它（待确认档案草稿的拟议条件）代替正式档案做安全复核；
+        读不到草稿时调用方传 None，即按正式档案。``message_red_flags`` 是消息层兜底命中词，
+        合并进安全复核（不落库）。
+        """
         snapshot = await self._profiles.read_in_transaction(conn)
         if snapshot.profile is None:
             # 计划只能经确认事务建立，而确认要求正式档案；到这里即库内状态损坏，显式失败。
@@ -193,14 +214,20 @@ class PlanReadService:
         plan = await self._build_view(
             conn, version, is_current=is_current, business_date=business_date
         )
+        effective_profile = (
+            snapshot.profile if safety_profile is None else safety_profile
+        )
         safety = evaluate_plan_safety(
-            snapshot.profile,
+            effective_profile,
             version.payload,
             catalog=await self._plan_catalog_in_transaction(
                 conn, version.payload, session_exercise_ids
             ),
             session_exercise_ids=session_exercise_ids,
         )
+        if message_red_flags:
+            # C 层文本兜底（2026-09-12）：命中即本 Run 阻断；词表命中不并入档案红旗分类。
+            safety = replace(safety, message_red_flags=tuple(message_red_flags))
         return PlanGuidance(
             plan=plan, safety=safety, context_version=snapshot.context_version
         )

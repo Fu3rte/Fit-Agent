@@ -21,7 +21,9 @@ from api.dto import install_error_handlers
 from api.routes_drafts import router as drafts_router
 from api.routes_readonly import router as readonly_router
 from config import database_path, local_timezone_name, resolve_data_dir
+from runtime.run_service import RunService
 from storage.db import Database
+from storage.run_repo import RunRepo
 from storage.setting_repo import DEFAULT_PROVIDER, SettingRepo
 
 # 10.1：仅本机回环访问；Host/Origin 校验只放行回环主机名
@@ -95,6 +97,10 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
         try:
             await db.open()
             await db.migrate()
+            # 08 8.4：迁移完成后，在一个事务内把遗留 pending/running 标为 failed 并追加
+            # interrupted_by_restart 事件；不做断点续跑，由用户手动重试（S4-02）。
+            # 恢复先于对外服务：启动失败则拒绝启动，不带着“还在跑”的假状态服务请求。
+            await RunService(RunRepo(db)).recover_interrupted_runs()
             settings = SettingRepo(db)
             # 固定业务时区（07 7.3 / S0-05）：首次启动采样本机时区并持久化，
             # 之后只读已保存值，不随系统时区变化重取。采样或解析失败向上抛，

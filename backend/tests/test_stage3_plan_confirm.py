@@ -349,7 +349,10 @@ async def test_replacement_archives_old_version_and_cancels_only_future_unlocked
         sessions = await _session_rows(db)
         old = _cancelled(sessions, first.plan_version_id)
         new = _cancelled(sessions, second.plan_version_id)
-        assert set(new) == set(OLD_SCHEDULED_ON)
+        # 迟到确认（决策 2）：新版日程只从确认业务日期（含当天）起投影，不补确认日前的名额。
+        assert set(new) == {
+            on for on in OLD_SCHEDULED_ON if on >= REPLACE_BUSINESS_DATE
+        }
         assert all(not cancelled for cancelled in new.values())
         # 到期（业务日期 >= 应训练日）与已存储锁定的旧日程都保留；只有未来未锁定的被取消
         assert old == {

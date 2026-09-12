@@ -605,6 +605,8 @@ async def test_failed_stage3_migration_rolls_back_and_can_be_retried(
         "010_stage3_pr_candidates_view.sql",
         "011_stage3_reviews.sql",
         "012_stage3_pr_candidates_assisted_reps.sql",
+        # 013 是动作目录的增量补充迁移：临时目录补齐后才是与生产同编号的最新版本。
+        "013_stage4_action_muscle.sql",
     ):
         shutil.copy(DEFAULT_MIGRATIONS_DIR / name, directory / name)
     broken = directory / PLAN_TABLES_MIGRATION_FILE

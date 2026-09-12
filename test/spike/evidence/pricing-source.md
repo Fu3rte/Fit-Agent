@@ -1,5 +1,7 @@
 # DeepSeek 官方价格证据（spike 计费依据）
 
+> 2026-09-12 复核注记：官方文档（2026-09-11 抓取）已将 `deepseek-v4-flash` 等列为停用，请求路由到 DeepSeek-V4.1-Flash（现名 `deepseek-flash`）；当前窗口与输出上限改为 1M / 384K。本文件保留 2026-09-06 当日快照原文，不更新数值；真实调用前必须重新核对官方页面（PLAN.md 费用护栏）。
+
 - 来源页面：https://api-docs.deepseek.com/quick_start/pricing （Models & Pricing，官方全文）
 - 抓取通道：agent-reach 规定的只读网页阅读通道（Jina Reader：r.jina.ai），未登录、无写操作
 - 抓取时间：2026-09-06（本机时区 UTC+8 判断为当日；页面 `Published Time: Fri, 28 Aug 2026 05:44:14 GMT` 为缓存页时间戳）

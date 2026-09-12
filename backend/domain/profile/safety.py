@@ -44,8 +44,11 @@ from domain.profile.schema import (
     SessionConditions,
 )
 
-# 红旗来源：长期档案 / 拟议补丁 / 当次条件（02 2.3、2.4）。
-RedFlagSource = Literal["formal_profile", "proposed_patch", "session_conditions"]
+# 红旗来源：长期档案 / 拟议补丁 / 当次条件（02 2.3、2.4）；``message`` 是 C 层文本兜底
+# （当前 Run 最新用户消息命中词表）的来源标签，不是档案事实来源，不参与 ``assess_red_flags``。
+RedFlagSource = Literal[
+    "formal_profile", "proposed_patch", "session_conditions", "message"
+]
 RED_FLAG_SOURCES: tuple[RedFlagSource, ...] = (
     "formal_profile",
     "proposed_patch",
@@ -57,6 +60,34 @@ RED_FLAG_BLOCK_ADVICE = "存在已明确红旗症状：不生成常规训练处�
 UNLISTED_RED_FLAG_REASON = "清单外症状原文：只返回未知/需澄清，不判安全"
 UNKNOWN_RED_FLAG_REASON = "红旗未收集：不得当作无红旗"
 UNKNOWN_RESTRICTION_REASON = "动作限制未收集：不得当作无限制"
+
+#: C 层文本兜底词表（2026-09-12 用户拍板）：对**当前 Run 的最新用户消息**做精确子串扫描，
+#: 独立命中即本 Run 强制 safety 不可用。只做文本兜底：不做词形还原、语义理解或否定句解析
+#: （「没有麻木」这类否定句仍会命中并保守阻断），且**不含**正本的「功能受限」（B 暂缓，
+#: 本层不覆盖它）。B（结构化评估/必做步骤）未实现，不得当作已有保证。
+#: C 层文本兜底命中项的来源标签，用于把命中并入安全复核的红旗结论。
+MESSAGE_RED_FLAG_SOURCE: RedFlagSource = "message"
+
+MESSAGE_RED_FLAG_TERMS: tuple[str, ...] = (
+    "胸部异常不适",
+    "晕厥",
+    "异常气短",
+    "锐痛",
+    "麻木",
+    "放射痛",
+    "疼痛持续加重",
+    "明显肿胀",
+    "卡锁",
+    "关节失稳",
+)
+
+
+def message_red_flag_hits(text: str) -> tuple[str, ...]:
+    """当前 Run 最新用户消息命中的兜底红旗词（按词表顺序、精确子串、独立命中）。
+
+    普通肌肉酸痛与无痛且无功能异常的关节异响不得命中：词表不含对应词形（已测负例）。
+    """
+    return tuple(term for term in MESSAGE_RED_FLAG_TERMS if term in text)
 
 
 @dataclass(frozen=True, slots=True)

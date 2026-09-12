@@ -242,7 +242,8 @@ def test_profile_version_advance_stays_single_seam() -> None:
 # Stage 2 接线边界（stage2.md §5 S2-03/S2-05 已批准）：草稿生命周期与确认编排落位
 # app/，必然引用档案领域（同快照基线读取、事务内复查与写入复用）。此处按「显式扩
 # 展断言、不删测试、不放宽」的口径，把 Stage 1 的全禁守卫收窄为仍然成立的边界：
-# runtime/ 仍不得触碰档案领域（归 Stage 4）；app/ 与 api/ 内的接线只允许显式白名单；档案
+# runtime/ 只允许显式白名单（S4-04 起见下方 `_PROFILE_WIRING_ALLOWED_IN_RUNTIME`）；app/ 与
+# api/ 内的接线只允许显式白名单；档案
 # SQL 写入仍由上方旁路守卫锁在 domain/profile/repo.py，版本推进由上方版本守卫锁在同一
 # repo 与确认事务。
 # S3-04（stage3.md §5）：计划草稿创建在单一快照内读正式档案与限制，并以可选受限组合补丁
@@ -273,14 +274,23 @@ _PROFILE_WIRING_ALLOWED_IN_APP = frozenset(
 # 调用路径映射表），领域规则与 SQL 仍在应用层／repo。白名单只含这两个传输模块，
 # api/ 其余文件仍全禁；改动需显式扩展本白名单。
 _PROFILE_WIRING_ALLOWED_IN_API = frozenset({"dto.py", "routes_readonly.py"})
+
+# S4-04（stage4.md §5）：Agent 每 Run 从应用层读正式档案与业务版本作为模型上下文，并以同一
+# 应用层服务读草稿生成基线（08 8.6「当前事实每 Run 重读」、01 1.3），故 runtime/ 的上下文与
+# 工具接线同口径引用档案领域；它们只读档案与版本、不写档案、不推进 `context_version`。写入与
+# 推进仍由上方 `_PROFILE_WRITE_SQL` 旁路守卫与版本唯一推进点守卫全仓锁死。
+_PROFILE_WIRING_ALLOWED_IN_RUNTIME = frozenset({"context.py", "tools.py"})
 _PROFILE_DOMAIN_REFERENCES = ("domain.profile", "ProfileService", "ProfileRepo")
 
 
 def test_profile_wiring_stays_within_the_approved_stage2_seams() -> None:
     for source in sorted((BACKEND_ROOT / "runtime").rglob("*.py")):
         text = source.read_text(encoding="utf-8")
-        for reference in _PROFILE_DOMAIN_REFERENCES:
-            assert reference not in text, source.name
+        if not any(reference in text for reference in _PROFILE_DOMAIN_REFERENCES):
+            continue
+        assert source.name in _PROFILE_WIRING_ALLOWED_IN_RUNTIME, (
+            f"runtime/{source.name} 引用档案领域但不在接线白名单：只允许显式扩展"
+        )
     for source in sorted((BACKEND_ROOT / "api").rglob("*.py")):
         text = source.read_text(encoding="utf-8")
         if not any(reference in text for reference in _PROFILE_DOMAIN_REFERENCES):

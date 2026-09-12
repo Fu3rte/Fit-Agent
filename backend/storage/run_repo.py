@@ -11,6 +11,10 @@
 
 取消后不补存晚到框架快照；终态后不补写轨迹事件（07 7.4 消息契约）。
 ``run_events.id`` 仅作数据库行身份，无恢复游标或重放接口。
+
+Stage 4（S4-02）在本层补三仵存储侧事实：创建事务内的**全局单 Run** 判定
+（``ConversationBusy``）、手动重试所需的用户请求文本读取、迁移后的**重启恢复**事务；
+运行互斥的调度语义（409 与否、何时允许重试）在 ``runtime/run_service.py``。
 SQL 全部在本 repo 内以字面量书写并参数化（README 硬规则 3），动态值一律经参数绑定。
 """
 
@@ -21,7 +25,7 @@ from typing import Any
 import aiosqlite
 
 from storage.db import Database
-from storage.errors import InvalidInput, NotFound, RunStateConflict
+from storage.errors import ConversationBusy, InvalidInput, NotFound, RunStateConflict
 
 _CANCELLABLE_STATUSES = ("pending", "running")
 
@@ -38,11 +42,25 @@ def _validate_json_payload(payload: str) -> None:
         raise InvalidInput("框架消息负载必须是合法 JSON 字符串") from exc
 
 
+def _stored_json(raw: Any) -> Any:
+    try:
+        return json.loads(raw)
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError("运行时消息 JSON 无法解析") from exc
+
+
+def _stored_int(raw: Any) -> int:
+    try:
+        return int(raw)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise RuntimeError("运行时整数列无法解析") from exc
+
+
 def _require_rowid(cursor: aiosqlite.Cursor) -> int:
     """INSERT 成功后 AUTOINCREMENT 必有 rowid；None 只可能来自类型宽度，显式拒绝。"""
     if cursor.lastrowid is None:
         raise RuntimeError("INSERT 成功但未返回 rowid")
-    return int(cursor.lastrowid)
+    return _stored_int(cursor.lastrowid)
 
 
 class RunRepo:
@@ -83,11 +101,18 @@ class RunRepo:
         client_request_id: str,
         user_text: str,
         retry_of_run_id: str | None = None,
+        active_execution: str | None = None,
     ) -> dict[str, Any]:
-        """用户消息与 pending Run 同一事务创建（07 7.5）。
+        """用户消息与 pending Run 同一事务创建（07 7.5；08 8.2 全局单 Run）。
 
-        相同 ``client_request_id``（全局唯一幂等键）的重复或并发调用只产生一组记录，
-        返回已有 Run（``created=False``）；活跃 Run 检查与 409 归 Stage 4 并发互斥。
+        顺序即契约：**先**按 ``client_request_id`` 查重（相同请求返回已有 Run，
+        ``created=False``，不冲突），**再**在同一事务内检查是否已有 ``pending``/``running``
+        Run；有则抛 :class:`~storage.errors.ConversationBusy`，本次不写入任何 Run 或消息。
+        两步同事务，因此并发提交不同请求也不会产生两个活跃 Run。
+
+        ``active_execution``：runtime 层在进程内观察到的「仍占执行名额」Run（取消后底层调用
+        尚未退出的 draining，S4-03）。库内五状态看不见该事实，但同样必须在同一事务内、
+        幂等查重之后参与 busy 判定，否则 draining 期间会错误地放行新请求。
         """
         if not isinstance(user_text, str) or not user_text:
             raise InvalidInput("用户请求文本必须是非空字符串")
@@ -98,7 +123,19 @@ class RunRepo:
             ) as cursor:
                 existing = await cursor.fetchone()
             if existing is not None:
-                return {"created": False, "run": await self._get_run_locked(conn, str(existing["id"]))}
+                return {
+                    "created": False,
+                    "run": await self._get_run_locked(conn, str(existing["id"])),
+                }
+            async with conn.execute(
+                "SELECT id FROM runs WHERE status IN ('pending', 'running') LIMIT 1"
+            ) as cursor:
+                active = await cursor.fetchone()
+            if active is not None or active_execution is not None:
+                holder = active["id"] if active is not None else active_execution
+                raise ConversationBusy(
+                    f"已有活跃 Run，拒绝创建新 Run（08 8.2）: {holder}"
+                )
             now = _now()
             await conn.execute(
                 "INSERT INTO runs (id, conversation_id, client_request_id, status,"
@@ -137,7 +174,9 @@ class RunRepo:
 
     # ---------- Run 读取 ----------
 
-    async def _get_run_locked(self, conn: aiosqlite.Connection, run_id: str) -> dict[str, Any]:
+    async def _get_run_locked(
+        self, conn: aiosqlite.Connection, run_id: str
+    ) -> dict[str, Any]:
         async with conn.execute(
             "SELECT id, conversation_id, client_request_id, status, error_code,"
             " retry_of_run_id, created_at, updated_at FROM runs WHERE id = ?",
@@ -160,7 +199,9 @@ class RunRepo:
         row = await self._db.under_lock(op)
         return None if row is None else dict(row)
 
-    async def get_run_by_client_request_id(self, client_request_id: str) -> dict[str, Any] | None:
+    async def get_run_by_client_request_id(
+        self, client_request_id: str
+    ) -> dict[str, Any] | None:
         async def op(conn: aiosqlite.Connection) -> aiosqlite.Row | None:
             async with conn.execute(
                 "SELECT id FROM runs WHERE client_request_id = ?",
@@ -185,6 +226,7 @@ class RunRepo:
         """条件 pending→running。调度时机与互斥归 Stage 4（08 章）；本层只提供
         7.5 完成路径所需的条件写入。
         """
+
         async def op(conn: aiosqlite.Connection) -> dict[str, Any]:
             cursor = await conn.execute(
                 "UPDATE runs SET status = 'running', updated_at = ?"
@@ -235,7 +277,9 @@ class RunRepo:
                 )
             return await self._get_run_locked(conn, run_id)
 
-    async def cancel_run(self, run_id: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+    async def cancel_run(
+        self, run_id: str, payload: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
         """取消仅能从 pending/running 条件更新为 cancelled，并同事务追加取消事件（07 7.5）。
 
         取消成功后，迟到完成不得写入完整 Assistant 消息或覆盖终态（本层由
@@ -316,15 +360,96 @@ class RunRepo:
                 ids.append(_require_rowid(cursor))
             return ids
 
+    async def get_user_request_text(self, run_id: str) -> str | None:
+        """该 Run 的用户请求文本（手动重试时重建本 Run 上下文用）；无该行返回 None。"""
+
+        async def op(conn: aiosqlite.Connection) -> aiosqlite.Row | None:
+            async with conn.execute(
+                "SELECT payload_json FROM messages"
+                " WHERE run_id = ? AND kind = 'user_request' ORDER BY seq LIMIT 1",
+                (run_id,),
+            ) as cursor:
+                return await cursor.fetchone()
+
+        row = await self._db.under_lock(op)
+        return None if row is None else str(_stored_json(row["payload_json"])["text"])
+
+    async def fail_run(self, run_id: str, error_code: str) -> dict[str, Any]:
+        """条件 ``running`` → ``failed``：写失败原因，并在同一事务追加失败事件（07 7.5、08 8.1）。
+
+        只接受 ``running``：``pending`` → ``failed`` 只由启动恢复产生
+        （``fail_interrupted_runs``），终态不可再流转；从 pending 或任一终态调用一律
+        :class:`~storage.errors.RunStateConflict`，且不留下失败事件（同事务回滚）。
+        原因码的契约校验（普通失败与重启中断分开）在 runtime 层；本层只要求非空字符串。
+        触发时机与错误分类仍归 S4-03/S4-05，本方法不调度、不重试。
+        """
+        if not isinstance(error_code, str) or not error_code:
+            raise InvalidInput("失败原因码必须是非空字符串")
+        now = _now()
+        async with self._db.transaction() as conn:
+            cursor = await conn.execute(
+                "UPDATE runs SET status = 'failed', error_code = ?, updated_at = ?"
+                " WHERE id = ? AND status = 'running'",
+                (error_code, now, run_id),
+            )
+            if cursor.rowcount != 1:
+                run = await self._get_run_locked(conn, run_id)
+                raise RunStateConflict(
+                    f"仅 running Run 可标记失败（当前 {run['status']}）: {run_id}"
+                )
+            await conn.execute(
+                "INSERT INTO run_events (run_id, event_type, payload_json, created_at)"
+                " VALUES (?, 'failed', ?, ?)",
+                (
+                    run_id,
+                    json.dumps({"error_code": error_code}, ensure_ascii=False),
+                    now,
+                ),
+            )
+            return await self._get_run_locked(conn, run_id)
+
+    # ---------- 重启恢复（08 8.4；迁移之后单事务执行） ----------
+
+    async def fail_interrupted_runs(self, error_code: str) -> list[str]:
+        """把遗留 ``pending``/``running`` 统一改为 ``failed`` 并各追加一条失败事件。
+
+        一个事务内完成全部改动（08 8.4）：任一步骤失败整体回滚，不留下“状态已改、事件没写”
+        或“部分 Run 已改”的中间态；只影响执行中的两类状态，终态 Run 不触碰。
+        事件形状：``event_type='failed'``，payload 携带机器可读失败原因（不写自由文本）。
+        返回被标失败的 Run 身份（按创建顺序），无遗留时为空列表。
+        """
+        async with self._db.transaction() as conn:
+            async with conn.execute(
+                "SELECT id FROM runs WHERE status IN ('pending', 'running')"
+                " ORDER BY created_at, id"
+            ) as cursor:
+                rows = list(await cursor.fetchall())
+            now = _now()
+            payload = json.dumps({"error_code": error_code}, ensure_ascii=False)
+            for row in rows:
+                await conn.execute(
+                    "UPDATE runs SET status = 'failed', error_code = ?, updated_at = ?"
+                    " WHERE id = ? AND status IN ('pending', 'running')",
+                    (error_code, now, row["id"]),
+                )
+                await conn.execute(
+                    "INSERT INTO run_events (run_id, event_type, payload_json, created_at)"
+                    " VALUES (?, 'failed', ?, ?)",
+                    (row["id"], payload, now),
+                )
+            return [str(row["id"]) for row in rows]
+
     # ---------- 读取 ----------
 
-    async def _next_seq_locked(self, conn: aiosqlite.Connection, conversation_id: str) -> int:
+    async def _next_seq_locked(
+        self, conn: aiosqlite.Connection, conversation_id: str
+    ) -> int:
         async with conn.execute(
             "SELECT MAX(seq) FROM messages WHERE conversation_id = ?",
             (conversation_id,),
         ) as cursor:
             row = await cursor.fetchone()
-        return 1 if row is None or row[0] is None else int(row[0]) + 1
+        return 1 if row is None or row[0] is None else _stored_int(row[0]) + 1
 
     async def list_messages(self, conversation_id: str) -> list[dict[str, Any]]:
         async def op(conn: aiosqlite.Connection) -> list[aiosqlite.Row]:
@@ -350,6 +475,7 @@ class RunRepo:
 
     async def list_framework_messages(self, run_id: str) -> list[dict[str, Any]]:
         """本 Run 的完整框架消息（payload_json 原样，反序列化归 runtime 层）。"""
+
         async def op(conn: aiosqlite.Connection) -> list[aiosqlite.Row]:
             async with conn.execute(
                 "SELECT id, seq, role, kind, run_id, payload_json FROM messages"
@@ -362,6 +488,7 @@ class RunRepo:
 
     async def list_partial_answers(self, run_id: str) -> list[dict[str, Any]]:
         """已保存部分回答，按落盘顺序；可区分于完整成功 Assistant 消息（07 7.4）。"""
+
         async def op(conn: aiosqlite.Connection) -> list[aiosqlite.Row]:
             async with conn.execute(
                 "SELECT id, seq, role, kind, run_id, payload_json FROM messages"
@@ -372,7 +499,7 @@ class RunRepo:
 
         partials = []
         for row in await self._db.under_lock(op):
-            text = str(json.loads(row["payload_json"])["text"])
+            text = str(_stored_json(row["payload_json"])["text"])
             partials.append({"id": row["id"], "seq": row["seq"], "text": text})
         return partials
 

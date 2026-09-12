@@ -34,12 +34,15 @@ from datetime import date, timedelta
 from domain.actions.rules import LOAD_CONVENTIONS
 from domain.actions.schema import Exercise
 from domain.plan.schema import (
+    ARRANGEMENT_ITEM_DISPOSITIONS,
     ARRANGEMENT_TARGET_SCHEMA_VERSION,
     PLAN_PAYLOAD_SCHEMA_VERSION,
     PRESCRIPTION_RECORD_TYPES,
     PROGRESSION_METHODS,
+    ArrangementItemDisposition,
     ArrangementTarget,
     CalendarCycle,
+    DisplaySnapshot,
     IntRange,
     Load,
     NeedsCalibration,
@@ -83,15 +86,22 @@ class InvalidArrangementTarget(ValueError):
 
 @dataclass(frozen=True, slots=True)
 class ArrangementAdjustment:
-    """当次临时调整的可变字段（04 4.3 状态调整表已拍两种）：减少组次与／或目标 RIR。
+    """当次调整的已拍可变字段（04 4.3）：处置 + 减载参数 + 替换身份。
 
-    只影响对应训练：不改长期计划、不改动作身份、不改处方其余字段（次数区间、递增、负荷）。
-    两个字段都是可选：给出则替换该条目对应值，未给出保持计划值。
+    ``disposition`` 四类已拍：保留（默认）、减载、同等刺激替换、局部跳过；未给出时沿用既有
+    行为（只允许减组与提高目标 RIR 的兼容形态）。减载参数按 04 4.3 方案 1–3：``work_sets``／
+    ``reps_range`` 只减不增，``load_value`` 是用户选定器械实际可用重量，必须落在已验证重量的
+    50–70%；未校准〔需校准」动作不得改负荷（回落方案 1）。``replacement_exercise_id`` 只用于
+    同等刺激替换：原动作身份不变，处方与负荷照抄计划（不凭空造重）。
     """
 
     item_key: str
     work_sets: int | None = None
     target_rir: IntRange | None = None
+    disposition: ArrangementItemDisposition | None = None
+    reps_range: IntRange | None = None
+    load_value: float | None = None
+    replacement_exercise_id: str | None = None
 
 
 def arrangement_target_exercises(
@@ -129,7 +139,11 @@ def arrangement_target_exercises(
 def _adjusted_item(
     item: PlanExerciseItem, adjustment: ArrangementAdjustment | None
 ) -> PlanExerciseItem:
-    """单个条目应用临时调整：未给出时原样返回，不顺手“修正”其他字段。"""
+    """单个条目应用当次调整：未给出时原样返回，不顺手“修正”其他字段。
+
+    只构造候选目标；合法性（含仅向更安全方向移动与替换等价）由
+    :func:`validate_arrangement_target` 按处置逐项复核。
+    """
     if adjustment is None:
         return item
     try:
@@ -138,11 +152,45 @@ def _adjusted_item(
         if adjustment.target_rir is not None:
             # RIR 只作展示参考（D3）：允许 0，只要求 min ≤ max，不引入医学或强度阈值。
             _validate_range("target_rir", adjustment.target_rir, allow_zero=True)
+        if adjustment.reps_range is not None:
+            _validate_range("reps_range", adjustment.reps_range)
+        if adjustment.load_value is not None and (
+            isinstance(adjustment.load_value, bool)
+            or not isinstance(adjustment.load_value, (int, float))
+            or adjustment.load_value <= 0
+        ):
+            raise InvalidPlanPayload(
+                f"load_value 必须是正数值：{adjustment.load_value!r}"
+            )
+        if adjustment.disposition is not None and (
+            adjustment.disposition not in ARRANGEMENT_ITEM_DISPOSITIONS
+        ):
+            raise InvalidPlanPayload(f"处置不在已拍四类内：{adjustment.disposition!r}")
     except InvalidPlanPayload as exc:
         # 调整越界统一报 :class:`InvalidArrangementTarget`，不把当次调整的结构错误
         # 与长期计划 payload 的错误码混用。
         raise InvalidArrangementTarget(f"当次调整越界：{exc}") from exc
+    disposition = adjustment.disposition
+    if disposition in ("equivalent_replace", "local_skip"):
+        # 替换照抄计划处方与负荷（不凭空造重）；局部跳过的目标保持计划值，处置只作标注。
+        return replace(
+            item,
+            disposition=disposition,
+            replacement_exercise_id=(
+                adjustment.replacement_exercise_id
+                if disposition == "equivalent_replace"
+                else None
+            ),
+        )
     prescription = item.prescription
+    load = item.load
+    if disposition == "deload" and adjustment.load_value is not None:
+        if not isinstance(load, VerifiedLoad):
+            # 未校准或计划无负荷：不得凭当次调整造出重量（04 4.3 方案 2）。
+            raise InvalidArrangementTarget(
+                f"计划该动作没有已验证重量，减载不得改为负荷调整：{item.item_key}"
+            )
+        load = replace(load, value=float(adjustment.load_value))
     if isinstance(prescription, TimedPrescription):
         if adjustment.target_rir is not None:
             raise InvalidArrangementTarget(
@@ -158,6 +206,8 @@ def _adjusted_item(
                 ),
                 duration_seconds_range=prescription.duration_seconds_range,
             ),
+            load=load,
+            disposition=disposition,
         )
     return replace(
         item,
@@ -167,18 +217,27 @@ def _adjusted_item(
                 if adjustment.work_sets is None
                 else adjustment.work_sets
             ),
-            reps_range=prescription.reps_range,
+            reps_range=(
+                prescription.reps_range
+                if adjustment.reps_range is None
+                else adjustment.reps_range
+            ),
             target_rir=(
                 prescription.target_rir
                 if adjustment.target_rir is None
                 else adjustment.target_rir
             ),
         ),
+        load=load,
+        disposition=disposition,
     )
 
 
 def validate_arrangement_target(
-    target: ArrangementTarget, *, workout: PlanWorkout
+    target: ArrangementTarget,
+    *,
+    workout: PlanWorkout,
+    catalog: Mapping[str, Exercise] | None = None,
 ) -> None:
     """校验当次目标快照结构与绑定（S3-08，纯函数不碰 IO）。
 
@@ -189,8 +248,9 @@ def validate_arrangement_target(
       允许不同，其余全等；调整只能向**更安全**方向移动（用户已拍 B）：``work_sets`` 只减不增，
       ``target_rir`` 只增不减，计划目标没有 RIR 时不得凭当次调整新造一个；有差异即属于普通
       调整，必须给出非空白 ``adjustment_reason``（PRD §5.5：普通调整必须说明原因）；
-    - 结构：每个条目再跑一次 :func:`_validate_item` 的结构与区间校验（目录引用复查归确认
-      事务的调用方，本函数不读库）。
+    - 结构：每个条目再跑一次 :func:`_validate_item` 的结构与区间校验（目录引用复查与替换等价
+      归调用方：器械、限制与保存时必须拿到目录；本函数只按 ``catalog`` 复查替换等价，缺目录
+      时带替换项的条目一律 fail-closed）。
 
     仅校验与绑定版本的一致性：安排不能改动作身份、不能改长期计划，也不会在这里写任何库。
     """
@@ -227,7 +287,7 @@ def validate_arrangement_target(
             # 目标条目的结构错误统一报 :class:`InvalidArrangementTarget`，
             # 不把当次安排的结构违规混进长期计划 payload 的错误码。
             raise InvalidArrangementTarget(f"当次目标结构非法：{exc}") from exc
-        _validate_arrangement_item(planned, item)
+        _validate_arrangement_item(planned, item, catalog=catalog)
     if target.adjustment_reason is None:
         if tuple(target.exercises) != tuple(workout.exercises):
             raise InvalidArrangementTarget(
@@ -239,25 +299,114 @@ def validate_arrangement_target(
 
 
 def _validate_arrangement_item(
-    planned: PlanExerciseItem, item: PlanExerciseItem
+    planned: PlanExerciseItem,
+    item: PlanExerciseItem,
+    *,
+    catalog: Mapping[str, Exercise] | None,
 ) -> None:
-    """目标条目相对计划条目只允许组次／目标 RIR 不同，且必须向**更安全**方向移动（已拍 B）。
+    """目标条目相对计划条目按**处置**逐项复核（04 4.3 四种处置；已拍）。
 
-    组次只减不增（``work_sets``）；目标 RIR 只增不减（更大 RIR 更保守），逐端比较；计划目标
-    没有 RIR 时不得新造一个：没有可比基线就不做 RIR 调整，保留计划值。
+    - ``disposition is None``（既有的 S3-08 快照）：沿用保守规则——只允许减组与提高目标 RIR，
+      其余全等；不把已存快照读成某个新处置。
+    - ``keep``：动作身份、组数、次数区间、负荷与递增全等，只允许提高目标 RIR。
+    - ``deload``：方案 1–3——组数与次数区间只减不增、负荷只降且在已验证重量的 50–70%；
+      未校准／无已验证重量时不得改负荷（回落方案 1）；至少有一项真的降低。
+    - ``equivalent_replace``：原动作身份不变、处方与负荷照抄计划（不凭空造重），替代动作按
+      ``catalog`` 复核等价（04 4.7）；缺目录或任一身份／肌群未知一律 fail-closed。
+    - ``local_skip``：目标保持计划值，只作推进；不得同时改处方或替换。
     """
+    disposition = item.disposition
+    if disposition is None:
+        _require_same_identity(planned, item)
+        _validate_legacy_adjustment(planned, item)
+        if item.replacement_exercise_id is not None:
+            raise InvalidArrangementTarget(
+                f"未标注处置的条目不得携带替代动作身份：{planned.item_key}"
+            )
+        return
+    if disposition == "keep":
+        if item.replacement_exercise_id is not None:
+            raise InvalidArrangementTarget(
+                f"保留项不得携带替代动作身份：{planned.item_key}"
+            )
+        _require_same_identity(planned, item)
+        if item.load != planned.load:
+            raise InvalidArrangementTarget(f"保留项不得改负荷：{planned.item_key}")
+        _require_same_prescription_shape(planned, item)
+        if isinstance(planned.prescription, RepsPrescription) and isinstance(
+            item.prescription, RepsPrescription
+        ):
+            if item.prescription.work_sets != planned.prescription.work_sets or (
+                item.prescription.reps_range != planned.prescription.reps_range
+            ):
+                raise InvalidArrangementTarget(
+                    f"保留项的组数与次数区间必须与计划相同：{planned.item_key}"
+                )
+            _require_non_decreasing_rir(
+                planned.item_key,
+                planned_rir=planned.prescription.target_rir,
+                target_rir=item.prescription.target_rir,
+            )
+        return
+    if disposition == "local_skip":
+        if item != replace(planned, disposition="local_skip"):
+            raise InvalidArrangementTarget(
+                f"局部跳过的目标必须保持计划值，只标注处置：{planned.item_key}"
+            )
+        return
+    if disposition == "equivalent_replace":
+        violations = replacement_violations(item, catalog=catalog)
+        if violations:
+            raise InvalidArrangementTarget(
+                f"同等刺激替换不等价（{planned.item_key}）：" + "；".join(violations)
+            )
+        _require_same_identity(planned, item)
+        if item.prescription != planned.prescription or item.load != planned.load:
+            raise InvalidArrangementTarget(
+                f"同等刺激替换必须照抄计划的处方与负荷，不得自行造处方或重量：{planned.item_key}"
+            )
+        return
+    if disposition == "deload":
+        if item.replacement_exercise_id is not None:
+            raise InvalidArrangementTarget(
+                f"减载项不得携带替代动作身份：{planned.item_key}"
+            )
+        _require_same_identity(planned, item)
+        if item.progression != planned.progression:
+            raise InvalidArrangementTarget(f"减载项不得改递增方式：{planned.item_key}")
+        _apply_deload_bounds(planned, item)
+        return
+    raise InvalidArrangementTarget(f"处置不在已拍四类内：{disposition!r}")
+
+
+def _require_same_identity(planned: PlanExerciseItem, item: PlanExerciseItem) -> None:
+    """身份与展示快照不得变：动作身份、处方口径、展示副本、递增方式（04 4.3）。"""
     if (
         item.exercise_id != planned.exercise_id
         or item.record_type != planned.record_type
         or item.display_snapshot != planned.display_snapshot
-        or item.load != planned.load
         or item.progression != planned.progression
     ):
         raise InvalidArrangementTarget(
-            f"当次目标不得改动作身份／展示快照／负荷／递增：{planned.item_key}"
+            f"当次目标不得改动作身份／展示快照／递增：{planned.item_key}"
         )
+
+
+def _require_same_prescription_shape(
+    planned: PlanExerciseItem, item: PlanExerciseItem
+) -> None:
+    """处方类型不得改（次数型不得变计时型），否则无法与计划逐项对比。"""
     if type(item.prescription) is not type(planned.prescription):
         raise InvalidArrangementTarget(f"当次目标不得改处方类型：{planned.item_key}")
+
+
+def _validate_legacy_adjustment(
+    planned: PlanExerciseItem, item: PlanExerciseItem
+) -> None:
+    """既有 S3-08 快照的保守规则：只允许减组与提高目标 RIR，其余全等。"""
+    _require_same_prescription_shape(planned, item)
+    if item.load != planned.load:
+        raise InvalidArrangementTarget(f"当次目标不得改负荷：{planned.item_key}")
     if isinstance(planned.prescription, TimedPrescription) and isinstance(
         item.prescription, TimedPrescription
     ):
@@ -290,6 +439,289 @@ def _validate_arrangement_item(
             planned.item_key,
             planned_rir=planned.prescription.target_rir,
             target_rir=item.prescription.target_rir,
+        )
+
+
+def _apply_deload_bounds(planned: PlanExerciseItem, item: PlanExerciseItem) -> None:
+    """减载方案 1–3 的确定性边界（04 4.3）：只减不增、负荷限 50–70%、至少一项降低。"""
+    _require_same_prescription_shape(planned, item)
+    if item.load != planned.load:
+        if not isinstance(planned.load, VerifiedLoad) or not isinstance(
+            item.load, VerifiedLoad
+        ):
+            # 未校准或计划无负荷：不得凭当次减载造出重量（方案 2 回落方案 1）。
+            raise InvalidArrangementTarget(
+                f"减载改负荷只适用于已有已验证重量的动作：{planned.item_key}"
+            )
+        if (
+            item.load.unit != planned.load.unit
+            or item.load.load_notation != planned.load.load_notation
+        ):
+            raise InvalidArrangementTarget(
+                f"减载不得改负荷单位或负重口径：{planned.item_key}"
+            )
+        ratio = item.load.value / planned.load.value
+        if not 0.5 <= ratio <= 0.7:
+            raise InvalidArrangementTarget(
+                f"减载只能降到已验证重量的 50–70%：{planned.item_key} "
+                f"{planned.load.value} → {item.load.value}"
+            )
+    if isinstance(planned.prescription, TimedPrescription) and isinstance(
+        item.prescription, TimedPrescription
+    ):
+        if (
+            item.prescription.duration_seconds_range
+            != planned.prescription.duration_seconds_range
+        ):
+            raise InvalidArrangementTarget(
+                f"减载不得改时长处方（计时型只允许减组）：{planned.item_key}"
+            )
+        _require_non_increasing_sets(
+            planned.item_key,
+            planned_sets=planned.prescription.work_sets,
+            work_sets=item.prescription.work_sets,
+        )
+    elif isinstance(planned.prescription, RepsPrescription) and isinstance(
+        item.prescription, RepsPrescription
+    ):
+        _require_non_increasing_sets(
+            planned.item_key,
+            planned_sets=planned.prescription.work_sets,
+            work_sets=item.prescription.work_sets,
+        )
+        planned_reps = planned.prescription.reps_range
+        item_reps = item.prescription.reps_range
+        if item_reps.min > planned_reps.min or item_reps.max > planned_reps.max:
+            raise InvalidArrangementTarget(
+                f"减载只能减少每组次数：{planned.item_key} "
+                f"{planned_reps.min}-{planned_reps.max} → {item_reps.min}-{item_reps.max}"
+            )
+        if item.prescription.target_rir != planned.prescription.target_rir:
+            raise InvalidArrangementTarget(
+                f"减载方案 1–3 不改目标用力（提高用力属于保留）：{planned.item_key}"
+            )
+        reduced = (
+            item.prescription.work_sets < planned.prescription.work_sets
+            or item_reps.min < planned_reps.min
+            or item_reps.max < planned_reps.max
+            or item.load != planned.load
+        )
+        if not reduced:
+            raise InvalidArrangementTarget(
+                f"减载必须真的减少组数、次数或负荷之一：{planned.item_key}"
+            )
+
+
+#: 减载方案 2 的展示区间（04 4.3）：50–70% 已验证重量，用户选器械实际可用重量。
+DELOAD_LOAD_BAND: tuple[float, float] = (0.5, 0.7)
+
+
+def replacement_violations(
+    item: PlanExerciseItem, *, catalog: Mapping[str, Exercise] | None
+) -> tuple[str, ...]:
+    """同等刺激替换的确定性等价复查（04 4.7；PRD §5.7），返回不等价原因（空 = 等价）。
+
+    已拍条件全数执行，缺一不可：``modes`` 有交集、**主要肌群**有交集、替代动作启用且可推荐、
+    目录身份可读；任一来源缺失（无目录、无肌群、身份读不到）都算不等价——缺失数据不得猜测，
+    也不得当成「无冲突」放行。器械可用与限制冲突需要正式条件，归创建与确认路径的调用方。
+
+    替换**不要求**旁记录口径相等（2026-09-12 已拍）：跨自重／外加负重替换允许，处方与负荷
+    如何承载由写进 payload 的修订条目决定（见 :func:`plan_item_revision`）。替代动作仍须能映射
+    到已拍三类处方口径，那是 payload 有效性，不是等价条件。
+    """
+    if catalog is None:
+        return ("缺少动作目录，无法判定主要肌群与动作模式交集",)
+    replacement_id = item.replacement_exercise_id
+    if replacement_id is None:
+        return ("同等刺激替换缺少替代动作身份",)
+    if replacement_id == item.exercise_id:
+        return ("替代动作身份与原动作相同，不构成替换",)
+    original = catalog.get(item.exercise_id)
+    replacement = catalog.get(replacement_id)
+    if original is None:
+        return (f"原动作身份在目录内读不到：{item.exercise_id}",)
+    if replacement is None:
+        return (f"替代动作身份在目录内读不到：{replacement_id}",)
+    violations: list[str] = []
+    if not original.modes or not replacement.modes:
+        violations.append("动作模式未知：无法判定训练目的相同")
+    elif set(original.modes).isdisjoint(replacement.modes):
+        violations.append(
+            f"动作模式无交集：{list(original.modes)} / {list(replacement.modes)}"
+        )
+    if not original.muscle or not replacement.muscle:
+        violations.append("主要肌群未知：缺失数据不得猜测，按不等价处理")
+    elif original.muscle != replacement.muscle:
+        violations.append(f"主要肌群不同：{original.muscle} / {replacement.muscle}")
+    if not (replacement.active and replacement.recommendable):
+        violations.append(
+            f"替代动作不在启用且可推荐状态：{replacement.id}"
+            f"（active={replacement.active}, recommendable={replacement.recommendable}）"
+        )
+    return tuple(violations)
+
+
+def needs_calibration_for(
+    record_type: str, prescription: RepsPrescription | TimedPrescription
+) -> NeedsCalibration:
+    """D3 校准文案：次数型按次数下限、计时型按最短时长；RIR 不作硬性指标。
+
+    通过 = 稳定完成处方下限；停止 = 疼痛／不适、动作明显失稳，或加重后完不成下限
+    （计时型为无法维持动作）。不输出任何具体起始重量。
+    """
+    if record_type == "timed":
+        if not isinstance(prescription, TimedPrescription):
+            raise InvalidPlanPayload("timed 处方的校准必须是 TimedPrescription")
+        shortest = prescription.duration_seconds_range.min
+        return NeedsCalibration(
+            steps=(
+                "从最容易的变式或最轻档位完成一组热身，观察动作是否稳定",
+                f"逐级增加负荷或难度，以能稳定完成最短时长（{shortest} 秒）的档位为准",
+            ),
+            pass_criteria=f"能稳定完成该组处方的最短时长（{shortest} 秒）",
+            stop_criteria=(
+                "出现疼痛或其他不适、动作明显失稳，或无法维持动作时停止，不继续加重"
+            ),
+        )
+    if not isinstance(prescription, RepsPrescription):
+        raise InvalidPlanPayload("次数型处方的校准必须是 RepsPrescription")
+    floor = prescription.reps_range.min
+    return NeedsCalibration(
+        steps=(
+            "从该动作最轻可用档位（自重动作取最轻辅助档）完成一组热身",
+            "逐级加重，每级完成 5 次，观察动作是否稳定",
+            f"以能稳定完成处方次数下限（{floor} 次）的档位为起始负荷",
+        ),
+        pass_criteria=f"能稳定完成该组处方的次数下限（{floor} 次）",
+        stop_criteria=(
+            "出现疼痛或其他不适、动作明显失稳，或加重后完不成次数下限时停止，不继续加重"
+        ),
+    )
+
+
+def plan_item_revision(
+    planned: PlanExerciseItem,
+    adjustment: ArrangementAdjustment,
+    *,
+    catalog: Mapping[str, Exercise] | None = None,
+) -> PlanExerciseItem | None:
+    """长期修订：对单个计划条目应用已拍四类处置（04 4.5；决策 7），返回修订条目。
+
+    返回 ``None`` 表示局部跳过：该条目从训练日删除（04 4.5「只对受影响部分微调、减载、
+    作同等刺激替换或删除」）。与当次安排快照的差别：长期修订直接写进候选计划 payload，
+    ``equivalent_replace`` 换成替代动作身份（计划不再包含原动作）；只有当替代动作能承载
+    计划处方与负荷时才照抄，承载不了（跨自重／外加负重或负重口径不同）时负荷转未校准，
+    绝不猜重量。替代动作仍须能映射到已拍三类处方口径（payload 有效性）。
+
+    未列出处置、处置越界、参数与处置矛盾、等价条件不满足或目录读不到一律拒绝，不落库。
+    """
+    if not isinstance(adjustment, ArrangementAdjustment):
+        raise InvalidPlanPayload(f"不是长期修订条目结构：{type(adjustment).__name__}")
+    disposition = adjustment.disposition
+    if disposition in ("keep", "local_skip"):
+        _require_no_revision_params(adjustment, disposition=disposition)
+        return None if disposition == "local_skip" else planned
+    if disposition == "deload":
+        revised = _adjusted_item(planned, adjustment)
+        _validate_arrangement_item(planned, revised, catalog=None)
+        return revised
+    if disposition == "equivalent_replace":
+        marked = replace(
+            planned,
+            disposition="equivalent_replace",
+            replacement_exercise_id=adjustment.replacement_exercise_id,
+        )
+        violations = replacement_violations(marked, catalog=catalog)
+        if violations:
+            raise InvalidPlanPayload(
+                f"同等刺激替换不等价（{planned.item_key}）：" + "；".join(violations)
+            )
+        replacement = (
+            None
+            if catalog is None
+            else catalog.get(adjustment.replacement_exercise_id or "")
+        )
+        if replacement is None:
+            raise InvalidPlanPayload(
+                f"替代动作身份在目录内读不到：{adjustment.replacement_exercise_id}"
+            )
+        record_type = prescription_record_type_for(replacement.record_type)
+        if record_type == "timed":
+            if not isinstance(planned.prescription, TimedPrescription):
+                raise InvalidPlanPayload(
+                    f"替代动作的处方口径与计划处方不兼容（{planned.item_key}）："
+                    f"{replacement.record_type} 不能承载次数型处方"
+                )
+            prescription: RepsPrescription | TimedPrescription = planned.prescription
+            load: Load | None = None
+        else:
+            if not isinstance(planned.prescription, RepsPrescription):
+                raise InvalidPlanPayload(
+                    f"替代动作的处方口径与计划处方不兼容（{planned.item_key}）："
+                    f"{replacement.record_type} 不能承载计时型处方"
+                )
+            prescription = planned.prescription
+            load = _replacement_load(
+                planned,
+                replacement,
+                record_type=record_type,
+                prescription=prescription,
+            )
+        return replace(
+            planned,
+            exercise_id=replacement.id,
+            display_snapshot=DisplaySnapshot(
+                name=replacement.standard_name_zh,
+                equipment_variant=replacement.equipment_variant,
+                load_convention=replacement.load_convention,
+            ),
+            record_type=record_type,  # type: ignore[arg-type]
+            prescription=prescription,
+            load=load,
+            disposition="equivalent_replace",
+            replacement_exercise_id=None,
+        )
+    raise InvalidPlanPayload(f"长期修订的处置不在已拍四类内：{disposition!r}")
+
+
+def _replacement_load(
+    planned: PlanExerciseItem,
+    replacement: Exercise,
+    *,
+    record_type: str,
+    prescription: RepsPrescription,
+) -> Load | None:
+    """替代动作的负荷承载（决策 4）：能照抄已验证重量才照抄，否则未校准，绝不猜重。"""
+    if record_type == "bodyweight_reps":
+        # 自重替代不携带外加负重：计划本来无负荷则保持无负荷，否则转未校准。
+        return (
+            None
+            if planned.load is None
+            else needs_calibration_for(record_type, prescription)
+        )
+    if (
+        isinstance(planned.load, VerifiedLoad)
+        and planned.record_type == record_type
+        and replacement.load_convention is not None
+        and load_notation_for(replacement.load_convention) == planned.load.load_notation
+    ):
+        return planned.load
+    return needs_calibration_for(record_type, prescription)
+
+
+def _require_no_revision_params(
+    adjustment: ArrangementAdjustment, *, disposition: str
+) -> None:
+    """保留／局部跳过不带任何调整参数：处置与参数矛盾即拒绝，不静默忽略。"""
+    if (
+        adjustment.work_sets is not None
+        or adjustment.target_rir is not None
+        or adjustment.reps_range is not None
+        or adjustment.load_value is not None
+        or adjustment.replacement_exercise_id is not None
+    ):
+        raise InvalidPlanPayload(
+            f"处置 {disposition} 不得携带其他调整参数：{adjustment.item_key}"
         )
 
 

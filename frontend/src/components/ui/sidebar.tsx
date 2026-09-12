@@ -134,7 +134,7 @@ function Sidebar({
       <div className="relative w-(--sidebar-width) bg-transparent transition-[width] duration-200 ease-linear group-data-[collapsible=offcanvas]:w-0" />
       <div
         className={cn(
-          "fixed inset-y-0 left-0 z-10 flex h-svh w-(--sidebar-width) border-r border-sidebar-border transition-[left] duration-200 ease-linear group-data-[collapsible=offcanvas]:left-[calc(var(--sidebar-width)*-1)]",
+          "fixed inset-y-0 left-0 z-10 flex h-svh w-(--sidebar-width) border-r border-sidebar-border transition-[left] duration-200 ease-linear group-data-[collapsible=offcanvas]:-left-(--sidebar-width)",
           className,
         )}
         {...props}

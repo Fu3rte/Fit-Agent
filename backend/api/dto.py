@@ -94,6 +94,8 @@ from domain.stats.schema import (
     WeekCompletion,
     review_basis_to_json,
 )
+from runtime.error_codes import CONVERSATION_BUSY
+from storage.errors import ConversationBusy
 
 _STALE_DETAIL_NO_FIELD_CHANGE = "业务版本已变化，当前快照无字段差异"
 
@@ -335,8 +337,11 @@ def _restriction_from_dto(raw: object) -> ActionRestriction:
 #: 应用层／领域异常 → (HTTP 状态码, error_code)。404 与 409 的 ``invalid_request`` 表示
 #: 「身份未找到」与「草稿状态不允许该操作」，与 revision 冲突（``draft_modified``）、
 #: 业务基线冲突（``draft_stale``）分开表达；不新增前端契约之外的 error_code。
+#: ``conversation_busy`` 是 Stage 4 已冻结的运行时错误码（``runtime.error_codes``），
+#: 语义与状态码只登记一次，不在路由里另写。
 _ERROR_STATUS: tuple[tuple[type[Exception], int, str], ...] = (
     (InvalidRequestShape, 400, "invalid_request"),
+    (ConversationBusy, 409, CONVERSATION_BUSY),
     (UnknownDraft, 404, "invalid_request"),
     (DraftRevisionConflict, 409, "draft_modified"),
     (DraftStale, 409, "draft_stale"),

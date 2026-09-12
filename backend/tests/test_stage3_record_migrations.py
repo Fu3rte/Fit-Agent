@@ -58,6 +58,7 @@ RECORD_MIGRATION_FILE = "009_stage3_record_tables.sql"
 PR_CANDIDATES_MIGRATION_FILE = "010_stage3_pr_candidates_view.sql"
 REVIEWS_MIGRATION_FILE = "011_stage3_reviews.sql"
 PR_CANDIDATES_FIX_MIGRATION_FILE = "012_stage3_pr_candidates_assisted_reps.sql"
+ACTION_MUSCLE_MIGRATION_FILE = "013_stage4_action_muscle.sql"
 LATEST_VERSION = len(load_migrations())
 SEEDED_EXERCISE_ID = "barbell-back-squat"  # 目录种子内动作（003）
 
@@ -653,6 +654,11 @@ async def test_failed_record_migration_rolls_back_and_can_be_retried(
     shutil.copy(
         DEFAULT_MIGRATIONS_DIR / PR_CANDIDATES_FIX_MIGRATION_FILE,
         directory / PR_CANDIDATES_FIX_MIGRATION_FILE,
+    )
+    # 013 是动作目录的增量补充迁移：临时目录补齐后才是与生产同编号的最新版本。
+    shutil.copy(
+        DEFAULT_MIGRATIONS_DIR / ACTION_MUSCLE_MIGRATION_FILE,
+        directory / ACTION_MUSCLE_MIGRATION_FILE,
     )
     broken = directory / RECORD_MIGRATION_FILE
     original = (DEFAULT_MIGRATIONS_DIR / RECORD_MIGRATION_FILE).read_text(

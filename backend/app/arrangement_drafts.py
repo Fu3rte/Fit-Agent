@@ -23,10 +23,14 @@
 端点复核归 S3-14（S3-07 证据残留 ④）。
 """
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 
 from app.draft_repo import Draft, DraftRepo, InvalidDraftRow
 from app.drafts import DraftKindMismatch, require_draft_source
+from app.plan_drafts import replacement_condition_violations
+from domain.actions.repo import ExerciseRepo
+from domain.actions.schema import Exercise
 from domain.plan.repo import PlanRepo, PlanVersionRecord, ScheduledSessionRecord
 from domain.plan.rules import (
     ArrangementAdjustment,
@@ -41,6 +45,7 @@ from domain.plan.schema import (
     arrangement_target_from_json,
     arrangement_target_to_json,
 )
+from domain.plan.service import evaluate_plan_safety
 from domain.profile.repo import ProfileRepo
 from domain.profile.schema import (
     Profile,
@@ -86,6 +91,54 @@ class ArrangementDraftView:
     planned_workout: PlanWorkout
 
 
+def require_arrangement_safety(
+    target: ArrangementTarget,
+    *,
+    version: PlanVersionRecord,
+    profile: Profile | None,
+    catalog: Mapping[str, Exercise],
+) -> None:
+    """创建与确认共用的确定性安全复核（04 4.5、PRD §5.5／§5.7）；不过则不得落库。
+
+    整份计划按**当刻条件**复核（不只当天的动作），并把当次目标实际要做的动作身份（含同等
+    刺激替换的替代动作）一并评估：新报告的限制或红旗在落库前就阻断，不得等档案更新落盘。
+    替换的器械与限制条件同入口重建，不靠调用方声明。
+    """
+    if profile is None:
+        raise InvalidArrangementTarget(
+            "尚未建立正式档案：不按计划给可执行处方，也不接受当次安排"
+        )
+    recheck = evaluate_plan_safety(
+        profile,
+        version.payload,
+        catalog=catalog,
+        session_exercise_ids=_session_exercise_ids(target),
+    )
+    violations = list(recheck.blocking_reasons)
+    violations.extend(
+        replacement_condition_violations(target, profile=profile, catalog=catalog)
+    )
+    if violations:
+        raise InvalidArrangementTarget(
+            "当次安排未通过最新限制与红旗复核，不落库：" + "；".join(violations)
+        )
+
+
+def _session_exercise_ids(target: ArrangementTarget) -> tuple[str, ...]:
+    """当次目标实际要做的动作身份（去重，含替代动作）：复核「当次条件」用（04 4.5）。"""
+    return tuple(
+        dict.fromkeys(
+            exercise_id
+            for item in target.exercises
+            for exercise_id in (
+                item.exercise_id,
+                item.replacement_exercise_id,
+            )
+            if exercise_id is not None
+        )
+    )
+
+
 class ArrangementDraftService:
     """安排草稿生命周期应用层（S3-08）：准备、创建与查询；不写正式事实、不推进版本。"""
 
@@ -95,6 +148,11 @@ class ArrangementDraftService:
         self._plans = PlanRepo(db)
         self._drafts = DraftRepo(db)
         self._runs = RunRepo(db)
+        self._exercises = ExerciseRepo(db)
+
+    async def _catalog(self) -> dict[str, Exercise]:
+        """目录投影（含停用动作）：建草稿前的结构校验与替换等价复查用，不掺推荐判定。"""
+        return {exercise.id: exercise for exercise in await self._exercises.list_all()}
 
     async def prepare_input(self) -> ArrangementPreparation:
         """在单一读事务内读正式档案与版本、当前正式计划及其日程，作为创建的唯一快照。"""
@@ -157,6 +215,9 @@ class ArrangementDraftService:
                 f"已取消的日程不再是应训练义务，不接受当次安排：{scheduled_session_id}"
             )
         workout = _planned_workout(plan, session)
+        # 目录在创建前读一次（参考表，同一业务版本内不因草稿而变）：替换等价必须真的看到
+        # 双方身份与肌群，读不到就 fail-closed，不得当作「无冲突」。
+        catalog = await self._catalog()
         target = ArrangementTarget(
             scheduled_session_id=session.id,
             plan_version_id=plan.id,
@@ -165,7 +226,13 @@ class ArrangementDraftService:
             exercises=arrangement_target_exercises(workout, adjustments),
             adjustment_reason=adjustment_reason,
         )
-        validate_arrangement_target(target, workout=workout)
+        validate_arrangement_target(target, workout=workout, catalog=catalog)
+        require_arrangement_safety(
+            target,
+            version=plan,
+            profile=preparation.snapshot.profile,
+            catalog=catalog,
+        )
         await require_draft_source(
             self._runs, conversation_id=conversation_id, run_id=run_id
         )
@@ -222,12 +289,17 @@ class ArrangementDraftService:
             session = await self._plans.read_session_in_transaction(
                 conn, target.scheduled_session_id
             )
+            catalog = await self._exercises.list_all_in_transaction(conn)
         if session is None:
             raise InvalidDraftRow(
                 f"安排草稿绑定的应训练名额不存在：{target.scheduled_session_id}"
             )
         planned = require_arrangement_binding(target, version=version, session=session)
-        validate_arrangement_target(target, workout=planned)
+        validate_arrangement_target(
+            target,
+            workout=planned,
+            catalog={exercise.id: exercise for exercise in catalog},
+        )
         return ArrangementDraftView(
             draft=draft,
             base_profile=(

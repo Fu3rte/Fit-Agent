@@ -23,13 +23,16 @@ fail-closed 口径（stage3.md §4.4「缺档案/红旗 fail-closed」）：
 """
 
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date
 from typing import Literal, cast
 
 from domain.actions.schema import Exercise
 from domain.plan.rules import (
+    ArrangementAdjustment,
     InvalidPlanPayload,
+    needs_calibration_for,
+    plan_item_revision,
     prescription_record_type_for,
     project_sessions,
     validate_calendar_cycle,
@@ -41,7 +44,6 @@ from domain.plan.schema import (
     DisplaySnapshot,
     IntRange,
     Load,
-    NeedsCalibration,
     PlanExerciseItem,
     PlanPayload,
     PlanWorkout,
@@ -50,13 +52,14 @@ from domain.plan.schema import (
     ProgressionMethod,
     RepsPrescription,
     RestCycleSlot,
-    TimedPrescription,
     WorkoutCycleSlot,
 )
 from domain.profile.rules import apply_patch, missing_first_time_fields
 from domain.profile.safety import (
+    MESSAGE_RED_FLAG_SOURCE,
     RED_FLAG_BLOCK_ADVICE,
     RedFlagCheck,
+    RedFlagFinding,
     RestrictionHit,
     SafetyCheckResult,
     evaluate_safety,
@@ -277,6 +280,8 @@ class PlanSafetyRecheck:
 
     safety: SafetyCheckResult
     unknown_exercise_ids: tuple[str, ...] = ()
+    #: C 层文本兜底命中的当前消息词（2026-09-12 拍板）：非空即阻断，不并入目录／档案判定。
+    message_red_flags: tuple[str, ...] = ()
 
     @property
     def restriction_conflicts(self) -> tuple[RestrictionHit, ...]:
@@ -285,8 +290,21 @@ class PlanSafetyRecheck:
 
     @property
     def red_flags(self) -> RedFlagCheck:
-        """最新条件的红旗评估（正式档案来源，独立于限制冲突）。"""
-        return self.safety.red_flags
+        """最新条件的红旗评估（档案来源，独立于限制冲突）＋ C 层消息兜底命中。
+
+        C 层命中（2026-09-12 拍板）没有档案来源，以 ``message`` 来源并入 ``confirmed``：
+        只补强红旗结论，不改写任何档案事实，也不进 ``unknown_sources``。
+        """
+        if not self.message_red_flags:
+            return self.safety.red_flags
+        return replace(
+            self.safety.red_flags,
+            confirmed=self.safety.red_flags.confirmed
+            + tuple(
+                RedFlagFinding(source=MESSAGE_RED_FLAG_SOURCE, label=term)
+                for term in self.message_red_flags
+            ),
+        )
 
     @property
     def restrictions_unknown(self) -> bool:
@@ -295,16 +313,17 @@ class PlanSafetyRecheck:
 
     @property
     def is_blocked(self) -> bool:
-        """整份计划不得作为可执行训练建议：限制冲突、红旗或无法复核的目录引用任一为真。"""
+        """整份计划不得作为可执行训练建议：限制冲突、红旗、目录引用或消息兜底任一为真。"""
         return (
             bool(self.restriction_conflicts)
             or self.red_flags.is_blocked
             or bool(self.unknown_exercise_ids)
+            or bool(self.message_red_flags)
         )
 
     @property
     def blocking_reasons(self) -> tuple[str, ...]:
-        """阻断原因：限制冲突、红旗、目录引用读不到各自独立列出（空 = 未阻断）。"""
+        """阻断原因：限制冲突、红旗、目录引用读不到、消息兜底各自独立列出（空 = 未阻断）。"""
         reasons = [
             f"动作 {hit.standard_name}（{hit.exercise_id}）命中最新限制："
             "整份计划不作为可执行训练建议"
@@ -319,6 +338,12 @@ class PlanSafetyRecheck:
             reasons.append(
                 "计划引用的动作身份在目录内已读不到，无法按最新限制复核："
                 f"{list(self.unknown_exercise_ids)}"
+            )
+        if self.message_red_flags:
+            reasons.append(
+                "当前用户消息命中已拍红旗兜底词（"
+                + "、".join(self.message_red_flags)
+                + "）：本 Run 不给可执行处方"
             )
         return tuple(reasons)
 
@@ -364,44 +389,6 @@ def evaluate_plan_safety(
         safety=evaluate_safety(profile, actions),
         unknown_exercise_ids=tuple(
             item_id for item_id in referenced if item_id not in catalog
-        ),
-    )
-
-
-def needs_calibration_for(
-    record_type: str, prescription: RepsPrescription | TimedPrescription
-) -> NeedsCalibration:
-    """D3 校准文案：次数型按次数下限、计时型按最短时长；RIR 不作硬性指标。
-
-    通过 = 稳定完成处方下限；停止 = 疼痛／不适、动作明显失稳，或加重后完不成下限
-    （计时型为无法维持动作）。不输出任何具体起始重量。
-    """
-    if record_type == "timed":
-        if not isinstance(prescription, TimedPrescription):
-            raise InvalidPlanPayload("timed 处方的校准必须是 TimedPrescription")
-        shortest = prescription.duration_seconds_range.min
-        return NeedsCalibration(
-            steps=(
-                "从最容易的变式或最轻档位完成一组热身，观察动作是否稳定",
-                f"逐级增加负荷或难度，以能稳定完成最短时长（{shortest} 秒）的档位为准",
-            ),
-            pass_criteria=f"能稳定完成该组处方的最短时长（{shortest} 秒）",
-            stop_criteria=(
-                "出现疼痛或其他不适、动作明显失稳，或无法维持动作时停止，不继续加重"
-            ),
-        )
-    if not isinstance(prescription, RepsPrescription):
-        raise InvalidPlanPayload("次数型处方的校准必须是 RepsPrescription")
-    floor = prescription.reps_range.min
-    return NeedsCalibration(
-        steps=(
-            "从该动作最轻可用档位（自重动作取最轻辅助档）完成一组热身",
-            "逐级加重，每级完成 5 次，观察动作是否稳定",
-            f"以能稳定完成处方次数下限（{floor} 次）的档位为起始负荷",
-        ),
-        pass_criteria=f"能稳定完成该组处方的次数下限（{floor} 次）",
-        stop_criteria=(
-            "出现疼痛或其他不适、动作明显失稳，或加重后完不成次数下限时停止，不继续加重"
         ),
     )
 
@@ -537,6 +524,69 @@ def generate_ppl_plan(
             ),
         )
     return PlanGenerationReady(payload=payload)
+
+
+def revise_plan_payload(
+    current: PlanPayload,
+    adjustments: Sequence[ArrangementAdjustment],
+    *,
+    catalog: Mapping[str, Exercise],
+) -> PlanPayload:
+    """以**当前正式 payload 为基线**的受限长期修订（04 4.5；决策 7；stage4.md S4-04）。
+
+    不是从模板重新生成：只改被列出的动作条目（keep／deload／equivalent_replace／local_skip），
+    未列出的条目、训练日集合与顺序、日历循环逐字保留。
+    至少一个条目必须产生真实改动：全部处置加起来没有改动即拒绝（不落库），档案补丁不能
+    代替计划本身的业务变化。任一处置越界、目录读不到或修订后 payload 自检不过即拒绝。
+    """
+    if not adjustments:
+        raise InvalidPlanPayload("长期修订必须至少给出一个要调整的动作条目")
+    by_item_key: dict[str, ArrangementAdjustment] = {}
+    for adjustment in adjustments:
+        if adjustment.item_key in by_item_key:
+            raise InvalidPlanPayload(f"同一动作条目被调整两次：{adjustment.item_key}")
+        by_item_key[adjustment.item_key] = adjustment
+    known = {
+        item.item_key for workout in current.plan_workouts for item in workout.exercises
+    }
+    unknown = sorted(set(by_item_key) - known)
+    if unknown:
+        raise InvalidPlanPayload(f"调整引用了当前计划不存在的动作条目：{unknown}")
+    workouts: list[PlanWorkout] = []
+    changed = False
+    for workout in current.plan_workouts:
+        items: list[PlanExerciseItem] = []
+        for item in workout.exercises:
+            adjustment = by_item_key.get(item.item_key)
+            revised = (
+                item
+                if adjustment is None
+                else plan_item_revision(item, adjustment, catalog=catalog)
+            )
+            if revised is not None:
+                items.append(revised)
+        if not items:
+            raise InvalidPlanPayload(
+                f"训练日 {workout.workout_key} 的动作不能被全部删除：至少保留一个动作"
+            )
+        if tuple(items) == workout.exercises:
+            workouts.append(workout)
+            continue
+        changed = True
+        workouts.append(
+            replace(
+                workout,
+                exercises=tuple(items),
+                estimated_minutes=estimated_minutes(items),
+            )
+        )
+    if not changed:
+        raise InvalidPlanPayload(
+            "长期修订没有产生任何真实计划改动（未列出的条目一律保持原样）"
+        )
+    revised_payload = replace(current, plan_workouts=tuple(workouts))
+    validate_payload(revised_payload, catalog=catalog)
+    return revised_payload
 
 
 def _build_item(

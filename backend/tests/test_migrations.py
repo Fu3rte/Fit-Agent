@@ -205,16 +205,17 @@ async def test_error_code_and_retry_pointer_semantics(tmp_path: Path) -> None:
         repo = RunRepo(db)
         await repo.create_conversation("c1")
         await repo.create_run_with_user_message("c1", "r-old", "cri-old", "a")
-        result = await repo.create_run_with_user_message(
-            "c1", "r-new", "cri-new", "b", retry_of_run_id="r-old"
-        )
-        assert result["run"]["retry_of_run_id"] == "r-old"
         # 已拍语义可保存：重启中断标记（Stage 4 负责流转时机，本层只验证存储能力）
         async with db.transaction() as conn:
             await conn.execute(
                 "UPDATE runs SET status = 'failed', error_code = 'interrupted_by_restart'"
                 " WHERE id = 'r-old'"
             )
+        # 08 8.2：同一时刻只允许一个活跃 Run，因此重试请求必然发生在旧 Run 结束之后
+        result = await repo.create_run_with_user_message(
+            "c1", "r-new", "cri-new", "b", retry_of_run_id="r-old"
+        )
+        assert result["run"]["retry_of_run_id"] == "r-old"
         saved = await repo.get_run("r-old")
         assert saved is not None
         assert saved["status"] == "failed"
@@ -271,3 +272,50 @@ async def test_migration_failure_blocks_service_startup(
             pass  # 生命周期启动即失败：不得进入可用状态
     assert not app.state.db.is_open  # 已建立连接被关闭
     assert (data_dir / "app.db").exists()  # 未以删除用户数据库替代恢复
+
+
+async def test_failed_013_rolls_back_muscle_column_and_version(tmp_path: Path) -> None:
+    """013 失败注入：ALTER 已执行但后续语句失败 → 整片回滚（列不存在、版本停在 012）。
+
+    用真实 001–012 加一个注入失败的 013 验证；修复后可重跑，不需删库（07 7.2）。
+    """
+    real_dir = Path(__file__).resolve().parents[1] / "storage" / "migrations"
+    migrations_dir = tmp_path / "migrations"
+    migrations_dir.mkdir()
+    for source in sorted(real_dir.glob("0*.sql")):
+        if source.name.startswith("013"):
+            continue
+        (migrations_dir / source.name).write_text(
+            source.read_text(encoding="utf-8"), encoding="utf-8"
+        )
+    _write_migration(
+        migrations_dir,
+        13,
+        "stage4_action_muscle",
+        "ALTER TABLE exercises ADD COLUMN muscle TEXT;\nTHIS IS NOT VALID SQL;",
+    )
+    path = tmp_path / "app.db"
+    async with open_database(path, migrate=False, migrations_dir=migrations_dir) as db:
+        with pytest.raises(MigrationError, match="stage4_action_muscle"):
+            await db.migrate()
+        assert await db.pragma_value("user_version") == 12
+        async with (
+            db.transaction() as conn,
+            conn.execute("PRAGMA table_info(exercises)") as cursor,
+        ):
+            columns = {str(row["name"]) for row in await cursor.fetchall()}
+        assert "muscle" not in columns  # 半套结构已回滚
+
+        _write_migration(
+            migrations_dir,
+            13,
+            "stage4_action_muscle",
+            "ALTER TABLE exercises ADD COLUMN muscle TEXT;",
+        )
+        assert await db.migrate() == 13
+        async with (
+            db.transaction() as conn,
+            conn.execute("PRAGMA table_info(exercises)") as cursor,
+        ):
+            columns = {str(row["name"]) for row in await cursor.fetchall()}
+        assert "muscle" in columns

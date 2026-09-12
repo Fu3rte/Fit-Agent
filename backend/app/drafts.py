@@ -28,11 +28,16 @@ from app.draft_repo import PROFILE_UPDATE_KIND, Draft, DraftRepo
 from domain.actions.repo import ExerciseRepo
 from domain.actions.service import ActionCatalogService
 from domain.profile.repo import ProfileRepo
-from domain.profile.rules import UnknownExerciseReference, validate_profile_structure
+from domain.profile.rules import (
+    InvalidProfilePatch,
+    UnknownExerciseReference,
+    validate_profile_structure,
+)
 from domain.profile.schema import (
     FACT_FIELDS,
     Fact,
     Profile,
+    ProfilePatch,
     ProfileSnapshot,
     profile_from_json,
     profile_to_json,
@@ -140,6 +145,43 @@ def profile_diff(
             field=name, before=getattr(baseline, name), after=getattr(proposed, name)
         )
         for name in FACT_FIELDS
+    )
+
+
+def profile_patch(base: Profile | None, proposed: Profile) -> ProfilePatch | None:
+    """正式档案 → 拟议档案的长期补丁；无变化返回 None（不得生成空补丁）。
+
+    受限组合草稿只需要补丁，不需要用户手写补丁对象：拟议档案与正式档案逐字段对比得出
+    ``facts`` 与限制增删。补丁只表达 known／denied：拟议值退回「未知」不是补丁能表达的变更，
+    直接拒绝（02 2.4）。
+    """
+    baseline = base if base is not None else Profile.empty()
+    facts: dict[str, Fact[Any]] = {}
+    for name in FACT_FIELDS:
+        if name == "action_restrictions":
+            continue
+        value = getattr(proposed, name)
+        if getattr(baseline, name) == value:
+            continue
+        if not value.is_known:
+            raise InvalidProfilePatch(
+                f"拟议补丁只表达 known／denied，不表达重新变为未知：{name}"
+            )
+        facts[name] = value
+    removed = tuple(
+        restriction
+        for restriction in baseline.restrictions
+        if restriction not in proposed.restrictions
+    )
+    added = tuple(
+        restriction
+        for restriction in proposed.restrictions
+        if restriction not in baseline.restrictions
+    )
+    if not facts and not added and not removed:
+        return None
+    return ProfilePatch(
+        facts=facts, add_restrictions=added, remove_restrictions=removed
     )
 
 

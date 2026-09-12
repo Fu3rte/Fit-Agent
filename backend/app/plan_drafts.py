@@ -32,6 +32,7 @@ architecture/01 1.3（草稿生命周期与基线绑定）、04 4.1/4.2（版本
 ``domain/actions/repo`` 的目录读取。
 """
 
+from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from datetime import date
 from typing import Any
@@ -61,6 +62,7 @@ from domain.plan.rules import (
 )
 from domain.plan.schema import (
     PLAN_MODES,
+    ArrangementTarget,
     PlanMode,
     PlanPayload,
     PlanProposal,
@@ -231,6 +233,13 @@ class PlanDraftService:
             candidates=preparation.candidates,
             patch=patch,
         )
+        # 迟到草稿（决策 2）：生效范围已全部过去即拒绝，不落库、不向前补齐。
+        if business_date >= review_on:
+            raise InvalidPlanPayload(
+                f"计划的生效范围 [starts_on, review_on) 已全部过去"
+                f"（当刻业务日期 {business_date.isoformat()}）：不接受迟到的计划草稿，"
+                "请按当前日期重新生成"
+            )
         if patch is not None:
             validate_patch(patch)
             await self._require_known_patch_restrictions(patch)
@@ -656,6 +665,97 @@ def _available_equipment(profile: Profile) -> tuple[str, ...]:
     """拟议档案器械：known 取值；denied（明确无）取空元组；未知同样按空处理（fail-closed）。"""
     fact = profile.available_equipment
     return fact.value if fact.is_known and fact.value is not None else ()
+
+
+def require_long_term_revision(
+    *,
+    payload: PlanPayload,
+    review_on: date,
+    current: PlanVersionRecord,
+) -> None:
+    """长期调整版必须真的改当前基线，且保留循环与训练日结构（04 4.5、stage4.md S4-04）。
+
+    用户确认需要调整长期计划后，修订以**原计划为基线**保留宏观周期／复核节点、训练频率与
+    未受影响部分；本函数只做确定性边界，任一不符抛 :class:`InvalidPlanPayload` 不落库：
+
+    - **不是原样续期**：拟议 payload 与当前正式计划逐字相同（只有日期信封不同）就不是调整，
+      拒绝生成草稿——档案补丁不能代替计划本身的业务变化（2026-09-12 已拍口径）；真实改动
+      由 :func:`~domain.plan.service.revise_plan_payload` 的受限修订（仅受影响条目变化）产生；
+    - **保留训练频率与循环结构**：日历循环的槽位序列（休息／训练与引用的 ``workout_key``）
+      与训练日的 ``workout_key`` 序列必须与基线一致，不按调整之名改频率或改循环；
+    - **保留原复核节点**：``review_on`` 必须等于基线的复核日，不延长周期。
+
+    首次建档（无当前正式计划）不走本函数：那不叫调整，也不存在可保留的基线。
+    """
+    if payload == current.payload:
+        raise InvalidPlanPayload(
+            "拟议计划与当前基线内容完全相同，也没有真实计划改动：没有实际调整，"
+            "不生成长期调整草稿（档案补丁不能代替计划本身的业务变化）"
+        )
+    if _slot_pattern(payload) != _slot_pattern(current.payload):
+        raise InvalidPlanPayload(
+            "长期调整必须保留原日历循环结构（休息／训练槽与训练频率）"
+        )
+    if [workout.workout_key for workout in payload.plan_workouts] != [
+        workout.workout_key for workout in current.payload.plan_workouts
+    ]:
+        raise InvalidPlanPayload("长期调整必须保留原训练日集合与顺序")
+    if review_on != current.review_on:
+        raise InvalidPlanPayload(
+            f"长期调整必须保留原复核节点 {current.review_on.isoformat()}："
+            f"收到 {review_on.isoformat()}"
+        )
+
+
+def _slot_pattern(payload: PlanPayload) -> tuple[tuple[str, str | None], ...]:
+    """循环结构指纹：槽类型与引用的训练日（相位 ``anchor_date`` 属日期信封，不计入）。"""
+    return tuple(
+        (
+            slot.kind,
+            None if slot.kind == "rest" else slot.workout_key,
+        )
+        for slot in payload.calendar_cycle.slots
+    )
+
+
+def replacement_condition_violations(
+    target: ArrangementTarget,
+    *,
+    profile: Profile,
+    catalog: Mapping[str, Exercise],
+) -> tuple[str, ...]:
+    """当次安排中同等刺激替换的器械与限制复查（04 4.7 的后两项条件）。
+
+    结构、动作模式与主要肌群条件归 ``domain/plan/rules.replacement_violations``；器械可用与
+    最新限制冲突需要正式条件，由本函数在**创建与确认两处**用同一入口重建：
+
+    - 器械：拟议（当刻正式）器械条件不覆盖替代动作的器械变式即冲突，未知变式 fail-closed；
+    - 限制：替代动作命中最新限制即冲突；已确认限制不得被替换绕开（PRD §5.7）。
+
+    缺失目录行同样列入冲突（宁可不替换，不得读成「无冲突」）。
+    """
+    equipment = _available_equipment(profile)
+    violations: list[str] = []
+    for item in target.exercises:
+        if item.disposition != "equivalent_replace":
+            continue
+        replacement = catalog.get(item.replacement_exercise_id or "")
+        if replacement is None:
+            violations.append(
+                f"替代动作身份在目录内读不到：{item.replacement_exercise_id}"
+            )
+            continue
+        if not equipment_available(replacement.equipment_variant, equipment):
+            violations.append(
+                f"替代动作 {replacement.standard_name_zh}（{replacement.id}）的器械"
+                f" {replacement.equipment_variant} 在当前器械条件下不可用"
+            )
+        hits = evaluate_safety(profile, (replacement,)).restrictions.hits
+        violations.extend(
+            f"替代动作 {hit.standard_name}（{hit.exercise_id}）命中最新限制"
+            for hit in hits
+        )
+    return tuple(violations)
 
 
 def _require_date(name: str, value: object) -> None:

@@ -59,7 +59,11 @@ from uuid import uuid4
 
 import aiosqlite
 
-from app.arrangement_drafts import ARRANGEMENT_DRAFT_KIND, require_arrangement_binding
+from app.arrangement_drafts import (
+    ARRANGEMENT_DRAFT_KIND,
+    require_arrangement_binding,
+    require_arrangement_safety,
+)
 from app.draft_repo import PROFILE_UPDATE_KIND, Draft, DraftRepo, InvalidDraftRow
 from app.drafts import (
     DraftKindMismatch,
@@ -557,6 +561,16 @@ class ConfirmService:
                 "计划与拟议条件的频率／时长上限冲突，不确认："
                 + "；".join(limit_violations)
             )
+        # 迟到确认（决策 2）：生效范围 [starts_on, review_on) 已全部过去即拒绝，不向前补齐。
+        if business_date >= proposal.review_on:
+            raise InvalidPlanPayload(
+                "计划的生效范围 [starts_on, review_on) 已全部过去"
+                f"（当刻业务日期 {business_date.isoformat()}）：不接受迟到的计划确认，"
+                "请按当前日期重新生成计划草稿"
+            )
+        # 未过去的只从**确认业务日期当天**起投影日程（确认日保留），不生成确认日前的名额；
+        # 因此确认日前的日子不进入完成率分母（06 6.1），starts_on／review_on 行字段不变。
+        effective_starts_on = max(proposal.starts_on, business_date)
         # 只替换「当刻正式计划」：草稿绑定的来源版本与它不一致时拒结，否则会把未基于该版本的
         # 草稿用在当前版本上（取消错版本日程、留下两份未取消的未来日程）。
         current = await self._plans.read_current_in_transaction(conn)
@@ -593,8 +607,16 @@ class ConfirmService:
             confirmed_at=now,
         )
         projected = project_sessions(
-            proposal.payload, starts_on=proposal.starts_on, review_on=proposal.review_on
+            proposal.payload,
+            starts_on=effective_starts_on,
+            review_on=proposal.review_on,
         )
+        if not projected:
+            raise InvalidPlanPayload(
+                "确认日到复核日之间没有任何训练日：计划的剩余生效范围没有可执行日程，"
+                f"不接受本次确认（{effective_starts_on.isoformat()} / "
+                f"{proposal.review_on.isoformat()}）"
+            )
         await self._plans.insert_sessions_in_transaction(
             conn,
             sessions=tuple(
@@ -616,7 +638,7 @@ class ConfirmService:
         return _plan_commit_result(committed, record)
 
     async def confirm_arrangement_draft(
-        self, *, draft_id: str, seen_revision: int
+        self, *, draft_id: str, seen_revision: int, business_date: date
     ) -> ArrangementCommitResult:
         """确认安排草稿身份＋用户所见 revision；返回该次提交的不可变结果（S3-08）。
 
@@ -627,6 +649,10 @@ class ConfirmService:
         - **接受即落盘的真实时间**：``accepted_at`` 取本事务的当刻 UTC 时间，不接受调用方
           传入，也不从训练日或草稿时间倒推（PRD §5.5：不得先在会话中视为已接受、等打卡时
           再补写）。训练发生时间、系统接受时间、记录与更正确认时间分列保存。
+        - **过期按绑定的训练日判定**：``business_date`` 是确认当刻的**固定业务时区日期**
+          （07 7.3，服务端算出、不接受客户端传入）。 ``business_date > scheduled_on`` 即该次
+          训练日已过，草稿不可再接受、必须重新生成（04 4.3）；训练日当天仍可接受。本口径
+          不叫用长期计划的「生成日 +1」规则。
         - **临时调整不改长期计划版本**：本事务不写 ``plan_versions``、不写
           ``scheduled_sessions``、不改正式档案，只追加安排修订并将 ``context_version``
           恰好 +1（01 1.4、04 4.3）。
@@ -635,6 +661,10 @@ class ConfirmService:
         - **只用内部分派**：只服务 ``kind='arrangement'``；档案与计划草稿的确认走各自入口。
           安排草稿不接受档案补丁，也不推进计划版本（不得把当次目标当长期计划提交）。
         """
+        if type(business_date) is not date:
+            raise InvalidPlanPayload(
+                f"business_date 必须是 date 日期：{business_date!r}"
+            )
         async with self._db.transaction() as conn:
             draft = await self._drafts.get_in_transaction(conn, draft_id)
             if draft is None:
@@ -651,7 +681,7 @@ class ConfirmService:
                 raise DraftDiscarded(f"草稿已丢弃，不可确认：{draft_id}")
             else:
                 result = await self._commit_pending_arrangement(
-                    conn, draft, seen_revision
+                    conn, draft, seen_revision, business_date
                 )
         # 事务已 COMMIT（或本就不需要写）：只有到这里才把结果交给调用方（「提交后再响应」）。
         return result
@@ -680,6 +710,7 @@ class ConfirmService:
         conn: aiosqlite.Connection,
         draft: Draft,
         seen_revision: int,
+        business_date: date,
     ) -> ArrangementCommitResult:
         """§4.2 步骤 3–5 的安排版：基线／revision → 绑定与结构复查 → 写入修订 → 读回凭据。"""
         snapshot = await self._profiles.read_in_transaction(conn)
@@ -725,9 +756,26 @@ class ConfirmService:
             raise InvalidArrangementTarget(
                 f"已取消的日程不再是应训练义务，不接受当次安排：{session.id}"
             )
-        # 绑定与训练日复查：返回绑定版本里的该训练日。
+        if business_date > session.scheduled_on:
+            # 当次安排按其**绑定的训练日**判过期（不是长期计划的「生成日 +1」口径）：
+            # 训练日已过则拒结并重新生成，不事后倒改执行标准（04 4.3）。
+            raise InvalidArrangementTarget(
+                f"绑定的训练日已过，当次安排不可再接受，请重新生成：{session.id} "
+                f"{session.scheduled_on.isoformat()} < {business_date.isoformat()}"
+            )
+        # 绑定与训练日复查：返回绑定版本里的该训练日；再按**本事务当刻条件**复核整份计划、
+        # 当次目标实际动作与替换等价（普通新报限制或红旗在落库前就阻断）。
         workout = require_arrangement_binding(target, version=version, session=session)
-        validate_arrangement_target(target, workout=workout)
+        catalog = await self._exercises.list_all_in_transaction(conn)
+        validate_arrangement_target(
+            target, workout=workout, catalog={item.id: item for item in catalog}
+        )
+        require_arrangement_safety(
+            target,
+            version=version,
+            profile=snapshot.profile,
+            catalog={item.id: item for item in catalog},
+        )
         accepted_at = _now()
         record = await self._plans.append_arrangement_revision_in_transaction(
             conn,

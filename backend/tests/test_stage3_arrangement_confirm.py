@@ -20,7 +20,7 @@ S3-09 起与 S3-06），不是生产写入旁路。
 
 import asyncio
 import inspect
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -176,10 +176,17 @@ async def _create_arrangement(
 
 
 async def _confirm_arrangement(
-    db: Database, *, draft_id: str, seen_revision: int = 1
+    db: Database,
+    *,
+    draft_id: str,
+    seen_revision: int = 1,
+    business_date: date = STARTS_ON,
 ) -> ArrangementCommitResult:
+    """确认入口统一走真实签名：``business_date`` 是服务端按固定业务时区算出的当日。"""
     return await ConfirmService(db).confirm_arrangement_draft(
-        draft_id=draft_id, seen_revision=seen_revision
+        draft_id=draft_id,
+        seen_revision=seen_revision,
+        business_date=business_date,
     )
 
 
@@ -335,9 +342,12 @@ async def test_later_plan_replacement_does_not_rewrite_the_accepted_target(
         plan_before = (await _plan_rows(db))[plan.id]
         rows_before = await _arrangement_rows(db, session.id)
 
-        # 替换：新计划版本启用（旧版全部日程已到期锁定，故只归档、不取消）
+        # 替换：新计划版本启用（确认业务日期为旧版最后一条训练日：旧版全部日程已到期锁定，
+        # 故只归档、不取消；新版日程从确认日当天起投影）。
         await _create_plan_draft(db, draft_id="plan-draft-2")
-        await _confirm_plan(db, draft_id="plan-draft-2", business_date=REVIEW_ON)
+        await _confirm_plan(
+            db, draft_id="plan-draft-2", business_date=REVIEW_ON - timedelta(days=3)
+        )
 
         replacement = await PlanRepo(db).read_current()
         assert replacement is not None and replacement.version == 2
@@ -364,9 +374,13 @@ async def test_later_plan_replacement_does_not_rewrite_the_accepted_target(
 
 
 def test_confirmation_api_accepts_no_accept_time_from_the_caller() -> None:
-    """不倒填的结构证据：确认入口只接受草稿身份与所见 revision，没有时间参数。"""
+    """不倒填的结构证据：确认入口只接受草稿身份、所见 revision 与服务端业务日期。
+
+    ``business_date`` 不是调用方可传的接受时间：它是服务端按固定业务时区算出的当日，
+    只用于「训练日已过则拒结」的过期判定；``accepted_at`` 仍只能由确认事务自己取。
+    """
     parameters = inspect.signature(ConfirmService.confirm_arrangement_draft).parameters
-    assert set(parameters) == {"self", "draft_id", "seen_revision"}
+    assert set(parameters) == {"self", "draft_id", "seen_revision", "business_date"}
 
 
 async def test_each_acceptance_keeps_its_own_time_and_never_backdates_history(

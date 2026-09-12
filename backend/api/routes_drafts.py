@@ -139,8 +139,8 @@ async def confirm_draft(
 ) -> dict[str, Any]:
     """所见 revision 确认草稿；返回持久化提交结果（重复确认返回原结果）。
 
-    计划确认需要当刻**业务日期**（到期即锁的规则判定，07 7.3）：由服务端按固定业务时区算出
-    并注入，不接受客户端传入。
+    计划与安排确认需要当刻**业务日期**（到期即锁的规则判定与当次训练日过期判定，07 7.3）：
+    由服务端按固定业务时区算出并注入，不接受客户端传入。
     """
     body = await json_object_body(request, keys=_CONFIRM_KEYS)
     seen_revision = seen_revision_from_dto(body)
@@ -159,7 +159,9 @@ async def confirm_draft(
         )
     elif kind == ARRANGEMENT_DRAFT_KIND:
         result = await confirm.confirm_arrangement_draft(
-            draft_id=draft_id, seen_revision=seen_revision
+            draft_id=draft_id,
+            seen_revision=seen_revision,
+            business_date=business_date,
         )
     else:
         result = await confirm.confirm_profile_draft(
