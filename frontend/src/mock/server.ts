@@ -8,9 +8,12 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { Plugin } from "vite";
 import type {
+  AcceptedArrangement,
   ApiError,
   ArrangementDraftPayload,
+  ArrangementItemDisposition,
   ArrangementTarget,
+  Buckets,
   ChatMessage,
   ConfirmResult,
   Draft,
@@ -36,16 +39,20 @@ import type {
   SetFacts,
   StatsSummary,
   TrainingRecord,
+  WeekCompletion,
 } from "@/lib/contract";
 import {
   derivePlanBlocks,
+  dayDiff,
   deriveRangeLabel,
+  effortPlainLabel,
   findWorkout,
   prescriptionLabel,
   progressionLabel,
   projectSchedules,
   weekdayLabel,
 } from "../lib/planView";
+import { CATALOG } from "./catalog";
 import {
   profileFieldRows,
   profilePayloadDiff,
@@ -66,8 +73,16 @@ import {
 
 /* ---------------------------------- 状态 ---------------------------------- */
 
-const MOCK_TODAY = "2026-09-10";
-const MOCK_UPDATED_AT = "2026-09-10T08:30:00+08:00";
+const MOCK_TODAY = "2026-09-11";
+const MOCK_UPDATED_AT = "2026-09-11T09:00:00+08:00";
+/** mock 时钟：不依赖真实 Date.now，保证统计/接受时间的确定性可断言 */
+let mockClockMs = Date.parse(MOCK_UPDATED_AT);
+function mockNowIso(): string {
+  return new Date(mockClockMs).toISOString();
+}
+function advanceMockClock(): void {
+  mockClockMs += 60_000;
+}
 
 interface RunState {
   id: string;
@@ -137,9 +152,9 @@ interface MockState {
   draft_sessions: Map<string, string>;
   /** 建档对话状态（按会话；stage1 F1-02） */
   onboarding: Map<string, OnboardingState>;
-  /** 首次确认凭据（owner 决策 B；01 1.3 提交凭据）：draft_id → 原始 context_version 与 summary；
+  /** 首次确认凭据（owner 决策 B；01 1.3 提交凭据）：draft_id → 完整 ConfirmResult 凭据；
    *  重复确认返回持久化凭据，不从当前状态重建，不再写入或递增版本 */
-  confirm_receipts: Map<string, { context_version: number; summary: string }>;
+  confirm_receipts: Map<string, ConfirmResult>;
   runs: Map<string, RunState>;
   /** 唯一执行名额（08 8.3）：由正在执行的 Run 持有，runScript 实际退出（finally）后才释放；
    *  与 Run 状态解耦——取消立即置 cancelled，名额不提前释放。非权威状态，仅作并发互斥。 */
@@ -282,110 +297,156 @@ function seedPlanV2(): PlanVersion {
 
 function seedState(): MockState {
   const plan: PlanVersion = seedPlanV2();
+  const schedules = seedSchedules(plan);
 
+  /** 按绑定训练日构造已接受安排快照（stage3 §3.5 种子） */
+  const seedArrangement = (
+    id: string,
+    date: string,
+    acceptedAt: string,
+    opts: {
+      /** deload：卧推 work_sets 减 1（4→3）并标 disposition */
+      deloadBench?: boolean;
+      reason?: string;
+    },
+  ): MockState["arrangement_revisions"][number] => {
+    const sched = schedules.find((s) => s.date === date);
+    const workout = sched
+      ? findWorkout(plan.payload, sched.plan_workout_key)
+      : undefined;
+    if (!sched || !workout)
+      throw new Error(`种子安排绑定的日程不存在：${date}`);
+    const exercises = workout.exercises.map((e) => {
+      if (
+        opts.deloadBench &&
+        e.exercise_id === "barbell-bench-press" &&
+        e.prescription.kind === "reps"
+      ) {
+        return {
+          ...e,
+          prescription: {
+            ...e.prescription,
+            work_sets: e.prescription.work_sets - 1,
+          },
+          disposition: "deload" as const,
+        };
+      }
+      return { ...e, disposition: "keep" as const };
+    });
+    const target: ArrangementTarget = {
+      schema_version: 1,
+      scheduled_session_id: sched.id,
+      plan_version: plan.version,
+      plan_workout_key: workout.workout_key,
+      scheduled_on: date,
+      exercises,
+      ...(opts.reason ? { adjustment_reason: opts.reason } : {}),
+    };
+    return { id, target, accepted_at: acceptedAt };
+  };
+
+  const arrangement_revisions: MockState["arrangement_revisions"] = [
+    seedArrangement("arr-seed-0831", "2026-08-31", "2026-08-31T08:05:00.000Z", {}),
+    seedArrangement("arr-seed-0902", "2026-09-02", "2026-09-02T08:05:00.000Z", {}),
+    seedArrangement("arr-seed-0907", "2026-09-07", "2026-09-07T08:10:00.000Z", {
+      deloadBench: true,
+      reason: "当日状态不佳：卧推减 1 组（方案 1）",
+    }),
+  ];
+
+  /* 种子事实（stage3 §3.5）：
+   * W1 2/3（08-31✓ / 09-02✓ / 09-04 漏）、W2 1/3（09-07✓ / 09-09 漏 / 09-11 今日待办）、
+   * 三桶 1/1/1 按 09-07 对照安排、PR 卧推 80kg×8；09-05 无安排 incomplete。
+   * 只有 09-07 记录显式携带 arrangement_revision_id（三桶只按对照安排判定）。 */
   const records: TrainingRecord[] = [
     {
-      id: "rec-001",
-      date: "2026-09-01",
-      kind: "correction",
+      id: "rec-seed-0831",
+      date: "2026-08-31",
+      kind: "new",
       status: "valid",
       exercise: "杠铃平板卧推",
       variant: "杠铃",
       sets: [
+        { weight_kg: 80, reps: 8, rir: 2, set_type: "working" },
+        { weight_kg: 80, reps: 8, rir: 2, set_type: "working" },
         { weight_kg: 80, reps: 8, rir: 1, set_type: "working" },
         { weight_kg: 80, reps: 8, rir: 1, set_type: "working" },
-        { weight_kg: 80, reps: 8, rir: 1, set_type: "working" },
-        { weight_kg: 80, reps: 8, rir: 0, set_type: "working" },
       ],
       warmup_summary: "递增至 60kg",
       schedule_snapshot: "W1 · 推日 · PPL v2",
-      revision_note: "更正：4组x8@82.5kg → 4组x8@80kg（2026-09-02 确认）",
+      scheduled_session_id: "sched-v2-2026-08-31",
+      arrangement_revision_id: null,
     },
     {
-      id: "rec-002",
-      date: "2026-09-03",
+      id: "rec-seed-0902",
+      date: "2026-09-02",
       kind: "new",
       status: "valid",
-      exercise: "杠铃俯身划船",
-      variant: "杠铃",
+      exercise: "自重引体向上",
+      variant: "自重",
       sets: [
-        { weight_kg: 60, reps: 10, rir: 2, set_type: "working" },
-        { weight_kg: 60, reps: 10, rir: 2, set_type: "working" },
-        { weight_kg: 60, reps: 10, rir: 2, set_type: "working" },
+        { reps: 8, rir: 2, set_type: "working" },
+        { reps: 7, rir: 2, set_type: "working" },
+        { reps: 6, rir: 1, set_type: "working" },
       ],
       schedule_snapshot: "W1 · 拉日 · PPL v2",
+      scheduled_session_id: "sched-v2-2026-09-02",
+      arrangement_revision_id: null,
     },
     {
-      id: "rec-003",
-      date: "2026-09-08",
+      id: "rec-seed-0907",
+      date: "2026-09-07",
       kind: "new",
       status: "valid",
       exercise: "杠铃平板卧推",
       variant: "杠铃",
       sets: [
-        { weight_kg: 77.5, reps: 8, rir: 2, set_type: "working" },
-        { weight_kg: 77.5, reps: 8, rir: 2, set_type: "working" },
-        { weight_kg: 77.5, reps: 8, set_type: "working" },
+        // 对照安排（deload）：卧推 3 组、次数区间 6-8（RIR 不参与判定）
+        { weight_kg: 75, reps: 7, rir: 2, set_type: "working" }, // met
+        { weight_kg: 75, reps: 5, rir: 1, set_type: "working" }, // unmet（低于下限）
+        { weight_kg: 75, set_type: "working" }, // pending（缺次数）
       ],
       warmup_summary: "递增至 60kg",
-      schedule_snapshot: "W2 · 推日 · PPL v2",
+      schedule_snapshot: "W2 · 推日 · PPL v2 · 当次安排 deload",
+      scheduled_session_id: "sched-v2-2026-09-07",
+      arrangement_revision_id: "arr-seed-0907",
     },
     {
-      id: "rec-004",
-      date: "2026-09-09",
+      id: "rec-seed-0905",
+      date: "2026-09-05",
       kind: "new",
       status: "incomplete",
-      exercise: "坐姿哑铃肩推",
+      exercise: "哑铃弯举",
       variant: "哑铃",
-      sets: [{ weight_kg: 15, reps: 10, set_type: "working" }],
+      sets: [{ weight_kg: 12, reps: 10, set_type: "working" }],
       schedule_snapshot: null,
-      revision_note: "额外训练，无对照安排；缺组类型确认，待补全",
+      scheduled_session_id: null,
+      arrangement_revision_id: null,
+      revision_note: "无安排加练，待补全",
     },
   ];
 
   const stats: StatsSummary = {
-    per_week: [
-      { week: "W1", planned: 3, completed: 2, rate: 66.7 },
-      { week: "W2", planned: 1, completed: 1, rate: 100 },
-    ],
-    buckets: { met: 8, unmet: 1, pending: 1 },
-    prs: [
-      {
-        exercise: "杠铃平板卧推",
-        variant: "杠铃",
-        best_weight_kg: 80,
-        best_reps_at_weight: 8,
-      },
-      {
-        exercise: "杠铃俯身划船",
-        variant: "杠铃",
-        best_weight_kg: 60,
-        best_reps_at_weight: 10,
-      },
-    ],
+    per_week: [],
+    buckets: { met: 0, unmet: 0, pending: 0 },
+    prs: [],
     data_updated_at: MOCK_UPDATED_AT,
   };
 
   const review: ReviewDoc = {
     text: [
-      "## W1 复盘（2026-08-31 ~ 2026-09-06）",
+      "## 阶段复盘（截至 2026-09-11）",
       "",
-      "本周按 PPL v2 执行，完成率 **2/3（66.7%）**，腿日（09-05）漏练。",
+      "按 PPL v2 执行：W1 完成率 **2/3（66.7%）**（09-04 腿日漏练），W2 截至今日 **1/3（33.3%）**（09-09 拉日漏练、09-11 腿日待办）。",
       "",
-      "- 卧推两次训练均完成 8 次目标，RIR 1，符合渐进预期。",
-      "- 09-01 第 4 组 RIR 0，未符合目标区间（1-3），建议下周维持 80kg 观察一组。",
-      "- 划船 60kg x10 全部符合，下周可尝试 62.5kg。",
-      "",
-      "| 组级判定 | 组数 |",
-      "| --- | --- |",
-      "| 符合目标 | 8 |",
-      "| 未符合 | 1 |",
-      "| 待补全 | 1 |",
+      "- 08-31 卧推 80kg×8 全部符合；PR：卧推 80kg × 8。",
+      "- 09-07 按当次安排（卧推减 1 组）：符合 1 / 未符合 1 / 待补全 1。",
+      "- 自重引体不进重量 PR；09-05 无安排 incomplete 不进 PR 与完成率分子。",
       "",
       "> 复盘仅解释确定性统计结果；不修改数值，也不补充没有数据支持的因果结论。",
     ].join("\n"),
     stale: true,
-    generated_at: "2026-09-07T21:00:00+08:00",
+    generated_at: "2026-09-08T21:00:00+08:00",
   };
 
   const provider: ProviderConfig = {
@@ -449,7 +510,7 @@ function seedState(): MockState {
     ],
   ]);
 
-  return {
+  const state: MockState = {
     context_version: 3,
     provider,
     profile: {
@@ -472,10 +533,10 @@ function seedState(): MockState {
     ],
     plan,
     plan_history: [],
-    /** 种子计划的日程：锁定双态——date < MOCK_TODAY → locked_by_date_rule + stored locked */
-    schedules: seedSchedules(plan),
+    /** 种子计划的日程：锁定双态——date <= MOCK_TODAY → locked_by_date_rule + stored locked */
+    schedules,
     records,
-    arrangement_revisions: [],
+    arrangement_revisions,
     stats,
     review,
     sessions,
@@ -488,6 +549,9 @@ function seedState(): MockState {
     execution_slot_run_id: null,
     dev_confirm_failure: false,
   };
+  // 启动即全量现算（stage3 §3.4：种子不再写字面 per_week/三桶/PR）
+  recomputeStats(state);
+  return state;
 }
 
 /**
@@ -752,7 +816,7 @@ const nextId = (prefix: string) => `${prefix}-${(idSeq += 1)}`;
 
 /**
  * 记录草稿状态派生（05 5.3）：由事实完整性派生 incomplete/valid，不单独存第二份状态。
- * incomplete 不进 PR/完成率分子。
+ * incomplete 不进 PR/完成率分子；必填次数/时长缺失（后端 D8）= incomplete。
  */
 export function deriveRecordDraftStatus(
   payload: RecordDraftPayload,
@@ -763,9 +827,38 @@ export function deriveRecordDraftStatus(
     for (const s of ex.sets) {
       // 组类型未明确 = incomplete（不默认 work）
       if (s.set_type === undefined || s.set_type === null) return "incomplete";
+      // 缺次数且缺时长 = incomplete（不进 PR 与完成率分子）
+      if (
+        (s.reps === undefined || s.reps === null) &&
+        (s.duration_seconds === undefined || s.duration_seconds === null)
+      )
+        return "incomplete";
     }
   }
   return "valid";
+}
+
+/** 记录载荷领域校验（stage3 §3.2：负数/非有限 RIR 不通过校验；revise 与 confirm 共用） */
+function recordPayloadError(p: RecordDraftPayload): string | undefined {
+  for (const ex of p.exercises) {
+    for (const s of ex.sets) {
+      if (
+        s.rir !== undefined &&
+        s.rir !== null &&
+        (!Number.isFinite(s.rir) || s.rir < 0)
+      )
+        return `第 ${s.set_no} 组 RIR 不得为负数或非有限值`;
+      if (
+        s.reps !== undefined &&
+        s.reps !== null &&
+        (!Number.isFinite(s.reps) || s.reps < 0)
+      )
+        return `第 ${s.set_no} 组次数无效`;
+      if (s.load && !Number.isFinite(Number(s.load.value_text)))
+        return `第 ${s.set_no} 组负重不是有效数值`;
+    }
+  }
+  return undefined;
 }
 
 /** RawLoad → 展示 kg（仅 unit=kg 时返回数值；否则 null） */
@@ -793,51 +886,205 @@ function setFactsToRecordSet(s: SetFacts): {
   };
 }
 
-function recordScriptReply(): { text: string; draft: Draft } {
+/** 打卡剧本的动作短语表（确定性 mock 解析，不扩目录、不是通用 NLU） */
+const RECORD_EXERCISES: readonly { pattern: RegExp; id: string }[] = [
+  { pattern: /卧推(?!架)/, id: "barbell-bench-press" },
+  { pattern: /深蹲|背蹲/, id: "barbell-back-squat" },
+  { pattern: /哑铃弯举|弯举/, id: "dumbbell-biceps-curl" },
+  { pattern: /引体/, id: "pull-up" },
+  // 罗马尼亚必须先于泛化「硬拉」，否则被误匹配为传统硬拉
+  { pattern: /罗马尼亚/, id: "barbell-romanian-deadlift" },
+  { pattern: /硬拉/, id: "barbell-deadlift" },
+  { pattern: /划船/, id: "barbell-bent-over-row" },
+];
+
+/** 同日补充歧义（stage3 §3.2/§7 第 11 步）：草稿前先询问，不自动选拆 */
+const SUPPLEMENT_CHOICE = /补充上一练|补充上一次|加到上一练/;
+const NEW_SESSION_CHOICE = /新增一练|新练一次|另起一练/;
+const SUPPLEMENT_AMBIGUOUS = /再补一组|补一组|补充/;
+
+/** 相对日期 → 具体日期（展示层不用相对词；「今天」= 业务日 MOCK_TODAY） */
+function resolveRecordDate(message: string): string {
+  const explicit = message.match(/(\d{4}-\d{2}-\d{2})/);
+  if (explicit) return explicit[1];
+  if (/昨天/.test(message)) {
+    const d = new Date(`${MOCK_TODAY}T00:00:00Z`);
+    d.setUTCDate(d.getUTCDate() - 1);
+    return d.toISOString().slice(0, 10);
+  }
+  return MOCK_TODAY;
+}
+
+interface ParsedRecordFacts {
+  exercise_id: string;
+  /** 负重原文数值；未提负重 = undefined（自重等） */
+  weightText?: string;
+  unit: "kg" | "lb";
+  reps?: number;
+  sets: SetFacts[];
+  warmup?: string;
+}
+
+/**
+ * 打卡反馈 → 结构化事实（stage3 §3.2）：逐组负重/次数；
+ * RIR 不解析、不落库（已拍 2026-09-12：记录侧隐藏）；辅助/热身仍解析；无法解析时不编造。
+ */
+function parseRecordMessage(message: string): ParsedRecordFacts | undefined {
+  let exercise_id: string | undefined;
+  for (const { pattern, id } of RECORD_EXERCISES) {
+    if (pattern.test(message)) {
+      exercise_id = id;
+      break;
+    }
+  }
+  if (!exercise_id) return undefined;
+
+  // 负重优先取与「N 组」同句的重量（避免热身「递增至 60kg」抢在工作组「100kg 4组」前）
+  const weight = message.match(
+    /(\d+(?:\.\d+)?)\s*(kg|公斤|磅|lb)\s*\D{0,6}\d+\s*组/i,
+  );
+  const setCount = message.match(/(\d+)\s*组/);
+  const perSetReps = message.match(/每组\s*(\d+)\s*次/);
+  const pairReps =
+    message.match(/(\d+)\s*组\s*[x×]\s*(\d+)\s*次/i) ??
+    message.match(/(\d+)\s*[x×]\s*(\d+)\s*次/i);
+  const setN = setCount
+    ? Number(setCount[1])
+    : perSetReps || pairReps
+      ? 1
+      : undefined;
+  if (setN === undefined || setN <= 0) return undefined;
+  const reps = perSetReps
+    ? Number(perSetReps[1])
+    : pairReps
+      ? Number(pairReps[2])
+      : undefined;
+  const unit: "kg" | "lb" = weight && /lb|磅/i.test(weight[2]) ? "lb" : "kg";
+
+  /** 逐组覆盖：辅助（RIR 已拍不解析、不落库） */
+  const assisted = new Set<number>();
+  let assistedLast = false;
+  for (const clause of message.split(/[，。；;、\n]/)) {
+    if (
+      !/朋友帮忙|有人辅助|辅助抬起|被辅助|让人辅助|辅助才|帮忙才|请人辅助|辅助完成/.test(
+        clause,
+      )
+    )
+      continue;
+    const sm = clause.match(/第\s*(\d+)\s*组/);
+    if (sm) assisted.add(Number(sm[1]));
+    else if (/最后一组/.test(clause)) assistedLast = true;
+  }
+
+  // 热身摘要：原文保留（如「递增至 60kg」）
+  const warmupM = message.match(
+    /[^。；;\n]*?递增[至到]\s*\d+(?:\.\d+)?\s*(?:kg|公斤|磅|lb)/i,
+  );
+  const warmup = warmupM
+    ? warmupM[0].replace(/^热身\s*/, "").trim()
+    : undefined;
+
+  const sets: SetFacts[] = Array.from({ length: setN }, (_, i) => {
+    const no = i + 1;
+    const isLast = no === setN;
+    const isAssisted = assisted.has(no) || (isLast && assistedLast);
+    return {
+      set_no: no,
+      set_type: "work" as const,
+      ...(weight ? { load: { value_text: weight[1], unit } } : {}),
+      ...(reps !== undefined ? { reps } : {}),
+      rir: null,
+      assistance: isAssisted ? ("assisted" as const) : null,
+    };
+  });
+
+  return {
+    exercise_id,
+    ...(weight ? { weightText: weight[1] } : {}),
+    unit,
+    ...(reps !== undefined ? { reps } : {}),
+    sets,
+    ...(warmup ? { warmup } : {}),
+  };
+}
+
+/**
+ * 打卡剧本（stage3 F3-04）：对话反馈 → RecordDraftPayload（确定性 mock 解析）。
+ * - 「今天/昨天/具体日期」→ 具体日期；未明确字段保持空、不编造；
+ * - 同日补充歧义先询问（补充上一练 / 新增一练），未澄清不生成草稿；
+ * - 当天已接受安排且动作在安排目标内时显式携带 arrangement_revision_id（绝不从日期推断）；
+ * - 无法解析时回询问文案、不生成草稿。
+ */
+function recordScriptReply(
+  state: MockState,
+  message: string,
+): { text: string; draft?: Draft } {
+  const occurred_on = resolveRecordDate(message);
+  const facts = parseRecordMessage(message);
+  const sameDayRecords = state.records.filter((r) => r.date === occurred_on);
+
+  // 归属歧义：先询问，不自动选拆（草稿前）
+  if (
+    !SUPPLEMENT_CHOICE.test(message) &&
+    !NEW_SESSION_CHOICE.test(message) &&
+    SUPPLEMENT_AMBIGUOUS.test(message) &&
+    sameDayRecords.length > 0
+  ) {
+    return {
+      text: [
+        `${occurred_on} 已有训练记录。「再补一组」还不清楚归属，请先选择：`,
+        "",
+        "- **补充上一练**：并入既有训练身份（复用同一 training_session_id，不新增身份）；",
+        "- **新增一练**：作为同日新的一练（新身份）。",
+        "",
+        "请直接回复「补充上一练」或「新增一练」，我再整理草稿。",
+      ].join("\n"),
+    };
+  }
+
+  if (!facts)
+    return {
+      text: [
+        "我没能从这句话里整理出完整的结构化训练事实，因此**不生成草稿、也不编造数值**。",
+        "",
+        "请按此格式反馈：「今天卧推 80kg 4组 每组8次」；",
+        "辅助如「第3组朋友帮忙抬起」；热身如「热身递增至 60kg」。",
+      ].join("\n"),
+    };
+
+  // 稳定身份：补充上一练 → 复用当日最近一次身份；其余（含新增一练）= null 新身份
+  let training_session_id: string | null = null;
+  if (SUPPLEMENT_CHOICE.test(message)) {
+    const last = [...sameDayRecords]
+      .reverse()
+      .find((r) => r.training_session_id);
+    training_session_id = last?.training_session_id ?? null;
+  }
+
+  // 当次安排：当天已接受且该动作在安排目标内时显式携带（不从日期静默推断）
+  const arrangement = [...state.arrangement_revisions]
+    .reverse()
+    .find(
+      (a) =>
+        a.target.scheduled_on === occurred_on &&
+        a.target.exercises.some((e) => e.exercise_id === facts.exercise_id),
+    );
+
+  const cat = CATALOG.find((c) => c.id === facts.exercise_id);
   const exercises: DraftExerciseLog[] = [
     {
       position: 1,
-      exercise_id: "barbell-bench-press",
-      record_type: "reps_weight",
-      load_notation: "barbell_includes_bar_total",
-      warmup_summary_text: "递增至 60kg",
-      sets: [
-        {
-          set_no: 1,
-          set_type: "work",
-          load: { value_text: "80", unit: "kg" },
-          reps: 8,
-          rir: 1,
-          assistance: null,
-        },
-        {
-          set_no: 2,
-          set_type: "work",
-          load: { value_text: "80", unit: "kg" },
-          reps: 8,
-          rir: 1,
-        },
-        {
-          set_no: 3,
-          set_type: "work",
-          load: { value_text: "80", unit: "kg" },
-          reps: 8,
-          rir: 1,
-        },
-        {
-          set_no: 4,
-          set_type: "work",
-          load: { value_text: "80", unit: "kg" },
-          reps: 8,
-          // 第 4 组 RIR 未报告：保持 null，不补 0
-        },
-      ],
+      exercise_id: facts.exercise_id,
+      record_type: cat?.record_type ?? "reps_weight",
+      load_notation: cat?.load_convention ?? null,
+      ...(facts.warmup ? { warmup_summary_text: facts.warmup } : {}),
+      sets: facts.sets,
     },
   ];
   const payload: RecordDraftPayload = {
-    occurred_on: MOCK_TODAY,
-    // null = 新增一次训练（确认时建立新的稳定身份）
-    training_session_id: null,
+    occurred_on,
+    training_session_id,
+    ...(arrangement ? { arrangement_revision_id: arrangement.id } : {}),
     exercises,
   };
   const draft: Draft = {
@@ -847,10 +1094,31 @@ function recordScriptReply(): { text: string; draft: Draft } {
     revision: 1,
     base_business_version: 0,
     payload,
-    diff: recordDraftDiff(payload),
+    diff: recordDraftDiff(state, payload),
   };
+
+  const assistedCount = facts.sets.filter(
+    (s) => s.assistance === "assisted",
+  ).length;
+  const plainCount = facts.sets.length - assistedCount;
+  const name = cat?.standard_name_zh ?? facts.exercise_id;
   return {
-    text: "已将打卡内容整理为训练记录草稿：**杠铃平板卧推 4 组 x 8 次 @ 80kg**，第 4 组 RIR 未报告（保持为空，不自行补造）。\n\n请核对下方草稿卡，可内联纠错关键字段，确认采纳后才写入正式记录。",
+    text: [
+      `已将打卡内容整理为训练记录草稿：**${name} ${facts.sets.length} 组**${
+        facts.reps !== undefined ? ` × ${facts.reps} 次` : ""
+      }${facts.weightText ? ` @ ${facts.weightText}${facts.unit}` : ""}（${occurred_on}）。`,
+      facts.warmup ? `- 热身：${facts.warmup}（保留原文摘要）` : "",
+      assistedCount > 0
+        ? `- ${assistedCount} 组标注人工辅助；其余 ${plainCount} 组未提及辅助，按「无辅助」待确认展示（不默认 assisted）。`
+        : "- 全部组未提及辅助，按「无辅助」待确认展示（不默认 assisted）。",
+      arrangement
+        ? `- 已关联当次安排 ${arrangement.id}（草稿卡展示「原计划 X 组 · 当次安排 Y 组」对照摘要）。`
+        : "- 当天该动作无已接受的当次安排：不携带 arrangement_revision_id（无对照，不从日期推断）。",
+      "",
+      "请核对下方草稿卡，可内联纠错关键字段，确认采纳后才写入正式记录。",
+    ]
+      .filter((line) => line !== "")
+      .join("\n"),
     draft,
   };
 }
@@ -1225,6 +1493,45 @@ function planScriptReply(state: MockState): { text: string; draft?: Draft } {
  * - 任一动作命中具体动作／动作模式限制：整份阻断，**不**只跳过冲突动作继续给其余动作的处方。
  * 两种阻断都只影响「使用时」：当前计划与其当前日程仍可在 /profile 查看，修订从对话发起。
  */
+/**
+ * 指导用参考工作组重量：取该动作最近一条 valid 记录的非辅助工作组重量。
+ * 首次（无记录）仍走校准文案；有记录后直接标重量（用户走查反馈 2026-09-12）。
+ */
+function referenceWorkKg(
+  state: MockState,
+  exerciseId: string,
+): number | undefined {
+  const cat = CATALOG.find((c) => c.id === exerciseId);
+  if (!cat) return undefined;
+  for (let i = state.records.length - 1; i >= 0; i--) {
+    const rec = state.records[i];
+    if (rec.status !== "valid") continue;
+    if (rec.exercise !== cat.standard_name_zh) continue;
+    for (let j = rec.sets.length - 1; j >= 0; j--) {
+      const s = rec.sets[j];
+      if (s.set_type === "working" && !s.assisted && s.weight_kg !== undefined)
+        return s.weight_kg;
+    }
+  }
+  return undefined;
+}
+
+/** 指导单行动作：有参考重量 → 直接标 kg；无 → 组次 + 目标用力大白话 */
+function guidanceExerciseLine(
+  state: MockState,
+  e: PlanExerciseItem | ArrangementTarget["exercises"][number],
+): string {
+  const name = e.display_snapshot.name;
+  const kg = referenceWorkKg(state, e.exercise_id);
+  if (kg !== undefined)
+    return `- ${name} ${kg}kg ${prescriptionLabel(e.prescription)}（${progressionLabel(e.progression.method)}）`;
+  const effort =
+    e.prescription.kind === "reps" && e.prescription.target_rir
+      ? `，${effortPlainLabel(e.prescription.target_rir)}`
+      : "";
+  return `- ${name} ${prescriptionLabel(e.prescription)}${effort}（${progressionLabel(e.progression.method)}）`;
+}
+
 function planGuidanceReply(state: MockState): string {
   /* 安全症状独立阻断（02 2.3；读取时分类）：与有没有计划无关，先于计划检查——不生成、也不给出任何常规处方 */
   const redFlags = classifyBodyConditions(
@@ -1251,10 +1558,15 @@ function planGuidanceReply(state: MockState): string {
     context_version: state.context_version,
   });
 
-  /* 安全症状已在上面拦截，这里的不可用只剩限制冲突（仍按整份阻断，不降级为逐动作跳过） */
+  /* 安全症状已在上面拦截，这里的不可用只剩限制冲突/目录缺失（仍按整份阻断，不降级为逐动作跳过） */
   if (!safety.usable) {
     return [
-      `按最新限制复核当前计划 ${plan.version}：**整份计划指导已阻断**——任一动作命中限制时，我不会给出任何基于该计划的处方，也不会只跳过冲突动作、继续给其余「未冲突」动作的处方。`,
+      `按最新限制复核当前计划 ${plan.version}：**整份计划指导已阻断**——任一动作命中限制时，我不会给出任何基于该计划或已接受安排的处方，也不会只跳过冲突动作、继续给其余「未冲突」动作的处方。`,
+      ...(safety.block_code === "plan_action_unavailable"
+        ? [
+            "计划引用的动作目录身份缺失（plan_action_unavailable）：无法安全给出基于该计划或已接受安排的处方。",
+          ]
+        : []),
       "",
       ...safety.conflicts.map(
         (c) =>
@@ -1263,14 +1575,17 @@ function planGuidanceReply(state: MockState): string {
       "",
       `正式计划 ${plan.version} 与它的当前日程仍可在「档案与限制」页查看（不隐藏、不改写，也不标为「部分可用」）。`,
       "修改计划只能从对话发起：说明你要调整的内容，我给出修订草稿，确认后生成新版本。",
-    ].join("\n");
+    ]
+      .filter((line) => line !== "")
+      .join("\n");
   }
 
+  /* 指导日：今日仍应训练则优先今日（日期规则锁定 ≠ 处方锁定），否则下一个未到期应训练日 */
   const upcoming = state.schedules
     .filter(
       (s) =>
         s.plan_version === plan.version &&
-        s.locked_effective === false &&
+        s.date >= MOCK_TODAY &&
         s.stored_status !== "cancelled",
     )
     .sort((a, b) => a.date.localeCompare(b.date))[0];
@@ -1284,26 +1599,41 @@ function planGuidanceReply(state: MockState): string {
       ...clarification,
     ].join("\n");
 
-  const calibration = workout.exercises.find(
+  /* F3-03：存在已接受安排的应训练日时按安排目标（最新快照优先），否则按原计划处方 */
+  const arrangement = [...state.arrangement_revisions]
+    .reverse()
+    .find(
+      (a) =>
+        a.target.scheduled_session_id === upcoming.id ||
+        a.target.scheduled_on === upcoming.date,
+    );
+  const exercises = arrangement ? arrangement.target.exercises : workout.exercises;
+  const calibration = exercises.find(
     (e) => e.load?.kind === "needs_calibration",
   )?.load;
   return [
-    `下一个应训练日：${upcoming.date}（${weekdayLabel(upcoming.weekday)}）· ${workout.name} · 预计 ${workout.estimated_minutes} 分钟（计划 ${plan.version}）`,
+    `下一个应训练日：${upcoming.date}（${weekdayLabel(upcoming.weekday)}）· ${workout.name} · 预计 ${workout.estimated_minutes} 分钟（计划 ${plan.version}${arrangement ? " · **按已接受安排**" : ""}）`,
+    ...(arrangement?.target.adjustment_reason
+      ? [`安排原因：${arrangement.target.adjustment_reason}`]
+      : []),
     "",
-    ...workout.exercises.map((e) => {
-      const rir =
-        e.prescription.kind === "reps"
-          ? `，目标 RIR ${deriveRangeLabel(e.prescription.target_rir)}`
-          : "";
-      return `- ${e.display_snapshot.name} ${prescriptionLabel(e.prescription)}${rir}（${progressionLabel(e.progression.method)}）`;
-    }),
+    ...exercises.map((e) => guidanceExerciseLine(state, e)),
     "",
-    "负荷：没有可信训练记录，不给出具体起始重量，按各动作的「需要校准」步骤逐级试重。",
-    calibration && calibration.kind === "needs_calibration"
-      ? `- 通过标准：${calibration.pass_criteria}；停止条件：${calibration.stop_criteria}`
-      : "",
+    exercises.every((e) => referenceWorkKg(state, e.exercise_id) !== undefined)
+      ? "负荷：已按近期有效工作组记录直接标明参考重量；加重仍须逐级试重。"
+      : [
+          "负荷：首次或尚无该动作有效记录时，不给出具体起始重量，按「需要校准」逐级试重；有记录后将直接标明重量。",
+          "目标用力示例：卧推 60kg 一组能做 8 个、再推 2 个就起不来 = 每一组结束还能再做 2 次的重量。",
+          calibration && calibration.kind === "needs_calibration"
+            ? `- 通过标准：${calibration.pass_criteria}；停止条件：${calibration.stop_criteria}`
+            : "",
+        ]
+          .filter(Boolean)
+          .join("\n"),
     "",
-    "该指导依据当前计划与最新安全复核；如出现疼痛或需专业评估的情况请立即停止并按线下专业评估处理。",
+    arrangement
+      ? "该指导依据当前计划的已接受安排与最新安全复核；如出现疼痛或需专业评估的情况请立即停止并按线下专业评估处理。"
+      : "该指导依据当前计划与最新安全复核；如出现疼痛或需专业评估的情况请立即停止并按线下专业评估处理。",
     ...clarification,
   ]
     .filter((line) => line !== "")
@@ -1350,11 +1680,11 @@ function newPlanReply(state: MockState): { text: string; draft?: Draft } {
     const wdays = b.weekday !== undefined ? weekdayLabel(b.weekday) : "—";
     return `- ${b.name}（${wdays}，预计 ${b.estimated_minutes} 分钟）：${b.exercises
       .map((e) => {
-        const rir =
-          e.prescription.kind === "reps"
-            ? `，目标 RIR ${deriveRangeLabel(e.prescription.target_rir)}`
+        const effort =
+          e.prescription.kind === "reps" && e.prescription.target_rir
+            ? `，${effortPlainLabel(e.prescription.target_rir)}`
             : "";
-        return `${e.display_snapshot.name} ${prescriptionLabel(e.prescription)}${rir}`;
+        return `${e.display_snapshot.name} ${prescriptionLabel(e.prescription)}${effort}`;
       })
       .join("；")}`;
   });
@@ -1387,8 +1717,11 @@ function newPlanReply(state: MockState): { text: string; draft?: Draft } {
   };
 }
 
-/** 纠错后训练记录草稿的 diff 再生成（01 1.2；从纠错后 payload 派生） */
-function recordDraftDiff(p: RecordDraftPayload): FieldDiff[] {
+/** 纠错后训练记录草稿的 diff 再生成（01 1.2；从纠错后 payload 派生；含安排对照摘要） */
+function recordDraftDiff(
+  state: MockState,
+  p: RecordDraftPayload,
+): FieldDiff[] {
   const rows: FieldDiff[] = [
     { field: "训练记录 · 日期", new_value: p.occurred_on },
     {
@@ -1398,21 +1731,40 @@ function recordDraftDiff(p: RecordDraftPayload): FieldDiff[] {
         : "新增（确认时建立）",
     },
   ];
+  // 对照摘要（有安排时；从 arrangement target vs 计划派生；无安排不显示）
+  const arr = p.arrangement_revision_id
+    ? state.arrangement_revisions.find(
+        (r) => r.id === p.arrangement_revision_id,
+      )
+    : undefined;
+  if (arr) {
+    const plannedWorkout =
+      state.plan && state.plan.version === arr.target.plan_version
+        ? findWorkout(state.plan.payload, arr.target.plan_workout_key)
+        : undefined;
+    for (const ex of p.exercises) {
+      const item = arr.target.exercises.find(
+        (e) => e.exercise_id === ex.exercise_id,
+      );
+      const planned = plannedWorkout?.exercises.find(
+        (e) => e.exercise_id === ex.exercise_id,
+      );
+      if (
+        item?.prescription.kind === "reps" &&
+        planned?.prescription.kind === "reps"
+      )
+        rows.push({
+          field: `对照 · ${item.display_snapshot.name}`,
+          new_value: `原计划 ${planned.prescription.work_sets} 组 · 当次安排 ${item.prescription.work_sets} 组`,
+        });
+    }
+  }
   for (const ex of p.exercises) {
     const working = ex.sets.filter((s) => s.set_type === "work");
     const first = working[0];
     rows.push({
       field: `动作 ${ex.position} · 工作组`,
       new_value: `${working.length} 组 x ${first?.reps ?? "?"} 次 @ ${first?.load?.value_text ?? "?"}${first?.load?.unit ?? ""}`,
-    });
-    working.forEach((s, i) => {
-      rows.push({
-        field: `动作 ${ex.position} 第 ${s.set_no ?? i + 1} 组 · RIR`,
-        new_value:
-          s.rir === undefined || s.rir === null
-            ? "未报告（待确认）"
-            : String(s.rir),
-      });
     });
     if (ex.warmup_summary_text)
       rows.push({
@@ -1428,9 +1780,28 @@ function recordDraftDiff(p: RecordDraftPayload): FieldDiff[] {
 
 /* ---------------------- 当次安排（S3-08）辅助 ---------------------- */
 
+/** 处置中文标签（mock 内展示；页面主词不用英文缩写） */
+const DISPOSITION_LABEL: Record<
+  ArrangementItemDisposition,
+  string
+> = {
+  keep: "保留（目标更保守）",
+  deload: "减载",
+  equivalent_replace: "同等刺激替换",
+  local_skip: "局部跳过",
+};
+
 /**
- * 安排草稿校验（mock 内）：组次只减不增、RIR 只增不减、计划无 RIR 不新造、
- * 有差异必须 adjustment_reason。返回 undefined = 通过。
+ * 安排草稿校验（mock 内，复刻 S4-04 四种处置 + legacy 兼容路径的语义）：
+ * - 身份/绑定/展示快照/递增不得改；不得增删动作；
+ * - keep：组次次数负荷全等，只可升目标用力（目标 RIR 只增不减）；
+ * - deload：组次次数只减、负荷只降且在已验证重量 50–70%、至少一项真的降低；
+ *   需校准动作不得改负荷；不改目标用力（属 keep 范畴）；
+ * - equivalent_replace：处方与负荷照抄计划；replacement_exercise_id 必填且目录身份合法；
+ * - local_skip：目标保持计划值，仅标注 disposition；
+ * - legacy（disposition 缺省）：只减组 / 只升目标用力；
+ * - 有实质差异必须非空白 adjustment_reason（仅标注处置不算差异）。
+ * 返回 undefined = 通过。
  */
 function arrangementPayloadError(
   state: MockState,
@@ -1445,11 +1816,23 @@ function arrangementPayloadError(
   const plan = state.plan;
   if (!plan || plan.version !== t.plan_version)
     return `安排目标绑定的计划版本 ${t.plan_version} 不是当前正式计划`;
+  // 绑定校验：session_id 必须命中当前计划下真实日程；scheduled_on / plan_workout_key 与该日程一致
+  const boundSched = state.schedules.find(
+    (s) => s.id === t.scheduled_session_id && s.plan_version === t.plan_version,
+  );
+  if (!boundSched)
+    return `安排目标绑定的 scheduled_session_id ${t.scheduled_session_id} 不在当前计划日程内`;
+  if (boundSched.date !== t.scheduled_on)
+    return `安排目标 scheduled_on ${t.scheduled_on} 与日程 ${t.scheduled_session_id} 的日期 ${boundSched.date} 不一致`;
+  if (boundSched.plan_workout_key !== t.plan_workout_key)
+    return `安排目标 plan_workout_key ${t.plan_workout_key} 与日程 ${t.scheduled_session_id} 的训练日 ${boundSched.plan_workout_key} 不一致`;
   const workout = findWorkout(plan.payload, t.plan_workout_key);
   if (!workout) return `安排目标绑定的训练日 ${t.plan_workout_key} 不在计划内`;
   if (t.exercises.length !== workout.exercises.length)
     return "安排目标必须与绑定训练日逐条对应";
+  const catalogIds = new Set(CATALOG.map((c) => c.id));
   let hasDiff = false;
+
   for (let i = 0; i < workout.exercises.length; i++) {
     const planned = workout.exercises[i];
     const item = t.exercises[i];
@@ -1466,52 +1849,190 @@ function arrangementPayloadError(
       return `安排目标不得改动作身份／展示快照／递增：${planned.item_key}`;
     if (item.prescription.kind !== planned.prescription.kind)
       return `安排目标不得改处方类型：${planned.item_key}`;
+
+    const d = item.disposition;
+    if (d !== undefined && !(d in DISPOSITION_LABEL))
+      return `处置不在已拍四类内：${String(d)}`;
+
+    // 处方结构：两边都 reps 或都 timed（上面 kind 已比对）
     if (
       planned.prescription.kind === "reps" &&
       item.prescription.kind === "reps"
     ) {
-      if (
-        JSON.stringify(item.prescription.reps_range) !==
-        JSON.stringify(planned.prescription.reps_range)
-      )
-        return `安排目标不得改次数区间：${planned.item_key}`;
-      if (item.prescription.work_sets > planned.prescription.work_sets)
-        return `当次调整只能减组、不得增组：${planned.item_key}`;
-      if (item.prescription.work_sets !== planned.prescription.work_sets)
+      const prx = planned.prescription;
+      const irx = item.prescription;
+      const sameReps =
+        JSON.stringify(irx.reps_range) === JSON.stringify(prx.reps_range);
+      const sameSets = irx.work_sets === prx.work_sets;
+      const pr = prx.target_rir;
+      const ir = irx.target_rir;
+      const rirEqual = JSON.stringify(ir) === JSON.stringify(pr);
+      const rirRaised =
+        pr !== undefined &&
+        ir !== undefined &&
+        ir.min >= pr.min &&
+        ir.max >= pr.max &&
+        !rirEqual;
+      const rirLowered =
+        pr !== undefined &&
+        (ir === undefined || ir.min < pr.min || ir.max < pr.max);
+      const loadSame =
+        JSON.stringify(item.load ?? null) === JSON.stringify(planned.load ?? null);
+
+      if (d === "local_skip") {
+        if (!sameReps || !sameSets || !rirEqual || !loadSame)
+          return `局部跳过的目标必须保持计划值，仅标注处置：${planned.item_key}`;
+        if (item.replacement_exercise_id != null)
+          return `局部跳过不得携带替代动作身份：${planned.item_key}`;
+        continue; // 仅标注不算实质差异
+      }
+      if (d === "equivalent_replace") {
+        if (!sameReps || !sameSets || !rirEqual || !loadSame)
+          return `同等刺激替换必须照抄计划的处方与负荷，不得自行造处方或重量：${planned.item_key}`;
+        if (!item.replacement_exercise_id)
+          return `同等刺激替换缺少 replacement_exercise_id：${planned.item_key}`;
+        if (item.replacement_exercise_id === item.exercise_id)
+          return `替代动作身份与原动作相同，不构成替换：${planned.item_key}`;
+        if (!catalogIds.has(item.replacement_exercise_id))
+          return `替代动作身份不在目录内：${item.replacement_exercise_id}`;
         hasDiff = true;
-      const pr = planned.prescription.target_rir;
-      const ir = item.prescription.target_rir;
+        continue;
+      }
+      if (d === "keep") {
+        if (item.replacement_exercise_id != null)
+          return `保留项不得携带替代动作身份：${planned.item_key}`;
+        if (!sameReps || !sameSets || !loadSame)
+          return `保留项的组数、次数与负荷必须与计划相同：${planned.item_key}`;
+        if (pr === undefined) {
+          if (ir !== undefined)
+            return `计划目标没有目标用力，不得凭当次调整新造一个：${planned.item_key}`;
+        } else if (ir === undefined) {
+          return `当次目标不得删除计划已有的目标用力：${planned.item_key}`;
+        } else if (rirLowered) {
+          return `保留项只能提高目标用力、不得降低：${planned.item_key}`;
+        } else if (rirRaised) hasDiff = true;
+        continue;
+      }
+      if (d === "deload") {
+        if (item.replacement_exercise_id != null)
+          return `减载项不得携带替代动作身份：${planned.item_key}`;
+        if (!rirEqual)
+          return `减载方案 1–3 不改目标用力（提高用力属于保留）：${planned.item_key}`;
+        if (!sameSets && irx.work_sets > prx.work_sets)
+          return `减载只能减组、不得增组：${planned.item_key}`;
+        if (!sameReps) {
+          if (irx.reps_range.min > prx.reps_range.min || irx.reps_range.max > prx.reps_range.max)
+            return `减载只能减少每组次数：${planned.item_key}`;
+        }
+        if (!loadSame) {
+          const plannedLoad = planned.load;
+          const itemLoad = item.load;
+          if (
+            !plannedLoad ||
+            plannedLoad.kind !== "verified" ||
+            !itemLoad ||
+            itemLoad.kind !== "verified"
+          )
+            return `减载改负荷只适用于已有已验证重量的动作（需校准动作回落方案 1）：${planned.item_key}`;
+          if (
+            plannedLoad.unit !== itemLoad.unit ||
+            plannedLoad.load_notation !== itemLoad.load_notation
+          )
+            return `减载不得改负荷单位或负重口径：${planned.item_key}`;
+          const ratio = itemLoad.value / plannedLoad.value;
+          if (!(ratio >= 0.5 && ratio <= 0.7))
+            return `减载只能降到已验证重量的 50–70%：${planned.item_key}`;
+        }
+        const reduced =
+          irx.work_sets < prx.work_sets ||
+          (!sameReps &&
+            (irx.reps_range.min < prx.reps_range.min ||
+              irx.reps_range.max < prx.reps_range.max)) ||
+          !loadSame;
+        if (!reduced)
+          return `减载必须真的减少组数、次数或负荷之一：${planned.item_key}`;
+        hasDiff = true;
+        continue;
+      }
+
+      // legacy：disposition 缺省 —— 只减组 / 只升目标用力
+      if (item.replacement_exercise_id != null)
+        return `未标注处置的条目不得携带替代动作身份：${planned.item_key}`;
+      if (!sameReps || !loadSame)
+        return `当次目标不得改次数区间或负荷：${planned.item_key}`;
+      if (!sameSets && irx.work_sets > prx.work_sets)
+        return `当次调整只能减组、不得增组：${planned.item_key}`;
+      if (!sameSets) hasDiff = true;
       if (pr === undefined) {
         if (ir !== undefined)
-          return `计划目标没有目标 RIR，不得凭当次调整新造一个：${planned.item_key}`;
+          return `计划目标没有目标用力，不得凭当次调整新造一个：${planned.item_key}`;
       } else if (ir === undefined) {
-        return `当次目标不得删除计划已有的目标 RIR：${planned.item_key}`;
-      } else if (ir.min < pr.min || ir.max < pr.max) {
-        return `当次调整只能提高目标 RIR、不得降低：${planned.item_key}`;
-      } else if (JSON.stringify(ir) !== JSON.stringify(pr)) hasDiff = true;
+        return `当次目标不得删除计划已有的目标用力：${planned.item_key}`;
+      } else if (rirLowered) {
+        return `当次调整只能提高目标用力、不得降低：${planned.item_key}`;
+      } else if (rirRaised) hasDiff = true;
     } else if (
       planned.prescription.kind === "timed" &&
       item.prescription.kind === "timed"
     ) {
-      if (
-        JSON.stringify(item.prescription.duration_seconds_range) !==
-        JSON.stringify(planned.prescription.duration_seconds_range)
-      )
-        return `安排目标不得改时长处方：${planned.item_key}`;
-      if (item.prescription.work_sets > planned.prescription.work_sets)
-        return `当次调整只能减组、不得增组：${planned.item_key}`;
-      if (item.prescription.work_sets !== planned.prescription.work_sets)
+      const sameDuration =
+        JSON.stringify(item.prescription.duration_seconds_range) ===
+        JSON.stringify(planned.prescription.duration_seconds_range);
+      const sameSets =
+        item.prescription.work_sets === planned.prescription.work_sets;
+      const loadSame =
+        JSON.stringify(item.load ?? null) ===
+        JSON.stringify(planned.load ?? null);
+      if (d === "equivalent_replace") {
+        if (!sameDuration || !sameSets || !loadSame)
+          return `同等刺激替换必须照抄计划的处方与负荷：${planned.item_key}`;
+        if (!item.replacement_exercise_id)
+          return `同等刺激替换缺少 replacement_exercise_id：${planned.item_key}`;
+        if (item.replacement_exercise_id === item.exercise_id)
+          return `替代动作身份与原动作相同，不构成替换：${planned.item_key}`;
+        if (!catalogIds.has(item.replacement_exercise_id))
+          return `替代动作身份不在目录内：${item.replacement_exercise_id}`;
         hasDiff = true;
+        continue;
+      }
+      if (d === "local_skip") {
+        if (!sameDuration || !sameSets || !loadSame)
+          return `局部跳过的目标必须保持计划值，仅标注处置：${planned.item_key}`;
+        if (item.replacement_exercise_id != null)
+          return `局部跳过不得携带替代动作身份：${planned.item_key}`;
+        continue;
+      }
+      if (d === "keep") {
+        if (item.replacement_exercise_id != null)
+          return `保留项不得携带替代动作身份：${planned.item_key}`;
+        if (!sameDuration || !sameSets || !loadSame)
+          return `计时型保留项的组数与负荷必须与计划相同：${planned.item_key}`;
+        continue;
+      }
+      // deload / legacy（timed）：只允许减组
+      if (item.replacement_exercise_id != null)
+        return `计时型条目不得携带替代动作身份：${planned.item_key}`;
+      if (!sameDuration || !loadSame)
+        return `安排目标不得改时长处方或负荷：${planned.item_key}`;
+      if (!sameSets && item.prescription.work_sets > planned.prescription.work_sets)
+        return `当次调整只能减组、不得增组：${planned.item_key}`;
+      if (!sameSets) hasDiff = true;
+      if (d === "deload") {
+        if (sameSets)
+          return `减载必须真的减少组数（计时型只允许减组）：${planned.item_key}`;
+        hasDiff = true;
+      }
     }
   }
   if (hasDiff) {
     const reason = t.adjustment_reason?.trim();
-    if (!reason) return "当次目标与计划不同却没有 adjustment_reason：普通调整必须说明原因";
+    if (!reason)
+      return "当次目标与计划不同却没有 adjustment_reason：普通调整必须说明原因";
   }
   return undefined;
 }
 
-/** 安排草稿 diff：相对绑定计划的差异行 */
+/** 安排草稿 diff：相对绑定计划的差异行（服务端派生；目标用力用大白话） */
 function arrangementDiff(
   state: MockState,
   p: ArrangementDraftPayload,
@@ -1532,22 +2053,60 @@ function arrangementDiff(
     for (let i = 0; i < workout.exercises.length; i++) {
       const planned = workout.exercises[i];
       const item = t.exercises[i];
-      if (!planned || !item || item.prescription.kind !== "reps" || planned.prescription.kind !== "reps")
-        continue;
-      if (item.prescription.work_sets !== planned.prescription.work_sets)
+      if (!planned || !item) continue;
+      if (item.disposition && planned.disposition !== item.disposition)
         rows.push({
-          field: `${item.display_snapshot.name} · 组数`,
-          old_value: `${planned.prescription.work_sets} 组`,
-          new_value: `${item.prescription.work_sets} 组`,
+          field: `${item.display_snapshot.name} · 处置`,
+          new_value: DISPOSITION_LABEL[item.disposition],
         });
       if (
-        JSON.stringify(item.prescription.target_rir) !==
-        JSON.stringify(planned.prescription.target_rir)
+        item.prescription.kind === "reps" &&
+        planned.prescription.kind === "reps"
+      ) {
+        if (item.prescription.work_sets !== planned.prescription.work_sets)
+          rows.push({
+            field: `${item.display_snapshot.name} · 组数`,
+            old_value: `${planned.prescription.work_sets} 组`,
+            new_value: `${item.prescription.work_sets} 组`,
+          });
+        if (
+          JSON.stringify(item.prescription.reps_range) !==
+          JSON.stringify(planned.prescription.reps_range)
+        )
+          rows.push({
+            field: `${item.display_snapshot.name} · 每组次数`,
+            old_value: deriveRangeLabel(planned.prescription.reps_range),
+            new_value: deriveRangeLabel(item.prescription.reps_range),
+          });
+        if (
+          JSON.stringify(item.prescription.target_rir) !==
+          JSON.stringify(planned.prescription.target_rir)
+        )
+          rows.push({
+            field: `${item.display_snapshot.name} · 目标用力`,
+            old_value: effortPlainLabel(planned.prescription.target_rir),
+            new_value: effortPlainLabel(item.prescription.target_rir),
+          });
+      }
+      if (JSON.stringify(item.load ?? null) !== JSON.stringify(planned.load ?? null))
+        rows.push({
+          field: `${item.display_snapshot.name} · 负荷`,
+          old_value:
+            planned.load?.kind === "verified"
+              ? `${planned.load.value}${planned.load.unit}`
+              : "—",
+          new_value:
+            item.load?.kind === "verified"
+              ? `${item.load.value}${item.load.unit}`
+              : "—",
+        });
+      if (
+        item.replacement_exercise_id &&
+        item.replacement_exercise_id !== planned.exercise_id
       )
         rows.push({
-          field: `${item.display_snapshot.name} · 目标 RIR`,
-          old_value: deriveRangeLabel(planned.prescription.target_rir),
-          new_value: deriveRangeLabel(item.prescription.target_rir),
+          field: `${item.display_snapshot.name} · 替换为`,
+          new_value: item.replacement_exercise_id,
         });
     }
   }
@@ -1556,43 +2115,132 @@ function arrangementDiff(
   return rows;
 }
 
-/** 下一未锁定训练日的安排草稿（减组/RIR 调高 + 原因）；从对话短语生成 */
-const ARRANGEMENT_PATTERN = /安排|减组|状态不好|今天轻一点|少做几组/;
+/** 当次安排触发短语（stage3 §7 第 2–5 步）：含状态档位关键词，便于档位分流入口 */
+const ARRANGEMENT_PATTERN =
+  /安排|减组|状态不好|今天轻一点|少做几组|状态不佳|状态差|状态一般|状态正常|非常差|不想练|不太想练|只改今天|升目标|更保守|局部跳过/;
+/** 明确指向长期计划（本阶段不生成 plan 修订，先澄清） */
+const LONG_TERM_SCOPE = /长期|以后|从下周|往后|未来/;
+/** 明确只改当次（今天/这次） */
+const TODAY_SCOPE = /今天|只改今天|就今天|这次|当次|本次/;
+/** 明显状态差：本阶段仅建议休息文案、不生成任何结构化草稿 */
+const SEVERE_STATE = /非常差|很差|极度|不想练|完全不想|动不了|太累.*不想|状态非常|彻底不想/;
+/** 正常：按原计划回复、无草稿 */
+const NORMAL_STATE = /状态正常|今天正常|状态不错|状态很好|状态还行|状态没问题/;
+/** 一般状态差：出 deload / keep 安排草稿（演示主路径） */
+const MILD_STATE =
+  /状态(一般|有点|不太好|不好|不佳|差)|有点累|轻一点|少做几组|减组|没力气|疲劳|状态不佳/;
 
-function arrangementScriptReply(state: MockState): {
+/**
+ * 当次安排剧本（stage3 F3-02）：
+ * - 先澄清「只改今天 / 是否动长期计划」——未说改长期时只出当次安排草稿；
+ *   明确要改长期时本阶段不生成 plan 修订，先澄清；
+ * - 状态档位：正常 → 原计划回复无草稿；一般状态差 → deload/keep 草稿；
+ *   明显状态差 → 仅建议休息文案、无结构化草稿；
+ * - 目标日 = 今日 MOCK_TODAY（日程按日期规则锁定 ≠ 处方锁定，仍可安排）。
+ */
+function arrangementScriptReply(
+  state: MockState,
+  message: string,
+): {
   text: string;
   draft?: Draft;
 } {
   const plan = state.plan;
   if (!plan || !state.profile)
     return { text: "当前没有可用的正式计划与档案，无法生成当次安排调整。" };
-  const upcoming = state.schedules
-    .filter(
+
+  const longTerm = LONG_TERM_SCOPE.test(message);
+  const todayScope = TODAY_SCOPE.test(message);
+  // 明确要改长期计划：本阶段不生成 plan 修订，先澄清（08：先问是否改长期）
+  if (longTerm && !/只改今天|就今天|这次|当次|本次/.test(message))
+    return {
+      text: [
+        "你提到了长期计划调整。",
+        "",
+        "本阶段只处理**当次安排**（只影响某一次训练，不修改长期计划与其余日程）。",
+        "长期修订需要单独确认。请先澄清：",
+        "- 只改今天这一练（生成当次安排草稿）；还是",
+        "- 需要动长期计划（本阶段先不生成计划修订草稿）。",
+      ].join("\n"),
+    };
+  // 状态档位：明显状态差 → 仅建议休息、无草稿
+  if (SEVERE_STATE.test(message))
+    return {
+      text: [
+        "今天状态非常差，建议休息，不生成训练安排。",
+        "",
+        "恢复后再按原计划训练；若长期状态持续低迷，可再讨论是否调整长期计划。",
+      ].join("\n"),
+    };
+  // 状态档位：正常 → 按原计划回复、无草稿
+  if (NORMAL_STATE.test(message) && !MILD_STATE.test(message))
+    return {
+      text: [
+        "今天状态正常，按原计划执行，无需当次安排调整。",
+        "",
+        `今日应训练：${planVersionLabel(state)}`,
+      ].join("\n"),
+    };
+
+  // 目标日：今日（日期规则锁定 ≠ 处方锁定）
+  const upcoming =
+    state.schedules.find(
       (s) =>
         s.plan_version === plan.version &&
-        !s.locked_effective &&
+        s.date === MOCK_TODAY &&
         s.stored_status !== "cancelled",
-    )
-    .sort((a, b) => a.date.localeCompare(b.date))[0];
+    ) ??
+    // 兜底：无今日日程时取下一未锁定日（仍可演示，但默认路径走今日）
+    state.schedules
+      .filter(
+        (s) =>
+          s.plan_version === plan.version &&
+          !s.locked_effective &&
+          s.stored_status !== "cancelled",
+      )
+      .sort((a, b) => a.date.localeCompare(b.date))[0];
   if (!upcoming)
-    return { text: "当前计划没有未锁定的应训练日，无法生成当次安排调整。" };
+    return { text: "当前计划没有可安排的应训练日，无法生成当次安排调整。" };
   const workout = findWorkout(plan.payload, upcoming.plan_workout_key);
-  if (!workout) return { text: "下一个应训练日不在当前计划内。" };
+  if (!workout) return { text: "目标应训练日不在当前计划内。" };
 
-  /* 演示调整：第一个外加负重动作减 1 组；有目标 RIR 时上调一档（更安全方向） */
+  // 未明确「只改今天」且也未明确长期：先澄清范围，不出草稿
+  if (!todayScope && !MILD_STATE.test(message)) {
+    return {
+      text: [
+        "请先澄清：这次是**只改今天**这一练，还是也要动长期计划？",
+        "",
+        "只改今天 → 生成当次安排草稿（不修改长期计划）。",
+        "动长期计划 → 本阶段先不生成计划修订草稿。",
+      ].join("\n"),
+    };
+  }
+
+  // 演示主路径：一般状态差 → 按消息偏好生成 deload（只减组）或 keep（只升目标用力）
+  const preferKeep = /只升|保守|不减组|不减次数|目标用力|升目标/.test(message);
   const exercises = workout.exercises.map((e) => {
     if (e.prescription.kind !== "reps") return e;
-    const sets = Math.max(1, e.prescription.work_sets - 1);
-    const rir = e.prescription.target_rir;
-    const nextRir = rir
-      ? { min: Math.min(rir.min + 1, rir.max + 1), max: rir.max + 1 }
-      : undefined;
+    if (preferKeep) {
+      const rir = e.prescription.target_rir;
+      const nextRir = rir
+        ? { min: Math.min(rir.min + 1, rir.max + 1), max: rir.max + 1 }
+        : undefined;
+      return {
+        ...e,
+        disposition: "keep" as const,
+        prescription: {
+          ...e.prescription,
+          ...(nextRir ? { target_rir: nextRir } : {}),
+        },
+      };
+    }
+    // deload 方案 1：各动作减 1 组（不改次数与目标用力）
     return {
       ...e,
+      disposition: "deload" as const,
       prescription: {
         ...e.prescription,
-        work_sets: sets,
-        ...(nextRir ? { target_rir: nextRir } : {}),
+        work_sets: Math.max(1, e.prescription.work_sets - 1),
       },
     };
   });
@@ -1603,7 +2251,9 @@ function arrangementScriptReply(state: MockState): {
     plan_workout_key: workout.workout_key,
     scheduled_on: upcoming.date,
     exercises,
-    adjustment_reason: "当日状态不佳：各动作减 1 组、目标 RIR 上调一档",
+    adjustment_reason: preferKeep
+      ? "当日状态一般：各动作目标用力上调一档（更保守），组次不变"
+      : "当日状态一般：各动作减 1 组（方案 1），其余目标保持计划",
   };
   const payload: ArrangementDraftPayload = { target };
   const invalid = arrangementPayloadError(state, payload);
@@ -1617,18 +2267,38 @@ function arrangementScriptReply(state: MockState): {
     payload,
     diff: arrangementDiff(state, payload),
   };
+  const lockNote =
+    upcoming.locked_effective
+      ? "（今日日程已按日期规则锁定，但处方仍可当次调整——日程锁定 ≠ 处方锁定）"
+      : "";
   return {
     text: [
-      `已按「${upcoming.date} 状态不佳」生成**当次安排草稿**（只影响这一练，不修改长期计划）：`,
+      `已按「${upcoming.date} 状态一般」生成**当次安排草稿**（只影响这一练，不修改长期计划）${lockNote}：`,
       "",
       `- 绑定：${upcoming.date} · ${workout.name} · 计划 ${plan.version}`,
-      `- 调整：各动作组次只减不增、目标 RIR 只增不减`,
+      preferKeep
+        ? "- 调整：保留原组次，目标用力只升不降（更保守）"
+        : "- 调整：方案 1 减组（组数只减不增），次数与目标用力保持计划",
       `- 原因：${target.adjustment_reason}`,
       "",
       "确认后写入当次安排修订（arrangement_revisions）；长期计划与其余日程不变。",
     ].join("\n"),
     draft,
   };
+}
+
+/** 当日应训练文案（正常档无草稿时的原计划回复） */
+function planVersionLabel(state: MockState): string {
+  const plan = state.plan;
+  if (!plan) return "—";
+  const sched = state.schedules.find(
+    (s) => s.plan_version === plan.version && s.date === MOCK_TODAY,
+  );
+  const workout = sched
+    ? findWorkout(plan.payload, sched.plan_workout_key)
+    : undefined;
+  if (!workout) return `${MOCK_TODAY}（当前计划无安排）`;
+  return `${MOCK_TODAY} · ${workout.name} · 计划 ${plan.version}`;
 }
 
 /* ---------------------- 建档对话剧本（stage1 F1-02） -----------------------
@@ -1677,23 +2347,9 @@ const FACT_QUESTIONS: Record<AskedFact, string> = {
     "当前身体情况如何？一次说明就好：有没有哪里不适、是否影响某个动作（如「深蹲时膝盖锐痛」）、是否出现胸部异常不适、晕厥、异常气短、锐痛、麻木、放射痛这类需要线下专业评估的情况；都没有也请明确说「没有」。",
 };
 
-/**
- * 阶段能力开关：训练打卡（记录写入）属阶段 3（plans/business-roadmap.md）。
- * 阶段 1 的 mock 不开放打卡：plans/stage1.md F1-02 要求仅说明该能力不在本阶段开放、
- * 不生成训练记录草稿，也不宣称建立计划是记录训练的业务前提。Stage 0 记录剧本保留在
- * 开关之后，待阶段 3 接线时替换为真实记录流程。
- */
-const CHECKIN_ENABLED = false;
-
-const CHECKIN_UNAVAILABLE_REPLY = [
-  "训练打卡（写入训练记录）不在本阶段开放，我不会生成训练记录草稿。",
-  "",
-  "本阶段对话只用于建档；训练记录与统计在后续阶段接入，建档本身不受影响——需要的话我们继续把档案补齐。",
-].join("\n");
-
-/** 打卡类请求（阶段 1 仅识别这些演示短语，不解析自然语言意图） */
+/** 打卡类请求（阶段 1 仅识别这些演示短语，不解析自然语言意图；F3-04 增同日补充歧义短语） */
 const CHECKIN_PATTERN =
-  /打卡|训练记录|记录一下|记一下|帮我记|今天练|昨天练|今天做|昨天做|\d+\s*(?:kg|公斤)\D{0,6}\d+\s*组|\d+\s*组\s*[x×]?\s*\d+\s*次/;
+  /打卡|训练记录|记录一下|记一下|帮我记|今天练|昨天练|今天做|昨天做|再补一组|补一组|补充上一练|新增一练|\d+\s*(?:kg|公斤)\D{0,6}\d+\s*组|\d+\s*组\s*[x×]?\s*\d+\s*次/;
 
 /** 用户明确否认的表达（仅用于把「没有」解释为对上一问的明确否认） */
 const DENIAL_PATTERN = /没有|没|无|不用|不需要|一切正常|都正常|没问题/;
@@ -2357,16 +3013,16 @@ function onboardingTurn(
 const REVIEW_REPLY = [
   "## 本阶段复盘（基于最新有效记录重算）",
   "",
-  "- 完成率：W1 **2/3（66.7%）**，W2 **1/1（100%）**；漏练保留，不做补课。",
-  "- 组级判定：符合目标 8 组 / 未符合 1 组 / 待补全 1 组。",
-  "- PR：杠铃平板卧推 **80kg x8**；杠铃俯身划船 **60kg x10**。",
+  "- 完成率：W1 **2/3（66.7%）**，W2 截至今日 **1/3（33.3%）**；漏练保留，不做补课。",
+  "- 组级判定（按当次安排）：符合 1 组 / 未符合 1 组 / 待补全 1 组。",
+  "- PR：杠铃平板卧推 **80kg x8**；自重引体不进重量 PR。",
   "",
   "| 计划周 | 应训练 | 已完成 | 完成率 |",
   "| --- | --- | --- | --- |",
   "| W1 | 3 | 2 | 66.7% |",
-  "| W2 | 1 | 1 | 100% |",
+  "| W2 | 3 | 1 | 33.3% |",
   "",
-  "> 建议下一步：腿日恢复训练前先做接回评估；卧推维持 80kg 观察 RIR。",
+  "> 建议下一步：今日腿日尚未完成；按已接受安排优先于原计划处方。",
 ].join("\n");
 
 /**
@@ -2404,9 +3060,11 @@ const GENERIC_REPLY = [
   "- 建档：直接给出目标、经验、每周频率、单次时长、可用器械、体重、动作限制与身体情况",
   "- 请求训练指导：如「给我周三的训练指导」（按最新身体情况与限制复核整份计划）",
   "- 调整计划：如「最近很累，帮我调整计划」",
+  "- 当次安排：如「今天轻一点，减一组」",
+  "- 训练打卡：如「今天卧推 80kg 4组 每组8次」",
   "- 生成复盘：如「给我看一下复盘」",
   "",
-  "训练打卡不在本阶段开放；所有业务变更都会先以草稿卡展示，确认后才写入。",
+  "所有业务变更都会先以草稿卡展示，确认后才写入。",
 ].join("\n");
 
 async function runScript(
@@ -2448,8 +3106,7 @@ async function runScript(
     !isGuidance &&
     !isCheckIn &&
     state.profile !== null &&
-    ARRANGEMENT_PATTERN.test(message) &&
-    !/以后|长期|替换/.test(message);
+    ARRANGEMENT_PATTERN.test(message);
   const isPlan = /计划|调整|哑铃/.test(message);
   const isReview = /复盘/.test(message);
   // 器械范围短语（plans/stage2.md §7 第 7 步，02 章：当日限制不得污染长期档案）：
@@ -2477,13 +3134,9 @@ async function runScript(
   const base_business_version = state.context_version;
 
   if (isCheckIn) {
-    if (CHECKIN_ENABLED) {
-      const r = recordScriptReply();
-      text = r.text;
-      draft = r.draft;
-    } else {
-      text = CHECKIN_UNAVAILABLE_REPLY;
-    }
+    const r = recordScriptReply(state, message);
+    text = r.text;
+    draft = r.draft;
   } else if (equipmentScope === "today_only") {
     text = TODAY_ONLY_EQUIPMENT_REPLY;
   } else if (equipmentScope === "long_term") {
@@ -2503,7 +3156,7 @@ async function runScript(
   } else if (isGuidance) {
     text = planGuidanceReply(state);
   } else if (isArrangement) {
-    const r = arrangementScriptReply(state);
+    const r = arrangementScriptReply(state, message);
     text = r.text;
     draft = r.draft;
   } else if (isPlan) {
@@ -2915,49 +3568,86 @@ async function handleDevControls(
 }
 /* ------------------------------ 统计重算 ---------------------------------- */
 
+/**
+ * 全量现算（stage3 §3.3/§3.4）：
+ * - 完成率：分母 = 该版本 [starts_on, review_on) 内 scheduled_on <= 业务日且未取消的应训练日；
+ *   分子 = 关联该日程的 valid 记录且至少一个工作组（同一日程最多计一次）；分母 0 → rate null。
+ * - 三桶：基准是当次安排快照（非计划处方）；只看次数；缺次数 → pending；无对照安排不进三桶。
+ * - PR：排除 incomplete、辅助组、热身组；同重量最高次数按单组；自重/无重量不进重量 PR。
+ * - data_updated_at 用 mock 时钟（不依赖真实 Date.now）。
+ */
 function recomputeStats(state: MockState): void {
-  const buckets = { met: 0, unmet: 0, pending: 0 };
+  advanceMockClock();
+  const buckets: Buckets = { met: 0, unmet: 0, pending: 0 };
   const prMap = new Map<string, PrEntry>();
-
-  // 处方区间以计划版本中该动作的为准（不另设隐藏容差）；找不到时退回通用区间
-  const prescriptionOf = (exercise: string) => {
-    const items =
-      state.plan?.payload.plan_workouts.flatMap((w) => w.exercises) ?? [];
-    const ex = items.find((e) => e.display_snapshot.name === exercise);
-    const rir =
-      ex?.prescription.kind === "reps"
-        ? ex.prescription.target_rir
-        : undefined;
-    const reps =
-      ex?.prescription.kind === "reps"
-        ? ex.prescription.reps_range
-        : undefined;
-    return {
-      rirMin: rir?.min ?? 1,
-      rirMax: rir?.max ?? 3,
-      repMin: reps?.min ?? 6,
-      repMax: reps?.max ?? 8,
-    };
-  };
+  const scheduleById = new Map(state.schedules.map((s) => [s.id, s]));
+  const arrangementById = new Map(
+    state.arrangement_revisions.map((r) => [r.id, r]),
+  );
+  /** 完成率分子：已出现 valid 工作组记录的日程 id（同一安排/日程最多一次） */
+  const completedSessionIds = new Set<string>();
 
   for (const rec of state.records) {
-    // incomplete 不进 PR/完成率分子（05 5.3）
-    if (rec.status !== "valid" || !rec.schedule_snapshot) continue;
-    const p = prescriptionOf(rec.exercise);
-    for (const set of rec.sets) {
-      if (set.set_type !== "working") continue;
-      if (set.rir === undefined) buckets.pending += 1;
-      else if (
-        set.rir >= p.rirMin &&
-        set.rir <= p.rirMax &&
-        set.reps !== undefined &&
-        set.reps >= p.repMin &&
-        set.reps <= p.repMax
-      )
-        buckets.met += 1;
-      else buckets.unmet += 1;
+    rec.judgement = null;
+    delete rec.comparison;
+    for (const s of rec.sets) delete s.judgement;
+    if (rec.status !== "valid") continue; // incomplete 不进 PR / 完成率 / 三桶
+    const hasWork = rec.sets.some((s) => s.set_type === "working");
+
+    // 完成率分子（显式关联；不从日期推断）
+    if (rec.scheduled_session_id && hasWork) {
+      const sched = scheduleById.get(rec.scheduled_session_id);
+      if (sched && sched.stored_status !== "cancelled")
+        completedSessionIds.add(rec.scheduled_session_id);
     }
-    // PR：valid 记录中可比较的独立完成工作组（辅助组不参与）
+
+    // 三桶 + 对照摘要：仅显式携带 arrangement_revision_id 的记录
+    const arr = rec.arrangement_revision_id
+      ? arrangementById.get(rec.arrangement_revision_id)
+      : undefined;
+    if (arr && hasWork) {
+      const item = arr.target.exercises.find(
+        (e) => e.display_snapshot.name === rec.exercise,
+      );
+      if (item && item.prescription.kind === "reps") {
+        const { min, max } = item.prescription.reps_range;
+        const local: Buckets = { met: 0, unmet: 0, pending: 0 };
+        for (const set of rec.sets) {
+          if (set.set_type !== "working") continue;
+          // 判定只看次数：缺次数 → pending；落在显式区间（含端点）→ met；否则 unmet
+          if (set.reps === undefined || set.reps === null) {
+            local.pending += 1;
+            set.judgement = "pending";
+          } else if (set.reps >= min && set.reps <= max) {
+            local.met += 1;
+            set.judgement = "met";
+          } else {
+            local.unmet += 1;
+            set.judgement = "unmet";
+          }
+        }
+        rec.judgement = local;
+        buckets.met += local.met;
+        buckets.unmet += local.unmet;
+        buckets.pending += local.pending;
+        const plannedItem =
+          state.plan && state.plan.version === arr.target.plan_version
+            ? findWorkout(
+                state.plan.payload,
+                arr.target.plan_workout_key,
+              )?.exercises.find((e) => e.item_key === item.item_key)
+            : undefined;
+        rec.comparison = {
+          ...(plannedItem?.prescription.kind === "reps"
+            ? { planned_sets: plannedItem.prescription.work_sets }
+            : {}),
+          arranged_sets: item.prescription.work_sets,
+          accepted_at: arr.accepted_at,
+        };
+      }
+    }
+
+    // PR：valid + 工作组 + 非辅助 + 有重量与次数（自重不进重量 PR）
     for (const set of rec.sets) {
       if (
         set.set_type !== "working" ||
@@ -2984,11 +3674,51 @@ function recomputeStats(state: MockState): void {
     }
   }
 
-  state.stats.buckets = buckets;
-  state.stats.prs = [...prMap.values()].sort((a, b) =>
-    a.exercise.localeCompare(b.exercise),
-  );
-  state.stats.data_updated_at = new Date().toISOString();
+  // 完成率 per_week：按计划周 Wn 现算（只含截至业务日已到的应训练日）
+  const per_week: WeekCompletion[] = [];
+  if (state.plan) {
+    const plan = state.plan;
+    const due = state.schedules.filter(
+      (s) =>
+        s.plan_version === plan.version &&
+        s.stored_status !== "cancelled" &&
+        s.date >= plan.starts_on &&
+        s.date < plan.review_on &&
+        s.date <= MOCK_TODAY,
+    );
+    if (due.length > 0) {
+      const maxWeek = Math.max(
+        ...due.map((s) => Math.floor(dayDiff(plan.starts_on, s.date) / 7)),
+      );
+      for (let w = 0; w <= maxWeek; w += 1) {
+        const weekSchedules = due.filter(
+          (s) => Math.floor(dayDiff(plan.starts_on, s.date) / 7) === w,
+        );
+        const planned = weekSchedules.length;
+        const completed = weekSchedules.filter((s) =>
+          completedSessionIds.has(s.id),
+        ).length;
+        per_week.push({
+          week: `W${w + 1}`,
+          planned,
+          completed,
+          rate:
+            planned === 0
+              ? null
+              : Math.round((completed / planned) * 1000) / 10,
+        });
+      }
+    }
+  }
+
+  state.stats = {
+    per_week,
+    buckets,
+    prs: [...prMap.values()].sort((a, b) =>
+      a.exercise.localeCompare(b.exercise),
+    ),
+    data_updated_at: mockNowIso(),
+  };
   state.review.stale = true;
 }
 
@@ -3071,6 +3801,17 @@ function createHandler(state: MockState, hub: SseHub) {
       /* 记录 */
       if (path === "/api/records" && method === "GET")
         return json(res, 200, { records: state.records });
+
+      /* 已接受安排读回（stage3 拍板的 mock 端点；镜像 arrangement_revisions） */
+      if (path === "/api/arrangements" && method === "GET") {
+        const arrangements: AcceptedArrangement[] =
+          state.arrangement_revisions.map((r) => ({
+            id: r.id,
+            accepted_at: r.accepted_at,
+            target: r.target,
+          }));
+        return json(res, 200, { arrangements });
+      }
 
       /* 统计与复盘 */
       if (path === "/api/stats" && method === "GET")
@@ -3230,6 +3971,7 @@ function createHandler(state: MockState, hub: SseHub) {
       if (reviseMatch && method === "POST") {
         const body = JSON.parse((await readBody(req)) || "{}") as {
           payload?: Draft["payload"];
+          revision?: number;
         };
         const draft = state.drafts.get(reviseMatch[1]);
         if (!draft)
@@ -3250,6 +3992,19 @@ function createHandler(state: MockState, hub: SseHub) {
             error_code: "invalid_request",
             message: "缺少 payload",
           });
+        // 交接 F3：纠错必须携带所见 revision；不匹配按 draft_modified 拒绝
+        if (typeof body.revision !== "number")
+          return apiError(res, {
+            http_status: 400,
+            error_code: "invalid_request",
+            message: "缺少 revision（用户所见草稿修订版本）",
+          });
+        if (body.revision !== draft.revision)
+          return apiError(res, {
+            http_status: 409,
+            error_code: "draft_modified",
+            message: "草稿已被修改（所见修订版本不一致），请刷新草稿后重试。",
+          });
         // payload 形状由草稿 kind 决定（D1A 单一形状源）：不匹配则拒绝
         const payloadMatchesKind =
           draft.kind === "training_record"
@@ -3268,8 +4023,16 @@ function createHandler(state: MockState, hub: SseHub) {
 
         // 展示与 Diff 随纠错更新（01 1.2）：diff 一律由服务端派生
         if (draft.kind === "training_record") {
-          draft.payload = body.payload;
-          draft.diff = recordDraftDiff(body.payload as RecordDraftPayload);
+          const rp = body.payload as RecordDraftPayload;
+          const recInvalid = recordPayloadError(rp);
+          if (recInvalid)
+            return apiError(res, {
+              http_status: 400,
+              error_code: "invalid_request",
+              message: `训练记录载荷无效，纠错未生效：${recInvalid}`,
+            });
+          draft.payload = rp;
+          draft.diff = recordDraftDiff(state, rp);
         } else if (draft.kind === "plan") {
           const storedPatch = (draft.payload as PlanDraftPayload).profile_patch;
           const normalized = normalizePlanPayload(
@@ -3344,6 +4107,18 @@ function createHandler(state: MockState, hub: SseHub) {
             newly_committed: false,
             context_version: receipt?.context_version ?? state.context_version,
             summary: receipt?.summary ?? "该草稿已提交过（幂等返回原结果）",
+            committed_revision: receipt?.committed_revision ?? draft.revision,
+            committed_business_version:
+              receipt?.committed_business_version ?? state.context_version,
+            ...(receipt?.plan_version
+              ? { plan_version: receipt.plan_version }
+              : {}),
+            ...(receipt?.arrangement_revision_id
+              ? { arrangement_revision_id: receipt.arrangement_revision_id }
+              : {}),
+            ...(receipt?.training_session_id
+              ? { training_session_id: receipt.training_session_id }
+              : {}),
           };
           return json(res, 200, result);
         }
@@ -3397,24 +4172,52 @@ function createHandler(state: MockState, hub: SseHub) {
             }
           | undefined;
         let arrangementSummary: string | undefined;
+        let arrangementRevisionId: string | undefined;
+        let trainingSessionId: string | undefined;
+        let planVersionResult: string | undefined;
         if (draft.kind === "training_record") {
           const p = draft.payload as RecordDraftPayload;
+          const recInvalid = recordPayloadError(p);
+          if (recInvalid)
+            return apiError(res, {
+              http_status: 400,
+              error_code: "invalid_request",
+              message: `训练记录载荷无效，无法确认：${recInvalid}`,
+            });
           const status = deriveRecordDraftStatus(p);
+          // 日程关联：仅当草稿显式携带已接受安排时，从安排 target 取（不从日期推断）
+          const linkedArr = p.arrangement_revision_id
+            ? state.arrangement_revisions.find(
+                (r) => r.id === p.arrangement_revision_id,
+              )
+            : undefined;
+          const linkedSessionId =
+            linkedArr?.target.scheduled_session_id ?? null;
+          // 稳定训练身份：null = 新建；有 id = 补充/更正（同日多练各自身份）
+          trainingSessionId = p.training_session_id ?? nextId("ts");
+          // dev 故障注入：记录确认在写入后、提交前可注入失败并整份回滚
+          if (state.dev_confirm_failure) {
+            state.dev_confirm_failure = false;
+            throw new Error("dev 注入失败：训练记录确认事务在写入中途失败");
+          }
           // 多动作：逐动作写入展示友好 TrainingRecord（同日多练以 training_session_id 显式区分）
           for (const ex of p.exercises) {
-            const catalogName = ex.exercise_id;
+            const cat = CATALOG.find((c) => c.id === ex.exercise_id);
             state.records.push({
               id: nextId("rec"),
               date: p.occurred_on,
               kind: p.training_session_id ? "correction" : "new",
               status,
-              exercise: catalogName,
+              exercise: cat?.standard_name_zh ?? ex.exercise_id,
               variant: ex.load_notation ?? "",
               sets: ex.sets.map(setFactsToRecordSet),
               ...(ex.warmup_summary_text
                 ? { warmup_summary: ex.warmup_summary_text }
                 : {}),
               schedule_snapshot: null,
+              scheduled_session_id: linkedSessionId,
+              arrangement_revision_id: p.arrangement_revision_id ?? null,
+              training_session_id: trainingSessionId,
             });
           }
         } else if (draft.kind === "plan") {
@@ -3472,6 +4275,7 @@ function createHandler(state: MockState, hub: SseHub) {
             profile: nextProfile,
             restrictions: nextRestrictions,
           });
+          planVersionResult = committed.version;
           planCommit = {
             ...committed,
             summary: [
@@ -3492,14 +4296,62 @@ function createHandler(state: MockState, hub: SseHub) {
               error_code: "invalid_request",
               message: `安排草稿内容无效，无法确认：${invalid}`,
             });
+          // dev 故障注入：安排/记录确认同样可整份回滚
+          if (state.dev_confirm_failure) {
+            state.dev_confirm_failure = false;
+            throw new Error("dev 注入失败：安排确认事务在写入中途失败");
+          }
           // 写入 arrangement_revisions（完整目标快照）；不改 plan_versions
           const revisionId = nextId("arr");
+          advanceMockClock();
           state.arrangement_revisions.push({
             id: revisionId,
             target: p.target,
-            accepted_at: new Date().toISOString(),
+            accepted_at: mockNowIso(),
           });
-          arrangementSummary = `当次安排已确认（修订 ${revisionId}）：不修改长期计划，仅影响 ${p.target.scheduled_on}`;
+          arrangementRevisionId = revisionId;
+          // 仅 keep 升目标用力未改组数/次数时，摘要标「目标更保守」（须至少一项真的升 RIR）
+          let onlyConservative = p.target.exercises.length > 0;
+          let anyEffortRaised = false;
+          for (const e of p.target.exercises) {
+            if (e.disposition !== "keep") {
+              onlyConservative = false;
+              break;
+            }
+            const plannedEx = state.plan
+              ? findWorkout(state.plan.payload, p.target.plan_workout_key)?.exercises.find(
+                  (x) => x.item_key === e.item_key,
+                )
+              : undefined;
+            if (
+              !plannedEx ||
+              plannedEx.prescription.kind !== "reps" ||
+              e.prescription.kind !== "reps"
+            ) {
+              onlyConservative = false;
+              break;
+            }
+            const pr = plannedEx.prescription;
+            const ir = e.prescription;
+            if (
+              ir.work_sets !== pr.work_sets ||
+              JSON.stringify(ir.reps_range) !== JSON.stringify(pr.reps_range)
+            ) {
+              onlyConservative = false;
+              break;
+            }
+            if (
+              pr.target_rir &&
+              ir.target_rir &&
+              (ir.target_rir.min > pr.target_rir.min ||
+                ir.target_rir.max > pr.target_rir.max)
+            )
+              anyEffortRaised = true;
+          }
+          arrangementSummary =
+            onlyConservative && anyEffortRaised
+              ? `当次安排已确认（修订 ${revisionId}）：目标更保守，不修改长期计划，仅影响 ${p.target.scheduled_on}`
+              : `当次安排已确认（修订 ${revisionId}）：不修改长期计划，仅影响 ${p.target.scheduled_on}`;
         } else {
           // 档案草稿：提交前对服务端存储的载荷做确定性复查（六类事实 + 必填体重、
           // 限制粒度）；不通过则不写任何正式数据、不递增版本
@@ -3511,6 +4363,10 @@ function createHandler(state: MockState, hub: SseHub) {
               error_code: "invalid_request",
               message: `档案草稿内容无效，无法确认：${invalid}`,
             });
+          if (state.dev_confirm_failure) {
+            state.dev_confirm_failure = false;
+            throw new Error("dev 注入失败：档案确认事务在写入中途失败");
+          }
           // 原子写入完整档案与当前有效限制（01 1.4：版本检查、领域复查、正式写入、
           // 版本递增、草稿状态变更同属一次提交）
           const prof = p.profile as Profile;
@@ -3541,6 +4397,7 @@ function createHandler(state: MockState, hub: SseHub) {
         }
         recomputeStats(state);
 
+        const committedRevision = draft.revision;
         const result: ConfirmResult = {
           draft_id: draft.id,
           status: "committed",
@@ -3552,13 +4409,17 @@ function createHandler(state: MockState, hub: SseHub) {
             (draft.kind === "training_record"
               ? "训练记录已写入正式数据"
               : "档案与动作限制已写入正式数据"),
+          committed_revision: committedRevision,
+          committed_business_version: state.context_version,
+          ...(planVersionResult ? { plan_version: planVersionResult } : {}),
+          ...(arrangementRevisionId
+            ? { arrangement_revision_id: arrangementRevisionId }
+            : {}),
+          ...(trainingSessionId ? { training_session_id: trainingSessionId } : {}),
         };
-        // 持久化首次确认凭据（owner 决策 B；01 1.3 提交凭据）：重复确认返回原始 context_version 与 summary，
+        // 持久化首次确认凭据（owner 决策 B；01 1.3 提交凭据）：重复确认返回原始凭据，
         // 不再写入正式数据或递增版本
-        state.confirm_receipts.set(draft.id, {
-          context_version: result.context_version,
-          summary: result.summary,
-        });
+        state.confirm_receipts.set(draft.id, result);
         return json(res, 200, result);
       }
 
@@ -3612,7 +4473,7 @@ function createHandler(state: MockState, hub: SseHub) {
             base_business_version: state.context_version,
             parent_draft_id: old.id,
             payload: { ...p },
-            diff: recordDraftDiff(p),
+            diff: recordDraftDiff(state, p),
           };
         } else if (old.kind === "plan") {
           const oldPayload = old.payload as PlanDraftPayload;

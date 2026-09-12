@@ -775,8 +775,11 @@ export default function ChatPage() {
    * 用返回的草稿替换本地卡（payload + diff + revision），不自动提交。
    */
   const revise = useMutation({
-    mutationFn: (vars: { draftId: string; payload: DraftPayload }) =>
-      reviseDraft(vars.draftId, vars.payload),
+    mutationFn: (vars: {
+      draftId: string;
+      payload: DraftPayload;
+      revision: number;
+    }) => reviseDraft(vars.draftId, vars.payload, vars.revision),
     onSuccess: (result) => {
       setDrafts((prev) => ({ ...prev, [result.draft.id]: result.draft }));
       clearEdit(result.draft.id);
@@ -880,7 +883,13 @@ export default function ChatPage() {
         onChange={(p) => setEdits((prev) => ({ ...prev, [draft.id]: p }))}
         onConfirm={() => requestConfirm(draft)}
         onRecalc={() => recalc.mutate(draft.id)}
-        onRevise={(payload) => revise.mutate({ draftId: draft.id, payload })}
+        onRevise={(payload) =>
+          revise.mutate({
+            draftId: draft.id,
+            payload,
+            revision: draft.revision,
+          })
+        }
         onDiscard={() => discard.mutate(draft.id)}
         confirmPending={confirm.isPending && confirm.variables?.id === draft.id}
         recalcPending={recalc.isPending && recalc.variables === resolvedId}

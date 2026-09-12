@@ -6,7 +6,7 @@ import { toNumber } from "./draftFields";
 /**
  * 组事实编辑器（对齐 S3-10 SetFacts）：
  * - set_type 未明确保持 null（不默认 work）；
- * - rir 未报告保持 null（不补 0）；
+ * - 不展示/不录入 RIR（已拍 2026-09-12：隐藏且不落库，保持 null）；
  * - load 保留原始 value_text + unit。
  */
 export function SetInputs({
@@ -89,18 +89,6 @@ export function SetInputs({
             onChange={(e) => patch(i, { reps: toNumber(e.target.value) })}
             className="h-7 w-16 text-xs"
             aria-label={`第 ${s.set_no} 组次数`}
-          />
-          <span className="text-muted-foreground">次 · RIR</span>
-          <Input
-            type="number"
-            min={0}
-            step="0.5"
-            value={s.rir ?? ""}
-            placeholder="未报告"
-            disabled={disabled}
-            onChange={(e) => patch(i, { rir: toNumber(e.target.value) })}
-            className="h-7 w-16 text-xs"
-            aria-label={`第 ${s.set_no} 组 RIR`}
           />
           <select
             className="h-7 rounded-md border border-input bg-transparent px-1 text-[10px] disabled:opacity-50"

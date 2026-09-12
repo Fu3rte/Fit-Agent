@@ -3,6 +3,7 @@
  * 错误统一解析为 ApiError 形状抛出；SSE 用原生 EventSource（A2）。
  */
 import type {
+  AcceptedArrangement,
   ActiveRunResponse,
   ApiError,
   ChatMessage,
@@ -71,6 +72,10 @@ export const getProfile = () => request<ProfileResponse>("/api/profile");
 export const getRecords = () =>
   request<{ records: TrainingRecord[] }>("/api/records");
 
+/** 已接受安排读回（stage3 拍板的 mock 端点；镜像 arrangement_revisions） */
+export const getArrangements = () =>
+  request<{ arrangements: AcceptedArrangement[] }>("/api/arrangements");
+
 export const getStats = () => request<StatsSummary>("/api/stats");
 
 export const getReview = () => request<ReviewDoc>("/api/review");
@@ -108,11 +113,15 @@ export const confirmDraft = (draftId: string, revision: number) => {
 };
 
 /**
- * 内联纠错（01 1.2/1.3）：提交纠错后的完整草稿内容，服务端整份替换 payload 并 revision+1，
- * 返回修订后的草稿（含随内容更新的 diff）；只改待确认草稿，不自动提交。
+ * 内联纠错（01 1.2/1.3）：提交纠错后的完整草稿内容与所见 revision，服务端整份替换
+ * payload 并 revision+1；revision 不匹配按 409 draft_modified 拒绝（交接 F3）。
  */
-export const reviseDraft = (draftId: string, payload: DraftPayload) => {
-  const body: ReviseRequest = { payload };
+export const reviseDraft = (
+  draftId: string,
+  payload: DraftPayload,
+  revision: number,
+) => {
+  const body: ReviseRequest = { payload, revision };
   return post<ReviseResult>(`/api/drafts/${draftId}/revise`, body);
 };
 

@@ -323,7 +323,7 @@ export function PlanDraftFields({
                         className="h-7 w-16 text-xs"
                         aria-label={`${ex.display_snapshot.name}次数区间`}
                       />
-                      <span className="text-muted-foreground">次 · RIR</span>
+                      <span className="text-muted-foreground">次 · 目标用力</span>
                       <Input
                         value={rir}
                         disabled={disabled}

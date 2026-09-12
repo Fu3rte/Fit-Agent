@@ -1,0 +1,20 @@
+﻿PASS RecordsPage 含「原计划」「当次安排」（三份事实文案）
+PASS RecordsPage 不展示用力余量/RIR（已拍隐藏且不落库）
+PASS RecordsPage 组级判定徽章用语（符合/未符合/待补全）
+PASS RecordsPage 辅助 Badge 保留（有辅助）
+PASS ReviewPage 仍消费 getStats（现算结果）
+PASS ReviewPage 分母零「暂无」逻辑仍在（WeekRow rate null）
+PASS ReviewPage 保持只读（无 input/select/textarea）
+PASS RecordsPage 保持只读（无表单输入控件；更正经对话）
+PASS 09-07 记录有 comparison：planned 4 → arranged 3（deload） — {"planned_sets":4,"arranged_sets":3,"accepted_at":"2026-09-07T08:10:00.000Z"}
+PASS 09-07 record.judgement 非 null 且 1/1/1 — {"met":1,"unmet":1,"pending":1}
+PASS 09-07 组级 judgement：met（7 次落在 6–8 含端点） — {"weight_kg":75,"reps":7,"rir":2,"set_type":"working","judgement":"met"}
+PASS 09-07 组级 judgement：unmet（5 次低于下限） — {"weight_kg":75,"reps":5,"rir":1,"set_type":"working","judgement":"unmet"}
+PASS 09-07 组级 judgement：pending（缺次数） — {"weight_kg":75,"set_type":"working","judgement":"pending"}
+PASS 09-05 incomplete：judgement=null、无 comparison — {"j":null}
+PASS 09-05 incomplete 工作组不写 set.judgement — [{"weight_kg":12,"reps":10,"set_type":"working"}]
+PASS 08-31 无对照安排：judgement=null、无 comparison、组级无 judgement — {"j":null,"sets":[{"weight_kg":80,"reps":8,"rir":2,"set_type":"working"},{"weight_kg":80,"reps":8,"rir":2,"set_type":"working"},{"weight_kg":80,"reps":8,"rir":1,"set_type":"working"},{"weight_kg":80,"reps":8,"rir":1,"set_type":"working"}]}
+PASS incomplete 不进三桶：stats.buckets 仍 1/1/1（种子） — {"met":1,"unmet":1,"pending":1}
+PASS 统计现算包含 Wn/PR/更新时间（ReviewPage 消费的字段） — {"weeks":["W1 2/3","W2 1/3"],"prs":1}
+
+全部通过

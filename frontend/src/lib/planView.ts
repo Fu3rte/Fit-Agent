@@ -6,6 +6,7 @@
  * - projectSchedules：按 [starts_on, review_on) 逐日投影应训练日（不生成 review_on 当日）。
  */
 import type {
+  AcceptedArrangement,
   CalendarCycle,
   CycleSlot,
   IntRange,
@@ -120,12 +121,111 @@ export function targetRirLabel(p: PlanPrescription): string {
   return deriveRangeLabel(p.target_rir);
 }
 
+/**
+ * 目标用力 UI 大白话（stage3 §3.1）：页面主展示禁止 RIR 缩写；
+ * 契约字段名仍可为 target_rir。无目标返回占位。
+ */
+export function effortPlainLabel(range?: IntRange | null): string {
+  if (!range) return "—";
+  const label = deriveRangeLabel(range);
+  if (range.min === range.max)
+    return `每一组结束还能再做 ${range.min} 次的重量`;
+  return `每一组结束还能再做 ${label} 次的重量`;
+}
+
 /** 训练日内按 workout_key 查找 */
 export function findWorkout(
   plan: PlanPayload,
   workout_key: string,
 ): PlanWorkout | undefined {
   return plan.plan_workouts.find((w) => w.workout_key === workout_key);
+}
+
+/**
+ * 安排展示状态（F3-03；展示派生，非契约真相）：
+ * - adjusted：组数/次数/负荷相对计划实质变化
+ * - more_conservative：仅 keep 且目标用力更保守（RIR 升高），组数/次数/负荷未改
+ * - identical：与计划处方全等
+ */
+export type ArrangementViewStatus =
+  | "adjusted"
+  | "more_conservative"
+  | "identical";
+
+function rangeEq(a?: IntRange | null, b?: IntRange | null): boolean {
+  return (a?.min ?? -1) === (b?.min ?? -1) && (a?.max ?? -1) === (b?.max ?? -1);
+}
+
+function loadKey(load?: PlanExerciseItem["load"]): string {
+  if (!load) return "";
+  if (load.kind === "verified")
+    return `v:${load.value}${load.unit}:${load.load_notation}`;
+  return `c:${load.steps.length}:${load.pass_criteria}:${load.stop_criteria}`;
+}
+
+function structuralDiff(a: PlanPrescription, b: PlanPrescription): boolean {
+  if (a.kind !== b.kind || a.work_sets !== b.work_sets) return true;
+  if (a.kind === "timed" && b.kind === "timed")
+    return !rangeEq(a.duration_seconds_range, b.duration_seconds_range);
+  if (a.kind === "reps" && b.kind === "reps")
+    return !rangeEq(a.reps_range, b.reps_range);
+  return true;
+}
+
+/** 目标用力相对计划：none / 仅升高（更保守） / 其余变化（含降 RIR） */
+function effortDelta(
+  a: PlanPrescription,
+  b: PlanPrescription,
+): "none" | "more_conservative" | "changed" {
+  if (a.kind !== "reps" || b.kind !== "reps") return "none";
+  const ar = a.target_rir;
+  const br = b.target_rir;
+  if (rangeEq(ar, br)) return "none";
+  if (ar && br && ar.min >= br.min && ar.max >= br.max)
+    return "more_conservative";
+  return "changed";
+}
+
+/**
+ * 安排目标相对计划处方的状态（联表展示用；按 item_key 对齐）。
+ * 结构/负荷变化、非保守的 RIR 变化、条目集合不一致 → adjusted；
+ * 仅目标用力单向升高 → more_conservative；全等 → identical。
+ */
+export function classifyArrangementStatus(
+  arrangement: AcceptedArrangement,
+  planExercises: PlanExerciseItem[],
+): ArrangementViewStatus {
+  let moreConservative = false;
+  const matched = new Set<string>();
+  for (const ex of arrangement.target.exercises) {
+    const planned = planExercises.find((p) => p.item_key === ex.item_key);
+    if (!planned) return "adjusted";
+    matched.add(ex.item_key);
+    if (
+      structuralDiff(ex.prescription, planned.prescription) ||
+      loadKey(ex.load) !== loadKey(planned.load)
+    )
+      return "adjusted";
+    const effort = effortDelta(ex.prescription, planned.prescription);
+    if (effort === "changed") return "adjusted";
+    if (effort === "more_conservative") moreConservative = true;
+  }
+  if (planExercises.some((p) => !matched.has(p.item_key))) return "adjusted";
+  return moreConservative ? "more_conservative" : "identical";
+}
+
+/** 安排徽章文案（F3-03 验收口径） */
+export function arrangementStatusLabel(
+  status: ArrangementViewStatus,
+): string {
+  switch (status) {
+    case "adjusted":
+      return "已接受安排 · 已调整";
+    case "more_conservative":
+      return "已接受安排 · 目标更保守";
+    case "identical":
+      return "已接受安排 · 未调整";
+  }
 }
 
 /**

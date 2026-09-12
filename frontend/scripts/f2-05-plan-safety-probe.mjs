@@ -373,6 +373,7 @@ tampered.plan.payload.plan_workouts[0].exercises[0].exercise_id =
   "barbell-bench-press";
 const rejected = await api("POST", `/api/drafts/${adjust.draft.id}/revise`, {
   payload: tampered,
+  revision: adjust.draft.revision,
 });
 const afterRejected = await ofProfile();
 check(

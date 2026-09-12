@@ -209,6 +209,16 @@ export interface DisplaySnapshot {
   load_convention: string | null;
 }
 
+/**
+ * 当次安排的逐项处置恰四类（04 4.3 / S4-04）：保留、减载、同等刺激替换、局部跳过。
+ * 快照始终保存该项完整最终目标，处置只是标注；计划 payload 与既有快照可缺省（None）。
+ */
+export type ArrangementItemDisposition =
+  | "keep"
+  | "deload"
+  | "equivalent_replace"
+  | "local_skip";
+
 /** 一个计划动作：目录稳定身份 + 处方 + 负荷 + 渐进（D9） */
 export interface PlanExerciseItem {
   /** workout 内唯一 */
@@ -220,6 +230,10 @@ export interface PlanExerciseItem {
   /** 仅 external_load_reps 携带；verified | needs_calibration 互斥 */
   load?: PlanLoad;
   progression: Progression;
+  /** 当次安排快照的处置标注；计划 payload 与既有快照缺省（S4-04） */
+  disposition?: ArrangementItemDisposition;
+  /** 同等刺激替换的替代动作身份；仅 disposition=equivalent_replace 时出现 */
+  replacement_exercise_id?: string | null;
 }
 
 /** 可被 calendar_cycle 引用的训练处方（D9）：workout_key 版本内唯一 */
@@ -356,6 +370,8 @@ export interface RecordSet {
   rir?: number;
   set_type: "working" | "warmup";
   assisted?: boolean;
+  /** 服务端派生：按当次安排、只看次数；无对照安排或热身组不写（F3-05） */
+  judgement?: SetJudgement;
 }
 
 /** 组级三桶判定（统一用语：符合目标/未符合/待补全，不另设同义状态） */
@@ -364,6 +380,8 @@ export type SetJudgement = "met" | "unmet" | "pending";
 /**
  * 训练记录对外列表（展示友好形状）：status 语义对齐 valid/incomplete
  * （incomplete 不进 PR 与完成率分子）；voided 可预留。
+ * scheduled_session_id / arrangement_revision_id 为关联键（显式携带，不从日期推断）；
+ * judgement / comparison 为服务端派生的展示扩展（stage3 F3-01）。
  */
 export interface TrainingRecord {
   id: string;
@@ -377,6 +395,20 @@ export interface TrainingRecord {
   warmup_summary?: string;
   schedule_snapshot?: string | null;
   revision_note?: string;
+  /** 关联的应训练日程 id；无对照计划的加练为 null/缺省 */
+  scheduled_session_id?: string | null;
+  /** 关联的已接受安排修订 id；只由调用方显式携带，绝不从日期推断 */
+  arrangement_revision_id?: string | null;
+  /** 稳定训练身份 id（确认时建立或复用；同日多练各自身份、补充复用既有身份） */
+  training_session_id?: string | null;
+  /** 服务端派生：按当次安排快照的组级三桶；无对照安排为 null */
+  judgement?: Buckets | null;
+  /** 服务端派生：对照摘要（原计划组数 / 当次安排组数 / 接受时间） */
+  comparison?: {
+    planned_sets?: number;
+    arranged_sets?: number;
+    accepted_at?: string;
+  };
 }
 
 /** 修订状态：由事实完整性派生，不单独存第二份与事实冲突的状态（05 5.3） */
@@ -467,11 +499,18 @@ export interface ChatMessage {
 
 /* --------------------------------- 当次安排（S3-08） ------------------------ */
 
-/** 当次临时调整的可变字段（04 4.3 已拍两种）：减少组次与/或目标 RIR */
+/**
+ * 当次临时调整的可变字段（对齐 S4-04 / backend ArrangementAdjustment）：
+ * 处置四类 + 减载参数 + 替换身份；disposition 缺省时沿用 legacy（只减组 / 只升 RIR）。
+ */
 export interface ArrangementAdjustment {
   item_key: string;
   work_sets?: number;
   target_rir?: IntRange;
+  disposition?: ArrangementItemDisposition;
+  reps_range?: IntRange;
+  load_value?: number;
+  replacement_exercise_id?: string | null;
 }
 
 /**
@@ -572,13 +611,27 @@ export interface Draft {
   diff: FieldDiff[];
 }
 
-/** 幂等确认结果：重复确认返回原结果 */
+/**
+ * 幂等确认结果（交接 F4 提交凭据 + mock 展示扩展）：
+ * 重复确认返回原凭据（committed_* 与 kind 结果 id），不重复写、不 cv+1；
+ * newly_committed / summary 保留为 mock 展示扩展。
+ */
 export interface ConfirmResult {
   draft_id: string;
   status: "committed";
   newly_committed: boolean;
   context_version: number;
   summary: string;
+  /** 提交时的草稿修订版本 */
+  committed_revision: number;
+  /** 提交后的业务版本（context_version） */
+  committed_business_version: number;
+  /** kind=plan：启用的计划版本 */
+  plan_version?: string;
+  /** kind=arrangement：写入的安排修订 id */
+  arrangement_revision_id?: string;
+  /** kind=training_record：稳定训练身份 id（handover F4） */
+  training_session_id?: string;
 }
 
 export interface ConfirmRequest {
@@ -614,8 +667,12 @@ export interface ActiveRunResponse {
   run: ActiveRunInfo | null;
 }
 
+/**
+ * 纠错请求（交接 F3）：revision 为用户所见草稿修订版本；不匹配按 409 draft_modified 拒绝。
+ */
 export interface ReviseRequest {
   payload: DraftPayload;
+  revision: number;
 }
 
 export interface ReviseResult {
@@ -629,6 +686,13 @@ export interface DiscardResult {
 
 /* --------------------------------- REST 端点 -------------------------------- */
 
+/** 已接受安排读回（stage3 拍板的 mock 端点；镜像 arrangement_revisions 行） */
+export interface AcceptedArrangement {
+  id: string;
+  accepted_at: string;
+  target: ArrangementTarget;
+}
+
 /**
  * REST 端点清单（契约 v1）：
  * - GET    /api/provider                -> ProviderConfig
@@ -636,6 +700,7 @@ export interface DiscardResult {
  * - DELETE /api/provider/api-key        -> {has_api_key: false}
  * - GET    /api/profile                 -> ProfileResponse
  * - GET    /api/records                 -> {records: TrainingRecord[]}
+ * - GET    /api/arrangements            -> {arrangements: AcceptedArrangement[]}
  * - GET    /api/stats                   -> StatsSummary
  * - GET    /api/review                  -> ReviewDoc
  * - GET    /api/sessions                -> SessionSummary[]

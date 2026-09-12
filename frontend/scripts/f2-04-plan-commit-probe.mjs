@@ -44,8 +44,8 @@ const devStatus = async () => (await api("GET", "/api/dev/status")).body;
 const profileProjection = async () => (await api("GET", "/api/profile")).body;
 const confirm = (id, revision) =>
   api("POST", `/api/drafts/${id}/confirm`, { revision });
-const revise = (id, payload) =>
-  api("POST", `/api/drafts/${id}/revise`, { payload });
+const revise = (id, payload, revision) =>
+  api("POST", `/api/drafts/${id}/revise`, { payload, revision });
 const recalc = (id) => api("POST", `/api/drafts/${id}/recalc`, {});
 const discard = (id) => api("POST", `/api/drafts/${id}/discard`, {});
 
@@ -126,7 +126,7 @@ edited.plan.payload.plan_workouts[0].exercises[0].prescription = {
   ...edited.plan.payload.plan_workouts[0].exercises[0].prescription,
   work_sets: 5,
 };
-const revised = await revise(plan1.id, edited);
+const revised = await revise(plan1.id, edited, plan1.revision);
 check(
   "步骤 5 轻量纠错：revision+1、日程仍按生效范围重算、官方数据不动",
   revised.status === 200 &&

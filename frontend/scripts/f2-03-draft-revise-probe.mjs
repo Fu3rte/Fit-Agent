@@ -13,7 +13,7 @@ import { buildPplDraft, normalizePlanPayload } from "../src/mock/plan.ts";
 import { derivePlanBlocks, rebuildCycleSlots } from "../src/lib/planView.ts";
 
 const read = (p) => readFileSync(new URL(p, import.meta.url), "utf8");
-const TODAY = "2026-09-10";
+const TODAY = "2026-09-11";
 let failed = 0;
 const check = (name, ok, detail = "") => {
   if (!ok) failed += 1;

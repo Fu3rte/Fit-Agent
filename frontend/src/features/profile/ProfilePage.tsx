@@ -15,11 +15,13 @@ import {
 } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { buttonVariants } from "@/components/ui/button";
-import { getProfile } from "@/lib/api";
+import { getArrangements, getProfile } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import type { ReactNode } from "react";
 import type {
+  AcceptedArrangement,
   NeedsCalibration,
+  PlanPayload,
   PlanSafetyReview,
   PlanScheduleEntry,
   PlanVersion,
@@ -27,8 +29,11 @@ import type {
   Restriction,
 } from "@/lib/contract";
 import {
+  arrangementStatusLabel,
+  classifyArrangementStatus,
   derivePlanBlocks,
-  deriveRangeLabel,
+  effortPlainLabel,
+  findWorkout,
   prescriptionLabel,
   progressionLabel,
   weekdayLabel,
@@ -151,17 +156,17 @@ function BlockTable({ block }: { block: DisplayBlock }) {
       <table className="w-full table-fixed text-sm">
         <thead>
           <tr className="border-b text-left text-xs text-muted-foreground">
-            <th className="w-[40%] py-1.5 pr-3 font-normal">动作</th>
+            <th className="w-[36%] py-1.5 pr-3 font-normal">动作</th>
             <th className="w-[18%] py-1.5 pr-3 font-normal">组 × 次</th>
-            <th className="w-[14%] py-1.5 pr-3 font-normal">目标 RIR</th>
-            <th className="w-[28%] py-1.5 font-normal">渐进方式</th>
+            <th className="w-[20%] py-1.5 pr-3 font-normal">目标用力</th>
+            <th className="w-[26%] py-1.5 font-normal">渐进方式</th>
           </tr>
         </thead>
         <tbody>
           {block.exercises.map((ex) => {
-            const rir =
-              ex.prescription.kind === "reps"
-                ? deriveRangeLabel(ex.prescription.target_rir)
+            const effort =
+              ex.prescription.kind === "reps" && ex.prescription.target_rir
+                ? effortPlainLabel(ex.prescription.target_rir)
                 : "—";
             return (
               <tr
@@ -177,7 +182,7 @@ function BlockTable({ block }: { block: DisplayBlock }) {
                 <td className="py-2 pr-3 tabular-nums">
                   {prescriptionLabel(ex.prescription)}
                 </td>
-                <td className="py-2 pr-3 tabular-nums">{rir}</td>
+                <td className="py-2 pr-3 text-xs">{effort}</td>
                 <td className="py-2 text-xs text-muted-foreground">
                   {progressionLabel(ex.progression.method)}
                 </td>
@@ -274,34 +279,78 @@ function CalibrationSection({ calibration }: { calibration: NeedsCalibration }) 
 }
 
 /**
- * 日程状态徽章（锁定双态）：effective 锁定优先展示「已锁定」；
- * stored cancelled 展示「已取消」；其余为应训练。
+ * 日程行徽章（锁定双态 + 安排状态联表，F3-03）：
+ * - 锁定优先展示「已锁定（日期规则）」；stored cancelled 展示「已取消」；
+ * - 安排状态：尚无安排 / 已接受安排 · 已调整|目标更保守|未调整 + 接受时间。
  */
-function ScheduleBadge({ entry }: { entry: PlanScheduleEntry }) {
-  const label = entry.locked_effective
-    ? "已锁定"
-    : entry.stored_status === "cancelled"
-      ? "已取消"
-      : "应训练";
+function ScheduleBadge({
+  entry,
+  plan,
+  arrangement,
+}: {
+  entry: PlanScheduleEntry;
+  plan: PlanPayload;
+  arrangement?: AcceptedArrangement;
+}) {
   const cancelled = entry.stored_status === "cancelled";
   const locked = entry.locked_effective && !cancelled;
+  const lockLabel = cancelled
+    ? "已取消"
+    : locked
+      ? entry.locked_by_date_rule
+        ? "已锁定（日期规则）"
+        : "已锁定"
+      : "应训练";
+  const status = arrangement
+    ? classifyArrangementStatus(
+        arrangement,
+        findWorkout(plan, entry.plan_workout_key)?.exercises ?? [],
+      )
+    : null;
+  const acceptedAt = arrangement
+    ? `${arrangement.accepted_at.slice(0, 10)} ${arrangement.accepted_at.slice(11, 16)}`
+    : "";
   return (
-    <Badge
-      variant={cancelled ? "secondary" : locked ? "outline" : "default"}
-      className={cn("py-1", cancelled && "line-through opacity-70")}
-    >
-      {label}
-    </Badge>
+    <>
+      <Badge
+        variant={cancelled ? "secondary" : locked ? "outline" : "default"}
+        className={cn("py-1", cancelled && "line-through opacity-70")}
+      >
+        {lockLabel}
+      </Badge>
+      <Badge
+        variant={status ? "secondary" : "outline"}
+        className="py-1"
+        title={status ? acceptedAt : undefined}
+      >
+        {status
+          ? `${arrangementStatusLabel(status)} · ${acceptedAt}`
+          : "尚无安排"}
+      </Badge>
+    </>
   );
 }
 
-/** 具体日程（04 4.2/4.4）：当前版本条目；锁定用 locked_effective */
-function ScheduleSection({ entries }: { entries: PlanScheduleEntry[] }) {
+/** 具体日程（04 4.2/4.4）：当前版本条目；锁定用 locked_effective；安排只读联表 */
+function ScheduleSection({
+  entries,
+  plan,
+  arrangements,
+}: {
+  entries: PlanScheduleEntry[];
+  plan: PlanPayload;
+  arrangements: AcceptedArrangement[];
+}) {
+  const bySession = new Map(
+    arrangements.map((a) => [a.target.scheduled_session_id, a]),
+  );
+  const byDate = new Map(arrangements.map((a) => [a.target.scheduled_on, a]));
   return (
     <section>
       <h4 className="text-sm font-medium">具体日程</h4>
       <p className="mt-1 text-xs text-muted-foreground">
-        仅列当前版本的应训练日（休息日不排）；到期即锁（存储标记 ∪ 日期规则）。
+        仅列当前版本的应训练日（休息日不排）；到期即锁（存储标记 ∪
+        日期规则）；安排状态联表自已接受安排。
       </p>
       <ul className="mt-2 flex flex-wrap gap-1.5">
         {entries.map((s) => (
@@ -312,7 +361,11 @@ function ScheduleSection({ entries }: { entries: PlanScheduleEntry[] }) {
             <span className="tabular-nums">
               {s.date.slice(5)} {weekdayLabel(s.weekday)}
             </span>
-            <ScheduleBadge entry={s} />
+            <ScheduleBadge
+              entry={s}
+              plan={plan}
+              arrangement={bySession.get(s.id) ?? byDate.get(s.date)}
+            />
           </li>
         ))}
       </ul>
@@ -328,10 +381,12 @@ function PlanCard({
   plan,
   schedules,
   safety,
+  arrangements,
 }: {
   plan: PlanVersion;
   schedules: PlanScheduleEntry[];
   safety?: PlanSafetyReview;
+  arrangements: AcceptedArrangement[];
 }) {
   const blocks = derivePlanBlocks(plan.payload);
   const calibration = plan.payload.plan_workouts
@@ -363,7 +418,11 @@ function PlanCard({
           <CalibrationSection calibration={calibration} />
         )}
         {currentSchedules.length > 0 && (
-          <ScheduleSection entries={currentSchedules} />
+          <ScheduleSection
+            entries={currentSchedules}
+            plan={plan.payload}
+            arrangements={arrangements}
+          />
         )}
       </CardContent>
     </Card>
@@ -373,6 +432,10 @@ function PlanCard({
 /** /profile 档案与限制：只读看板，业务变更唯一入口是对话 */
 export default function ProfilePage() {
   const profile = useQuery({ queryKey: ["profile"], queryFn: getProfile });
+  const arrangements = useQuery({
+    queryKey: ["arrangements"],
+    queryFn: getArrangements,
+  });
 
   return (
     <div className="mx-auto w-full max-w-3xl px-6 pb-10">
@@ -421,6 +484,7 @@ export default function ProfilePage() {
                 plan={profile.data.plan}
                 schedules={profile.data.schedules ?? []}
                 safety={profile.data.plan_safety}
+                arrangements={arrangements.data?.arrangements ?? []}
               />
             ) : (
               <Card className="sm:col-span-2">

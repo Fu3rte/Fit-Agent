@@ -10,7 +10,7 @@ import {
 } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { getRecords } from "@/lib/api";
-import type { RecordSet, TrainingRecord } from "@/lib/contract";
+import type { RecordSet, SetJudgement, TrainingRecord } from "@/lib/contract";
 
 /** 归属徽章：新增 / 更正 */
 function KindBadge({ kind }: { kind: TrainingRecord["kind"] }) {
@@ -32,19 +32,34 @@ function StatusBadge({ status }: { status: TrainingRecord["status"] }) {
   );
 }
 
-/** 单组展示：重量 × 次数 · RIR（未报告显示 —，不补造）；辅助标记异常申报制 */
+/** 组级判定徽章：符合 / 未符合 / 待补全（基准=当次安排、只看次数） */
+function SetJudgementBadge({ judgement }: { judgement: SetJudgement }) {
+  if (judgement === "met") return <Badge variant="default">符合</Badge>;
+  if (judgement === "unmet")
+    return <Badge variant="destructive">未符合</Badge>;
+  return (
+    <Badge variant="outline" className="border-dashed text-muted-foreground">
+      待补全
+    </Badge>
+  );
+}
+
+/**
+ * 单组展示：重量 × 次数（主观余力字段已拍隐藏，不展示、不落库）；
+ * 辅助标记异常申报制；有对照安排时带组级判定徽章。
+ */
 function SetLine({ set }: { set: RecordSet }) {
   const parts: string[] = [];
   if (set.weight_kg !== undefined) parts.push(`${set.weight_kg}kg`);
   if (set.reps !== undefined) parts.push(`${set.reps} 次`);
-  parts.push(`RIR ${set.rir ?? "—"}`);
   return (
     <li className="flex items-center gap-2">
       <span className="text-muted-foreground">
         {set.set_type === "warmup" ? "热身" : "工作"}
       </span>
-      <span className="tabular-nums">{parts.join(" × ")}</span>
+      <span className="tabular-nums">{parts.join(" · ")}</span>
       {set.assisted && <Badge variant="outline">有辅助</Badge>}
+      {set.judgement && <SetJudgementBadge judgement={set.judgement} />}
     </li>
   );
 }
@@ -66,12 +81,11 @@ function RecordCard({ record }: { record: TrainingRecord }) {
         </div>
         <CardDescription>
           {record.exercise} · {record.variant} ·{" "}
-          {workingSets.length > 0
-            ? `${workingSets.length} 个工作组`
-            : "无工作组"}
-          {record.schedule_snapshot
-            ? ` · 对照安排：${record.schedule_snapshot}`
-            : " · 无对照安排"}
+          {record.comparison
+            ? `原计划 ${record.comparison.planned_sets ?? "?"} 组 · 当次安排 ${record.comparison.arranged_sets ?? "?"} 组 · 实际 ${workingSets.length} 组`
+            : workingSets.length > 0
+              ? `${workingSets.length} 个工作组 · 无对照安排`
+              : "无工作组 · 无对照安排"}
         </CardDescription>
       </CardHeader>
       <CardContent className="flex flex-col gap-3">

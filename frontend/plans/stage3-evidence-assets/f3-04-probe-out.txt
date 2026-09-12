@@ -1,0 +1,75 @@
+﻿PASS DraftCard 记录分支含对照摘要（原计划 X 组 · 当次安排 Y 组来源）
+PASS DraftCard 未新建第二套记录编辑器（仍复用 RecordExerciseEditor/SetInputs）
+PASS A 主路径：生成 training_record 草稿 — 已将打卡内容整理为训练记录草稿：**杠铃平板卧推 4 组** × 8 次 @ 80kg（2026-09-11）。
+- 全部组未提及辅助，按「无辅助」待确认展示（
+PASS A 相对日期「今天」→ 2026-09-11（展示具体日期） — 2026-09-11
+PASS A 今天无已接受安排 → 不携带 arrangement_revision_id（无对照）
+PASS A 新增 → training_session_id null — null
+PASS A 逐组事实：4 组 × 80kg × 8 次 — {"set_no":1,"set_type":"work","load":{"value_text":"80","unit":"kg"},"reps":8,"rir":null,"assistance":null}
+PASS A 未报 RIR 保持空（不编造）；未提辅助不默认 assisted — [{"rir":null,"a":null},{"rir":null,"a":null},{"rir":null,"a":null},{"rir":null,"a":null}]
+PASS A 回复文案：「无辅助」待确认呈现 — 已将打卡内容整理为训练记录草稿：**杠铃平板卧推 4 组** × 8 次 @ 80kg（2026-09-11）。
+- 全部组未提及辅助，按「无辅助」待确认展示（不默认 assisted）。
+- 当天该动作无已接受的当次安排：不携带 arrangement_revision_id（无对照，不从日期推断）。
+请核对下方草稿卡，可内联纠错关键字段，确认采纳后才写入正式记录。
+
+PASS A 负数 RIR：revise → 400 拒绝 — {"http_status":400,"error_code":"invalid_request","message":"训练记录载荷无效，纠错未生效：第 1 组 RIR 不得为负数或非有限值"}
+PASS A 合法 payload revise → revision+1 — {"status":200,"rev":2}
+PASS A 确认落盘（valid + training_session_id 凭据） — {"draft_id":"draft-103","status":"committed","newly_committed":true,"context_version":4,"summary":"训练记录已写入正式数据","committed_revision":2,"committed_business_version":4,"training_session_id":"ts-105"}
+PASS A 记录入列表：状态 valid、动作名、无安排关联 — {"id":"rec-106","date":"2026-09-11","kind":"new","status":"valid","exercise":"杠铃平板卧推","variant":"barbell_includes_bar_total","sets":[{"weight_kg":80,"reps":8,"set_type":"working"},{"weight_kg":80,"reps":8,"set_type":"working"},{"weight_kg":80,"reps":8,"set_type":"working"},{"weight_kg":80,"reps":8,"set_type":"working"}],"schedule_snapshot":null,"scheduled_session_id":null,"arrangement_revision_id":null,"training_session_id":"ts-105","judgement":null}
+PASS A 重复确认幂等：不产生重复记录、不 cv+1 — {"first":4,"again":4}
+PASS A 无日程关联的记录不进完成率分子（W2 仍 1/3） — {"week":"W2","planned":3,"completed":1,"rate":33.3}
+PASS A 无对照安排 → 三桶不变（仍 1/1/1，今日记录不进三桶） — {"met":1,"unmet":1,"pending":1}
+PASS B 生成今日 deload 安排草稿 — 已按「2026-09-11 状态一般」生成**当次安排草稿**（只影响这一练，不修改长期计划）（今日日程已按日期规则锁定，但处方仍可当次调整——日程锁定 ≠ 处
+PASS B 今日安排已接受 — {"draft_id":"draft-109","status":"committed","newly_committed":true,"context_version":4,"summary":"当次安排已确认（修订 arr-111）：不修改长期计划，仅影响 2026-09-11","committed_revision":1,"committed_business_version":4,"arrangement_revision_id":"arr-111"}
+PASS B 完整反馈：生成 training_record 草稿 — 已将打卡内容整理为训练记录草稿：**杠铃背蹲 4 组** × 8 次 @ 100kg（2026-09-11）。
+- 热身：递增至 60kg（保留原文摘要）
+- 1 组标注人工辅助；其余 3 组未提及辅
+PASS B 今天 + 动作在安排目标内 → 显式携带 arrangement_revision_id — "arr-111"
+PASS B 热身摘要原文保留（递增至 60kg） — "递增至 60kg"
+PASS B 第 3 组朋友帮忙 → assistance=assisted — {"set_no":3,"set_type":"work","load":{"value_text":"100","unit":"kg"},"reps":8,"rir":null,"assistance":"assisted"}
+PASS B 未提辅助的组不默认 assisted（第 1/2 组 assistance 空） — [null,null]
+PASS B 消息含 RIR/力竭也不解析不落库（已拍隐藏） — [null,null,null,null]
+PASS B diff 含对照摘要「原计划 X 组 · 当次安排 Y 组」 — [{"field":"对照 · 杠铃背蹲","new_value":"原计划 4 组 · 当次安排 3 组"}]
+PASS B 回复文案说明关联与无辅助待确认 — 已将打卡内容整理为训练记录草稿：**杠铃背蹲 4 组** × 8 次 @ 100kg（2026-09-11）。
+- 热身：递增至 60kg（保留原文摘要）
+- 1 组标注人工辅助；其余 3 组未提及辅助，按「无辅助」待确认展示（不默认 assisted）。
+- 已关联当次安排 arr-111（草稿卡展示「原计划 X 组 · 当次安排 Y 组」对照摘要）。
+请核对下方草稿卡，可内联纠错关键字段，确认采纳后才写入正式记录。
+
+PASS B 确认落盘（valid） — {"draft_id":"draft-114","status":"committed","newly_committed":true,"context_version":5,"summary":"训练记录已写入正式数据","committed_revision":1,"committed_business_version":5,"training_session_id":"ts-116"}
+PASS B 记录携带 arrangement + scheduled_session_id（从安排 target） — {"id":"rec-117","date":"2026-09-11","kind":"new","status":"valid","exercise":"杠铃背蹲","variant":"barbell_includes_bar_total","sets":[{"weight_kg":100,"reps":8,"set_type":"working","judgement":"met"},{"weight_kg":100,"reps":8,"set_type":"working","judgement":"met"},{"weight_kg":100,"reps":8,"set_type":"working","assisted":true,"judgement":"met"},{"weight_kg":100,"reps":8,"set_type":"working","judgement":"met"}],"warmup_summary":"递增至 60kg","schedule_snapshot":null,"scheduled_session_id":"sched-v2-2026-09-11","arrangement_revision_id":"arr-111","training_session_id":"ts-116","judgement":{"met":4,"unmet":0,"pending":0},"comparison":{"planned_sets":4,"arranged_sets":3,"accepted_at":"2026-09-11T01:05:00.000Z"}}
+PASS B 辅助组入列表标注 assisted；RIR 不落库 — [{"weight_kg":100,"reps":8,"set_type":"working","judgement":"met"},{"weight_kg":100,"reps":8,"set_type":"working","judgement":"met"},{"weight_kg":100,"reps":8,"set_type":"working","assisted":true,"judgement":"met"},{"weight_kg":100,"reps":8,"set_type":"working","judgement":"met"}]
+PASS B 确认后统计刷新：W2 完成率 1/3 → 2/3（分子=关联日程的 valid 记录） — {"before":{"week":"W2","planned":3,"completed":1,"rate":33.3},"after":{"week":"W2","planned":3,"completed":2,"rate":66.7}}
+PASS B 三桶按当次安排更新（今日 4 组 × 8 次落在区间 → met +4） — {"met":5,"unmet":1,"pending":1}
+PASS B 非辅助组进 PR（辅助组被排除后其余组仍计 100kg） — [{"exercise":"杠铃背蹲","variant":"barbell_includes_bar_total","best_weight_kg":100,"best_reps_at_weight":8},{"exercise":"杠铃平板卧推","variant":"杠铃","best_weight_kg":80,"best_reps_at_weight":8}]
+PASS B 重复确认幂等：同一凭据、完成率不再变
+PASS C 第一练：无安排动作 → 不带 arrangement（今天无安排） — 已将打卡内容整理为训练记录草稿：**哑铃弯举 3 组** × 10 次 @ 12kg（2026-09-11）。
+- 全部组未提及辅助，按「无辅助」待确认展示（不
+PASS C 第一练确认，建立身份 — {"draft_id":"draft-120","status":"committed","newly_committed":true,"context_version":4,"summary":"训练记录已写入正式数据","committed_revision":1,"committed_business_version":4,"training_session_id":"ts-122"}
+PASS C 「再补一组」→ 草稿前询问归属，不生成草稿 — 2026-09-11 已有训练记录。「再补一组」还不清楚归属，请先选择：
+
+- **补充上一练**：并入既有训练身份（复用同一 training_session_id，不新增身份）；
+- **新增一练**：作为同日新的一练（新身份）。
+
+请直接回复「补充上一练」或「新增一练」，我再整理草稿。
+
+PASS C 「补充上一练」→ 草稿复用既有 training_session_id — "ts-122"
+PASS C 补充确认：training_session_id 复用（不新增身份） — "ts-122"
+PASS C 「新增一练」→ training_session_id null（新身份） — null
+PASS C 新增确认：建立不同身份 — {"ts1":"ts-122","ts3":"ts-136"}
+PASS D 缺次数：可生成草稿（事实不编造，保持缺省） — {"date":"2026-09-10","reps":[null,null,null,null]}
+PASS D 缺次数 → diff 标待补全（incomplete 派生） — [{"field":"动作 1 · 工作组","new_value":"4 组 x ? 次 @ 100kg"},{"field":"修订状态","new_value":"待补全（incomplete）"}]
+PASS D 缺次数确认落盘为 incomplete — {"draft_id":"draft-140","status":"committed","newly_committed":true,"context_version":4,"summary":"训练记录已写入正式数据","committed_revision":1,"committed_business_version":4,"training_session_id":"ts-142"}
+PASS D 记录状态 incomplete（待补全） — "incomplete"
+PASS D incomplete 不进完成率分子（W2 仍 1/3） — {"week":"W2","planned":3,"completed":1,"rate":33.3}
+PASS D incomplete 不进三桶与 PR（深蹲 100kg 不出现在 PR） — {"buckets":{"met":1,"unmet":1,"pending":1},"prs":[{"exercise":"杠铃平板卧推","variant":"杠铃","best_weight_kg":80,"best_reps_at_weight":8}]}
+PASS D 无安排加练：不带 arrangement（动作不在今日安排目标内），新身份 — {"occurred_on":"2026-09-11","training_session_id":null,"exercises":[{"position":1,"exercise_id":"dumbbell-biceps-curl","record_type":"reps_weight","load_notation":"dumbbell_per_hand","sets":[{"set_no":1,"set_type":"work","load":{"value_text":"12","unit":"kg"},"reps":10,"rir":null,"assistance":null},{"set_no":2,"set_type":"work","load":{"value_text":"12","unit":"kg"},"reps":10,"rir":null,"assistance":null},{"set_no":3,"set_type":"work","load":{"value_text":"12","unit":"kg"},"reps":10,"rir":null,"assistance":null}]}]}
+PASS D 无安排加练入列表：valid、无日程关联、不计完成率 — {"id":"rec-149","date":"2026-09-11","kind":"new","status":"valid","exercise":"哑铃弯举","variant":"dumbbell_per_hand","sets":[{"weight_kg":12,"reps":10,"set_type":"working"},{"weight_kg":12,"reps":10,"set_type":"working"},{"weight_kg":12,"reps":10,"set_type":"working"}],"schedule_snapshot":null,"scheduled_session_id":null,"arrangement_revision_id":null,"training_session_id":"ts-148","judgement":null}
+PASS D 无安排记录可进 PR（事实明确、无辅助、有重量） — [{"exercise":"杠铃平板卧推","variant":"杠铃","best_weight_kg":80,"best_reps_at_weight":8},{"exercise":"哑铃弯举","variant":"dumbbell_per_hand","best_weight_kg":12,"best_reps_at_weight":10}]
+PASS E 无法解析：回询问文案、不生成草稿、不编造 — 我没能从这句话里整理出完整的结构化训练事实，因此**不生成草稿、也不编造数值**。
+
+请按此格式反馈：「今天卧推 80kg 4组 每组8次」；
+辅助如「第3组朋友帮忙抬起」；热身如「热身递增至 60kg」。
+
+
+全部通过

@@ -1,0 +1,42 @@
+﻿PASS 页面主展示词无 RIR 缩写（DraftCard 源码无可见 RIR 文案）
+PASS 种子：今日 09-11 腿日已按日期规则锁定、尚无安排 — {"id":"sched-v2-2026-09-11","plan_version":"v2","date":"2026-09-11","plan_workout_key":"legs","weekday":5,"stored_status":"locked","locked_by_date_rule":true,"locked_effective":true}
+PASS 状态档位：正常 → 无安排草稿 — 今天状态正常，按原计划执行，无需当次安排调整。
+
+今日应训练：2026-09-11 · 腿日 · 计划 v2
+
+PASS 状态档位：明显状态差 → 仅建议休息文案、无结构化草稿 — 今天状态非常差，建议休息，不生成训练安排。
+
+恢复后再按原计划训练；若长期状态持续低迷，可再讨论是否调整长期计划。
+
+PASS 一般状态差 → 生成今日 09-11 腿日 deload 草稿（锁定日仍可安排） — 已按「2026-09-11 状态一般」生成**当次安排草稿**（只影响这一练，不修改长期计划）（今日日程已按日期规则锁定，但处方仍可当次调整——日程锁定 ≠ 处方锁定）：
+
+- 绑定：2026-09-
+PASS 越界：加组 → 400 拒绝 — 安排载荷无效，纠错未生效：减载只能减组、不得增组：legs-1
+PASS 越界：deload 改目标用力（属 keep 范畴）→ 拒绝 — 安排载荷无效，纠错未生效：减载方案 1–3 不改目标用力（提高用力属于保留）：legs-1
+PASS 越界：有差异但空白原因 → 拒绝 — 安排载荷无效，纠错未生效：当次目标与计划不同却没有 adjustment_reason：普通调整必须说明原因
+PASS 越界：增删动作 → 拒绝 — 安排载荷无效，纠错未生效：安排目标必须与绑定训练日逐条对应
+PASS 越界：需校准动作不得改负荷 → 拒绝 — 安排载荷无效，纠错未生效：减载改负荷只适用于已有已验证重量的动作（需校准动作回落方案 1）：legs-1
+PASS 越界：改绑定 session_id → 拒绝 — 安排载荷无效，纠错未生效：安排目标 scheduled_on 2026-09-11 与日程 sched-v2-2026-09-07 的日期 2026-09-07
+PASS 越界：改绑定 scheduled_on → 拒绝 — 安排载荷无效，纠错未生效：安排目标 scheduled_on 2026-09-07 与日程 sched-v2-2026-09-11 的日期 2026-09-11
+PASS 越界：session 与 date 不一致 → 拒绝 — 安排载荷无效，纠错未生效：安排目标 scheduled_on 2026-09-14 与日程 sched-v2-2026-09-11 的日期 2026-09-11
+PASS 越界调整后正式数据不变（arrangements 仍 3 条、cv 不变） — {"n":3,"cv":3}
+PASS 合法纠错：deload 再减组 + 原因 → revision+1、diff 同步 — {"status":200,"rev":2}
+PASS confirm：arrangement 返回 arrangement_revision_id 凭据、cv+1 — {"draft_id":"draft-109","status":"committed","newly_committed":true,"context_version":4,"summary":"当次安排已确认（修订 arr-111）：不修改长期计划，仅影响 2026-09-11","committed_revision":2,"committed_business_version":4,"arrangement_revision_id":"arr-111"}
+PASS 确认后 GET /api/arrangements 可读回完整目标快照 — ["2026-08-31","2026-09-02","2026-09-07","2026-09-11"]
+PASS 今日锁定仍可接受减组（处方锁定 ≠ 日程锁定） — {"sets":2}
+PASS 重复确认幂等：同一凭据、cv 不再 +1 — {"c1":4,"c2":4}
+PASS 重复确认后 arrangements 仍 4 条（不重复落盘）
+PASS local_skip 前置：生成草稿
+PASS local_skip：纠错可接受（目标保持计划值仅标注） — rev=2
+PASS local_skip：确认落盘 — {"draft_id":"draft-114","status":"committed","newly_committed":true,"context_version":5,"summary":"当次安排已确认（修订 arr-116）：不修改长期计划，仅影响 2026-09-11","committed_revision":2,"committed_business_version":5,"arrangement_revision_id":"arr-116"}
+PASS local_skip：读回标注且目标保持计划值 — {"d":"local_skip","sets":3}
+PASS keep：生成只升目标用力草稿 — 已按「2026-09-11 状态一般」生成**当次安排草稿**（只影响这一练，不修改长期计划）（今日日程已按日期规则锁定，但处方仍可当次调整——日程锁定 ≠ 处
+PASS keep：降目标用力（向危险方向）→ 拒绝 — 安排载荷无效，纠错未生效：保留项只能提高目标用力、不得降低：legs-1
+PASS keep：确认摘要可标目标更保守 — 当次安排已确认（修订 arr-121）：目标更保守，不修改长期计划，仅影响 2026-09-11
+PASS equivalent_replace：缺 replacement_exercise_id → 拒绝 — 安排载荷无效，纠错未生效：同等刺激替换缺少 replacement_exercise_id：legs-1
+PASS equivalent_replace：改处方 → 拒绝 — 安排载荷无效，纠错未生效：同等刺激替换必须照抄计划的处方与负荷，不得自行造处方或重量：legs-1
+PASS 失败注入：先生成草稿
+PASS 失败注入：确认失败整份回滚（无新安排落盘） — {"status":500,"n":3}
+PASS 失败注入后重做：可成功确认并落盘 — {"status":200}
+
+全部通过

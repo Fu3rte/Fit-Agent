@@ -12,15 +12,21 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import type {
   ArrangementDraftPayload,
+  ArrangementItemDisposition,
   Draft,
   DraftKind,
   DraftExerciseLog,
   DraftPayload,
   FieldDiff,
+  PlanExerciseItem,
   ProfileDraftPayload,
   RecordDraftPayload,
 } from "@/lib/contract";
-import { deriveRangeLabel, prescriptionLabel } from "@/lib/planView";
+import {
+  deriveRangeLabel,
+  effortPlainLabel,
+  prescriptionLabel,
+} from "@/lib/planView";
 import { profilePayloadDiff } from "@/lib/profile";
 import { FieldDiffList } from "./draftFields";
 import { PlanDraftFields } from "./PlanDraftFields";
@@ -32,6 +38,13 @@ const KIND_LABEL: Record<DraftKind, string> = {
   plan: "计划调整草稿",
   profile_update: "档案变更草稿",
   arrangement: "当次安排草稿",
+};
+
+const DISPOSITION_BADGE: Record<ArrangementItemDisposition, string> = {
+  keep: "保留 · 目标更保守",
+  deload: "减载",
+  equivalent_replace: "同等刺激替换",
+  local_skip: "局部跳过",
 };
 
 const fmt = (v: number | string | undefined | null, fallback = "—") =>
@@ -67,13 +80,54 @@ function recordDiffRows(
           old_value: fmt(bs.reps),
           new_value: fmt(cs.reps),
         });
-      if (bs.rir !== cs.rir)
-        rows.push({
-          field: `动作 ${ei + 1} 第 ${i + 1} 组 · RIR`,
-          old_value: fmt(bs.rir, "未报告"),
-          new_value: fmt(cs.rir, "未报告"),
-        });
     });
+  });
+  return rows;
+}
+
+/** 安排草稿：纠错后 payload vs 原草稿的字段级 Diff（与服务端派生口径对齐） */
+function arrangementLocalDiff(
+  base: ArrangementDraftPayload,
+  current: ArrangementDraftPayload,
+): FieldDiff[] {
+  const rows: FieldDiff[] = [];
+  const b = base.target;
+  const c = current.target;
+  if (b.adjustment_reason !== c.adjustment_reason)
+    rows.push({
+      field: "调整原因",
+      old_value: fmt(b.adjustment_reason),
+      new_value: fmt(c.adjustment_reason),
+    });
+  b.exercises.forEach((be, ei) => {
+    const ce = c.exercises[ei];
+    if (!ce || be.prescription.kind !== "reps" || ce.prescription.kind !== "reps")
+      return;
+    const name = ce.display_snapshot.name;
+    if (be.prescription.work_sets !== ce.prescription.work_sets)
+      rows.push({
+        field: `${name} · 组数`,
+        old_value: `${be.prescription.work_sets} 组`,
+        new_value: `${ce.prescription.work_sets} 组`,
+      });
+    if (
+      JSON.stringify(be.prescription.reps_range) !==
+      JSON.stringify(ce.prescription.reps_range)
+    )
+      rows.push({
+        field: `${name} · 每组次数`,
+        old_value: deriveRangeLabel(be.prescription.reps_range),
+        new_value: deriveRangeLabel(ce.prescription.reps_range),
+      });
+    if (
+      JSON.stringify(be.prescription.target_rir) !==
+      JSON.stringify(ce.prescription.target_rir)
+    )
+      rows.push({
+        field: `${name} · 目标用力`,
+        old_value: effortPlainLabel(be.prescription.target_rir),
+        new_value: effortPlainLabel(ce.prescription.target_rir),
+      });
   });
   return rows;
 }
@@ -136,9 +190,14 @@ export function DraftCard({
     ? recordDiffRows(draft.payload as RecordDraftPayload, payload)
     : isProfile
       ? profilePayloadDiff(draft.payload as ProfileDraftPayload, payload)
-      : [];
+      : isArrangement
+        ? arrangementLocalDiff(
+            draft.payload as ArrangementDraftPayload,
+            payload,
+          )
+        : [];
   const diffRows: FieldDiff[] =
-    isRecord || isProfile
+    isRecord || isProfile || isArrangement
       ? editedRows.length > 0
         ? editedRows
         : draft.diff
@@ -187,6 +246,16 @@ export function DraftCard({
                       : ""}
                   </p>
                 </div>
+                {/* 对照摘要（F3-04）：显式携带安排时展示「原计划 X 组 · 当次安排 Y 组」；无安排不显示 */}
+                {p.arrangement_revision_id && (
+                  <p className="text-[11px] text-muted-foreground">
+                    对照：
+                    {draft.diff
+                      .filter((r) => r.field.startsWith("对照"))
+                      .map((r) => r.new_value)
+                      .join(" · ") || "—"}
+                  </p>
+                )}
                 <div className="flex flex-wrap items-center gap-1.5 text-xs text-muted-foreground">
                   日期
                   <Input
@@ -236,17 +305,18 @@ export function DraftCard({
         </div>
       )}
 
-      {/* 安排草稿：完整目标 + 差异 */}
+      {/* 安排草稿：完整目标 + 可纠错（F3-02：deload/keep 主路径 + 原因输入） */}
       {isArrangement && (
         <div className="mt-3 space-y-2">
           {(() => {
             const p = payload as ArrangementDraftPayload;
+            const editable = !committed && !discarded;
             return (
               <>
                 <div className="rounded-lg border border-border bg-muted/30 p-2.5 text-xs">
                   <p className="font-medium">
-                    当次安排 · {p.target.scheduled_on} · {p.target.plan_workout_key}
-                    （计划 {p.target.plan_version}）
+                    当次安排 · {p.target.scheduled_on} ·{" "}
+                    {p.target.plan_workout_key}（计划 {p.target.plan_version}）
                   </p>
                   {p.target.adjustment_reason && (
                     <p className="mt-1 text-muted-foreground">
@@ -260,10 +330,48 @@ export function DraftCard({
                         {prescriptionLabel(e.prescription)}
                         {e.prescription.kind === "reps" &&
                           e.prescription.target_rir &&
-                          ` · RIR ${deriveRangeLabel(e.prescription.target_rir)}`}
+                          ` · ${effortPlainLabel(e.prescription.target_rir)}`}
+                        {e.disposition && (
+                          <Badge
+                            variant="secondary"
+                            className="ml-1.5 align-middle text-[10px]"
+                          >
+                            {DISPOSITION_BADGE[e.disposition]}
+                          </Badge>
+                        )}
                       </li>
                     ))}
                   </ul>
+                </div>
+                {/* 内联纠错：组数 / 目标用力 / 原因（仅待确认可编辑；终态只读） */}
+                <div className="space-y-1.5">
+                  <p className="text-[11px] font-medium text-muted-foreground">
+                    内联纠错（确认前需提交纠错）
+                  </p>
+                  <ArrangementExerciseEditors
+                    payload={p}
+                    disabled={!editable}
+                    onChange={onChange}
+                  />
+                  <label className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                    调整原因
+                    <Input
+                      value={p.target.adjustment_reason ?? ""}
+                      disabled={!editable}
+                      onChange={(e) =>
+                        onChange({
+                          ...p,
+                          target: {
+                            ...p.target,
+                            adjustment_reason: e.target.value,
+                          },
+                        })
+                      }
+                      className="h-7 flex-1 text-xs"
+                      aria-label="调整原因"
+                      placeholder="必填：说明为何调整"
+                    />
+                  </label>
                 </div>
                 <p className="text-[11px] text-muted-foreground">
                   确认后写入当次安排修订；不修改长期计划与其余日程。
@@ -399,7 +507,7 @@ export function DraftCard({
   );
 }
 
-/** 单动作记录编辑器：组列表（SetFacts）+ 组类型/负重/次数/RIR */
+/** 单动作记录编辑器：组列表（SetFacts）+ 组类型/负重/次数/余力 */
 function RecordExerciseEditor({
   exercise,
   index,
@@ -429,6 +537,152 @@ function RecordExerciseEditor({
         disabled={disabled}
         onChange={(sets) => onChange({ ...exercise, sets })}
       />
+    </div>
+  );
+}
+
+/**
+ * 安排草稿内联纠错（F3-02 主路径）：
+ * - deload：只可减 work_sets；
+ * - keep：只可升 target_rir（min/max）；
+ * - local_skip / equivalent_replace / 计时型：目标保持只读展示。
+ * 不在此提交，统一走「提交纠错」→ revise（01 1.2 单一编辑入口）。
+ */
+function ArrangementExerciseEditors({
+  payload,
+  disabled,
+  onChange,
+}: {
+  payload: ArrangementDraftPayload;
+  disabled: boolean;
+  onChange: (payload: DraftPayload) => void;
+}) {
+  const updateItem = (index: number, next: PlanExerciseItem) => {
+    onChange({
+      ...payload,
+      target: {
+        ...payload.target,
+        exercises: payload.target.exercises.map((e, i) =>
+          i === index ? next : e,
+        ),
+      },
+    });
+  };
+  return (
+    <div className="space-y-1.5">
+      {payload.target.exercises.map((e, ei) => {
+        if (e.prescription.kind !== "reps") return null;
+        const rx = e.prescription;
+        const d = e.disposition;
+        const canEditSets = d === "deload" || d === undefined;
+        const canEditRir = d === "keep" || d === undefined;
+        return (
+          <div
+            key={e.item_key}
+            className="flex flex-wrap items-center gap-1.5 rounded-lg border border-border bg-card/60 px-2.5 py-1.5 text-xs"
+          >
+            <span className="font-medium">{e.display_snapshot.name}</span>
+            {d && (
+              <Badge variant="secondary" className="text-[10px]">
+                {DISPOSITION_BADGE[d]}
+              </Badge>
+            )}
+            {canEditSets && (
+              <label className="flex items-center gap-1 text-muted-foreground">
+                组数
+                <Input
+                  type="number"
+                  min={1}
+                  value={rx.work_sets}
+                  disabled={disabled}
+                  onChange={(ev) => {
+                    const v = Number(ev.target.value);
+                    if (!Number.isFinite(v) || v < 1) return;
+                    updateItem(ei, {
+                      ...e,
+                      prescription: {
+                        kind: "reps",
+                        work_sets: Math.floor(v),
+                        reps_range: rx.reps_range,
+                        ...(rx.target_rir ? { target_rir: rx.target_rir } : {}),
+                      },
+                    });
+                  }}
+                  className="h-7 w-16 text-xs"
+                  aria-label={`${e.display_snapshot.name} 组数`}
+                />
+              </label>
+            )}
+            {canEditRir && rx.target_rir && (
+              <label className="flex items-center gap-1 text-muted-foreground">
+                目标用力（还能再做）
+                <Input
+                  type="number"
+                  min={0}
+                  value={rx.target_rir.min}
+                  disabled={disabled}
+                  onChange={(ev) => {
+                    const v = Number(ev.target.value);
+                    if (!Number.isFinite(v) || v < 0) return;
+                    const rir = rx.target_rir;
+                    if (!rir) return;
+                    updateItem(ei, {
+                      ...e,
+                      prescription: {
+                        kind: "reps",
+                        work_sets: rx.work_sets,
+                        reps_range: rx.reps_range,
+                        target_rir: {
+                          min: Math.floor(v),
+                          max: Math.max(Math.floor(v), rir.max),
+                        },
+                      },
+                    });
+                  }}
+                  className="h-7 w-16 text-xs"
+                  aria-label={`${e.display_snapshot.name} 目标用力下限`}
+                />
+                –
+                <Input
+                  type="number"
+                  min={0}
+                  value={rx.target_rir.max}
+                  disabled={disabled}
+                  onChange={(ev) => {
+                    const v = Number(ev.target.value);
+                    if (!Number.isFinite(v) || v < 0) return;
+                    const rir = rx.target_rir;
+                    if (!rir) return;
+                    updateItem(ei, {
+                      ...e,
+                      prescription: {
+                        kind: "reps",
+                        work_sets: rx.work_sets,
+                        reps_range: rx.reps_range,
+                        target_rir: {
+                          min: Math.min(rir.min, Math.floor(v)),
+                          max: Math.floor(v),
+                        },
+                      },
+                    });
+                  }}
+                  className="h-7 w-16 text-xs"
+                  aria-label={`${e.display_snapshot.name} 目标用力上限`}
+                />
+              </label>
+            )}
+            {!canEditSets && !canEditRir && (
+              <span className="text-muted-foreground">
+                {d === "local_skip"
+                  ? "局部跳过：目标保持计划值"
+                  : d === "equivalent_replace"
+                    ? "同等刺激替换：处方照抄计划"
+                    : "按处置只读展示"}
+              </span>
+            )}
+          </div>
+        );
+      })}
     </div>
   );
 }

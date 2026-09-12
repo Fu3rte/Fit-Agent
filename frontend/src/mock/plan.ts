@@ -35,6 +35,7 @@ import type {
 import {
   derivePlanBlocks,
   deriveRangeLabel,
+  effortPlainLabel,
   isIsoDate,
   progressionLabel,
   projectSchedules,
@@ -422,16 +423,16 @@ export function planDraftDiff(
       field: `${block.name} · 动作（预计 ${block.estimated_minutes} 分钟）`,
       new_value: block.exercises
         .map((e) => {
-          const rir =
-            e.prescription.kind === "reps"
-              ? `，目标 RIR ${deriveRangeLabel(e.prescription.target_rir)}`
+          const effort =
+            e.prescription.kind === "reps" && e.prescription.target_rir
+              ? `，${effortPlainLabel(e.prescription.target_rir)}`
               : "";
           const sets = e.prescription.work_sets;
           const range =
             e.prescription.kind === "reps"
               ? deriveRangeLabel(e.prescription.reps_range)
               : `${deriveRangeLabel(e.prescription.duration_seconds_range)} 秒`;
-          return `${e.display_snapshot.name} ${sets} 组 x ${range}${rir}（${progressionLabel(e.progression.method)}）`;
+          return `${e.display_snapshot.name} ${sets} 组 x ${range}${effort}（${progressionLabel(e.progression.method)}）`;
         })
         .join(" → "),
     });
