@@ -50,6 +50,9 @@ from domain.records.schema import (
 )
 from domain.records.service import RecordReadService
 from domain.stats.service import StatsService
+from runtime.budget import (
+    RunBudget,  # 同一 runtime 包内的依赖（无循环：budget 不反向依赖工具面）
+)
 from runtime.context import pending_proposed_profile, plan_guidance_facts
 from storage.db import Database
 from storage.errors import InvalidInput
@@ -86,6 +89,12 @@ class ToolIdentity:
     business_date: date
     cancel_requested: Callable[[], bool] | None = None
     message_red_flags: tuple[str, ...] = ()
+    budget: RunBudget | None = None
+    """本次 Run 的执行预算（S4-05b）：工具调用计数与取消／Run 剩余时间闸的唯一来源。
+
+    生产路径恒非空（``runtime.agent_factory.build_run_work`` 每 Run 注入）；直接构造工具面
+    的单元测试可为 ``None``，此时 ``cancel_requested`` 是唯一的取消探针。
+    """
 
 
 class BusinessTools:
@@ -453,7 +462,15 @@ class BusinessTools:
 
     # ---------- 取消 ----------
     def _require_active(self) -> None:
-        """取消后不启动新的读取或写入（08 8.3），底层执行由取消标记与驱动双重把关。"""
+        """每个工具执行前过预算闸：取消不启动、工具池用尽即终态失败（08 8.3/8.6）。
+
+        ``budget`` 非空时由它统一计数工具调用（含写入不确定时的状态核对查询）并检查取消与
+        Run 剩余时间；为 ``None`` 时退回只看取消标记（单元测试直接构造工具面的路径）。
+        """
+        budget = self._identity.budget
+        if budget is not None:
+            budget.begin_tool_call()
+            return
         if (
             self._identity.cancel_requested is not None
             and self._identity.cancel_requested()

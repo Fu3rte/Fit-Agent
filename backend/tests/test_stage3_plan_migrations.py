@@ -59,6 +59,8 @@ STAGE3_RECORD_TABLES = {
 }
 # S3-13 由 011 迁移新增的复盘两表（表集合断言显式扩展、不删测试）。
 STAGE3_REVIEW_TABLES = {"reviews", "review_source_revisions"}
+# S4-06a 由 014 迁移新增的摘要两表（stage4.md S4-06；表集合断言显式扩展、不删测试）。
+STAGE4_SUMMARY_TABLES = {"summaries", "summary_sources"}
 # Stage 3 表已全部落地：统计侧 ``pr_candidates`` 是视图（010），不在 type='table' 扫描内。
 LATER_STAGE_TABLES: set[str] = set()
 DRAFT_PAYLOAD_COLUMNS = (
@@ -339,6 +341,7 @@ async def test_empty_database_creates_stage3_plan_tables_without_statistics_side
             | STAGE3_PLAN_TABLES
             | STAGE3_RECORD_TABLES
             | STAGE3_REVIEW_TABLES
+            | STAGE4_SUMMARY_TABLES
             | {"sqlite_sequence"}
         )
         assert tables & LATER_STAGE_TABLES == set()  # 统计／复盘侧表归 S3-12／S3-13
@@ -607,6 +610,7 @@ async def test_failed_stage3_migration_rolls_back_and_can_be_retried(
         "012_stage3_pr_candidates_assisted_reps.sql",
         # 013 是动作目录的增量补充迁移：临时目录补齐后才是与生产同编号的最新版本。
         "013_stage4_action_muscle.sql",
+        "014_stage4_summaries.sql",
     ):
         shutil.copy(DEFAULT_MIGRATIONS_DIR / name, directory / name)
     broken = directory / PLAN_TABLES_MIGRATION_FILE

@@ -78,6 +78,9 @@ _SCANNED_TABLES = frozenset(
         # Stage 3 新增的复盘两表（S3-13）：同样必须被扫描覆盖
         "reviews",
         "review_source_revisions",
+        # Stage 4 新增的摘要两表（S4-06a，014 迁移）：同样必须被扫描覆盖
+        "summaries",
+        "summary_sources",
     }
 )
 
@@ -211,6 +214,12 @@ async def all_text_cells(db: Database) -> list[tuple[str, str, str]]:
             cells += _rows_as_cells(
                 "review_source_revisions", columns, await cursor.fetchall()
             )
+        async with conn.execute("SELECT * FROM summaries") as cursor:
+            columns = tuple(str(c[0]) for c in cursor.description)
+            cells += _rows_as_cells("summaries", columns, await cursor.fetchall())
+        async with conn.execute("SELECT * FROM summary_sources") as cursor:
+            columns = tuple(str(c[0]) for c in cursor.description)
+            cells += _rows_as_cells("summary_sources", columns, await cursor.fetchall())
         return cells
 
     return await db.under_lock(op)

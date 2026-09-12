@@ -20,7 +20,12 @@ from fastapi import FastAPI, Request
 from api.dto import install_error_handlers
 from api.routes_drafts import router as drafts_router
 from api.routes_readonly import router as readonly_router
-from config import database_path, local_timezone_name, resolve_data_dir
+from config import (
+    database_path,
+    freeze_effective_harness,
+    local_timezone_name,
+    resolve_data_dir,
+)
 from runtime.run_service import RunService
 from storage.db import Database
 from storage.run_repo import RunRepo
@@ -92,6 +97,10 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         resolved = resolve_data_dir(data_dir)
         resolved.mkdir(parents=True, exist_ok=True)
+        # 08 8.5（S4-05a）：Harness 本地配置在启动时加载并做硬边界与容量交叉校验；越界、
+        # 未知模型或不变量不成立一律拒绝启动，不静默钳制。Run 开始时的冻结入口同为此函数
+        # （S4-05b/07 每次 Run 开始时冻结；运行中改文件不影响已冻结的配置）。
+        app.state.harness_config = freeze_effective_harness(resolved)
         db = Database(database_path(resolved))
         app.state.db = db
         try:

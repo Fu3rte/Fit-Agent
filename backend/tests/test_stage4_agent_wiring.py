@@ -42,6 +42,7 @@ from pydantic_ai.models.function import AgentInfo, FunctionModel
 
 from api.app import create_app
 from app.confirm import ConfirmService
+from config import HarnessConfig, effective_harness_config
 from domain.profile.repo import ProfileRepo
 from domain.profile.safety import RED_FLAG_BLOCK_ADVICE
 from domain.profile.schema import Fact, profile_to_json
@@ -81,6 +82,9 @@ BUSINESS_DATE = date(2026, 9, 20)
 OCCURRED_ON = date(2026, 9, 16)
 SQUAT = "barbell-back-squat"
 RED_FLAG_LABEL = "胸部异常不适"
+
+#: 本文件用生产默认值的冻结有效配置（S4-05b 每 Run 冻结的输入）；用例不测预算边界。
+HARNESS = effective_harness_config(HarnessConfig())
 
 #: 预期工具面（不含任何正式写入能力）：四类只读查询 + 四类 Pending 草稿创建。
 EXPECTED_TOOLS = (
@@ -176,6 +180,7 @@ async def _run_agent(
         db=db,
         repo=repo,
         model=model,
+        harness=HARNESS,
         conversation_id=CONVERSATION_ID,
         run_id=run_id,
         business_date=BUSINESS_DATE,
@@ -698,6 +703,7 @@ async def test_cancel_after_draft_creation_recovers_verified_draft_in_next_conte
             db=db,
             repo=repo,
             model=model.model(on_request=on_request),
+            harness=HARNESS,
             conversation_id=CONVERSATION_ID,
             run_id="r1",
             business_date=BUSINESS_DATE,
@@ -827,6 +833,7 @@ async def test_cancel_prevents_late_messages_and_new_drafts(tmp_path: Path) -> N
             db=db,
             repo=repo,
             model=model.model(on_request=on_request),
+            harness=HARNESS,
             conversation_id=CONVERSATION_ID,
             run_id="r1",
             business_date=BUSINESS_DATE,

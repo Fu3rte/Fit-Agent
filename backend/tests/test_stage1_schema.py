@@ -47,6 +47,8 @@ STAGE3_RECORD_TABLES = {
 }
 # Stage 3 S3-13 由 011 迁移建立复盘两表（stage3.md §5 S3-13）。
 STAGE3_REVIEW_TABLES = {"reviews", "review_source_revisions"}
+# Stage 4 S4-06a 由 014 迁移建立摘要两表（stage4.md S4-06；07 7.4 摘要持久化）。
+STAGE4_SUMMARY_TABLES = {"summaries", "summary_sources"}
 # Stage 3 表已全部落地：统计侧 ``pr_candidates`` 是视图（010），不在 type='table' 扫描内。
 LATER_STAGE_TABLES: set[str] = set()
 
@@ -199,6 +201,7 @@ async def test_fresh_database_migrates_to_latest_with_seed_and_no_profile_facts(
             | STAGE3_PLAN_TABLES
             | STAGE3_RECORD_TABLES
             | STAGE3_REVIEW_TABLES
+            | STAGE4_SUMMARY_TABLES
             | {"sqlite_sequence"}
         )
         assert tables & LATER_STAGE_TABLES == set()  # 不建统计／复盘侧业务表

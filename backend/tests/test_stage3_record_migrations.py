@@ -48,6 +48,8 @@ STAGE3_RECORD_TABLES = {
 }
 # S3-13 由 011 迁移新增的复盘两表。
 STAGE3_REVIEW_TABLES = {"reviews", "review_source_revisions"}
+# S4-06a 由 014 迁移新增的摘要两表（stage4.md S4-06；表集合断言显式扩展、不删测试）。
+STAGE4_SUMMARY_TABLES = {"summaries", "summary_sources"}
 
 STAGE2_VERSION = 4  # 004_stage2_business_drafts.sql 执行后的 user_version
 STAGE3_PLAN_VERSION = (
@@ -59,6 +61,7 @@ PR_CANDIDATES_MIGRATION_FILE = "010_stage3_pr_candidates_view.sql"
 REVIEWS_MIGRATION_FILE = "011_stage3_reviews.sql"
 PR_CANDIDATES_FIX_MIGRATION_FILE = "012_stage3_pr_candidates_assisted_reps.sql"
 ACTION_MUSCLE_MIGRATION_FILE = "013_stage4_action_muscle.sql"
+SUMMARY_MIGRATION_FILE = "014_stage4_summaries.sql"
 LATEST_VERSION = len(load_migrations())
 SEEDED_EXERCISE_ID = "barbell-back-squat"  # 目录种子内动作（003）
 
@@ -304,6 +307,7 @@ async def test_empty_database_creates_record_tables_with_minimum_indexes(
             | STAGE3_PLAN_TABLES
             | STAGE3_RECORD_TABLES
             | STAGE3_REVIEW_TABLES
+            | STAGE4_SUMMARY_TABLES
             | {"sqlite_sequence"}
         )
 
@@ -659,6 +663,10 @@ async def test_failed_record_migration_rolls_back_and_can_be_retried(
     shutil.copy(
         DEFAULT_MIGRATIONS_DIR / ACTION_MUSCLE_MIGRATION_FILE,
         directory / ACTION_MUSCLE_MIGRATION_FILE,
+    )
+    shutil.copy(
+        DEFAULT_MIGRATIONS_DIR / SUMMARY_MIGRATION_FILE,
+        directory / SUMMARY_MIGRATION_FILE,
     )
     broken = directory / RECORD_MIGRATION_FILE
     original = (DEFAULT_MIGRATIONS_DIR / RECORD_MIGRATION_FILE).read_text(

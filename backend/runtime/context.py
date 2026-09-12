@@ -274,20 +274,43 @@ def current_facts_request(facts: BusinessFacts) -> ModelRequest:
     return ModelRequest(parts=[SystemPromptPart(content=facts_prompt(facts))])
 
 
-async def load_conversation_history(
-    repo: RunRepo, *, conversation_id: str, current_run_id: str
-) -> list[ModelMessage]:
-    """已保存会话 → 原生 :class:`ModelMessage` 列表（不含本次 Run 的用户请求）。
+@dataclass(frozen=True, slots=True)
+class HistoryInteraction:
+    """一段已保存的完整交互（一个 Run 的投影）：用户请求 → 完整回答或中断标注。
+
+    ``first_seq``／``last_seq`` 是该 Run 已保存消息的会话 ``seq`` 区间（摘要覆盖与来源关联
+    按行身份记录）；``source_message_ids`` 是这段投影真正用到的消息行 id（部分回答除外，
+    它们不进模型上下文）。交互边界即安全切点：不拆工具调用与结果，也不跨 Run 拼接。
+    """
+
+    run_id: str
+    first_seq: int
+    last_seq: int
+    messages: tuple[ModelMessage, ...]
+    source_message_ids: tuple[int, ...]
+
+
+async def load_conversation_interactions(
+    repo: RunRepo,
+    *,
+    conversation_id: str,
+    current_run_id: str,
+    after_seq: int = 0,
+) -> list[HistoryInteraction]:
+    """已保存会话 → 按 Run 分组的历史交互列表（不含本次 Run、不含已被摘要覆盖的消息）。
 
     - 已完成 Run：``kind='framework'`` 行逐条 ``ModelMessagesTypeAdapter`` 反序列化，顺序即
       ``seq``；历史里的 ``SystemPromptPart``（旧系统事实）被剔除，当前事实只由本次注入给出。
     - 未完成 Run（failed／cancelled／重启中断等）：只保留用户请求事实，并标注上一条请求未完成；
       部分回答不进上下文。用户请求在模型上下文里只出现一次（完成 Run 的框架消息已含它）。
+    - ``after_seq``：只取 ``seq`` 大于该值（最新有效摘要的覆盖终点）的消息，用于「摘要 + 尾段」
+      投影；摘要之前的原消息仍在库内逐条可追溯。
     - 本函数不执行工具、不调用模型、不写库：历史里的工具调用与结果只是已保存记录。
     """
     rows = await repo.list_messages(conversation_id)
-    history: list[ModelMessage] = []
-    for run_id, run_rows in _group_by_run(rows):
+    selected = [row for row in rows if int(row["seq"]) > after_seq]
+    interactions: list[HistoryInteraction] = []
+    for run_id, run_rows in _group_by_run(selected):
         if run_id == current_run_id:
             # 本次请求的用户文本由 agent 的 user prompt 注入，不重复注入（07 7.4）。
             continue
@@ -295,22 +318,38 @@ async def load_conversation_history(
         status = "pending" if run is None else str(run["status"])
         text = _user_request_text(run_rows)
         if status == "completed":
-            history.extend(_framework_history(run_rows, user_text=text))
+            messages = _framework_history(run_rows, user_text=text)
+            used_rows = [row for row in run_rows if row["kind"] != "partial"]
+        elif text is not None:
+            messages = [_interrupted_request(text, status)]
+            used_rows = [row for row in run_rows if row["kind"] == "user_request"]
+        else:
             continue
-        if text is None:
+        if not messages:
             continue
-        label = _INTERRUPTED_STATUS_LABEL.get(status, status)
-        history.append(
-            ModelRequest(
-                parts=[
-                    UserPromptPart(
-                        content=f"{text}\n\n{INTERRUPTION_MARKER}（{label}）："
-                        "不要把这次请求当作已完成的回答或已发生的结果。"
-                    )
-                ]
+        interactions.append(
+            HistoryInteraction(
+                run_id=run_id,
+                first_seq=min(int(row["seq"]) for row in run_rows),
+                last_seq=max(int(row["seq"]) for row in run_rows),
+                messages=tuple(messages),
+                source_message_ids=tuple(int(row["id"]) for row in used_rows),
             )
         )
-    return history
+    return interactions
+
+
+def _interrupted_request(text: str, status: str) -> ModelRequest:
+    """未完成 Run 的历史形态：请求事实 + 显式中断标注（不把残留部分回答当作事实）。"""
+    label = _INTERRUPTED_STATUS_LABEL.get(status, status)
+    return ModelRequest(
+        parts=[
+            UserPromptPart(
+                content=f"{text}\n\n{INTERRUPTION_MARKER}（{label}）："
+                "不要把这次请求当作已完成的回答或已发生的结果。"
+            )
+        ]
+    )
 
 
 def _group_by_run(rows: Sequence[dict[str, Any]]) -> list[tuple[str, list[dict]]]:

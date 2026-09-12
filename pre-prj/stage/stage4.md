@@ -30,7 +30,8 @@
 - 容量与估算：模型窗口 1,000,000（`deepseek-flash`，未知 id 拒绝启动）；触发点 200,000、有效输入上限 250,000、保留尾巴 25,000、摘要输出 6,144、输出预留 8,192、安全余量 max(4,096, 10%×估算)；估算取 0.6×字符上界与真实 usage 锚点较大值。
 - 不建 provider 溢出应急重试；摘要请求放不下时收缩待摘要区间，缩到无可摘要即放弃并保留旧上下文；压缩放弃后同一状态不重复尝试。
 
-- 首事件/流空闲超时 A（2026-09-12）：不新增计时器，由单次请求总时限 120 秒覆盖；未产出输出→用重试池 1 次，已产出→不重放、标未完成；错误码 `model_request_timeout`（单次请求）与 `run_timeout`（Run 总时限）登记进 S4-01。依据：官方 `: keep-alive` 保活会重置传输层 read timeout（官方未给客户端超时建议），离线探针证实 body 阶段断流裸抛 `httpx2.ReadTimeout` 而非 `ModelAPIError`，SDK 隐式重试不覆盖 body 阶段。
+- 首事件/流空闲超时 A（2026-09-12）：不新增计时器，由单次请求总时限 120 秒覆盖；未产出输出→用重试池 1 次，已产出→不重放、标未完成；流式一旦交给消费方即不重放（正本见第 8 章「流式重放边界」）；错误码 `model_request_timeout`（单次请求）与 `run_timeout`（Run 总时限）登记进 S4-01。依据：官方 `: keep-alive` 保活会重置传输层 read timeout（官方未给客户端超时建议），离线探针证实 body 阶段断流裸抛 `httpx2.ReadTimeout` 而非 `ModelAPIError`，SDK 隐式重试不覆盖 body 阶段。
+- 失败原因码补充（2026-09-12 用户拍板）：新增已冻结 Run 终态码 `model_request_failed`（永久性模型失败与请求／工具／纠错计数池耗尽）；`model_request_timeout` 仍只表示单次请求墙钟与重试用尽／剩余时间不足，`run_timeout` 仍只表示 Run 墙钟到期。
 
 - 思考模式默认（2026-09-12 拍板）：保持 Provider 默认**开启** Thinking；不提供按 Run 的思考开关、不传关闭参数（Provider 两种模式都支持，不作为能力限制声明）；模型 profile 如实声明思考支持与默认行为，隐藏推理不进产品/SSE 输出（正本见 08 章「思考模式默认」）。依据：真实调用实测响应含思考内容、官方标明 thinking 为默认模式，而框架对未知 id 的 DeepSeek profile 会错报为不支持思考；思考 token 计入输出，费用预检改按模型总输出上限计。
 
@@ -60,7 +61,7 @@
 
 - **工作**：在生产锁定的 PydanticAI、Provider SDK 组合下复核消息序列化、流式事件、usage、取消、超时和重试配置；用本地假服务端／测试模型复测四类 Harness 断言；为 `deepseek-flash` 显式覆盖框架模型 profile；冻结聊天、Run、取消、手动重试、SSE 与错误响应的最小传输契约，并逐项映射 Stage 3 F1–F10。
 - **依赖**：第 4 章 Harness 决策已收口；生产依赖已存在。若版本或依赖不满足，不自行安装或换路线，记录缺口并按项目规则停下确认。
-- **验收**：适配层是 Run 级纠错计数唯一权威，框架 per-tool 预算不叠加；SDK 隐式重试为零；取消后不启动新尝试；写后报错先核对状态；未知模型 id 拒绝启动，`deepseek-flash` 使用 1,000,000 token 窗口 profile；`context_budget_exceeded`、`model_request_timeout`、`run_timeout`、`conversation_busy`、`interrupted_by_restart` 进入封闭错误码契约；前端可独立 mock，且无公开建草稿或正式确认工具。
+- **验收**：适配层是 Run 级纠错计数唯一权威，框架 per-tool 预算不叠加；SDK 隐式重试为零；取消后不启动新尝试；写后报错先核对状态；未知模型 id 拒绝启动，`deepseek-flash` 使用 1,000,000 token 窗口 profile；`context_budget_exceeded`、`model_request_timeout`、`run_timeout`、`model_request_failed`、`conversation_busy`、`interrupted_by_restart` 进入封闭错误码契约；前端可独立 mock，且无公开建草稿或正式确认工具。
 - **验证**：运行生产依赖组合的定向离线测试，记录 Python、PydanticAI、Provider SDK 版本、命令、退出码与已知缺口；不发真实模型请求。
 
 ### S4-02：Run 服务、幂等互斥与启动恢复
@@ -140,7 +141,7 @@ S4-01 输出可由前端 mock 的端点/请求/响应/错误码/SSE 示例文档
 - Run 传输字段：`run_id`、`conversation_id`、`status`（五态）、`error_code`、`retry_of_run_id`、`created_at`、`updated_at`。
 - 错误码两类（封闭集合正本 `backend/runtime/error_codes.py`，测试断言闭合）：HTTP `conversation_busy`（409，
   映射登记在 `backend/api/dto.py`）；Run 终态原因 `interrupted_by_restart`、`model_request_timeout`、`run_timeout`、
-  `context_budget_exceeded`（随 Run 查询／状态事件给出可理解原因，不是 HTTP 错误码）。
+  `context_budget_exceeded`、`model_request_failed`（随 Run 查询／状态事件给出可理解原因，不是 HTTP 错误码）。
 
 先冻结最小接口契约，再并行实现；变更由后端更新契约并通知前端 owner，双方确认影响后同步。前端只修改 frontend，后端只修改 backend 与约定文档；联调共同负责，不互相覆盖代码。
 

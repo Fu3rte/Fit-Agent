@@ -27,18 +27,24 @@ RUN_TIMEOUT = "run_timeout"
 #: 上下文预算超限、无法安全压缩后结束（08「容量、估算与溢出」）。
 CONTEXT_BUDGET_EXCEEDED = "context_budget_exceeded"
 
+#: 模型请求无法继续且不是墙钟超时（2026-09-12 用户拍板新增）：永久性模型失败
+#: （HTTP 400/401/402/404/422、``finish_reason`` 内容过滤／length／
+#: insufficient_system_resource／aborted、已输出后的流中断）与请求／工具／纠错计数池耗尽。
+MODEL_REQUEST_FAILED = "model_request_failed"
+
 #: Run 终态失败原因全集；写入 ``runs.error_code`` 的值只允许来自这里。
 RUN_FAILURE_CODES: tuple[str, ...] = (
-  INTERRUPTED_BY_RESTART,
-  MODEL_REQUEST_TIMEOUT,
-  RUN_TIMEOUT,
-  CONTEXT_BUDGET_EXCEEDED,
+    INTERRUPTED_BY_RESTART,
+    MODEL_REQUEST_TIMEOUT,
+    RUN_TIMEOUT,
+    CONTEXT_BUDGET_EXCEEDED,
+    MODEL_REQUEST_FAILED,
 )
 
 #: 普通执行失败可用的原因（即除重启中断外的全部）：``interrupted_by_restart`` 只由
 #: 启动恢复写给遗留 Run，普通 running 失败不得使用它（08 8.1/8.4 分开表达）。
 ORDINARY_FAILURE_CODES: tuple[str, ...] = tuple(
-  code for code in RUN_FAILURE_CODES if code != INTERRUPTED_BY_RESTART
+    code for code in RUN_FAILURE_CODES if code != INTERRUPTED_BY_RESTART
 )
 
 #: 对外错误码封闭全集（HTTP 错误码 + Run 终态失败原因），前端据此做穷尽联合。
@@ -46,5 +52,5 @@ RUNTIME_ERROR_CODES: frozenset[str] = frozenset((CONVERSATION_BUSY, *RUN_FAILURE
 
 
 def is_runtime_error_code(code: object) -> bool:
-  """该值是否在本轮冻结的封闭错误码集合内。"""
-  return isinstance(code, str) and code in RUNTIME_ERROR_CODES
+    """该值是否在本轮冻结的封闭错误码集合内。"""
+    return isinstance(code, str) and code in RUNTIME_ERROR_CODES

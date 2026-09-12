@@ -38,6 +38,11 @@ dev = [
     "ruff>=0.16",
 ]
 
+# pi-lens 配置发现依赖字面量 [tool.ruff] 表（S4-05a 工具修复）：缺少该表时 pi-lens 会注入自带
+# core.toml（无 target-version），把 Python 3.11+ 标准库 tomllib 当成第三方并自动改写 import。
+# 空表本身不改变规则集：lint 规则仍只由下方 [tool.ruff.lint] 与 requires-python >= 3.13 决定。
+[tool.ruff]
+
 # 显式钉死规则集：Ruff 0.16 的默认 select 已扩到 300+ 条规则，会把 agent_core 等
 # 既有代码刷出几十条与本阶段无关的告警。用显式最小集，保证 Linux/Windows 复现一致。
 [tool.ruff.lint]

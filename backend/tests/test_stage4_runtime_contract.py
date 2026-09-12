@@ -5,7 +5,8 @@
    profile 显式覆盖 ``context_window``（框架对该 id 不给窗口，必须自己写死）。
    思考支持与默认行为同样由目录如实覆盖（2026-09-12 已拍：Provider 默认开启思考；不提供按 Run 开关）。
 2. 目录外模型 id（含框架已知的旧别名）拒绝启动：不推断、不降级到别的模型。
-3. 错误码封闭集合恰为已冻结的五个，且 ``conversation_busy`` 的 HTTP 409 映射只登记一次。
+3. 错误码封闭集合恰为已冻结的六个（含 2026-09-12 拍板新增的 ``model_request_failed``），
+   且 ``conversation_busy`` 的 HTTP 409 映射只登记一次。
 4. 本片不新增公开 HTTP 面：聊天／Run／SSE 路由仍未接入（不预支 S4-03/S4-07）。
 
 离线：全部为纯函数与静态表检查，不构造客户端、不读凭据、不发请求
@@ -24,6 +25,7 @@ from runtime.error_codes import (
     CONTEXT_BUDGET_EXCEEDED,
     CONVERSATION_BUSY,
     INTERRUPTED_BY_RESTART,
+    MODEL_REQUEST_FAILED,
     MODEL_REQUEST_TIMEOUT,
     RUN_FAILURE_CODES,
     RUN_TIMEOUT,
@@ -110,6 +112,7 @@ def test_runtime_error_codes_are_closed() -> None:
         MODEL_REQUEST_TIMEOUT,
         RUN_TIMEOUT,
         CONTEXT_BUDGET_EXCEEDED,
+        MODEL_REQUEST_FAILED,  # 2026-09-12 拍板新增：永久模型失败与计数池耗尽
     } == RUNTIME_ERROR_CODES
     assert set(RUN_FAILURE_CODES).issubset(RUNTIME_ERROR_CODES)
     assert CONVERSATION_BUSY not in RUN_FAILURE_CODES  # HTTP 错误码不是 Run 终态原因

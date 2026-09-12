@@ -4,6 +4,7 @@
 存储）、004_*.sql（Stage 2 草稿表）、005–007_*.sql（Stage 3 计划侧表、草稿 kind
 扩展、可推荐系统迁移）、008–010_*.sql（Stage 3 安排草稿载荷、记录侧四表、统计侧
 ``pr_candidates`` 视图）与 011_*.sql（Stage 3 复盘两表）；
+013_*.sql（Stage 4 动作肌群）与 014_*.sql（Stage 4 摘要两表）；
 升级/失败/重跑语义用临时注入的迁移目录验证（不向生产迁移目录塞测试用假迁移）。
 """
 
@@ -40,6 +41,8 @@ STAGE3_RECORD_TABLES = {
 }
 # S3-13 由 011 迁移新增的复盘两表：正文／快照本体与精确来源修订引用。
 STAGE3_REVIEW_TABLES = {"reviews", "review_source_revisions"}
+# S4-06a 由 014 迁移新增的摘要两表：覆盖范围与来源关联（07 7.4 摘要持久化）。
+STAGE4_SUMMARY_TABLES = {"summaries", "summary_sources"}
 # Stage 3 表已全部落地：统计侧 ``pr_candidates`` 是视图（010），不在 type='table' 扫描内。
 LATER_STAGE_TABLES: set[str] = set()
 LATEST_VERSION = len(load_migrations())
@@ -67,6 +70,7 @@ async def test_fresh_initialize_creates_runtime_tables(tmp_path: Path) -> None:
             | STAGE3_PLAN_TABLES
             | STAGE3_RECORD_TABLES
             | STAGE3_REVIEW_TABLES
+            | STAGE4_SUMMARY_TABLES
             | {"sqlite_sequence"}
         )
         assert tables & LATER_STAGE_TABLES == set()  # 不建统计／复盘侧表
@@ -283,7 +287,7 @@ async def test_failed_013_rolls_back_muscle_column_and_version(tmp_path: Path) -
     migrations_dir = tmp_path / "migrations"
     migrations_dir.mkdir()
     for source in sorted(real_dir.glob("0*.sql")):
-        if source.name.startswith("013"):
+        if source.name.startswith(("013", "014")):
             continue
         (migrations_dir / source.name).write_text(
             source.read_text(encoding="utf-8"), encoding="utf-8"
@@ -319,3 +323,52 @@ async def test_failed_013_rolls_back_muscle_column_and_version(tmp_path: Path) -
         ):
             columns = {str(row["name"]) for row in await cursor.fetchall()}
         assert "muscle" in columns
+
+
+async def _index_names(db: Database) -> set[str]:
+    async def op(conn):
+        async with conn.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'index'"
+        ) as cursor:
+            return {str(row["name"]) for row in await cursor.fetchall()}
+
+    return await db.under_lock(op)
+
+
+async def test_failed_014_rolls_back_summary_tables_and_version(tmp_path: Path) -> None:
+    """014 失败注入：真实脚本的表与索引先执行、末尾语句失败 → 整片回滚（无半套结构、版本停在 013）。
+
+    注入脚本 = 真实 014 全文 + 非法 SQL（表、索引、第二张表都已执行后失败）；
+    修复后把真实 014 原文放入临时目录重跑，验证升级路径不需删库（07 7.2）。
+    """
+    real_dir = Path(__file__).resolve().parents[1] / "storage" / "migrations"
+    migrations_dir = tmp_path / "migrations"
+    migrations_dir.mkdir()
+    for source in sorted(real_dir.glob("0*.sql")):
+        if source.name.startswith("014"):
+            continue
+        (migrations_dir / source.name).write_text(
+            source.read_text(encoding="utf-8"), encoding="utf-8"
+        )
+    real_sql = (real_dir / "014_stage4_summaries.sql").read_text(encoding="utf-8")
+    _write_migration(
+        migrations_dir, 14, "stage4_summaries", f"{real_sql}\nTHIS IS NOT VALID SQL;"
+    )
+    path = tmp_path / "app.db"
+    async with open_database(path, migrate=False, migrations_dir=migrations_dir) as db:
+        with pytest.raises(MigrationError, match="stage4_summaries"):
+            await db.migrate()
+        assert await db.pragma_value("user_version") == 13
+        tables = await _table_names(db)
+        assert "summaries" not in tables  # 半套结构已回滚
+        assert "summary_sources" not in tables
+        assert "idx_summaries_conversation_coverage" not in await _index_names(db)
+
+        # 修复：把真实 014 原文放入临时目录重跑（不删用户库）
+        (migrations_dir / "014_stage4_summaries.sql").write_text(
+            real_sql, encoding="utf-8"
+        )
+        assert await db.migrate() == 14
+        tables = await _table_names(db)
+        assert {"summaries", "summary_sources"} <= tables
+        assert "idx_summaries_conversation_coverage" in await _index_names(db)
