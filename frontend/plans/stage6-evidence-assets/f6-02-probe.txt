@@ -1,0 +1,22 @@
+# F6-02 probe — 2026-09-13T11:00:01.552Z
+# backend=D:\Repository\Fit_Agent\backend\.venv\Scripts\python.exe data_dir=C:\Users\Ericcc\AppData\Local\Temp\fit-agent-f6-02-AVzqs0 base=http://127.0.0.1:56558
+# loopback only; no real model / no API key
+
+PASS backend_ready — uvicorn http://127.0.0.1:56558
+PASS GET /healthz — status=200
+SKIP GET /api/provider has_api_key=false no data_dir — provider_route_pending_backend_owner status=404
+PASS POST /api/sessions — status=200
+PASS GET /api/sessions/{id} — status=200
+PASS GET /api/plan — status=200 plan=null
+PASS GET /api/plan/guidance — status=200 guidance=null
+PASS GET /api/records — status=200 n=0
+PASS GET /api/stats/completion (required query) — status=200 completion=null
+PASS GET /api/stats/pr (required query) — status=200 max=null
+PASS GET /api/reviews — status=200 n=0
+PASS GET /api/profile — status=200 profile=null
+PASS POST /api/sessions/{id}/requests accepted — status=200 run=e2559f774f064396b19e51298c185a4d
+PASS Run terminal model_request_failed (no key, no external call) — status=failed error_code=model_request_failed
+SKIP GET / static hosting — static_hosting_pending_backend_owner status=404
+# static: dist_present=true GET/ status=404
+
+# summary: passed=13 failed=0

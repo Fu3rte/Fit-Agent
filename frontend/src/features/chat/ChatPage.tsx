@@ -1,7 +1,7 @@
 /**
  * 对话页（/）：居中消息流 + 草稿卡闭环。
- * 数据全部经 src/lib/api.ts 走 mock 中间件（真实 fetch + 原生 EventSource，
- * 客户端代码为将来直连后端的形状）。SSE 事件见 src/lib/contract.ts 契约 v1。
+ * 数据全部经 src/lib/api.ts（F6-02a：真实后端传输面——会话查询恢复、
+ * 按 Run 订阅 SSE、POST /api/sessions/{id}/requests 提交）。SSE 事件见 contract.ts。
  */
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useLocation, useNavigate, useSearchParams } from "react-router-dom";
@@ -21,26 +21,25 @@ import { Textarea } from "@/components/ui/textarea";
 import {
   cancelRun,
   confirmDraft,
-  createRun,
   createSession,
   discardDraft,
-  getActiveRun,
-  getMessages,
   getProfile,
   getProvider,
+  getSession,
   getSessionDrafts,
-  getSessions,
   recalcDraft,
   reviseDraft,
+  retryRun,
+  submitRequest,
+  voidDraft,
 } from "@/lib/api";
 import type {
-  ActiveRunInfo,
-  ChatMessage,
   Draft,
   DraftPayload,
   ErrorCode,
-  FieldDiff,
   RunStatus,
+  SessionDetail,
+  SessionMessage,
   SseEvent,
 } from "@/lib/contract";
 import { toApiError } from "./apiError";
@@ -64,44 +63,47 @@ interface ActiveRun {
   session: string;
   userText: string;
   text: string;
-  drafts: Draft[];
+  /** 本 Run 已通知的草稿身份（draft 事件只给引用；详情经会话草稿查询） */
+  drafts: string[];
   compacted: boolean;
-  /** run.started 已收到：区分 8.8「处理中」的次要文案（受理中 / 执行中），不新造状态 */
+  /** status=running 已收到：区分 8.8「处理中」的次要文案（受理中 / 执行中） */
   started: boolean;
-  /** context.compacting 至 context.compacted 之间的常驻指示（08 8.8 压缩两态） */
+  /** compression started 至 finished 之间的常驻指示（08 8.8 压缩两态） */
   compacting: boolean;
   /**
-   * 查询恢复期（08 8.7 规则 1/3）：SSE 不可用，本 Run 的文本/草稿/状态一律以
-   * GET /api/runs/active 的查询结果为准（替换本地展示，不拼接），本次不接回 SSE。
+   * 查询恢复期（08 8.7 规则 1/3）：SSE 不可用，本 Run 的文本/状态一律以
+   * GET /api/sessions/{id} 的查询结果为准（替换本地展示，不拼接），本次不接回 SSE。
    */
   recovering: boolean;
 }
 
 /**
- * 已终结但仍需在会话内保留的 Run（08 8.8：取消/失败保留中断前文本并标明「输出未完成」，
- * 关联草稿一并保留；不自动恢复执行，重试由用户显式发起新的 Run）。
+ * 已终结但仍需在会话内保留的 Run（08 8.8：取消/失败保留中断前文本并标明「输出未完成」；
+ * 不自动恢复执行，重试经 POST /api/runs/{id}/retry 显式发起新 Run）。
  * completed 不入此列：完整回答由服务端落库后经消息列表呈现，避免重复拼接。
  */
 interface ClosedRun {
   key: string;
+  runId: string;
   session: string;
   status: Extract<RunStatus, "cancelled" | "failed">;
   userText: string;
-  /** 中断前已流出的文本（mock 阶段等同「已保存部分」） */
+  /** 中断前已流出的文本（查询恢复时取 partial 消息） */
   text: string;
-  drafts: Draft[];
+  /** 本 Run 已通知的草稿身份 */
+  drafts: string[];
   /** failed 的可理解原因文案 */
   reason?: string;
 }
 
 type Item =
-  | { kind: "message"; message: ChatMessage }
+  | { kind: "message"; message: SessionMessage }
   | { kind: "user"; text: string }
   | { kind: "compacted" }
   | {
       kind: "stream";
       text: string;
-      drafts: Draft[];
+      drafts: string[];
       compacting: boolean;
       /** 查询恢复期：常驻「连接中断，正在恢复」，不报错、不判失败（08 8.7 规则 1） */
       recovering: boolean;
@@ -109,18 +111,19 @@ type Item =
   | { kind: "closed"; run: ClosedRun };
 
 /**
- * SSE 订阅桥（F0-04B）：恢复周期结束后由父级换 key 重建订阅，取回一个全新连接。
- * useChatEvents 的订阅 effect 只在挂载时建立，闭合并行重连入口，故用挂载/卸载表达
- * 「一次新的订阅」——不改 useChatEvents 本身。
+ * SSE 订阅桥（F0-04B + F6-02a）：按 Run 订阅（runId=null 不建连——恢复周期内
+ * 刻意不接回 SSE，规则 3）；换 Run / 换订阅代次由 key 重建，取回一个全新连接。
  */
 function ChatEventsBridge({
+  runId,
   onEvent,
   onConnectionLost,
 }: {
+  runId: string | null;
   onEvent: (event: SseEvent) => void;
   onConnectionLost: (reason: ConnectionLostReason) => void;
 }) {
-  useChatEvents(onEvent, { onConnectionLost });
+  useChatEvents(runId, onEvent, { onConnectionLost });
   return null;
 }
 
@@ -148,9 +151,8 @@ export default function ChatPage() {
   const [params] = useSearchParams();
 
   /* ------------------------------ 会话与数据 ------------------------------ */
-  const sessions = useQuery({ queryKey: ["sessions"], queryFn: getSessions });
-  // 无 ?s= 参数时默认第一个会话（不改写 URL，侧栏高亮以显式选择为准）
-  const sessionId = params.get("s") ?? sessions.data?.[0]?.id ?? null;
+  // 真实后端无会话列表端点：会话身份经 ?s= 或「新建对话」获得（F6-02a）
+  const sessionId = params.get("s");
 
   const provider = useQuery({ queryKey: ["provider"], queryFn: getProvider });
   const configured = provider.data?.has_api_key === true;
@@ -159,9 +161,10 @@ export default function ChatPage() {
   const profile = useQuery({ queryKey: ["profile"], queryFn: getProfile });
   const uncreatedProfile = profile.data?.profile === null;
 
-  const messages = useQuery({
-    queryKey: ["messages", sessionId],
-    queryFn: () => getMessages(sessionId as string),
+  /** 会话查询（08 8.7 恢复入口）：消息内嵌 + 全部 Run */
+  const session = useQuery({
+    queryKey: ["session", sessionId],
+    queryFn: () => getSession(sessionId as string),
     enabled: sessionId !== null,
   });
 
@@ -182,12 +185,8 @@ export default function ChatPage() {
   const [staleIds, setStaleIds] = useState<ReadonlySet<string>>(new Set());
   /** draft_stale 冲突时的变更项说明（F4-06：卡内展示相关变更项） */
   const [staleDetails, setStaleDetails] = useState<Record<string, string>>({});
-  /** 一键重算后旧草稿 -> 新草稿 */
+  /** 一键重算后旧草稿 -> 新草稿（parent_draft_id 驱动；mergeDrafts 内维护） */
   const [replacedBy, setReplacedBy] = useState<Record<string, string>>({});
-  /** 重算新草稿 -> 新旧草稿 Diff */
-  const [recalcDiffs, setRecalcDiffs] = useState<Record<string, FieldDiff[]>>(
-    {},
-  );
   /** SSE 订阅代次：恢复周期结束后 +1 重建订阅（见 ChatEventsBridge） */
   const [subscribeCycle, setSubscribeCycle] = useState(0);
 
@@ -202,8 +201,7 @@ export default function ChatPage() {
 
   /* ------------------------------- 查询失效 ------------------------------- */
   const invalidateData = useCallback(() => {
-    void queryClient.invalidateQueries({ queryKey: ["messages"] });
-    void queryClient.invalidateQueries({ queryKey: ["sessions"] });
+    void queryClient.invalidateQueries({ queryKey: ["session"] });
     for (const key of DATA_QUERY_KEYS)
       void queryClient.invalidateQueries({ queryKey: [key] });
   }, [queryClient]);
@@ -218,7 +216,7 @@ export default function ChatPage() {
   const pollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   /** 连续查询失败次数 → 退避档位；查询成功即归零（规则 6） */
   const pollFailuresRef = useRef(0);
-  /** 本次恢复所跟踪的 Run；null = 尚未确认（乐观窗口无 run_id） */
+  /** 本次恢复所跟踪的 Run；null = 尚未确认 */
   const trackedRunIdRef = useRef<string | null>(null);
   const mountedRef = useRef(true);
   /** 本恢复周期内连接确实被断开过（决定终态后是否换新订阅） */
@@ -235,7 +233,8 @@ export default function ChatPage() {
     pollTimerRef.current = null;
   }, []);
 
-  /** 草稿按 draft.id 归并（规则 2：当前状态以业务接口查询为准），同 id 覆盖不产生重复卡 */
+  /** 草稿按 draft.id 归并（规则 2：当前状态以业务接口查询为准），同 id 覆盖不产生重复卡；
+   *  同时按 parent_draft_id 维护「重算后旧→新」映射（替代同步重算结果对象）。 */
   const mergeDrafts = useCallback((incoming: Draft[]) => {
     if (incoming.length === 0) return;
     setDrafts((prev) => {
@@ -243,32 +242,47 @@ export default function ChatPage() {
       for (const draft of incoming) next[draft.id] = draft;
       return next;
     });
+    setReplacedBy((prev) => {
+      let next = prev;
+      for (const draft of incoming) {
+        const parent = draft.parent_draft_id;
+        if (parent !== undefined && prev[parent] !== draft.id) {
+          if (next === prev) next = { ...prev };
+          next[parent] = draft.id;
+        }
+      }
+      return next;
+    });
   }, []);
 
-  /** 恢复态下用户原文无从取得（查询不返回用户消息）：取该会话已加载消息的最后一条 user */
-  const lastUserTextOf = useCallback(
-    (runSession: string): string => {
-      const loaded =
-        queryClient.getQueryData<ChatMessage[]>(["messages", runSession]) ?? [];
-      for (const message of [...loaded].reverse())
-        if (message.role === "user") return message.content;
-      return "";
+  /** 从会话查询投影取某 Run 的用户原文 / 部分回答（08 8.7：替换展示，不拼接） */
+  const textsOfRun = useCallback(
+    (detail: SessionDetail, runId: string) => {
+      let userText = "";
+      let partial = "";
+      for (const m of detail.messages) {
+        if (m.run_id !== runId) continue;
+        if (m.kind === "user_request") userText = m.text;
+        else if (m.kind === "partial") partial = m.text;
+      }
+      return { userText, partial };
     },
-    [queryClient],
+    [],
   );
 
   /** 草稿卡按会话草稿查询恢复当前状态（08 8.7 规则 2：通知不是事实来源） */
   const restoreSessionDrafts = useCallback(
-    (runSession: string) => {
+    (runSession: string | null) => {
+      if (runSession === null) return;
       void getSessionDrafts(runSession).then(mergeDrafts, () => {
-        // 会话草稿查询失败不阻断恢复：轮询载荷中的 run.drafts 仍会刷新卡片状态
+        // 会话草稿查询失败不阻断恢复：下一次轮询/事件再试
       });
     },
     [mergeDrafts],
   );
 
   /* ----------------------------- 终态收尾（保留已流出内容） ----------------------------- */
-  /** 保留项入列（08 8.8：中断前文本 + 草稿 + 终态标记）并刷新数据类 query */
+  /** 保留项入列（08 8.8：中断前文本 + 终态标记）并刷新数据类 query */
   const pushClosedRun = useCallback(
     (run: Omit<ClosedRun, "key">) => {
       setClosed((prev) => [...prev, { key: crypto.randomUUID(), ...run }]);
@@ -278,18 +292,23 @@ export default function ChatPage() {
   );
 
   /**
-   * 取消/失败：不丢弃已流出文本与关联草稿，转为会话内保留项（08 8.8）。
-   * 执行不自动恢复；重试仅由用户显式发起（见 closed 气泡中的重试按钮）。
+   * 取消/失败：不丢弃已流出文本，转为会话内保留项（08 8.8）。
+   * 执行不自动恢复；重试经 POST /api/runs/{id}/retry 显式发起新 Run。
    */
   const closeActive = useCallback(
-    (status: ClosedRun["status"], errorCode?: ErrorCode, cause?: string) => {
+    (
+      runId: string,
+      status: ClosedRun["status"],
+      errorCode?: ErrorCode | null,
+      cause?: string,
+    ) => {
       const cur = activeRef.current;
       if (!cur) return;
       pushClosedRun({
+        runId,
         session: cur.session,
         status,
-        // 恢复来的 Run 无本地原文（查询不返回用户消息）：按已加载消息回填，取不到为空
-        userText: cur.userText || lastUserTextOf(cur.session),
+        userText: cur.userText,
         text: cur.text,
         drafts: cur.drafts,
         reason:
@@ -304,7 +323,7 @@ export default function ChatPage() {
       // 终态已被取消/失败取代：撤下上一条「已完成」标记
       setCompletedText(null);
     },
-    [lastUserTextOf, pushClosedRun],
+    [pushClosedRun],
   );
 
   /* --------------------------- 查询恢复：轮询循环（08 8.7） --------------------------- */
@@ -323,40 +342,58 @@ export default function ChatPage() {
   }, [clearPollTimer]);
 
   /**
-   * 把 GET /api/runs/active 的结果落到本地展示（规则 2/3：以查询结果替换本地展示，
-   * 不拼接、不重放通知）。返回 true = 该 Run 仍在执行，需继续轮询至终态。
+   * 把 GET /api/sessions/{id} 的结果落到本地展示（规则 2/3：以查询结果替换本地展示，
+   * 不拼接、不重放通知）。返回 true = 跟踪中的 Run 仍在执行，需继续轮询至终态。
    */
-  const applyActiveRunSnapshot = useCallback(
-    (info: ActiveRunInfo | null): boolean => {
+  const applySessionSnapshot = useCallback(
+    (detail: SessionDetail): boolean => {
       const tracked = trackedRunIdRef.current;
-      // 服务端已无可查询 Run：无从确认终态，停止等待，不自动恢复执行
-      if (info === null) {
+      restoreSessionDrafts(detail.session_id);
+      // 尚未确认跟踪对象：在本会话 runs 里找进行中的 Run
+      if (tracked === null || tracked === "") {
+        const live = detail.runs.find(
+          (r) => r.status === "pending" || r.status === "running",
+        );
+        if (!live) return false;
+        trackedRunIdRef.current = live.run_id;
+        const { userText, partial } = textsOfRun(detail, live.run_id);
+        const next: ActiveRun = {
+          runId: live.run_id,
+          session: detail.session_id,
+          userText: userText || activeRef.current?.userText || "",
+          text: partial || activeRef.current?.text || "",
+          drafts: activeRef.current?.drafts ?? [],
+          compacted: activeRef.current?.compacted ?? false,
+          started: live.status === "running",
+          compacting: activeRef.current?.compacting ?? false,
+          recovering: true,
+        };
+        activeRef.current = next;
+        setActive(next);
+        return true;
+      }
+      const run = detail.runs.find((r) => r.run_id === tracked);
+      // 查询不到跟踪中的 Run：无从确认终态，停止等待，不自动恢复执行
+      if (!run) {
         const cur = activeRef.current;
-        if (cur !== null && (cur.runId === "" || cur.runId === tracked))
-          closeActive("failed", undefined, RECOVERY_UNKNOWN_CAUSE);
+        if (cur !== null && cur.runId === tracked)
+          closeActive(tracked, "failed", undefined, RECOVERY_UNKNOWN_CAUSE);
         return false;
       }
-      // 查询到的是另一个 Run（本地已发起新 Run）：不覆盖本地展示
-      if (tracked !== null && tracked !== "" && tracked !== info.run_id)
-        return false;
-      trackedRunIdRef.current = info.run_id;
-      // 规则 2：草稿当前状态以业务接口查询为准，按 id 归并不产生重复卡
-      mergeDrafts(info.drafts);
-      restoreSessionDrafts(info.session_id);
-
-      switch (info.status) {
+      const { userText, partial } = textsOfRun(detail, tracked);
+      switch (run.status) {
         case "pending":
         case "running": {
           const cur = activeRef.current;
           const next: ActiveRun = {
-            runId: info.run_id,
-            session: info.session_id,
-            userText: cur?.userText || lastUserTextOf(info.session_id),
+            runId: tracked,
+            session: detail.session_id,
+            userText: userText || cur?.userText || "",
             // 规则 2/3：文本一律以已保存部分替换，不拼接
-            text: info.saved_text,
-            drafts: info.drafts,
+            text: partial || cur?.text || "",
+            drafts: cur?.drafts ?? [],
             compacted: cur?.compacted ?? false,
-            started: info.status === "running",
+            started: run.status === "running",
             compacting: cur?.compacting ?? false,
             recovering: true,
           };
@@ -366,38 +403,39 @@ export default function ChatPage() {
         }
         case "completed": {
           // 完整回答由服务端落库后经消息列表呈现，不重复拼接（08 8.8）
+          const cur = activeRef.current;
           activeRef.current = null;
           setActive(null);
           compactingAtRef.current = null;
-          setCompletedText(info.saved_text);
+          setCompletedText(partial || cur?.text || "");
           invalidateData();
           return false;
         }
         default: {
-          // cancelled / failed：保留已保存部分与草稿，标明输出未完成（08 8.8）
+          // cancelled / failed：保留已保存部分，标明输出未完成（08 8.8）
           const cur = activeRef.current;
           if (cur === null) {
             // 刷新后直接落在终态（含服务重启遗留 failed）：按保留项渲染
             pushClosedRun({
-              session: info.session_id,
-              status: info.status,
-              userText: lastUserTextOf(info.session_id),
-              text: info.saved_text,
-              drafts: info.drafts,
+              runId: tracked,
+              session: detail.session_id,
+              status: run.status,
+              userText,
+              text: partial,
+              drafts: [],
               reason:
-                info.status === "failed"
-                  ? failureReasonCopy(info.error_code ?? "invalid_request")
+                run.status === "failed"
+                  ? failureReasonCopy(run.error_code ?? "invalid_request")
                   : undefined,
             });
           } else {
             activeRef.current = {
               ...cur,
-              runId: info.run_id,
-              session: info.session_id,
-              text: info.saved_text,
-              drafts: info.drafts,
+              runId: tracked,
+              session: detail.session_id,
+              text: partial || cur.text,
             };
-            closeActive(info.status, info.error_code);
+            closeActive(tracked, run.status, run.error_code);
           }
           return false;
         }
@@ -406,21 +444,25 @@ export default function ChatPage() {
     [
       closeActive,
       invalidateData,
-      lastUserTextOf,
-      mergeDrafts,
       pushClosedRun,
       restoreSessionDrafts,
+      textsOfRun,
     ],
   );
 
   /** 轮询一次并按退避安排下一次（规则 3/6）：成功即回到正常间隔，失败按 1/2/4/8/15s */
-  const pollActiveRun = useCallback(async (): Promise<void> => {
+  const pollSession = useCallback(async (): Promise<void> => {
     if (!mountedRef.current || !recoveringRef.current) return;
+    const sid = sessionIdRef.current;
+    if (sid === null) {
+      endRecovery();
+      return;
+    }
     let keepPolling: boolean;
     try {
-      const res = await getActiveRun();
+      const detail = await getSession(sid);
       pollFailuresRef.current = 0;
-      keepPolling = applyActiveRunSnapshot(res.run);
+      keepPolling = applySessionSnapshot(detail);
     } catch {
       pollFailuresRef.current += 1;
       keepPolling = true;
@@ -439,11 +481,11 @@ export default function ChatPage() {
       pollTimerRef.current = null;
       void pollRef.current();
     }, interval);
-  }, [applyActiveRunSnapshot, clearPollTimer, endRecovery]);
+  }, [applySessionSnapshot, clearPollTimer, endRecovery]);
 
   useEffect(() => {
-    pollRef.current = pollActiveRun;
-  }, [pollActiveRun]);
+    pollRef.current = pollSession;
+  }, [pollSession]);
 
   /**
    * 进入恢复（规则 1/3/5/7）：置闩后立即查询一次，再按退避轮询至终态。
@@ -461,8 +503,8 @@ export default function ChatPage() {
     activeRef.current = next;
     setActive(next);
     restoreSessionDrafts(cur.session);
-    void pollActiveRun();
-  }, [pollActiveRun, restoreSessionDrafts]);
+    void pollSession();
+  }, [pollSession, restoreSessionDrafts]);
 
   /** 连接不可用（08 8.7 规则 5）：有进行中 Run 则转查询恢复，否则取回新订阅 */
   const handleConnectionLost = useCallback(
@@ -472,9 +514,14 @@ export default function ChatPage() {
         beginRecovery();
         return;
       }
-      // 无进行中 Run：无内容可恢复、不提示；先探一次业务接口确认服务可达再重建订阅，
+      // 无进行中 Run：无内容可恢复、不提示；先探一次会话查询确认服务可达再重建订阅，
       // 避免服务不可用时形成重连风暴（规则 5：不依赖自动重连）
-      void getActiveRun().then(
+      const sid = sessionIdRef.current;
+      if (sid === null) {
+        setSubscribeCycle((n) => n + 1);
+        return;
+      }
+      void getSession(sid).then(
         () => setSubscribeCycle((n) => n + 1),
         () => {
           // 服务仍不可达：不重连、不轮询；等下一次页面级复查
@@ -484,24 +531,64 @@ export default function ChatPage() {
     [beginRecovery],
   );
 
-  /** 挂载即查询一次（规则 2/7）：活跃 Run 转恢复轮询，终态者按终态渲染 */
+  /** 挂载即查询一次（规则 2/7）：本会话有进行中的 Run 转恢复轮询；最近终态保留项按终态渲染 */
   useEffect(() => {
     mountedRef.current = true;
     if (mountCheckedRef.current) return;
     mountCheckedRef.current = true;
     void (async () => {
+      const sid = sessionIdRef.current;
+      if (sid === null) return;
       try {
-        const res = await getActiveRun();
+        const detail = await getSession(sid);
         if (!mountedRef.current) return;
-        if (!applyActiveRunSnapshot(res.run)) return;
-        // 规则 3：本次不接回 SSE，只轮询至终态
-        recoveringRef.current = true;
-        void pollActiveRun();
+        const live = detail.runs.find(
+          (r) => r.status === "pending" || r.status === "running",
+        );
+        if (live) {
+          const { userText, partial } = textsOfRun(detail, live.run_id);
+          const next: ActiveRun = {
+            runId: live.run_id,
+            session: detail.session_id,
+            userText,
+            text: partial,
+            drafts: [],
+            compacted: false,
+            started: live.status === "running",
+            compacting: false,
+            recovering: true,
+          };
+          activeRef.current = next;
+          setActive(next);
+          trackedRunIdRef.current = live.run_id;
+          recoveringRef.current = true;
+          restoreSessionDrafts(detail.session_id);
+          // 规则 3：本次不接回 SSE，只轮询至终态
+          void pollSession();
+          return;
+        }
+        // 最近一个 Run 若落在 cancelled/failed：按保留项渲染（08 8.8）；completed 由消息列表呈现
+        const last = detail.runs[detail.runs.length - 1];
+        if (last && (last.status === "cancelled" || last.status === "failed")) {
+          const { userText, partial } = textsOfRun(detail, last.run_id);
+          pushClosedRun({
+            runId: last.run_id,
+            session: detail.session_id,
+            status: last.status,
+            userText,
+            text: partial,
+            drafts: [],
+            reason:
+              last.status === "failed"
+                ? failureReasonCopy(last.error_code ?? "invalid_request")
+                : undefined,
+          });
+        }
       } catch {
         // 查询失败：无事实可依，不改本地展示；断线/可见性复查时会再试
       }
     })();
-  }, [applyActiveRunSnapshot, pollActiveRun]);
+  }, [pollSession, pushClosedRun, restoreSessionDrafts, textsOfRun]);
 
   /** 规则 7：页面恢复可见时立即复查一次，清掉待执行计时器后立刻查询（不叠加循环） */
   useEffect(() => {
@@ -509,11 +596,11 @@ export default function ChatPage() {
       if (document.visibilityState !== "visible") return;
       if (!mountedRef.current || !recoveringRef.current) return;
       clearPollTimer();
-      void pollActiveRun();
+      void pollSession();
     };
     document.addEventListener("visibilitychange", onVisibility);
     return () => document.removeEventListener("visibilitychange", onVisibility);
-  }, [clearPollTimer, pollActiveRun]);
+  }, [clearPollTimer, pollSession]);
 
   /** 卸载（规则 7）：落闩并清计时器，不再发起查询 */
   useEffect(
@@ -530,98 +617,108 @@ export default function ChatPage() {
     (ev: SseEvent) => {
       const mine = (runId: string) => {
         const cur = activeRef.current;
-        // runId === ""：POST /api/runs 尚未返回时的乐观窗口，当前仅可能是我方 run
+        // runId === ""：POST 尚未返回时的乐观窗口，当前仅可能是我方 run
         return cur !== null && (cur.runId === runId || cur.runId === "");
       };
+      const syncActive = (updater: (prev: ActiveRun) => ActiveRun) => {
+        const cur = activeRef.current;
+        if (!cur) return;
+        const next = updater(cur);
+        activeRef.current = next;
+        setActive(next);
+      };
       switch (ev.event) {
-        case "run.started":
-          setActive((prev) =>
-            // runId 有两个来源：POST /api/runs 响应（pending 期即可取消）与本事件；
-            // 空 runId（乐观窗口）与已持有同一 runId 者均据事件确认转 running。
-            prev && (prev.runId === "" || prev.runId === ev.run_id)
-              ? { ...prev, runId: ev.run_id, started: true }
-              : prev,
-          );
-          break;
-        case "message.delta":
-          setActive((prev) =>
-            prev && mine(ev.run_id)
-              ? { ...prev, text: prev.text + ev.text }
-              : prev,
-          );
-          break;
-        case "draft.proposed": {
-          setDrafts((prev) => ({ ...prev, [ev.draft.id]: ev.draft }));
-          setActive((prev) =>
-            prev && mine(ev.run_id)
-              ? { ...prev, drafts: [...prev.drafts, ev.draft] }
-              : prev,
-          );
-          break;
-        }
-        case "context.compacting":
-          // 压缩两态之一：常驻「正在整理上下文」，直到 context.compacted 撤下。
-          // 压缩失败由后端自动恢复，展示层不报错、不改 Run 状态。
-          if (mine(ev.run_id)) {
-            compactingAtRef.current = Date.now();
-            setActive((prev) =>
-              prev && mine(ev.run_id) ? { ...prev, compacting: true } : prev,
-            );
-          }
-          break;
-        case "context.compacted": {
-          // B3：上下文压缩仅界面轻提示，不做轨迹面板
+        case "status": {
           if (!mine(ev.run_id)) break;
-          const since = compactingAtRef.current;
-          compactingAtRef.current = null;
-          if (since !== null && Date.now() - since <= FAST_COMPACTION_MS) {
-            // 快速完成：轻提示 3 秒后消失，不留常驻指示
-            toast("已整理上下文", {
-              description: ev.note,
-              duration: 3000,
-            });
+          switch (ev.status) {
+            case "pending":
+              // 订阅即发当前状态；受理中无需改写展示
+              syncActive((prev) =>
+                prev.runId === "" ? { ...prev, runId: ev.run_id } : prev,
+              );
+              break;
+            case "running":
+              syncActive((prev) =>
+                prev.runId === "" || prev.runId === ev.run_id
+                  ? { ...prev, runId: ev.run_id, started: true }
+                  : prev,
+              );
+              break;
+            case "completed": {
+              const finished = activeRef.current;
+              if (finished) setCompletedText(finished.text);
+              activeRef.current = null;
+              setActive(null);
+              compactingAtRef.current = null;
+              invalidateData();
+              break;
+            }
+            case "cancelled":
+              closeActive(ev.run_id, "cancelled");
+              break;
+            case "failed":
+              closeActive(ev.run_id, "failed", ev.error_code);
+              break;
           }
-          setActive((prev) =>
-            prev && mine(ev.run_id)
-              ? { ...prev, compacting: false, compacted: true }
-              : prev,
+          break;
+        }
+        case "answer":
+          syncActive((prev) =>
+            mine(ev.run_id) ? { ...prev, text: prev.text + ev.text } : prev,
+          );
+          break;
+        case "draft": {
+          // draft 事件只是已持久化草稿的引用（身份 + 修订）；详情经会话草稿查询归并
+          if (!mine(ev.run_id)) break;
+          restoreSessionDrafts(activeRef.current?.session ?? sessionIdRef.current);
+          syncActive((prev) =>
+            prev.drafts.includes(ev.draft_id)
+              ? prev
+              : { ...prev, drafts: [...prev.drafts, ev.draft_id] },
           );
           break;
         }
-        case "run.completed":
-          if (mine(ev.run_id)) {
-            const finished = activeRef.current;
-            if (finished) setCompletedText(finished.text);
-            setActive(null);
-            activeRef.current = null;
-            invalidateData();
+        case "compression": {
+          // 压缩两态：started 常驻「正在整理上下文」，finished 撤下。
+          // 压缩失败由后端自动恢复，展示层不报错、不改 Run 状态。
+          if (!mine(ev.run_id)) break;
+          if (ev.state === "started") {
+            compactingAtRef.current = Date.now();
+            syncActive((prev) => ({ ...prev, compacting: true }));
+          } else {
+            const since = compactingAtRef.current;
+            compactingAtRef.current = null;
+            if (since !== null && Date.now() - since <= FAST_COMPACTION_MS) {
+              toast("已整理上下文", { duration: 3000 });
+            }
+            syncActive((prev) => ({ ...prev, compacting: false, compacted: true }));
           }
           break;
-        case "run.cancelled":
-          if (mine(ev.run_id)) closeActive("cancelled");
-          break;
-        case "run.failed":
-          if (mine(ev.run_id)) closeActive("failed", ev.error_code);
+        }
+        case "rationale":
+        case "heartbeat":
+          // heartbeat 只做活性判定（useChatEvents 内 touch）；rationale 本阶段无生产者
           break;
       }
     },
-    [closeActive, invalidateData],
+    [closeActive, invalidateData, restoreSessionDrafts],
   );
 
   /* -------------------------------- 发送 ---------------------------------- */
   /**
    * 发起一个新 Run：每次均使用新的 client_request_id（幂等键），
-   * 因此终态后的手动重试就是新建 Run，不恢复、不重放原有执行（08 8.4/8.8）。
+   * 经 POST /api/sessions/{id}/requests；因此终态后的手动重试就是新建 Run
+   * （或经 /retry 用旧请求事实重建），不恢复、不重放原有执行（08 8.4/8.8）。
    */
   const submit = async (text: string, restore?: (text: string) => void) => {
     if (!text || !sessionId || !configured) return;
-    // 运行中不做乐观覆盖：覆盖会以 runId:"" 顶掉原 run，致其 delta 串扰进新流或被丢弃。
+    // 运行中不做乐观覆盖：覆盖会以 runId:"" 顶掉原 run，致其事件串扰进新流或被丢弃。
     // 空闲时才挂乐观 active；运行中再发送由 409 conversation_busy 走全局 toast（演示路径）。
     const wasIdle = activeRef.current === null;
     if (wasIdle) {
       setCompletedText(null);
       compactingAtRef.current = null;
-      setActive({
+      const optimistic: ActiveRun = {
         runId: "",
         session: sessionId,
         userText: text,
@@ -631,29 +728,31 @@ export default function ChatPage() {
         started: false,
         compacting: false,
         recovering: false,
-      });
+      };
+      activeRef.current = optimistic;
+      setActive(optimistic);
     }
     try {
-      const handle = await createRun({
-        session_id: sessionId,
-        message: text,
-        client_request_id: crypto.randomUUID(),
-      });
-      // 08 8.1/8.3：pending 与 running 均可取消。POST /api/runs 一返回即写回 run_id，
-      // 使「停止」在 run.started 之前对 pending Run 可用；runId==="" 的乐观窗口逻辑不变。
-      if (handle.run_id) {
+      const result = await submitRequest(
+        sessionId,
+        crypto.randomUUID(),
+        text,
+      );
+      // 08 8.1/8.3：pending 与 running 均可取消。响应一返回即写回 run_id，
+      // 使「停止」在首个 status 之前对 pending Run 可用；runId==="" 的乐观窗口逻辑不变。
+      if (result.run.run_id) {
         // 同步补写 ref：SSE 归属判定（mine）读 activeRef.current，不能等 effect 刷新
         const cur = activeRef.current;
         if (
           cur !== null &&
           cur.session === sessionId &&
-          cur.runId === "" // 已由 run.started 赋过 id 则不覆写
+          cur.runId === "" // 已由 status 事件赋过 id 则不覆写
         ) {
-          activeRef.current = { ...cur, runId: handle.run_id };
+          activeRef.current = { ...cur, runId: result.run.run_id };
         }
         setActive((prev) =>
           prev && prev.session === sessionId && prev.runId === ""
-            ? { ...prev, runId: handle.run_id }
+            ? { ...prev, runId: result.run.run_id }
             : prev,
         );
       }
@@ -684,15 +783,44 @@ export default function ChatPage() {
     void submit(text, setInput);
   };
 
-  /** 终态后的手动重试：以原文本重新发送 = 新 Run + 新 client_request_id */
+  /**
+   * 终态后的手动重试：经 POST /api/runs/{id}/retry 用旧 Run 的同一请求事实
+   * 创建新 Run（不复活旧记录、不做断点续跑，08 8.1/8.4）。
+   */
   const retry = (run: ClosedRun) => {
-    void submit(run.userText);
+    if (!run.runId || !configured) return;
+    void (async () => {
+      try {
+        const result = await retryRun(run.runId, crypto.randomUUID());
+        const next: ActiveRun = {
+          runId: result.run.run_id,
+          session: run.session,
+          userText: run.userText,
+          text: "",
+          drafts: [],
+          compacted: false,
+          started: result.run.status === "running",
+          compacting: false,
+          recovering: false,
+        };
+        activeRef.current = next;
+        setActive(next);
+        setCompletedText(null);
+      } catch (error) {
+        const err = toApiError(error);
+        if (err.error_code === "conversation_busy") {
+          toast.error("已有正在进行的对话", { description: err.message });
+        } else {
+          toast.error(err.message ?? "重试失败");
+        }
+      }
+    })();
   };
 
   const cancel = useMutation({
     mutationFn: (runId: string) => cancelRun(runId),
     onSuccess: (res) => {
-      if (res.status === "cancelled") toast.success("已取消当前任务");
+      if (res.run.status === "cancelled") toast.success("已取消当前任务");
     },
     onError: (error) => toast.error(toApiError(error).message),
   });
@@ -748,16 +876,15 @@ export default function ChatPage() {
   const confirm = useMutation({
     mutationFn: (draft: Draft) => confirmDraft(draft.id, draft.revision),
     onSuccess: (result) => {
-      if (result.newly_committed) {
-        toast.success("已采纳", { description: result.summary });
-        setDrafts((prev) => ({
-          ...prev,
-          [result.draft_id]: { ...prev[result.draft_id], status: "committed" },
-        }));
-        invalidateData();
-      } else {
-        toast.info("该草稿已提交过（幂等返回原结果）");
-      }
+      // 交接 F4：响应即持久化提交凭据（幂等重放返回同一份，不重复写）
+      toast.success("已采纳", {
+        description: `修订 v${result.committed_revision} · 业务版本 ${result.committed_business_version}`,
+      });
+      setDrafts((prev) => ({
+        ...prev,
+        [result.draft_id]: { ...prev[result.draft_id], status: "committed" },
+      }));
+      invalidateData();
     },
     onError: (error, draft) => {
       const err = toApiError(error);
@@ -825,30 +952,81 @@ export default function ChatPage() {
     confirm.mutate(draft);
   };
 
+  /**
+   * 作废整次训练（F6-02c 已拍；S3-11）：POST /api/drafts/{id}/void body {revision}，
+   * 对绑定既有身份的 training_record 草稿追加 voided 修订（无独立 training_void kind）。
+   * 拦截顺序与确认一致：已丢弃拒绝；draft_stale → 一键重算；draft_modified → 拉最新草稿。
+   */
+  const voidRecord = useMutation({
+    mutationFn: (draft: Draft) => voidDraft(draft.id, draft.revision),
+    onSuccess: (result) => {
+      setDrafts((prev) => {
+        const draft = prev[result.draft_id];
+        if (!draft) return prev;
+        return {
+          ...prev,
+          [result.draft_id]: { ...draft, status: "committed" },
+        };
+      });
+      clearEdit(result.draft_id);
+      toast.success("已作废该次训练", {
+        description: `修订 v${result.committed_revision} · 业务版本 ${result.committed_business_version}`,
+      });
+      invalidateData();
+    },
+    onError: (error, draft) => {
+      const err = toApiError(error);
+      if (err.error_code === "draft_stale") {
+        setStaleIds((prev) => new Set(prev).add(draft.id));
+        setStaleDetails((prev) => ({
+          ...prev,
+          [draft.id]: err.detail ?? err.message ?? "",
+        }));
+        toast.error("草稿已过期", { description: err.message });
+      } else if (err.error_code === "draft_modified") {
+        onDraftModified(draft.id);
+      } else if (draft.status === "discarded") {
+        toast.error("草稿已丢弃，不可作废");
+      } else {
+        toast.error(err.message ?? "作废失败");
+      }
+    },
+  });
+
   const recalc = useMutation({
     mutationFn: (draftId: string) => recalcDraft(draftId),
     onSuccess: (result) => {
-      setDrafts((prev) => ({
-        ...prev,
-        [result.new_draft.id]: result.new_draft,
-        [result.old_draft.id]: result.old_draft,
-      }));
-      setStaleIds((prev) => {
-        const next = new Set(prev);
-        next.delete(result.old_draft.id);
-        return next;
-      });
-      setReplacedBy((prev) => ({
-        ...prev,
-        [result.old_draft.id]: result.new_draft.id,
-      }));
-      setRecalcDiffs((prev) => ({
-        ...prev,
-        [result.new_draft.id]: result.draft_vs_draft_diff,
-      }));
-      toast.success("已按最新数据重算，请再次确认新草稿");
+      // 真实后端：重算创建 Agent Run（{created, run}）；新草稿经 draft 事件 +
+      // 会话草稿查询到达，parent_draft_id 驱动「旧→新」映射（mergeDrafts）。
+      toast.success("已提交重算，完成后请确认新草稿");
+      const sid = sessionIdRef.current;
+      if (result.run.run_id && sid) {
+        setCompletedText(null);
+        compactingAtRef.current = null;
+        const next: ActiveRun = {
+          runId: result.run.run_id,
+          session: sid,
+          userText: "",
+          text: "",
+          drafts: [],
+          compacted: false,
+          started: result.run.status === "running",
+          compacting: false,
+          recovering: false,
+        };
+        activeRef.current = next;
+        setActive(next);
+      }
+      restoreSessionDrafts(sid);
     },
-    onError: (error) => toast.error(toApiError(error).message),
+    onError: (error) => {
+      const err = toApiError(error);
+      if (err.error_code === "conversation_busy") {
+        toast.error("已有正在进行的对话", { description: err.message });
+      } else {
+        toast.error(err.message ?? "重算失败");
+      }
+    },
   });
 
   /* ----------------------------- 外部跳转预填 ------------------------------ */
@@ -878,7 +1056,7 @@ export default function ChatPage() {
     if (!draft) {
       return (
         <p className="mt-2 text-xs text-muted-foreground">
-          草稿详情仅在当前页面会话内保留（mock 阶段已知限制）。
+          草稿详情加载中…（会话草稿查询返回后展示）
         </p>
       );
     }
@@ -897,15 +1075,16 @@ export default function ChatPage() {
           })
         }
         onDiscard={() => discard.mutate(draft.id)}
+        onVoid={() => voidRecord.mutate(draft)}
         confirmPending={confirm.isPending && confirm.variables?.id === draft.id}
         recalcPending={recalc.isPending && recalc.variables === resolvedId}
         revisePending={
           revise.isPending && revise.variables?.draftId === draft.id
         }
         discardPending={discard.isPending && discard.variables === draft.id}
+        voidPending={voidRecord.isPending && voidRecord.variables?.id === draft.id}
         staleError={staleIds.has(draft.id)}
         staleDetail={staleDetails[draft.id]}
-        recalcDiff={recalcDiffs[draft.id]}
         superseded={
           replacedBy[draft.id] !== undefined || draft.status === "stale"
         }
@@ -913,8 +1092,8 @@ export default function ChatPage() {
     );
   };
 
-  const loaded = messages.data ?? [];
-  const lastMessageId = loaded.at(-1)?.id;
+  const loaded = session.data?.messages ?? [];
+  const lastMessage = loaded.at(-1);
   const closedHere = closed.filter((run) => run.session === sessionId);
   const items: Item[] = [];
   // 保留项按发起它的用户消息后就地插入（该用户消息已在服务端落库，不重复渲染）；
@@ -924,7 +1103,7 @@ export default function ChatPage() {
     items.push({ kind: "message", message });
     if (message.role !== "user") continue;
     const hit = closedHere.find(
-      (run) => !anchored.has(run.key) && run.userText === message.content,
+      (run) => !anchored.has(run.key) && run.userText === message.text,
     );
     if (hit) {
       anchored.add(hit.key);
@@ -945,12 +1124,26 @@ export default function ChatPage() {
       recovering: active.recovering,
     });
   }
+  // 未挂到活动流/保留项的待确认草稿（刷新/恢复后 draft_id 不在消息投影里）：尾部集中展示
+  const placedDraftIds = new Set([
+    ...(active?.drafts ?? []),
+    ...closedHere.flatMap((run) => run.drafts),
+  ]);
+  const trailingDrafts = Object.values(drafts).filter(
+    (d) =>
+      !placedDraftIds.has(d.id) &&
+      (d.status === "pending" || d.status === "stale"),
+  );
+
+  /** 当前进行中 Run 才订阅 SSE；恢复周期内刻意不接回（08 8.7 规则 3） */
+  const subscribedRunId =
+    active && !active.recovering && active.runId !== "" ? active.runId : null;
 
   const scrollRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight });
   }, [
-    messages.data,
+    session.data,
     active?.text,
     active?.drafts.length,
     active?.compacted,
@@ -964,15 +1157,16 @@ export default function ChatPage() {
   const createSessionMutation = useMutation({
     mutationFn: () => createSession(),
     onSuccess: (s) => {
-      void queryClient.invalidateQueries({ queryKey: ["sessions"] });
-      navigate(`/?s=${s.id}`);
+      void queryClient.invalidateQueries({ queryKey: ["session"] });
+      navigate(`/?s=${s.session_id}`);
     },
   });
 
   return (
     <div className="relative mx-auto flex h-full w-full max-w-3xl flex-col px-6">
       <ChatEventsBridge
-        key={subscribeCycle}
+        key={`${subscribeCycle}:${subscribedRunId ?? "none"}`}
+        runId={subscribedRunId}
         onEvent={handleEvent}
         onConnectionLost={handleConnectionLost}
       />
@@ -1019,7 +1213,7 @@ export default function ChatPage() {
                 尚未建档：建档只能通过对话完成（无独立表单）。按提示提供目标、经验、频率、时长、器械、体重、动作限制与身体情况，即可生成档案草稿。
               </p>
             )}
-            {messages.isLoading && (
+            {session.isLoading && (
               <p className="pt-6 text-center text-xs text-muted-foreground">
                 加载中…
               </p>
@@ -1048,7 +1242,7 @@ export default function ChatPage() {
             {items.length === 0 &&
               configured &&
               sessionId !== null &&
-              !messages.isLoading && (
+              !session.isLoading && (
                 <p className="pt-6 text-center text-xs text-muted-foreground">
                   开始你的第一条消息：打卡、调整计划或提问…
                 </p>
@@ -1056,29 +1250,27 @@ export default function ChatPage() {
             {items.map((item, i) => {
               switch (item.kind) {
                 case "message": {
+                  const messageKey = `${item.message.run_id}-${item.message.seq}-${item.message.role}`;
                   const showCompleted =
                     item.message.role === "assistant" &&
-                    item.message.id === lastMessageId &&
+                    item.message === lastMessage &&
                     completedText !== null &&
-                    item.message.content.trim() === completedText.trim();
+                    item.message.text.trim() === completedText.trim();
                   return item.message.role === "user" ? (
-                    <div key={item.message.id} className="flex justify-end">
+                    <div key={messageKey} className="flex justify-end">
                       <div className="max-w-[85%] rounded-xl border border-bubble-out-border bg-bubble-out px-4 py-3 text-sm whitespace-pre-wrap text-bubble-out-foreground">
-                        {item.message.content}
+                        {item.message.text}
                       </div>
                     </div>
                   ) : (
-                    <div key={item.message.id} className="flex justify-start">
+                    <div key={messageKey} className="flex justify-start">
                       <div className="w-full max-w-[85%] rounded-xl border bg-bubble-in px-4 py-3 text-sm text-bubble-in-foreground">
-                        <Markdown text={item.message.content} />
-                        {renderDraftCard(item.message.draft_id ?? "")}
-                        {/* 08 8.8：completed → 已完成（Run 完成不等于草稿已确认） */}
+                        <Markdown text={item.message.text} />
+                        {/* 08 8.8：completed → 已完成（Run 完成不等于草稿已确认）；
+                            未完成的部分回答（取消/失败保留）由 closed 保留项表达 */}
                         {showCompleted ? (
                           <p className="mt-2 border-t pt-2 text-[11px] text-muted-foreground">
                             {RUN_STATUS_COPY.completed}
-                            {item.message.draft_id
-                              ? "·草稿待确认，尚未生效"
-                              : ""}
                           </p>
                         ) : null}
                       </div>
@@ -1185,6 +1377,15 @@ export default function ChatPage() {
                 }
               }
             })}
+            {/* 未挂载的待确认/待重算草稿：消息投影不携带 draft_id，统一尾部呈现 */}
+            {trailingDrafts.length > 0 && (
+              <div className="space-y-3 pt-2">
+                <p className="text-[11px] text-muted-foreground">
+                  待确认草稿
+                </p>
+                {trailingDrafts.map((d) => renderDraftCard(d))}
+              </div>
+            )}
           </div>
 
           {/* 输入容器：贴底浮层 + 上方渐变蒙板，消息从下方滚过 */}

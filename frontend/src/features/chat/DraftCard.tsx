@@ -33,13 +33,20 @@ import { PlanDraftFields } from "./PlanDraftFields";
 import { ProfileDraftFields } from "./ProfileDraftFields";
 import { SetInputs } from "./SetInputs";
 
+/**
+ * 真实后端 kind 封闭集标签（backend DRAFT_KINDS 恰四种）：
+ * profile_update | plan | training_record | arrangement。
+ * F6-02d：training_void / MOCK_ONLY_KIND_LABEL 已随 mock 删除。
+ */
 const KIND_LABEL: Record<DraftKind, string> = {
   training_record: "训练记录草稿",
   plan: "计划调整草稿",
   profile_update: "档案变更草稿",
   arrangement: "当次安排草稿",
-  training_void: "作废训练记录草稿",
 };
+
+const kindLabel = (kind: DraftKind): string =>
+  KIND_LABEL[kind] ?? "训练草稿";
 
 const DISPOSITION_BADGE: Record<ArrangementItemDisposition, string> = {
   keep: "保留 · 目标更保守",
@@ -152,6 +159,9 @@ export interface DraftCardProps {
   onDiscard?: () => void;
   revisePending?: boolean;
   discardPending?: boolean;
+  /** 作废整次训练（POST /api/drafts/{id}/void）：仅绑定既有身份的待确认记录草稿 */
+  onVoid?: () => void;
+  voidPending?: boolean;
 }
 
 export function DraftCard({
@@ -170,6 +180,8 @@ export function DraftCard({
   onDiscard,
   revisePending = false,
   discardPending = false,
+  onVoid,
+  voidPending = false,
 }: DraftCardProps) {
   const committed = draft.status === "committed";
   const discarded = draft.status === "discarded";
@@ -189,6 +201,18 @@ export function DraftCard({
   const isProfile = "profile" in payload;
   const isArrangement = "target" in payload;
   const isPlan = "diff" in payload && "title" in payload;
+  /**
+   * 作废入口（F6-02c 已拍）：真实后端无独立 training_void kind——作废经
+   * POST /api/drafts/{id}/void 对绑定既有身份的训练记录草稿追加 voided 修订。
+   * 仅待确认 + 已绑定身份（training_session_id 非空）时展示；新记录无身份可作废。
+   */
+  const canVoid =
+    draft.kind === "training_record" &&
+    !committed &&
+    !discarded &&
+    onVoid !== undefined &&
+    isRecord &&
+    Boolean((payload as RecordDraftPayload).training_session_id);
 
   const editedRows = isRecord
     ? recordDiffRows(draft.payload as RecordDraftPayload, payload)
@@ -214,7 +238,7 @@ export function DraftCard({
       <div className="flex items-center justify-between gap-2">
         <div className="flex items-center gap-2 text-sm font-medium">
           <Sparkles className="size-4 text-muted-foreground" aria-hidden />
-          {KIND_LABEL[draft.kind]}
+          {kindLabel(draft.kind)}
           {draft.parent_draft_id !== undefined && (
             <Badge variant="outline" className="text-[10px]">
               重算草稿
@@ -497,6 +521,17 @@ export function DraftCard({
           >
             确认采纳
           </Button>
+          {canVoid && (
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={onVoid}
+              disabled={voidPending}
+              title="作废整次训练：追加 voided 修订并退出统计（不物理删除）"
+            >
+              作废该次训练
+            </Button>
+          )}
           {onDiscard && (
             <Button
               variant="outline"

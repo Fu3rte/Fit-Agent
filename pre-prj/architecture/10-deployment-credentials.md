@@ -11,6 +11,8 @@
 | 用户数据目录 | 自建权限系统 / platformdirs | 使用 `platformdirs` 解析跨平台用户数据目录；Windows 数据库路径为 `%LOCALAPPDATA%\Fit-Agent\app.db` | 数据文件继承操作系统用户目录 ACL，不自建跨平台权限系统 |
 | Provider 配置与密钥 | 独立存储 / 与业务数据同库 | Provider 配置和明文 API Key 与会话、业务数据保存在同一个 SQLite 数据库 | 本地单用户场景接受依赖用户目录 ACL；拥有相同操作系统用户权限或数据库副本者可以读取 Key |
 
+补充（2026-09-13，Stage 6 换商，设计级见 design-decisions「Stage 6 真实联调 Provider 范围」）：生产调用端点为 **OpenAI 兼容** Base URL（阿里云百炼 compatible-mode），不再默认 DeepSeek 官方 URL。Base URL 与模型 id 属 Provider 配置实现细节（与 Key 同库或验证进程 env）；密钥边界、`has_api_key` 投影与「完整 Key 不进响应/日志/事件」**不变**。
+
 ## 责任边界
 
 负责：

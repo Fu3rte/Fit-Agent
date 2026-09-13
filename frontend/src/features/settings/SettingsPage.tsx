@@ -162,27 +162,16 @@ export default function SettingsPage() {
           )}
         </Card>
 
-        {/* 数据目录卡：mock 阶段仅 toast 演示 */}
+        {/* 数据目录卡：freeze 契约不投影 data_dir（F6-02d），只给指引文案，不编造路径 */}
         <Card>
-          <CardHeader className="flex-row items-start justify-between gap-4">
+          <CardHeader>
             <div className="flex flex-col gap-1.5">
               <CardTitle className="flex items-center gap-2">
                 <FolderOpen className="size-4 text-muted-foreground" />
                 数据目录
               </CardTitle>
-              <CardDescription className="font-mono text-xs">
-                {provider.data?.data_dir ?? "—"}
-              </CardDescription>
+              <CardDescription>见数据目录配置</CardDescription>
             </div>
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() =>
-                toast.info("演示环境：请在文件管理器中打开该目录查看数据文件")
-              }
-            >
-              打开数据目录
-            </Button>
           </CardHeader>
         </Card>
       </div>

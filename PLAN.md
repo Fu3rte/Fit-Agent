@@ -33,7 +33,7 @@
 | 前端 | React + TypeScript + Tailwind CSS + shadcn/ui | 轻量，组件按需添加；其他库逐项决定 |
 | 前端构建 | Vite | 开发用 Vite 开发服务器；生产构建产物由 FastAPI 静态托管，运行时不需要 Node.js |
 | 数据目录 | `platformdirs` | Windows 数据库路径 `%LOCALAPPDATA%\Fit-Agent\app.db` |
-| 模型 Provider | 当前仅 DeepSeek 官方兼容端点完成 spike 验证 | Anthropic（含 cache_control/usage）与本地 Qwen 验证(取消) |
+| 模型 Provider | **Stage 6 起（2026-09-13 改拍）**：真实联调与首版生产调用采用 owner 指定 **OpenAI 兼容端点**（阿里云百炼 compatible-mode，Base URL 以配置/env 为准，示例模型 `qwen3.7-flash`）。历史：DeepSeek 官方兼容端点完成 spike 与 Stage 4 联调 | Anthropic（含 cache_control/usage）仍不支持；本地 Qwen 验证已取消；DeepSeek 官方端点与 `deepseek-flash` 为 Stage 4 历史口径，**不自动延用**为 Stage 6 生产模型 |
 
 选型溯源：v1 冻结 ADR「已确认决策」表；Agent 基座定案证据见 `pre-prj/architecture-archive/spikes/pydantic-ai-spike.md`。
 
@@ -64,11 +64,12 @@
 > 明确待拍板的开放项索引；`pre-prj/architecture/01–10` 各章「⚠️ 冲突 / 待拍」节同样有效，拍板后须同步更新本索引。
 
 - Harness 生产决策已收口：错误白名单、重试与纠错计数作用域、模型窗口、安全余量、token 估算、上下文溢出处理、摘要请求放不下策略以及首事件/流空闲超时（2026-09-12 拍 A：不新增计时器，由单次请求总时限 120 秒覆盖）均已拍板。已拍 1A/2A/3.1A/3.2A/3.3A/3.4A/3.5A、容量参数及超时口径正本见 `pre-prj/architecture/08-agent-runtime.md`「Stage 4 已拍 Harness 策略」；摘要持久化语义见第 7 章。
-- 模型思考模式（2026-09-12 拍板）：生产 `deepseek-flash` 保持 Provider 默认**开启** Thinking；本阶段不提供按 Run 的思考开关、不传关闭参数（Provider 两种模式都支持，故不作为能力限制声明）；模型 profile 如实声明思考支持与默认行为，隐藏推理不进产品页面与 SSE 输出。正本见 `pre-prj/architecture/08-agent-runtime.md`「Stage 4 已拍 Harness 策略」的「思考模式默认」节。
-- Stage 4 真实模型联调费用已拍板（2026-09-12）：本批累计 10 美元，为本轮新确认额度，不恢复旧授权；请求前预留费用上界，完成后按真实 usage 结算，未知 usage 按预留额保守扣账、余额足够可继续。跨重启持久账本累计，换会话、重试不重置；包含正常请求、摘要、重试与纠错，不包含 Stage 5 正式测评。细则见第 8 章「Stage 4 联调费用护栏」。当前仅授权文档同步与只读核对，不授权实现或立即真实调用；拍板后实现仍待后续指令，调用前核实凭据、价格与计费口径。API Key 不进入计划、日志或仓库。
+- 模型思考模式（2026-09-12 拍板，针对当时 `deepseek-flash`）：保持 Provider 默认**开启** Thinking；不提供按 Run 的思考开关、不传关闭参数；模型 profile 如实声明思考支持与默认行为，隐藏推理不进产品页面与 SSE 输出。正本见 `pre-prj/architecture/08-agent-runtime.md`「Stage 4 已拍 Harness 策略」的「思考模式默认」节。**Stage 6 换商后**（见下条）须按新模型重核默认思考与 `extra_body` 口径，不沿用 DeepSeek profile 旧值。
+- Stage 4 真实模型联调费用已拍板（2026-09-12）：本批累计 10 美元，为本轮新确认额度，不恢复旧授权；请求前预留费用上界，完成后按真实 usage 结算，未知 usage 按预留额保守扣账、余额足够可继续。跨重启持久账本累计，换会话、重试不重置；包含正常请求、摘要、重试与纠错，不包含 Stage 5 正式测评。细则见第 8 章「Stage 4 联调费用护栏」。当前仅授权文档同步与只读核对，不授权实现或立即真实调用；拍板后实现仍待后续指令，调用前核实凭据、价格与计费口径。API Key 不进入计划、日志或仓库。**Stage 6 联调额度另批，不累加进本条**。
+- Stage 6 真实联调 Provider 与费用（2026-09-13 拍板）：首版真实调用改为 owner 指定 **OpenAI 兼容端点**（阿里云百炼 compatible-mode；示例模型 `qwen3.7-flash`；验证进程可用 env `MODEL_API_KEY`/`MODEL_BASE_URL`/`MODEL_NAME`，产品运行时仍按第 10 章从同库读 Key）；累计额度 **USD 50**，预留/结算/跨重启账本规则沿用第 8 章护栏语义，**不恢复、不累加** Stage 4 的 10 美元。模型窗口、最大输出、计价与思考默认**不得沿用** `deepseek-flash` 旧拍，联调前只读重核，不适用则停下列缺项。09 章正式测评不并入 Stage 6。正本见 `pre-prj/design-decisions.md`「Stage 6 真实联调 Provider 范围」与第 8 章「Stage 6 联调费用护栏」；执行计划 `frontend/plans/stage6.md`。API Key 不进入计划、日志或仓库。
 - Agent 测评执行前置项：测评专属的输出上限与执行预算/超时/重试参数（生产 Harness 参数已于 2026-09-12 由第 8 章收口）、币种换算依据及双方实际计费核实；具体案例与 Rubric、证据包待编写及人工校准。
 - web_search：尚未拍板；现行测评方案不依赖或授权搜索能力。
-- Anthropic（含 cache_control 断点与 usage 浮出）与本地 Qwen——首版不支持，仅接入 DeepSeek 官方 OpenAI 兼容 API。
+- Anthropic（含 cache_control 断点与 usage 浮出）与本地 Qwen——首版不支持。真实调用 Provider 见上条 Stage 6 改拍（OpenAI 兼容端点）；DeepSeek 官方端点为 Stage 4 历史，非当前生产默认。
 - 新增业务语义与事务边界：仍须拍板（已拍部分新增 2026-09-12 状态调整边界：身体状况更新不自动改长期计划，用户确认需要后才生成保留原宏观周期与未受影响部分的调整草稿；普通肌肉酸痛和无痛且无功能异常的关节异响不自动停训；非红旗当次调整可保持、减载、同等刺激替换或局部跳过且不改长期计划；红旗及已拍功能异常表现仍阻断。其余已拍部分：草稿确认与修订校验、受限组合提交、安排接受即落盘、历史版本、更正统计、11 张业务表职责、固定业务时区与计划日程边界；字段名、索引与传输字段按既定语义整理，不逐项拍板）。
 - 训练身份作废终态（2026-09-13 拍 A）：问题——某次训练的当前修订被作废后，该训练身份是否还能再接受后续更正／复活修订；选项 A 作废即终态、B 允许作废后继续经同一草稿链路追加更正修订。选 A：当前修订为 `voided` 后该训练身份即终态，不再接受任何后续更正／复活修订（含 incomplete 补全）。边界：只约束「当前已确认修订被作废」的训练身份；不删除历史修订、不改训练稳定身份、不跳过草稿确认、不影响普通 `valid`／`incomplete` 记录的更正与补全。正本见 `pre-prj/design-decisions.md`「训练身份作废终态（2026-09-13 用户拍板）」与 `pre-prj/architecture/05-training-records.md` §5.3；后端当前尚未实现终态拦截，缺口与实现归 S4-09（`pre-prj/stage/stage4.md`、`pre-prj/stage/evidence/S4-evidence.md`）。
 - 当次安排扩展（2026-09-12 已拍部分）：目标用力只作处方字段（默认 2，保守调整可提高到 3），不要求用户报告、不进入结构化记录、不参与判定；非红旗当次调整（不限于当天）支持保留／减载／同等刺激替换／局部跳过，减载四方案与参数、次数上限、替换等价规则正本见 `pre-prj/architecture/04-plan-training.md`。长期调整版生效日（2026-09-12 已拍）：草稿生成时按**生成业务日期的次日**固定并展示（20260912 生成 → 20260913 生效），确认时不再改日期；确认日等于或晚于该日都允许（版本、安全与有效期校验照旧执行），不顺延、不追溯改写已锁定或已执行历史，过期日期不补执行；当次安排另按绑定的训练日判定过期。

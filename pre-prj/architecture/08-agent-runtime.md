@@ -197,21 +197,24 @@
 - 语义边界：`model_request_timeout` 仍只表示单次请求墙钟（受 Run 剩余时间约束）与「重试用尽／剩余时间不足／已产出输出」；`run_timeout` 仍只表示 Run 总时限到期；三者不相互代用。`finish_reason=length` 仍属不重试的永久结果，不静默接受截断回答。
 - 依据：08 原错误码集合没有能如实表达永久失败与池耗尽的码，前端封闭联合需要机器可读原因；本项不改变任何已拍次数、超时、退避与重试白名单。
 
-### 思考模式默认（2026-09-12）
+### 思考模式默认（2026-09-12；Stage 6 换商后须重核）
 
-- 选：**保持 Provider 默认开启 Thinking**。Provider 同时支持非思考模式，因此这是本阶段的产品策略而非能力限制：不提供按 Run 的思考开关、不传关闭参数，默认行为即生效。模型 profile 必须如实声明思考支持与默认行为（不得声称模型无法关闭思考）。隐藏推理不进产品页面与 SSE 输出（见 8.7、8.8）。
-- 依据（2026-09-12 真实调用实测，`backend/scripts/deepseek_smoke.py`，生产路径 pydantic-ai 2.41.0 + openai 3.13.0）：`deepseek-flash` 的响应包含思考内容（框架 `ThinkingPart`），官方 Models & Pricing 页也写“Supports both non-thinking and thinking (default) modes”；而框架的 DeepSeek profile 按 `deepseek-v4-*` 前缀推断，会把该 id 错报为 `supports_thinking=False`、`openai_reasoning_enabled_by_default=False`，因此**必须由本仓模型目录显式覆盖**为 `supports_thinking=True`、`openai_reasoning_enabled_by_default=True`（`thinking_always_enabled` 保持 False，如实反映 Provider 也能跑非思考模式）。
-- 边界：思考 token 计入输出 token 与费用（实测 1 个词的回答消耗 15–23 输出 token），因此可见 `max_tokens` 不是总输出上界；单次请求的费用预检按**模型总输出上限**（384,000）与有效输入上限（250,000）保守计入（见 `../stage/evidence/S4-evidence.md`）。
-- 本项只确定模型默认行为与 profile 归属，不新增 Harness 参数、不授权实现；执行侧模型参数与预算冻结仍归 S4-05。
+- 选（DeepSeek 时期）：**保持 Provider 默认开启 Thinking**。不提供按 Run 的思考开关、不传关闭参数；模型 profile 必须如实声明思考支持与默认行为。隐藏推理不进产品页面与 SSE 输出（见 8.7、8.8）。
+- 依据（2026-09-12 真实调用实测，`backend/scripts/deepseek_smoke.py`，生产路径 pydantic-ai 2.41.0 + openai 3.13.0）：`deepseek-flash` 响应含思考内容；框架 DeepSeek profile 会错报该 id，故当时由本仓模型目录显式覆盖。
+- **Stage 6（2026-09-13 改拍）**：生产联调改为 OpenAI 兼容端点（阿里云百炼，示例模型 `qwen3.7-flash`）。官方示例用 `extra_body={"enable_thinking": True}`，流式分列 `delta.reasoning_content`（思考）与 `delta.content`（正文）。联调前须实测并更新本仓模型 profile 与是否默认思考；**不得**沿用 DeepSeek 的 profile 覆盖值与「默认开启」假设。隐藏推理不进产品/SSE 的边界**不变**。
+- 边界：思考 token 计入输出与费用时，可见 `max_tokens` 不是总输出上界；费用预检按所接模型**实际总输出上限**重核（DeepSeek 384,000 为历史值）。
+- 本项不新增 Harness 参数、不授权实现；执行侧模型参数与预算冻结归 S4-05 / Stage 6。
 
-### 容量、估算与溢出（2026-09-12）
+### 容量、估算与溢出（2026-09-12；Stage 6 须按新模型重核）
 
-模型窗口以生产 `deepseek-flash` 为准：context length 1,000,000、最大输出 384,000（官方 Models & Pricing 页面 2026-09-11 只读核对；`deepseek-v4-flash` 等旧别名已停用）。首版只支持该模型，配置出现未知模型 id 时启动拒绝。框架（pydantic-ai 2.41）的已知模型名与 DeepSeek profile 尚未包含该 id，实现时须显式覆盖模型 profile，并把该行为列入 S4-01 离线断言。
+**历史（DeepSeek `deepseek-flash`）**：context length 1,000,000、最大输出 384,000（官方页 2026-09-11 只读核对）。下列容量参数表按该窗口拍定。
 
-| 参数 | 已拍值 | 说明与边界 |
+**Stage 6 起**：生产模型为 owner 指定 OpenAI 兼容端点上的模型（示例 `qwen3.7-flash`）。**窗口与最大输出不得默认继承上表**；联调前只读核实后，若 250,000 有效输入等参数越界或不适用，须停下重拍，不静默钳制。未知 id 拒绝启动的策略仍适用（按配置的模型 id）。
+
+| 参数 | 已拍值（DeepSeek 窗口下） | 说明与边界 |
 |---|---:|---|
 | 压缩触发点（活跃 prompt 估算） | 有效输入上限 × 80% | 默认 200,000；随上限派生，不单独配置 |
-| 有效输入上限（预算） | 250,000 tokens | 硬边界 32,768–524,288 |
+| 有效输入上限（预算） | 250,000 tokens | 硬边界 32,768–524,288；**须 ≤ 新模型窗口** |
 | 保留最近完整交互 | 有效输入上限 × 10% | 默认 25,000；随上限派生，压缩后原样保留 |
 | 摘要输出上限 | 6,144 tokens | 摘要请求的 max_tokens |
 | 普通输出预留 | 8,192 tokens | 普通请求的 max_tokens，等于单次输出上限 |
@@ -239,13 +242,23 @@
 - 本批共用跨重启持久账本；正常请求、摘要、自动重试、纠错与手动重试全部纳入累计额度。重启、换会话、新建 Run 均不重置预算；重启后无法结算的在途请求按未知 usage 处理，不释放其预留额。
 - 本地账本是保守费用护栏，不是 Provider 账单保证；既有请求数、超时、取消与重试边界不因额度充足而放宽。
 - 当前仅授权拍板与文档同步，不授权实现或立即发真实请求；实现待后续指令，真实调用前仍须核实凭据和上述计费前置条件。密钥边界沿用第 10 章。
+- **Stage 6 不沿用本额度**；见下节。
+
+## Stage 6 联调费用护栏（2026-09-13 拍板）
+
+- Stage 6 真实模型联调累计额度为 **50 美元**，是本轮新确认额度；**不恢复、不累加** Stage 4 的 10 美元；不包含 09 章正式测评。
+- 被调端点：owner 指定 OpenAI 兼容端点（阿里云百炼 compatible-mode）；模型示例 `qwen3.7-flash`（以配置/env `MODEL_NAME` 为准）。计价与 usage 字段以该端点实际返回为准；官方无价或 usage 缺失时按预留额保守扣账。
+- 预留、结算、未知 usage、跨重启账本、余额不足停发等规则**与 Stage 4 护栏同构**（上一节 2–5 条），单独记账、不与 Stage 4 账本混用额度。
+- 调用前核实：Base URL 可达、模型 id 有效、计费口径可解释；Key 只经验证进程 env 或产品同库配置读取，不打印、不入仓。
+- 文档同步不等于已执行计费；真实调用仍须 owner 开工指令（`frontend/plans/stage6.md`）。
 
 ## ⚠️ 冲突 / 待拍
 
 > 本节清单可能滞后：已拍事项以 `pre-prj/design-decisions.md` 为准；未拍项仍以本节与 `PLAN.md` 唯一索引为准。
 
 - Harness 生产决策已收口：错误白名单、计数作用域、模型窗口、安全余量、token 估算、上下文溢出处理与摘要请求放不下策略已于 2026-09-12 拍板，首事件/流空闲超时已于 2026-09-12 按 A 拍板（见本章「Stage 4 已拍 Harness 策略」）。先核对生产版本框架能力，不隐式增加恢复路径。
-- Stage 4 联调费用计量、未知 usage 处理与本批累计 10 美元额度已于 2026-09-12 收口（见上节）；当前仍仅授权文档同步，不授权实现或立即调用。调用前凭据与价格核实属于执行前置，不是剩余费用决策。
+- Stage 4 联调费用计量、未知 usage 处理与本批累计 10 美元额度已于 2026-09-12 收口；Stage 6 额度 50 美元与 OpenAI 兼容端点已于 2026-09-13 另批（见「Stage 6 联调费用护栏」与 design-decisions「Stage 6 真实联调 Provider 范围」）。两批账本不混用。
+- **待执行前置（非未拍）**：`qwen3.7-flash`（或 env 实际模型）的窗口、最大输出、计价与默认思考行为尚未在本仓实测；Harness 容量表为 DeepSeek 窗口历史值，不适用须重拍后改实现。
 - 无本章来源冲突；PLAN.md 2026-09-08 收窄前「SSE 事件与当前状态恢复」覆盖范围 L111–113（历史来源；现承载见第 8 章 8.7）已声明对 v1 与前端历史 SSE 约定的覆盖范围，本章按其执行。
 
 ## 来源

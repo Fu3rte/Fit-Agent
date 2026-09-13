@@ -15,9 +15,13 @@ export const RUN_STATUS_COPY: Record<RunStatus, string> = {
 export const runPhaseCopy = (started: boolean): string =>
   started ? "执行中" : "受理中";
 
-/** run.failed 原因码 → 可理解文案（未列出者走兜底，不暴露错误码给用户） */
+/** status=failed 原因码 → 可理解文案（未列出者走兜底，不暴露错误码给用户） */
 const FAILURE_REASON_COPY: Partial<Record<ErrorCode, string>> = {
   interrupted_by_restart: "服务重启导致执行中断",
+  model_request_timeout: "模型请求超时",
+  run_timeout: "任务总时限到期",
+  context_budget_exceeded: "上下文超出容量限制",
+  model_request_failed: "模型请求失败",
   not_configured: "模型未配置或不可用",
   conversation_busy: "已有正在进行的对话",
   invalid_request: "请求无效",

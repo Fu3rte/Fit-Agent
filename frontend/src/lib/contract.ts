@@ -1,8 +1,9 @@
 /**
  * Fit-Agent 前端契约 v1（D1A 契约先行；stage0 F0-01 定型；stage3 D9 全面对齐）
  *
- * 本文件是前端唯一的数据形状来源：UI 组件、mock 服务器（src/mock/server.ts）
- * 与 API 封装（src/lib/api.ts）一律从此处引用类型，不得另写第三份形状。
+ * 本文件是前端唯一的数据形状来源：UI 组件与 API 封装（src/lib/api.ts）
+ * 一律从此处引用类型，不得另写第三份形状。
+ * F6-02d 起 src/mock/ 已删除；类型仅对齐真实后端传输契约。
  *
  * v1 基线对齐架构正本：SSE 事件全集与断线/刷新恢复规则（08 8.7）、Run 状态与
  * 显示映射（08 8.1/8.8）、草稿生命周期与确认事务（01 1.2–1.6）。
@@ -13,11 +14,13 @@
 /* ---------------------------------- 错误 ---------------------------------- */
 
 /**
- * 机器可读错误码（409 语义对齐正本）：
+ * 机器可读错误码（409 语义 + Run 终态失败原因，对齐 backend/runtime/error_codes.py 封闭集合）：
  * - draft_stale：确认时业务基线冲突（base_business_version != context_version，01 1.4/1.6）；
  * - draft_modified：确认时草稿修订版本不匹配（01 1.4：拒绝确认已被修改的草稿）；
- * - conversation_busy：全局已有活跃 Run（08 8.2）；
- * - interrupted_by_restart：服务重启中断遗留 Run（08 8.4：pending/running 统一改 failed 并附此原因）；
+ * - conversation_busy：全局已有活跃 Run（08 8.2；HTTP 409，不创建 Run）；
+ * - interrupted_by_restart / model_request_timeout / run_timeout /
+ *   context_budget_exceeded / model_request_failed：Run 终态失败原因（随 Run 查询与
+ *   status 事件给出，不是 HTTP 错误码；08 8.1/8.4/8.5/8.8）；
  * - not_configured / invalid_request：未配置模型 / 请求无效；
  * - plan_action_unavailable：计划引用动作目录缺失时的具体安全阻断（S3-07）。
  */
@@ -28,6 +31,10 @@ export type ErrorCode =
   | "not_configured"
   | "invalid_request"
   | "interrupted_by_restart"
+  | "model_request_timeout"
+  | "run_timeout"
+  | "context_budget_exceeded"
+  | "model_request_failed"
   | "plan_action_unavailable";
 
 export interface ApiError {
@@ -55,8 +62,7 @@ export interface ProviderConfig {
   /** 只暴露 has_api_key，任何接口不得返回明文 Key */
   has_api_key: boolean;
   model: { name: string; deployment: ModelDeployment };
-  /** 用户数据目录（演示用常量，真实值由后端 platformdirs 解析） */
-  data_dir: string;
+  // F6-02d：无 data_dir——freeze 契约不投影数据目录（见 settings 页「见数据目录配置」）
 }
 
 /**
@@ -317,6 +323,7 @@ export interface ProposedSessionCancellation {
 /**
  * 计划安全复核投影（04 4.5；02 2.2/2.3）：任一动作或模式冲突即整份阻断；
  * 目录身份读不到时 usable=false 且 block_code=plan_action_unavailable（S3-07）。
+ * 展示形状（mock / 本地投影）；真实后端传输形状见 PlanSafetyWire。
  */
 export interface PlanSafetyReview {
   context_version: number;
@@ -333,6 +340,226 @@ export interface PlanSafetyConflict {
   exercise_id: string;
   exercise_name: string;
   restriction: Restriction;
+}
+
+/* -------------------------- 只读传输形状（stage6 F6-02b） ------------------- */
+/* 对齐 backend api/dto.py + stage6-transport-freeze §1.2；页面经 lib/readModels 映射。 */
+
+export type FactState = "unknown" | "denied" | "known";
+
+/** S2-07 三态事实：unknown/denied 不携带值；known 带值 */
+export interface FactDto<T> {
+  state: FactState;
+  value: T | null;
+}
+
+/** 限制传输身份（02 2.2）：scope + target，不是展示名 */
+export interface ActionRestrictionWire {
+  scope: "specific_action" | "movement_pattern";
+  target: string;
+}
+
+/** GET /api/profile 的 profile 载荷（八项三态事实；无 plan/safety/restrictions 外置数组） */
+export interface ProfileFactsDto {
+  training_goal: FactDto<string>;
+  training_experience: FactDto<string>;
+  weekly_frequency: FactDto<number>;
+  session_duration_minutes: FactDto<number>;
+  available_equipment: FactDto<string[]>;
+  action_restrictions: FactDto<ActionRestrictionWire[]>;
+  body_conditions: FactDto<string[]>;
+  body_weight_kg: FactDto<number>;
+}
+
+/** 一条日程传输行（schedule_dto） */
+export interface PlanScheduleWire {
+  id: string;
+  plan_version_id: string;
+  plan_workout_key: string;
+  scheduled_on: string;
+  /** 1=周一 */
+  weekday: number;
+  cancelled: boolean;
+  cancelled_at: string | null;
+  locked_at: string | null;
+  lock: {
+    stored: boolean;
+    by_business_date: boolean;
+    effective: boolean;
+  };
+  status: "cancelled" | "locked" | "scheduled";
+}
+
+/** GET /api/plan 与 /api/plans/{id} 的 plan 视图（plan_view_dto） */
+export interface PlanViewWire {
+  id: string;
+  version: string;
+  source_plan_version_id: string | null;
+  starts_on: string;
+  review_on: string;
+  mode: "regular" | "return";
+  is_current: boolean;
+  confirmed_at: string;
+  template_key: string | null;
+  /** D9 payload JSON（schema_version=1） */
+  plan: PlanPayload;
+  schedules: PlanScheduleWire[];
+}
+
+export interface PlanResponseWire {
+  plan: PlanViewWire | null;
+}
+
+/** 安全复核传输形状（plan_safety_dto）：conflict.restriction 为 scope/target */
+export interface PlanSafetyWire {
+  context_version: number;
+  reviewed_at: string;
+  usable: boolean;
+  red_flag_blocked: boolean;
+  conflicts: Array<{
+    exercise_id: string;
+    exercise_name: string;
+    restriction: ActionRestrictionWire;
+    matched_modes: string[];
+  }>;
+  action_unavailable: boolean;
+  block_code: "plan_action_unavailable" | null;
+  unknown_exercise_ids: string[];
+  reasons: string[];
+  /** clarifications ≠ 安全放行 */
+  clarifications: string[];
+}
+
+/** GET /api/plan/guidance（guidance_dto） */
+export interface PlanGuidanceWire {
+  plan: PlanViewWire;
+  safety: PlanSafetyWire;
+}
+
+export interface PlanGuidanceResponseWire {
+  guidance: PlanGuidanceWire | null;
+}
+
+/** 记录列表条目（record_dto）：稳定身份 + 当前修订摘要 + 存储契约 payload */
+export interface RecordListItemWire {
+  id: string;
+  created_at: string;
+  revision: {
+    id: string;
+    revision_no: number;
+    status: "incomplete" | "valid" | "voided";
+    occurred_on: string;
+  } | null;
+  record: RecordStoragePayload;
+}
+
+/** GET /api/records 响应 */
+export interface RecordListResponseWire {
+  records: RecordListItemWire[];
+}
+
+/** GET /api/records/{id} 响应 */
+export interface RecordItemResponseWire {
+  record: RecordListItemWire;
+}
+
+/** 组级三桶判定传输（target_judgement_dto） */
+export interface RecordJudgementWire {
+  session_revision_id: string;
+  has_comparison: boolean;
+  is_return_phase: boolean;
+  buckets: Buckets;
+}
+
+export interface RecordJudgementResponseWire {
+  judgement: RecordJudgementWire | null;
+}
+
+/** 完成率传输（week_completion_dto）；rate 为 0–1 比率，null=「暂无」 */
+export interface WeekCompletionWire {
+  plan_version_id: string;
+  week_no: number;
+  week_start: string;
+  week_end: string;
+  planned: number;
+  completed: number;
+  rate: number | null;
+}
+
+export interface StatsCompletionResponseWire {
+  completion: WeekCompletionWire | null;
+}
+
+/** PR 传输（/api/stats/pr）；load_kg_key 为 kg×1000 整数键 */
+export interface PrWire {
+  exercise_id: string;
+  load_notation: string;
+  load_kg_key: number | null;
+  max_load_kg_key: number | null;
+  best_reps: number | null;
+}
+
+export interface StatsPrResponseWire {
+  pr: PrWire;
+}
+
+/** 一条复盘传输（review_dto）：正文字段 body_markdown */
+export interface ReviewWire {
+  id: string;
+  body_markdown: string;
+  stale: boolean;
+  generated_at: string;
+  source_revision_ids: string[];
+  basis: ReviewBasisWire | null;
+}
+
+/** 复盘依据快照传输（review_basis_to_json）：冻结 per_week/prs，无 buckets */
+export interface ReviewBasisWire {
+  schema_version: number;
+  per_week: Array<{
+    plan_version_id: string;
+    week_no: number;
+    week_start: string;
+    week_end: string;
+    numerator: number;
+    denominator: number;
+  }>;
+  prs: Array<{
+    exercise_id: string;
+    load_notation: string;
+    load_kg_key: number;
+    best_reps: number;
+  }>;
+}
+
+export interface ReviewListResponseWire {
+  reviews: ReviewWire[];
+}
+
+export interface ReviewItemResponseWire {
+  review: ReviewWire;
+}
+
+/** 记录存储契约（record_draft_to_json / exercises 展平行） */
+export interface RecordStoragePayload {
+  schema_version: number;
+  occurred_on: string;
+  training_session_id?: string | null;
+  arrangement_revision_id?: string | null;
+  started_at?: string | null;
+  time_precision?: string | null;
+  completion_declared?: boolean;
+  is_return_phase?: boolean;
+  feedback?: Record<string, unknown> | null;
+  exercises: Array<{
+    position: number;
+    exercise_id: string;
+    record_type: CatalogRecordType;
+    load_notation?: string | null;
+    target_item_key?: string | null;
+    warmup_summary_text?: string | null;
+    sets: SetFacts[];
+  }>;
 }
 
 /* --------------------------------- 记录事实 --------------------------------- */
@@ -540,23 +767,27 @@ export interface ReviewDoc {
   basis?: ReviewBasis;
 }
 
+/**
+ * 会话摘要（仅 mock 列表端点仍在用；真实后端暂无 `GET /api/sessions` 列表，
+ * 会话身份经 URL `?s=` 与 `POST /api/sessions` 获得）。
+ */
 export interface SessionSummary {
   id: string;
   title: string;
   updated_at: string;
 }
 
-export interface MessageEvidence {
-  sources: string[];
-  summary: string;
-}
-
-export interface ChatMessage {
-  id: string;
+/**
+ * 会话查询内嵌消息（stage4 §6 / dto.session_messages_dto）：
+ * 按 Run 分组投影——用户请求 + 可见回答（完整）或未完成的部分回答（complete=false）。
+ */
+export interface SessionMessage {
+  seq: number;
+  run_id: string;
   role: "user" | "assistant";
-  content: string;
-  draft_id?: string;
-  evidence?: MessageEvidence;
+  kind: "user_request" | "answer" | "partial";
+  text: string;
+  complete: boolean;
 }
 
 /* --------------------------------- 当次安排（S3-08） ------------------------ */
@@ -598,12 +829,17 @@ export interface ArrangementDraftPayload {
 
 /* --------------------------------- 草稿 ---------------------------------- */
 
+/**
+ * 草稿 kind 封闭集（交接 F2）：真实后端恰四种
+ * `profile_update | plan | training_record | arrangement`（backend app/draft_repo.py
+ * DRAFT_KINDS）。作废经 `POST /api/drafts/{id}/void` 对 training_record 追加
+ * voided 修订，不产生独立 kind。F6-02d：`training_void` 已随 mock 删除。
+ */
 export type DraftKind =
-  | "training_record"
-  | "plan"
   | "profile_update"
-  | "arrangement"
-  | "training_void";
+  | "plan"
+  | "training_record"
+  | "arrangement";
 
 /**
  * 草稿生命周期 Pending / Committed / Discarded（01 1.3）；Discarded 不得再提交。
@@ -611,12 +847,31 @@ export type DraftKind =
  */
 export type DraftStatus = "pending" | "committed" | "discarded" | "stale";
 
-/** 结构化字段级 Diff（A4：业务 Diff 是「旧值→新值」字段对，不是文本 diff） */
+/**
+ * 结构化字段级 Diff 的展示形状（A4：业务 Diff 是「旧值→新值」字段对，不是文本 diff）。
+ * 后端传输形状是 WireFieldDiff（{field, before, after, changed}，F6-02c 已拍）；
+ * 前端展示层仍用 old_value/new_value，网络边界经 normalizeFieldDiffRows 映射
+ * （src/lib/diffNormalize.ts），页面与 mock 内部构造沿用展示形状。
+ */
 export interface FieldDiff {
   /** 字段路径，如「卧推 · 组数」 */
   field: string;
+  /** 无旧值 = 新增（展示「新增」徽章） */
   old_value?: string;
   new_value: string;
+}
+
+/**
+ * 后端 Diff 传输形状（F6-02c 已拍：{field, before, after, changed}）。
+ * before/after 可能是字符串，也可能是结构化值（档案 Fact {state,value}、
+ * 计划/安排结构化字段）——展示前必须经 normalizeFieldDiffRows 映射为 FieldDiff。
+ */
+export interface WireFieldDiff {
+  field: string;
+  before?: unknown;
+  after?: unknown;
+  /** false 的行不进展示（基线派生时含未变字段） */
+  changed?: boolean;
 }
 
 /**
@@ -673,41 +928,45 @@ export interface Draft {
   parent_draft_id?: string;
   payload: DraftPayload;
   diff: FieldDiff[];
+  /** 一键重算的新旧草稿 Diff（后端 draft_dto.parent_diff；仅重算子草稿携带） */
+  parent_diff?: FieldDiff[] | null;
+  /** 已提交草稿的提交凭据（持久化，不随后续业务版本改写；draft_dto） */
+  committed_revision?: number | null;
+  committed_business_version?: number | null;
 }
 
 /**
- * 幂等确认结果（交接 F4 提交凭据 + mock 展示扩展）：
- * 重复确认返回原凭据（committed_* 与 kind 结果 id），不重复写、不 cv+1；
- * newly_committed / summary 保留为 mock 展示扩展。
+ * 幂等确认结果（交接 F4 / dto.any_commit_result_dto）：
+ * 公共凭据 draft_id + status="committed" + committed_revision + committed_business_version；
+ * 首次确认按 kind 附带正式事实身份（plan_version(_id) / arrangement_revision* /
+ * training_session_id 等）。重复确认返回同一份持久化凭据，不重复写、不递增业务版本。
  */
 export interface ConfirmResult {
   draft_id: string;
   status: "committed";
-  newly_committed: boolean;
-  context_version: number;
-  summary: string;
-  /** 提交时的草稿修订版本 */
   committed_revision: number;
-  /** 提交后的业务版本（context_version） */
   committed_business_version: number;
-  /** kind=plan：启用的计划版本 */
+  /** kind=plan：计划版本身份 */
+  plan_version_id?: string;
   plan_version?: string;
-  /** kind=arrangement：写入的安排修订 id */
+  /** kind=arrangement：当次安排修订身份 */
   arrangement_revision_id?: string;
-  /** kind=training_record：稳定训练身份 id（handover F4） */
+  arrangement_revision_no?: number;
+  scheduled_session_id?: string;
+  accepted_at?: string;
+  /** kind=training_record：稳定训练身份与修订 */
   training_session_id?: string;
+  session_revision_id?: string;
+  revision_no?: number;
+  revision_status?: string;
 }
 
 export interface ConfirmRequest {
   revision: number;
 }
 
-/** 重算结果：新草稿 + 新旧草稿 diff */
-export interface RecalcResult {
-  new_draft: Draft;
-  old_draft: Draft;
-  draft_vs_draft_diff: FieldDiff[];
-}
+// F6-02d：RecalcResult 仅 mock 同步旧链路使用，已随 mock 删除；
+// 真实后端一键重算经 `{created, run}` + draft 事件到达。
 
 /**
  * 一键重算请求（01 1.6 / S4-08）：携带幂等 client_request_id；
@@ -726,17 +985,34 @@ export type RunStatus =
   | "failed"
   | "cancelled";
 
-export interface ActiveRunInfo {
+/** Run 行传输投影（dto.run_dto，stage4 §6）：五态权威 + 可理解失败原因 */
+export interface Run {
   run_id: string;
-  session_id: string;
+  conversation_id: string;
   status: RunStatus;
-  saved_text: string;
-  error_code?: ErrorCode;
-  drafts: Draft[];
+  error_code?: ErrorCode | null;
+  retry_of_run_id?: string | null;
+  created_at?: string;
+  updated_at?: string;
 }
 
-export interface ActiveRunResponse {
-  run: ActiveRunInfo | null;
+/** 提交对话请求 / 重试 / 重算的统一响应（routes_chat：{created, run}） */
+export interface SubmitRequestResult {
+  /** false = client_request_id 幂等命中已有 Run，不重启执行 */
+  created: boolean;
+  run: Run;
+}
+
+/**
+ * 会话查询投影（dto.session_dto；08 8.7 断线/刷新/重启后的恢复入口）：
+ * 消息内嵌 + 全部 Run 状态；不重放 SSE、不重复拼接回答。草稿当前状态另走
+ * `GET /api/sessions/{id}/drafts`（本结构不复制草稿语义）。
+ */
+export interface SessionDetail {
+  session_id: string;
+  created_at?: string;
+  runs: Run[];
+  messages: SessionMessage[];
 }
 
 /**
@@ -758,7 +1034,11 @@ export interface DiscardResult {
 
 /* --------------------------------- REST 端点 -------------------------------- */
 
-/** 已接受安排读回（stage3 拍板的 mock 端点；镜像 arrangement_revisions 行） */
+/**
+ * 已接受安排（一次接受的当次目标快照投影）：由前端从 records / 会话安排草稿
+ * 投影（src/lib/arrangements.ts），无独立后端端点。id 为安排修订身份
+ * （投影来源可得时携带）。F6-02d：mock GET /api/arrangements 已随 mock 删除。
+ */
 export interface AcceptedArrangement {
   id: string;
   accepted_at: string;
@@ -766,56 +1046,64 @@ export interface AcceptedArrangement {
 }
 
 /**
- * REST 端点清单（契约 v1）：
+ * REST 端点清单（契约 v1，stage6 F6-02b 只读看板对齐；F6-02d 删 mock 后仅真实后端）：
  * - GET    /api/provider                -> ProviderConfig
  * - PUT    /api/provider/api-key        body {api_key} -> {has_api_key: true}
  * - DELETE /api/provider/api-key        -> {has_api_key: false}
- * - GET    /api/profile                 -> ProfileResponse
- * - GET    /api/records                 -> {records: TrainingRecord[]}
- * - GET    /api/arrangements            -> {arrangements: AcceptedArrangement[]}
- * - GET    /api/stats                   -> StatsSummary
- * - GET    /api/review                  -> ReviewDoc（最新条投影；无条目时空态）
- * - GET    /api/sessions                -> SessionSummary[]
- * - POST   /api/sessions                -> SessionSummary
- * - GET    /api/sessions/:id/messages   -> ChatMessage[]
+ * - GET    /api/profile                 -> ProfileResponse（S2-07：无 plan/safety）
+ * - GET    /api/plan                    -> PlanResponseWire（{plan|null}）
+ * - GET    /api/plan/guidance           -> PlanGuidanceResponseWire
+ * - GET    /api/records                 -> RecordListResponseWire（存储契约，页面映射）
+ * - GET    /api/records/:id             -> RecordItemResponseWire
+ * - GET    /api/records/:id/judgement   -> RecordJudgementResponseWire
+ * - GET    /api/stats/completion        -> StatsCompletionResponseWire（必填 plan_version_id+week_no）
+ * - GET    /api/stats/pr                -> StatsPrResponseWire（必填 exercise_id+load_notation）
+ * - GET    /api/reviews                 -> ReviewListResponseWire（最新条=当前复盘）
+ * - GET    /api/reviews/:id             -> ReviewItemResponseWire
+ * - POST   /api/sessions                body {} -> SessionDetail
+ * - GET    /api/sessions/:id            -> SessionDetail
+ * - POST   /api/sessions/:id/requests   body {client_request_id, text} -> SubmitRequestResult
  * - GET    /api/sessions/:id/drafts     -> Draft[]
- * - POST   /api/runs                    body RunRequest -> RunHandle
- * - GET    /api/runs/active             -> ActiveRunResponse
- * - POST   /api/runs/:id/cancel         -> {run_id, status}
- * - POST   /api/drafts/:id/revise       body ReviseRequest -> ReviseResult
- * - POST   /api/drafts/:id/confirm      body ConfirmRequest -> ConfirmResult
- * - POST   /api/drafts/:id/recalc       body RecalcRequest -> RecalcResult
- * - POST   /api/drafts/:id/discard      -> DiscardResult
+ * - GET    /api/runs/:id                -> {run: Run}
+ * - GET    /api/runs/:id/events         -> SSE
+ * - POST   /api/runs/:id/retry|/cancel
+ * - POST   /api/drafts/:id/revise|confirm|recalc|discard|void
+ *
+ * 已废弃（前端不得再调用）：GET /api/stats（聚合）、GET /api/review（单文档）、
+ * GET /api/arrangements（仅 mock 遗留，02d 随 mock 删除）、POST /api/runs、
+ * GET /api/events、GET /api/runs/active、GET /api/sessions/:id/messages。
  */
 
-export interface RunRequest {
-  session_id: string;
-  message: string;
-  client_request_id: string;
-}
-
-export interface RunHandle {
-  run_id: string;
-}
-
 export interface ProfileResponse {
-  profile: Profile | null;
-  restrictions: Restriction[];
+  /** null = 未建档；已建档为 S2-07 三态事实（不再内嵌 plan/schedules/safety，F1） */
+  profile: ProfileFactsDto | null;
   context_version: number;
-  plan?: PlanVersion;
-  schedules?: PlanScheduleEntry[];
-  plan_safety?: PlanSafetyReview;
 }
 
 /* --------------------------------- SSE 事件 -------------------------------- */
 
+/**
+ * Run 级 SSE 产品事件（backend runtime/events.py EVENT_KINDS 封闭集合）：
+ * 订阅 `GET /api/runs/{run_id}/events`；订阅即先发当前 status；终态 status 后流结束；
+ * 断线不取消、不重跑、不重放——恢复一律走会话查询（08 8.7）。
+ * draft 事件只是已持久化草稿的引用（身份 + 修订），当前状态以业务查询为准。
+ */
 export type SseEvent =
-  | { event: "run.started"; run_id: string }
-  | { event: "message.delta"; run_id: string; text: string }
-  | { event: "draft.proposed"; run_id: string; draft: Draft }
-  | { event: "context.compacting"; run_id: string }
-  | { event: "context.compacted"; run_id: string; note: string }
-  | { event: "run.completed"; run_id: string }
-  | { event: "run.cancelled"; run_id: string }
-  | { event: "run.failed"; run_id: string; error_code: ErrorCode }
+  | {
+      event: "status";
+      run_id: string;
+      status: RunStatus;
+      error_code?: ErrorCode | null;
+    }
+  | { event: "answer"; run_id: string; text: string }
+  | { event: "rationale"; run_id: string }
+  | {
+      event: "draft";
+      run_id: string;
+      draft_id: string;
+      kind: DraftKind;
+      revision: number;
+      status: DraftStatus;
+    }
+  | { event: "compression"; run_id: string; state: "started" | "finished" }
   | { event: "heartbeat" };

@@ -4,9 +4,8 @@ import {
   Route,
   Routes,
   useNavigate,
-  useSearchParams,
 } from "react-router-dom";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { Toaster } from "sonner";
 import {
   ChartLine,
@@ -19,7 +18,7 @@ import {
   UserRound,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
-import { createSession, getSessions } from "@/lib/api";
+import { createSession } from "@/lib/api";
 import { getTheme, setTheme, type Theme } from "@/lib/theme";
 import {
   Sidebar,
@@ -70,18 +69,19 @@ function ThemeToggle() {
   );
 }
 
-/** 历史会话列表（B2A）+ 新建会话；当前会话按 /?s= 高亮 */
+/**
+ * 新建会话入口（F6-02a）：真实后端暂无会话列表端点（stage4 §6 只有
+ * POST /api/sessions 与 GET /api/sessions/{id}），历史会话经 ?s= 直达；
+ * 侧栏只保留「新对话」。
+ */
 function SessionNav() {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
-  const [params] = useSearchParams();
-  const currentSessionId = params.get("s");
-  const sessions = useQuery({ queryKey: ["sessions"], queryFn: getSessions });
   const create = useMutation({
     mutationFn: () => createSession(),
     onSuccess: (session) => {
-      void queryClient.invalidateQueries({ queryKey: ["sessions"] });
-      navigate(`/?s=${session.id}`);
+      void queryClient.invalidateQueries({ queryKey: ["session"] });
+      navigate(`/?s=${session.session_id}`);
     },
   });
 
@@ -100,25 +100,6 @@ function SessionNav() {
             </SidebarMenuButton>
           </SidebarMenuItem>
         </SidebarMenu>
-        <div className="mt-1 max-h-56 overflow-y-auto scrollbar-none [&::-webkit-scrollbar]:hidden">
-          <SidebarMenu>
-            {sessions.data?.map((s) => (
-              <SidebarMenuItem key={s.id}>
-                <NavLink
-                  to={`/?s=${s.id}`}
-                  title={s.title}
-                  data-active={currentSessionId === s.id}
-                  className={cn(
-                    sidebarMenuButtonVariants(),
-                    "data-[active=true]:bg-sidebar-accent data-[active=true]:font-medium data-[active=true]:text-sidebar-accent-foreground",
-                  )}
-                >
-                  <span>{s.title}</span>
-                </NavLink>
-              </SidebarMenuItem>
-            ))}
-          </SidebarMenu>
-        </div>
       </SidebarGroupContent>
     </SidebarGroup>
   );

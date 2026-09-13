@@ -1,3 +1,4 @@
+import { useMemo } from "react";
 import { Link } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import {
@@ -15,19 +16,24 @@ import {
 } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { buttonVariants } from "@/components/ui/button";
-import { getArrangements, getProfile } from "@/lib/api";
+import { getPlan, getPlanGuidance, getProfile } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import type { ReactNode } from "react";
 import type {
-  AcceptedArrangement,
+  FactDto,
   NeedsCalibration,
   PlanPayload,
-  PlanSafetyReview,
+  PlanSafetyWire,
   PlanScheduleEntry,
   PlanVersion,
-  Profile,
+  ProfileFactsDto,
   Restriction,
 } from "@/lib/contract";
+import {
+  projectAcceptedArrangements,
+  projectedAsAccepted,
+  type ProjectedArrangement,
+} from "@/lib/arrangements";
 import {
   arrangementStatusLabel,
   classifyArrangementStatus,
@@ -39,6 +45,7 @@ import {
   weekdayLabel,
   type DisplayBlock,
 } from "@/lib/planView";
+import { mapPlanView, mapProfileRestrictions } from "@/lib/readModels";
 
 function Loading({ text }: { text: string }) {
   return <p className="mt-10 text-sm text-muted-foreground">{text}…</p>;
@@ -57,30 +64,58 @@ interface ProfileRow {
   value: ReactNode;
 }
 
-/** 档案卡：八项事实（目标/经验/频率/时长/器械/体重/身体情况，PRD 5.2，只读） */
-function ProfileCard({ profile }: { profile: Profile }) {
+/** 三态事实 → 展示文案（unknown=未收集；denied=无（用户确认）；不补造数值） */
+function factText<T>(
+  fact: FactDto<T> | undefined,
+  known: (value: T) => ReactNode,
+): ReactNode {
+  if (!fact || fact.state === "unknown") return "未收集";
+  if (fact.state === "denied") return "无（用户确认）";
+  return known(fact.value as T);
+}
+
+/** 档案卡：八项事实（S2-07 三态；PRD 5.2 只读） */
+function ProfileCard({ profile }: { profile: ProfileFactsDto }) {
   const rows: ProfileRow[] = [
-    { label: "训练目标", value: profile.goal },
-    { label: "训练经验", value: profile.experience },
-    { label: "每周频率", value: `${profile.weekly_frequency} 次 / 周` },
-    { label: "单次时长", value: `${profile.session_minutes} 分钟` },
+    {
+      label: "训练目标",
+      value: factText(profile.training_goal, (v) => v),
+    },
+    {
+      label: "训练经验",
+      value: factText(profile.training_experience, (v) => v),
+    },
+    {
+      label: "每周频率",
+      value: factText(profile.weekly_frequency, (v) => `${v} 次 / 周`),
+    },
+    {
+      label: "单次时长",
+      value: factText(profile.session_duration_minutes, (v) => `${v} 分钟`),
+    },
     {
       label: "可用器械",
-      value: profile.equipment.length > 0 ? profile.equipment.join("、") : "无",
+      value: factText(profile.available_equipment, (v) =>
+        v.length > 0 ? v.join("、") : "无（用户确认）",
+      ),
     },
-    { label: "体重", value: `${profile.body_weight_kg} kg` },
+    {
+      label: "体重",
+      value: factText(profile.body_weight_kg, (v) => `${v} kg`),
+    },
     {
       label: "身体情况",
-      value:
-        profile.body_conditions.length > 0 ? (
+      value: factText(profile.body_conditions, (v) =>
+        v.length > 0 ? (
           <span className="flex flex-col items-end gap-0.5">
-            {profile.body_conditions.map((c) => (
+            {v.map((c) => (
               <span key={c}>{c}</span>
             ))}
           </span>
         ) : (
           "无（用户确认）"
         ),
+      ),
     },
   ];
   return (
@@ -195,8 +230,8 @@ function BlockTable({ block }: { block: DisplayBlock }) {
   );
 }
 
-/** 使用前安全复核结果（04 4.5 整份复核） */
-function PlanSafetyNotice({ safety }: { safety: PlanSafetyReview }) {
+/** 使用前安全复核结果（04 4.5；传输形状 PlanSafetyWire） */
+function PlanSafetyNotice({ safety }: { safety: PlanSafetyWire }) {
   if (safety.usable)
     return (
       <p className="flex items-start gap-1.5 rounded-lg border bg-muted/40 p-3 text-sm text-muted-foreground">
@@ -230,8 +265,8 @@ function PlanSafetyNotice({ safety }: { safety: PlanSafetyReview }) {
           </p>
           <ul className="mt-1.5 flex list-disc flex-col gap-0.5 pl-5">
             {safety.conflicts.map((c) => (
-              <li key={`${c.exercise_id}·${c.restriction.name}`}>
-                {c.exercise_name} · 命中限制「{c.restriction.name}」（
+              <li key={`${c.exercise_id}·${c.restriction.target}`}>
+                {c.exercise_name} · 命中限制「{c.restriction.target}」（
                 {c.restriction.scope === "specific_action"
                   ? "具体动作"
                   : "动作模式"}
@@ -279,18 +314,22 @@ function CalibrationSection({ calibration }: { calibration: NeedsCalibration }) 
 }
 
 /**
- * 日程行徽章（锁定双态 + 安排状态联表，F3-03）：
+ * 日程行徽章（锁定双态 + 安排状态联表，F3-03；F6-02c 起安排证据来自前端投影；
+ * F6-02d：projectedAsAccepted 收敛到 src/lib/arrangements.ts 单点）：
  * - 锁定优先展示「已锁定（日期规则）」；stored cancelled 展示「已取消」；
- * - 安排状态：尚无安排 / 已接受安排 · 已调整|目标更保守|未调整 + 接受时间。
+ * - 安排状态：尚无安排 / 已接受安排（粗证据） / 已接受安排 · 已调整|目标更保守|未调整
+ *   （有完整 target 时细分）；接受时间可得时附带，缺省不伪造。
+ * 已知限制：真实后端无跨会话安排枚举，arranged 恒空 → 徽章生产假阴性「尚无安排」，
+ * 不静默改语义（见 02d 报告 / f6-02-probe 注释）。
  */
 function ScheduleBadge({
   entry,
   plan,
-  arrangement,
+  projected,
 }: {
   entry: PlanScheduleEntry;
   plan: PlanPayload;
-  arrangement?: AcceptedArrangement;
+  projected?: ProjectedArrangement;
 }) {
   const cancelled = entry.stored_status === "cancelled";
   const locked = entry.locked_effective && !cancelled;
@@ -301,15 +340,21 @@ function ScheduleBadge({
         ? "已锁定（日期规则）"
         : "已锁定"
       : "应训练";
-  const status = arrangement
+  const accepted = projectedAsAccepted(projected);
+  const status = accepted
     ? classifyArrangementStatus(
-        arrangement,
+        accepted,
         findWorkout(plan, entry.plan_workout_key)?.exercises ?? [],
       )
     : null;
-  const acceptedAt = arrangement
-    ? `${arrangement.accepted_at.slice(0, 10)} ${arrangement.accepted_at.slice(11, 16)}`
+  const acceptedAt = projected?.accepted_at
+    ? `${projected.accepted_at.slice(0, 10)} ${projected.accepted_at.slice(11, 16)}`
     : "";
+  const arrangementLabel = status
+    ? `${arrangementStatusLabel(status)}${acceptedAt ? ` · ${acceptedAt}` : ""}`
+    : projected
+      ? `已接受安排${acceptedAt ? ` · ${acceptedAt}` : ""}`
+      : "尚无安排";
   return (
     <>
       <Badge
@@ -319,38 +364,40 @@ function ScheduleBadge({
         {lockLabel}
       </Badge>
       <Badge
-        variant={status ? "secondary" : "outline"}
+        variant={status || projected ? "secondary" : "outline"}
         className="py-1"
-        title={status ? acceptedAt : undefined}
+        title={acceptedAt || undefined}
       >
-        {status
-          ? `${arrangementStatusLabel(status)} · ${acceptedAt}`
-          : "尚无安排"}
+        {arrangementLabel}
       </Badge>
     </>
   );
 }
 
-/** 具体日程（04 4.2/4.4）：当前版本条目；锁定用 locked_effective；安排只读联表 */
+/** 具体日程（04 4.2/4.4）：当前版本条目；锁定用 locked_effective；安排只读联表（前端投影） */
 function ScheduleSection({
   entries,
   plan,
-  arrangements,
+  arranged,
 }: {
   entries: PlanScheduleEntry[];
   plan: PlanPayload;
-  arrangements: AcceptedArrangement[];
+  arranged: Map<string, ProjectedArrangement>;
 }) {
-  const bySession = new Map(
-    arrangements.map((a) => [a.target.scheduled_session_id, a]),
+  // 联键优先 target.scheduled_session_id；target 自带 scheduled_on 仅作草稿证据的次级回退
+  // （安排快照声明的日程日期，不是从记录日期推断）
+  const byDate = new Map(
+    [...arranged.values()]
+      .filter((a) => a.target?.scheduled_on)
+      .map((a) => [a.target!.scheduled_on, a]),
   );
-  const byDate = new Map(arrangements.map((a) => [a.target.scheduled_on, a]));
   return (
     <section>
       <h4 className="text-sm font-medium">具体日程</h4>
       <p className="mt-1 text-xs text-muted-foreground">
         仅列当前版本的应训练日（休息日不排）；到期即锁（存储标记 ∪
-        日期规则）；安排状态联表自已接受安排。
+        日期规则）；安排状态由前端从已接受安排证据投影联表（A2，不走
+        /api/arrangements）。
       </p>
       <ul className="mt-2 flex flex-wrap gap-1.5">
         {entries.map((s) => (
@@ -364,7 +411,7 @@ function ScheduleSection({
             <ScheduleBadge
               entry={s}
               plan={plan}
-              arrangement={bySession.get(s.id) ?? byDate.get(s.date)}
+              projected={arranged.get(s.id) ?? byDate.get(s.date)}
             />
           </li>
         ))}
@@ -381,12 +428,12 @@ function PlanCard({
   plan,
   schedules,
   safety,
-  arrangements,
+  arranged,
 }: {
   plan: PlanVersion;
   schedules: PlanScheduleEntry[];
-  safety?: PlanSafetyReview;
-  arrangements: AcceptedArrangement[];
+  safety?: PlanSafetyWire;
+  arranged: Map<string, ProjectedArrangement>;
 }) {
   const blocks = derivePlanBlocks(plan.payload);
   const calibration = plan.payload.plan_workouts
@@ -421,7 +468,7 @@ function PlanCard({
           <ScheduleSection
             entries={currentSchedules}
             plan={plan.payload}
-            arrangements={arrangements}
+            arranged={arranged}
           />
         )}
       </CardContent>
@@ -429,13 +476,38 @@ function PlanCard({
   );
 }
 
-/** /profile 档案与限制：只读看板，业务变更唯一入口是对话 */
+/** /profile 档案与限制：只读看板；计划/安全改调 /api/plan + /api/plan/guidance（F1） */
 export default function ProfilePage() {
   const profile = useQuery({ queryKey: ["profile"], queryFn: getProfile });
-  const arrangements = useQuery({
-    queryKey: ["arrangements"],
-    queryFn: getArrangements,
+  const hasProfile = profile.data?.profile != null;
+
+  /** 计划与安全复核独立端点；未建档不请求 */
+  const planQuery = useQuery({
+    queryKey: ["plan"],
+    queryFn: getPlan,
+    enabled: hasProfile,
   });
+  const guidanceQuery = useQuery({
+    queryKey: ["plan-guidance"],
+    queryFn: () => getPlanGuidance(),
+    enabled: hasProfile,
+  });
+
+  const mappedPlan =
+    planQuery.data?.plan != null ? mapPlanView(planQuery.data.plan) : null;
+  const safety = guidanceQuery.data?.guidance?.safety;
+  const restrictions = mapProfileRestrictions(profile.data?.profile ?? null);
+  /**
+   * 安排联表（F6-02c 已拍 A2）：不调用 GET /api/arrangements；由前端投影推导。
+   * 生产路径缺项（不静默补造，见 src/lib/arrangements.ts 与 02c 报告）：
+   * - 真实后端无会话列表端点 → 本页无法枚举跨会话已提交安排草稿（drafts 暂为空）；
+   * - 记录传输契约无 scheduled_session_id → 记录证据联不到具体日程条目。
+   * 因此徽章默认「尚无安排」；拿到已知会话草稿后经 projectAcceptedArrangements 联表。
+   */
+  const arranged = useMemo(
+    () => projectAcceptedArrangements({ drafts: [] }),
+    [],
+  );
 
   return (
     <div className="mx-auto w-full max-w-3xl px-6 pb-10">
@@ -476,15 +548,20 @@ export default function ProfilePage() {
 
       {profile.data && profile.data.profile && (
         <>
+          {planQuery.isPending && <Loading text="正在加载计划" />}
+          {planQuery.isError && (
+            <LoadError text={`计划：${planQuery.error.message}`} />
+          )}
+
           <div className="grid gap-4 sm:grid-cols-2">
             <ProfileCard profile={profile.data.profile} />
-            <RestrictionsCard restrictions={profile.data.restrictions} />
-            {profile.data.plan ? (
+            <RestrictionsCard restrictions={restrictions} />
+            {mappedPlan ? (
               <PlanCard
-                plan={profile.data.plan}
-                schedules={profile.data.schedules ?? []}
-                safety={profile.data.plan_safety}
-                arrangements={arrangements.data?.arrangements ?? []}
+                plan={mappedPlan.plan}
+                schedules={mappedPlan.schedules}
+                safety={safety}
+                arranged={arranged}
               />
             ) : (
               <Card className="sm:col-span-2">

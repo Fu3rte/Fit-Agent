@@ -16,6 +16,7 @@ import type {
   TrainingRecord,
   TrainingRevision,
 } from "@/lib/contract";
+import { mapRecordList } from "@/lib/readModels";
 
 /** 归属徽章：新增 / 更正 */
 function KindBadge({ kind }: { kind: TrainingRecord["kind"] }) {
@@ -223,11 +224,12 @@ function RecordCard({ record }: { record: TrainingRecord }) {
   );
 }
 
-/** /records 训练记录：只读列表，日期倒序 */
+/** /records 训练记录：存储契约 → 扁平展示映射（F6），日期倒序 */
 export default function RecordsPage() {
-  const records = useQuery({ queryKey: ["records"], queryFn: getRecords });
-  const sorted = records.data?.records
-    ? [...records.data.records].sort((a, b) => b.date.localeCompare(a.date))
+  const wire = useQuery({ queryKey: ["records"], queryFn: getRecords });
+  const mapped = wire.data ? mapRecordList(wire.data.records) : null;
+  const sorted = mapped
+    ? [...mapped].sort((a, b) => b.date.localeCompare(a.date))
     : [];
 
   return (
@@ -241,16 +243,16 @@ export default function RecordsPage() {
         </p>
       </header>
 
-      {records.isPending && (
+      {wire.isPending && (
         <p className="mt-10 text-sm text-muted-foreground">正在加载记录…</p>
       )}
-      {records.isError && (
+      {wire.isError && (
         <p className="mt-10 text-sm text-destructive">
-          加载失败：{records.error.message}，请刷新重试。
+          加载失败：{wire.error.message}，请刷新重试。
         </p>
       )}
 
-      {records.data && sorted.length === 0 && (
+      {wire.data && sorted.length === 0 && (
         <p className="mt-10 text-sm text-muted-foreground">
           暂无训练记录；到对话页用自然语言打卡，确认后即在此显示。
         </p>
