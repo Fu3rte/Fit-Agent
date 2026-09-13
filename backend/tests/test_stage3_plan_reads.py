@@ -107,6 +107,7 @@ async def test_effective_lock_follows_the_business_date_rule(tmp_path: Path) -> 
         assert _session(day_before, STARTS_ON).lock.by_business_date is False
 
         on_the_day = await service.read_current_plan(business_date=STARTS_ON)
+        assert on_the_day is not None
         assert {
             item.session.scheduled_on
             for item in on_the_day.sessions

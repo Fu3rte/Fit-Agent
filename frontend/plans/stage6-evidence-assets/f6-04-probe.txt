@@ -1,0 +1,17 @@
+passed=10 failed=0
+# F6-04 probe — 2026-09-13T14:37:51.114Z
+# backend=D:\Repository\Fit_Agent\backend\.venv\Scripts\python.exe data_dir=C:\Users\Ericcc\AppData\Local\Temp\fit-agent-f6-04-mM69zv base=http://127.0.0.1:61020
+# loopback only; no real model / no real API key / empty DB
+
+PASS backend_ready — uvicorn http://127.0.0.1:61020
+PASS GET /api/profile → 200 profile=null (未建档) — status=200 profile=null keys=context_version,profile
+PASS PUT /api/profile → 404/405 (无公开建档入口) — status=405
+PASS POST /api/profile → 404/405 (无公开建档入口) — status=405
+PASS POST /api/sessions — status=200
+PASS GET /api/sessions/{id}/drafts → 200 [] — status=200 n=0
+PASS GET /api/drafts/nonexistent → 404 invalid_request — status=404 error_code=invalid_request
+PASS POST /api/drafts/nonexistent/confirm → 404 invalid_request — status=404 error_code=invalid_request
+PASS POST /api/drafts/nonexistent/revise → 404 invalid_request — status=404 error_code=invalid_request
+PASS GET /api/profile after mis-ops → profile still null — status=200 profile=null
+
+# summary: passed=10 failed=0

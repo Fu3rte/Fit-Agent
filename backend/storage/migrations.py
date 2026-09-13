@@ -21,12 +21,16 @@ DEFAULT_MIGRATIONS_DIR = Path(__file__).parent / "migrations"
 _NAME_PREFIX = re.compile(r"^(\d+)_")
 
 
-def load_migrations(migrations_dir: str | Path | None = None) -> list[tuple[int, str, str]]:
+def load_migrations(
+    migrations_dir: str | Path | None = None,
+) -> list[tuple[int, str, str]]:
     """加载并校验迁移脚本：返回按编号排序的 (version, 文件名, SQL) 列表。
 
     编号必须从 1 连续递增；组织错误在启动早期即失败，不执行任何脚本。
     """
-    directory = Path(migrations_dir) if migrations_dir is not None else DEFAULT_MIGRATIONS_DIR
+    directory = (
+        Path(migrations_dir) if migrations_dir is not None else DEFAULT_MIGRATIONS_DIR
+    )
     files = sorted(directory.glob("*.sql"))
     if not files:
         raise MigrationError(f"迁移目录没有 .sql 文件: {directory}")
@@ -37,7 +41,9 @@ def load_migrations(migrations_dir: str | Path | None = None) -> list[tuple[int,
             raise MigrationError(
                 f"迁移文件编号必须从 1 连续（期望 {expected_version:03d}_*.sql）: {path.name}"
             )
-        migrations.append((expected_version, path.name, path.read_text(encoding="utf-8")))
+        migrations.append(
+            (expected_version, path.name, path.read_text(encoding="utf-8"))
+        )
     return migrations
 
 

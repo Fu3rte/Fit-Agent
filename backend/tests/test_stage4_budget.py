@@ -228,6 +228,11 @@ class _ScriptedHandler(BaseHTTPRequestHandler):
         super().__init__(*args, **kwargs)  # type: ignore[arg-type]
 
     def do_POST(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler 接口名
+        # 先读完请求体再应答：否则 Windows 上服务端带未读数据关连接会 RST，
+        # 客户端在读响应体时偶发 ConnectionAborted，把 429+Retry-After 降级成连接错误（退避默认 1s）。
+        length = int(self.headers.get("Content-Length") or 0)
+        if length:
+            self.rfile.read(length)
         index = len(self._seen)
         self._seen.append(self.path)
         reply = self._replies[min(index, len(self._replies) - 1)]

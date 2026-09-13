@@ -47,7 +47,9 @@ async def _count(db, sql: str, params: tuple = ()) -> int:
     return await db.under_lock(op)
 
 
-async def _make_running_run(repo: RunRepo, conversation_id: str = "c1", run_id: str = "r1") -> str:
+async def _make_running_run(
+    repo: RunRepo, conversation_id: str = "c1", run_id: str = "r1"
+) -> str:
     await repo.create_conversation(conversation_id)
     await repo.create_run_with_user_message(
         conversation_id, run_id, f"cr-{run_id}", f"请求-{run_id}"
@@ -63,7 +65,9 @@ async def test_user_message_and_pending_run_created_together(tmp_path: Path) -> 
     async with open_database(tmp_path / "app.db") as db:
         repo = RunRepo(db)
         await repo.create_conversation("c1")
-        result = await repo.create_run_with_user_message("c1", "r1", "cr-1", "帮我安排训练")
+        result = await repo.create_run_with_user_message(
+            "c1", "r1", "cr-1", "帮我安排训练"
+        )
         assert result["created"] is True
         assert result["run"]["status"] == "pending"
 
@@ -88,7 +92,9 @@ async def test_duplicate_client_request_id_returns_existing_run(tmp_path: Path) 
         assert await _count(db, "SELECT COUNT(*) FROM messages") == 1
 
 
-async def test_concurrent_same_client_request_id_creates_one_set(tmp_path: Path) -> None:
+async def test_concurrent_same_client_request_id_creates_one_set(
+    tmp_path: Path,
+) -> None:
     async with open_database(tmp_path / "app.db") as db:
         repo = RunRepo(db)
         await repo.create_conversation("c1")
@@ -140,7 +146,9 @@ async def test_complete_requires_running_status(tmp_path: Path) -> None:
         assert run is not None and run["status"] == "pending"
 
 
-async def test_complete_run_commits_messages_and_completed_together(tmp_path: Path) -> None:
+async def test_complete_run_commits_messages_and_completed_together(
+    tmp_path: Path,
+) -> None:
     async with open_database(tmp_path / "app.db") as db:
         repo = RunRepo(db)
         await _make_running_run(repo)
@@ -251,7 +259,9 @@ async def test_complete_and_cancel_cannot_both_succeed(tmp_path: Path) -> None:
             assert len(await repo.list_framework_messages("r1")) == 1
         else:
             assert run["status"] == "cancelled"
-            assert [e["event_type"] for e in await repo.list_run_events("r1")] == ["cancelled"]
+            assert [e["event_type"] for e in await repo.list_run_events("r1")] == [
+                "cancelled"
+            ]
             assert await repo.list_framework_messages("r1") == []
 
 
@@ -272,7 +282,9 @@ async def test_failed_cancel_leaves_no_cancelled_event(tmp_path: Path) -> None:
 # ---------- 验收 5：重开数据库读取全部记录，partial 与 framework 可区分 ----------
 
 
-async def test_reopen_reads_conversation_messages_run_events_partials(tmp_path: Path) -> None:
+async def test_reopen_reads_conversation_messages_run_events_partials(
+    tmp_path: Path,
+) -> None:
     path = tmp_path / "app.db"
     async with open_database(path) as db:
         repo = RunRepo(db)
@@ -294,7 +306,10 @@ async def test_reopen_reads_conversation_messages_run_events_partials(tmp_path: 
         assert kinds == ["user_request", "partial", "partial"]
         # 部分回答可区分于完整成功 Assistant 消息：kind='partial' 独立读取，
         # 本 Run 无 framework 行，完整成功回答只来自 completed Run 的 framework 行
-        assert [m["role"] for m in messages if m["kind"] == "partial"] == ["assistant", "assistant"]
+        assert [m["role"] for m in messages if m["kind"] == "partial"] == [
+            "assistant",
+            "assistant",
+        ]
         partials = await repo.list_partial_answers("r1")
         assert [p["text"] for p in partials] == ["部分一", "部分二"]
         assert await repo.list_framework_messages("r1") == []
@@ -328,7 +343,9 @@ async def test_retry_pointer_persisted_across_reopen(tmp_path: Path) -> None:
 # ---------- 验收 7：原生 JSON 往返、多请求/响应与工具顺序、本 Run 增量 ----------
 
 
-async def test_framework_messages_roundtrip_order_and_run_increment(tmp_path: Path) -> None:
+async def test_framework_messages_roundtrip_order_and_run_increment(
+    tmp_path: Path,
+) -> None:
     path = tmp_path / "app.db"
     async with open_database(path) as db:
         repo = RunRepo(db)
@@ -359,7 +376,9 @@ async def test_framework_messages_roundtrip_order_and_run_increment(tmp_path: Pa
         # 原生 JSON 往返等价 + 多请求/响应与工具调用/结果顺序保持
         assert restored == originals
         call_part, return_part = restored[2].parts[0], restored[3].parts[0]
-        assert isinstance(call_part, ToolCallPart) and isinstance(return_part, ToolReturnPart)
+        assert isinstance(call_part, ToolCallPart) and isinstance(
+            return_part, ToolReturnPart
+        )
         assert call_part.tool_call_id == return_part.tool_call_id == "call-1"
         assert [row["seq"] for row in rows] == sorted(row["seq"] for row in rows)
         # 用户请求关联：框架行与本 Run 关联，应用事实 user_request 行同属本 Run
@@ -371,10 +390,15 @@ async def test_framework_messages_roundtrip_order_and_run_increment(tmp_path: Pa
         # 本 Run 增量：同一会话第二个 Run 只追加自己的新消息
         await repo.create_run_with_user_message("c1", "r2", "cr-2", "第二个请求")
         await repo.start_run("r2")
-        await repo.complete_run("r2", [("assistant", dump_framework_message(text_response("答二")))])
+        await repo.complete_run(
+            "r2", [("assistant", dump_framework_message(text_response("答二")))]
+        )
         assert len(await repo.list_framework_messages("r1")) == 5
         assert len(await repo.list_framework_messages("r2")) == 1
-        assert await _count(db, "SELECT COUNT(*) FROM messages WHERE conversation_id='c1'") == 8
+        assert (
+            await _count(db, "SELECT COUNT(*) FROM messages WHERE conversation_id='c1'")
+            == 8
+        )
 
 
 # ---------- 验收 8：取消先提交，晚到快照/成功结果拒写且此前记录可读 ----------
@@ -396,7 +420,9 @@ async def test_late_frames_after_committed_cancel_rejected_prior_records_intact(
 
         # 晚到框架运行快照
         with pytest.raises(RunStateConflict):
-            await repo.append_run_events("r1", [("framework_snapshot", {"messages": ["late"]})])
+            await repo.append_run_events(
+                "r1", [("framework_snapshot", {"messages": ["late"]})]
+            )
         # 迟到成功结果
         late_payload = dump_framework_message(text_response("迟到成功回答"))
         with pytest.raises(RunStateConflict):
@@ -419,7 +445,9 @@ async def test_late_frames_after_committed_cancel_rejected_prior_records_intact(
         # 此前保存的请求、部分回答与事件仍可读取
         messages = await repo.list_messages("c1")
         assert messages[0]["kind"] == "user_request"
-        assert [p["text"] for p in await repo.list_partial_answers("r1")] == ["已落盘部分"]
+        assert [p["text"] for p in await repo.list_partial_answers("r1")] == [
+            "已落盘部分"
+        ]
 
 
 # ---------- 边界补充：NotFound ----------

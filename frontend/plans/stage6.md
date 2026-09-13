@@ -108,8 +108,8 @@
 - **依赖**：F6-00；S4-01–08 既有实现。
 - **验收标准**：作废后追加更正被 `invalid_request` 拒绝；设置路由只回 `has_api_key`；`npm run build` 产物可被后端托管并打开五页；pytest 全绿（无新增 skip 掩盖联调缺口）。
 - **验证方式**：后端自动化 + 回环 curl 冒烟；证据归 `pre-prj/stage/evidence/`（后端侧）。
-- **实现状态**：**F6-01 后端完成（2026-09-13 owner 拍 A；归后端 owner；日期按实测 UTC 时间戳，见 S4-evidence §3 C 小节与新拍板小节）**：四项均已实现并有后端证据——（1）作废终态拦截＋定向回归（`tests/test_stage3_record_confirm.py` 11 passed）；（2）`GET/PUT/DELETE /api/provider` 只回 `has_api_key` 与只读展示（`tests/test_provider_settings_api.py` **6 passed**，Subtask C 复跑当前字节；初版 4 例）；（3）`frontend/dist` 静态托管＋SPA 回退（`tests/test_frontend_static.py` 3 passed）；（4）Stage 6 OpenAI 兼容 Provider 运行时适配＋USD 50 持久费用账本（`tests/test_stage6_provider_runtime.py` **19 passed**；全量门 **952 passed**／34.70s 为结算边界修复后当前字节，Subtask C 复跑）。**2026-09-13 precommit 自动门（当前字节）**：全量门 **953 passed**（33.89s，exit 0）、27 个改动／未跟踪 Python 文件 ruff check＋format --check＋pyright（1.1.411，0 errors／0 warnings／0 informations）全过、`npm run build` exit 0（`✓ built in 3.81s`）、F6-02 探针复跑 **15 PASS／0 FAIL／0 SKIP**（归档已更新）、`git diff --check` 通过且无 staged；当前 diff 为待提交 checkpoint（未提交）。**2026-09-13 Subtask C 协议级联调**：`npm run build` 重建 dist（`✓ built in 4.40s`）、F6-02 回环探针 **15 PASS／0 FAIL／0 SKIP**、窄回环 27 项全过、定向协议 pytest 113 passed，见 `pre-prj/stage/evidence/S4-evidence.md` §1／§3。**2026-09-13 Subtask D 真实模型最小联调**：真实 Stage 6 兼容端点 **4 Runs／9 个模型响应行**全部 completed、累计账本 **$0.01963052**（USD 50 内；授权批账本目录唯一 `/tmp/fit-agent-stage6-d`）；smoke 真实流式＋真实 usage＋结算、可见 SSE 无思考标记、草稿行随 Run 落盘（通知即时顺序由离线用例固定）、会话查询恢复与复盘 `GET /api/reviews` 取正文均通过（见 S4-evidence §1／§3「Subtask D」）；草稿工具描述已补 `Fact` 三态词表＋离线断言（校验未改；真实模型复验未做）。**豁免项（不阻塞 F6-01 后端完成；仍是本阶段未执行证据缺口，不得当 PASS）**：真实浏览器打开五页走查未做（仅 HTTP 路由级验证 SPA 回退；浏览器 SSE／断线恢复未验）；设置页 UI 录入闭环（F6-03+）与完整业务剧本（F6-04–F6-08）未开始；Windows（F6-10）未验。完成判定依据：owner 2026-09-13 拍 A（自动化＋协议级＋真实模型最小联调），正本见 `pre-prj/stage/evidence/S4-evidence.md` §3「2026-09-13 owner 拍板：S4-09 后端任务完成判定」。
-- **历史状态**：2026-09-13 backend 全量回滚后曾记「未完成，归后端 owner；此前『已完成』作废」；本行按当日重做的后端底座＋Subtask C 协议验证＋Subtask D 真实最小联调更新（日期按实测 UTC 时间戳）；同日 owner 拍 A 后本项后端部分封口，浏览器／UI／Windows 缺口转入 F6-03–F6-10。
+- **实现状态**：**F6-01 后端完成（2026-09-13 owner 拍 A；归后端 owner；日期按实测 UTC 时间戳，见 S4-evidence §3 C 小节与新拍板小节）**：四项均已实现并有后端证据——（1）作废终态拦截＋定向回归（`tests/test_stage3_record_confirm.py` 11 passed）；（2）`GET/PUT/DELETE /api/provider` 只回 `has_api_key` 与只读展示（`tests/test_provider_settings_api.py` **6 passed**，Subtask C 复跑当前字节；初版 4 例）；（3）`frontend/dist` 静态托管＋SPA 回退（`tests/test_frontend_static.py` 3 passed）；（4）Stage 6 OpenAI 兼容 Provider 运行时适配＋USD 50 持久费用账本（`tests/test_stage6_provider_runtime.py` **19 passed**；全量门 **952 passed**／34.70s 为结算边界修复后当前字节，Subtask C 复跑）。**2026-09-13 precommit 自动门（当前字节）**：全量门 **953 passed**（33.89s，exit 0）、27 个改动／未跟踪 Python 文件 ruff check＋format --check＋pyright（1.1.411，0 errors／0 warnings／0 informations）全过、`npm run build` exit 0（`✓ built in 3.81s`）、F6-02 探针复跑 **15 PASS／0 FAIL／0 SKIP**（归档已更新）、`git diff --check` 通过且无 staged；当前 diff 为待提交 checkpoint（未提交）。**2026-09-13 Subtask C 协议级联调**：`npm run build` 重建 dist（`✓ built in 4.40s`）、F6-02 回环探针 **15 PASS／0 FAIL／0 SKIP**、窄回环 27 项全过、定向协议 pytest 113 passed，见 `pre-prj/stage/evidence/S4-evidence.md` §1／§3。**2026-09-13 Subtask D 真实模型最小联调**：真实 Stage 6 兼容端点 **4 Runs／9 个模型响应行**全部 completed、累计账本 **$0.01963052**（USD 50 内；授权批账本目录唯一 `/tmp/fit-agent-stage6-d`）；smoke 真实流式＋真实 usage＋结算、可见 SSE 无思考标记、草稿行随 Run 落盘（通知即时顺序由离线用例固定）、会话查询恢复与复盘 `GET /api/reviews` 取正文均通过（见 S4-evidence §1／§3「Subtask D」）；草稿工具描述已补 `Fact` 三态词表＋离线断言（校验未改；真实模型复验未做）。**豁免项（不阻塞 F6-01 后端完成；仍是本阶段未执行证据缺口，不得当 PASS）**：真实浏览器打开五页走查未做（仅 HTTP 路由级验证 SPA 回退；浏览器 SSE／断线恢复未验）；设置页 UI 录入闭环（F6-03+）与完整业务剧本（F6-04–F6-08）未开始；Windows（F6-10）未验。完成判定依据：owner 2026-09-13 拍 A（自动化＋协议级＋真实模型最小联调），正本见 `pre-prj/stage/evidence/S4-evidence.md` §3「2026-09-13 owner 拍板：S4-09 后端任务完成判定」。**2026-09-14 验收门重跑（F6-01g，不改业务代码）**：初跑 FAIL（全量 pytest 1 failed／952 passed——Windows 假服务端 429 fixture 未读请求体致 RST flake；ruff 业务范围 format 4 files；pyright 既有 1 error）；fix 后复验**全量 953 passed**、业务范围 ruff check＋format --check＋pyright 全绿、`npm run build` exit 0、f6-02 探针 **15 PASS／0 FAIL／0 SKIP**；429 根因为 fixture flake（WinError 10053→APIConnectionError→默认退避 1s），断言语义未动（`delays == [7.0]` 保持）；证据：`stage6-evidence-assets/f6-01g-rerun.md`／`f6-01g-fix.md`／`f6-01g-fix-review.md`（PASS_WITH_NOTES）。**仍判后端完成；不构成 Stage 6 结项。**
+- **历史状态**：2026-09-13 backend 全量回滚后曾记「未完成，归后端 owner；此前『已完成』作废」；本行按当日重做的后端底座＋Subtask C 协议验证＋Subtask D 真实最小联调更新（日期按实测 UTC 时间戳）；同日 owner 拍 A 后本项后端部分封口，浏览器／UI／Windows 缺口转入 F6-03–F6-10；2026-09-14 F6-01g 验收门重跑＋429 fixture 修复后全量 953 passed 复验通过，后端完成判定不变。
 
 ### F6-02：前端真实 API 适配
 
@@ -137,7 +137,7 @@
 - **验收标准**：录入后查询仅 `has_api_key=true`；删除后 `false` 且跨重启一致；网络响应、浏览器控制台、后端日志抽样无 Key 明文；冒烟通过或失败原因可复现。
 - **验证方式**：协议探针 `f6-03` + owner 浏览器走查 + 可选单轮冒烟；日志抽样人工核对。
 - **验证证据**：探针输出 + 走查记录 + usage/费用汇总；不落 Key 值。
-- **实现状态增量（2026-09-13，后端 Subtask D）**：最小真实连通冒烟已由后端证据脚本在临时数据目录执行（4 Runs／9 个模型响应行／累计 $0.01963，经生产 Provider／profile／费用账本；见 S4-evidence §3「Subtask D」）；本批账本／数据目录为 `/tmp/fit-agent-stage6-d`（**唯一**；换新 `--data-dir` 只会另起一份 $50 账本，**不构成新的付费调用授权**）；**设置页 UI 录入闭环与 owner 浏览器走查仍未做**，F6-03 不标完成。
+- **实现状态**：**已完成（2026-09-14）**。证据正本：[stage6-evidence.md](stage6-evidence.md)。协议探针 `f6-03` **14 PASS／0 FAIL**；设置页路径真实冒烟 **PASS**（`qwen3.7-flash`，≈USD 0.00053）；owner 浏览器走查 **通过（口述确认，无截图）**。历史：Subtask D 另有 Linux 侧最小联调（见 S4-evidence）。
 
 ### F6-04：建档闭环（真实）
 
@@ -145,6 +145,7 @@
 - **依赖**：F6-02。
 - **验收标准**：确认前正式档案不变；缺失事实不编造；确认幂等；失败不半写；对话仍是唯一变更入口。
 - **验证方式**：真实后端协议探针 `f6-04` + owner 浏览器剧本。
+- **实现状态**：**已完成（2026-09-14）**。证据正本：[stage6-evidence.md](stage6-evidence.md)。协议探针 `f6-04` **10 PASS／0 FAIL**；真实建档闭环 **8/8 PASS**（≈USD 0.00179）；owner 浏览器走查 **通过（口述确认，无截图）**。
 
 ### F6-05：计划启用闭环（真实）
 
@@ -267,7 +268,7 @@ B 档改 Provider 范围已写入：`PLAN.md`（技术栈表 + 未拍索引）�
 - [x] owner 明示「按 stage6.md 开工」（F6-00–02 已实施，2026-09-13）
 - [x] F6-00 + F6-02 前端侧完成，传输对照表冻结且前端无 mock 私有生产调用（F3 后 mock 已删）（2026-09-13，复审 PASS_WITH_NOTES；F6-01 后端另判完成，见下行）
 - [x] F6-01 后端完成（2026-09-13 owner 拍 A，依据自动化＋协议级＋真实模型最小联调）：作废终态、Provider 路由、静态托管、Stage 6 Provider 运行时＋USD 50 费用账本**已实现**（2026-09-13；费用定向 19 passed／全量门 **952 passed**＝结算边界修复后当前字节）；协议级联调已验（Subtask C：`npm run build` 重建＋f6-02 探针 15 PASS＋窄回环 27 项＋定向协议 pytest 113 passed）；**真实模型最小联调已由 Subtask D 执行**（4 Runs／$0.01963：smoke＋草稿行落盘（即时顺序离线验证）＋会话恢复＋复盘查询；本批账本目录 `/tmp/fit-agent-stage6-d` 为唯一）；**豁免项（不阻塞 F6-01 后端完成；仍是本阶段未执行证据缺口，不得当 PASS）：真实浏览器打开五页走查与浏览器 SSE／断线恢复、设置页 UI 闭环（F6-03+）、完整业务剧本（F6-04–F6-08）、Windows（F6-10）**（后端侧证据见 `pre-prj/stage/evidence/S4-evidence.md` §1／§2 S4-09 行／§3「Subtask D」与新拍板小节）；2026-09-13 precommit 自动门（当前字节）：全量门 **953 passed**／ruff＋format＋pyright 全过／`npm run build` exit 0／f6-02 **15 PASS**／无 staged——可作 checkpoint 提交候选（未提交）
-- [ ] F6-03–F6-07 主闭环在真实后端通过（含 `qwen3.7-flash` 或 env 实际模型；费用计入 USD 50；授权批账本目录唯一——换新数据目录只另起一份账本、不构成新的调用授权）
+- [ ] F6-03–F6-07 主闭环在真实后端通过（含 `qwen3.7-flash` 或 env 实际模型；费用计入 USD 50；授权批账本目录唯一——换新数据目录只另起一份账本、不构成新的调用授权）。**F6-03、F6-04 已完成（2026-09-14，见 stage6-evidence.md）；F6-05–07 未做，本行未勾**
 - [ ] F6-09 安全/失败/重启清单通过或缺口入证据
 - [ ] F6-10 Windows 清单实测完成，版本一致
 - [ ] F6-11 `stage6-evidence.md` 归档；build/pytest/探针退出码齐全
