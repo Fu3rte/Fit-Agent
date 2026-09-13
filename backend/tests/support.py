@@ -8,6 +8,7 @@
 """
 
 import http.client
+import json
 import os
 import socket
 import subprocess
@@ -50,6 +51,44 @@ async def open_database(
         yield db
     finally:
         await db.close()
+
+
+async def seed_legacy_run(
+    db: Database,
+    *,
+    conversation_id: str,
+    run_id: str,
+    client_request_id: str,
+    text: str,
+) -> None:
+    """按 001 原生的 conversations／runs／messages 结构直写一条旧运行时行。
+
+    当前 ``RunRepo`` 的 INSERT 带 015 迁移的 ``kind`` 列，无法在升级前的旧字库里造种子；
+    本助手用与 001 同形的参数化 SQL 造出旧行（含用户请求消息），供旧库升级保留性用例使用。
+    """
+    now = FIXED_TS.isoformat()
+    async with db.transaction() as conn:
+        await conn.execute(
+            "INSERT INTO conversations (id, created_at) VALUES (?, ?)",
+            (conversation_id, now),
+        )
+        await conn.execute(
+            "INSERT INTO runs (id, conversation_id, client_request_id, status,"
+            " error_code, retry_of_run_id, created_at, updated_at)"
+            " VALUES (?, ?, ?, 'pending', NULL, NULL, ?, ?)",
+            (run_id, conversation_id, client_request_id, now, now),
+        )
+        await conn.execute(
+            "INSERT INTO messages (conversation_id, run_id, seq, role, kind,"
+            " payload_json) VALUES (?, ?, 1, 'user', 'user_request', ?)",
+            (conversation_id, run_id, json.dumps({"text": text}, ensure_ascii=False)),
+        )
+        # 旧字库的 run_events 与 001 同形：升级后由 repo 读回验证事件保留。
+        await conn.execute(
+            "INSERT INTO run_events (run_id, event_type, payload_json, created_at)"
+            " VALUES (?, 'note', ?, ?)",
+            (run_id, json.dumps({"legacy": True}, ensure_ascii=False), now),
+        )
 
 
 def dump_framework_message(message: ModelMessage) -> str:

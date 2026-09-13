@@ -279,6 +279,8 @@ _PROFILE_WIRING_ALLOWED_IN_API = frozenset({"dto.py", "routes_readonly.py"})
 # 应用层服务读草稿生成基线（08 8.6「当前事实每 Run 重读」、01 1.3），故 runtime/ 的上下文与
 # 工具接线同口径引用档案领域；它们只读档案与版本、不写档案、不推进 `context_version`。写入与
 # 推进仍由上方 `_PROFILE_WRITE_SQL` 旁路守卫与版本唯一推进点守卫全仓锁死。
+# S4-08 的重算资格（Q2=A）只读当前 ``context_version``，经应用层 ``DraftService`` 走既有
+# 生成基线入口，不在 runtime 另开档案领域引用。
 _PROFILE_WIRING_ALLOWED_IN_RUNTIME = frozenset({"context.py", "tools.py"})
 _PROFILE_DOMAIN_REFERENCES = ("domain.profile", "ProfileService", "ProfileRepo")
 

@@ -118,6 +118,7 @@ class RecordDraftView:
     status: RecordRevisionStatus
     baseline: RecordDraftPayload | None
     diff: tuple[RecordFieldDiff, ...]
+    parent_diff: tuple[RecordFieldDiff, ...] | None = None
 
 
 class RecordDraftService:
@@ -168,6 +169,7 @@ class RecordDraftService:
         completion_declared: bool = False,
         is_return_phase: bool = False,
         feedback: dict[str, Any] | None = None,
+        parent_draft_id: str | None = None,
     ) -> RecordDraftView:
         """按准备快照保存一条 Pending 记录草稿（revision 从 1 起），返回查询形态。
 
@@ -214,6 +216,7 @@ class RecordDraftService:
             ),
             proposed_record_json=record_draft_to_json(payload),
             base_business_version=preparation.snapshot.context_version,
+            parent_draft_id=parent_draft_id,
         )
         return await self._to_view(draft)
 
@@ -405,12 +408,22 @@ class RecordDraftService:
         if draft.base_profile_json is not None:
             profile_from_json(draft.base_profile_json)
         baseline = await self._read_baseline(payload)
+        parent_diff = None
+        if draft.parent_draft_id is not None:
+            parent = await self._drafts.get(draft.parent_draft_id)
+            if parent is None:
+                raise InvalidDraftRow(
+                    f"重算子草稿的旧草稿不存在：{draft.parent_draft_id}"
+                )
+            parent_payload = record_draft_from_json(_require_record_json(parent))
+            parent_diff = record_draft_diff(parent_payload, payload)
         return RecordDraftView(
             draft=draft,
             payload=payload,
             status=record_draft_status(payload),
             baseline=baseline,
             diff=record_draft_diff(baseline, payload),
+            parent_diff=parent_diff,
         )
 
     async def _read_baseline(

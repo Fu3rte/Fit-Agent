@@ -25,6 +25,7 @@
 
 from collections.abc import Mapping
 from dataclasses import dataclass
+from typing import Any
 
 from app.draft_repo import Draft, DraftRepo, InvalidDraftRow
 from app.drafts import DraftKindMismatch, require_draft_source
@@ -41,6 +42,7 @@ from domain.plan.rules import (
 from domain.plan.schema import (
     ArrangementTarget,
     InvalidPlanRow,
+    PlanExerciseItem,
     PlanWorkout,
     arrangement_target_from_json,
     arrangement_target_to_json,
@@ -74,13 +76,40 @@ class ArrangementPreparation:
 
 
 @dataclass(frozen=True, slots=True)
+class ArrangementFieldDiff:
+    """单个安排字段的「基线 → 拟议」对比；形状与计划／记录 FieldDiff 一致。
+
+    ``field`` 取 ``exercises``（完整动作集合，结构化保留处方与处置）与
+    ``adjustment_reason``；绑定身份（``scheduled_session_id``／``plan_version_id``／
+    ``plan_workout_key``／``scheduled_on``）不进 Diff：它是草稿身份与绑定，不是业务内容
+    改动（与记录 Diff 排除 ``training_session_id`` 同口径）。``before`` 为 None（无基线）与
+    空集合不是同一语义。
+    """
+
+    field: str
+    before: Any
+    after: Any
+
+    @property
+    def changed(self) -> bool:
+        """基线与拟议是否不同；无基线（None）与空集合仍可区分。"""
+        return self.before != self.after
+
+
+#: 安排 Diff 的对比基线：绑定版本的正式计划训练日，或重算子草稿对应的旧草稿当次目标
+#: （两者都有相同的完整动作集合字段，与计划 ``PlanDiffBaseline`` 同一约定）。
+ArrangementDiffBaseline = ArrangementTarget | PlanWorkout
+
+
+@dataclass(frozen=True, slots=True)
 class ArrangementDraftView:
-    """安排草稿的当前查询形态：行数据 + 当次完整目标 + 绑定版本的计划目标。
+    """安排草稿的当前查询形态：行数据 + 当次完整目标 + 绑定版本的计划目标 + 结构化 Diff。
 
     ``base_profile is None`` 表示准备时未建档；``planned_workout`` 是绑定版本里该训练日的
     原始目标（原计划），``target`` 是当次完整目标（原计划加已接受调整）；未接受前两者只在
     草稿里，不写正式表。``session`` 含存储锁定与取消状态：安排确认与日程锁定分离，锁定不
-    影响接受，取消才拒绝（04 4.2/4.3）。
+    影响接受，取消才拒绝（04 4.2/4.3）。``diff`` 是「拟议 → 正式业务数据」，
+    ``parent_diff`` 只在重算子草稿上给出「旧草稿 → 新草稿」（01 1.6）。
     """
 
     draft: Draft
@@ -89,6 +118,8 @@ class ArrangementDraftView:
     plan_version: PlanVersionRecord
     session: ScheduledSessionRecord
     planned_workout: PlanWorkout
+    diff: tuple[ArrangementFieldDiff, ...]
+    parent_diff: tuple[ArrangementFieldDiff, ...] | None = None
 
 
 def require_arrangement_safety(
@@ -182,6 +213,7 @@ class ArrangementDraftService:
         scheduled_session_id: str,
         adjustments: tuple[ArrangementAdjustment, ...] = (),
         adjustment_reason: str | None = None,
+        parent_draft_id: str | None = None,
     ) -> ArrangementDraftView:
         """按准备快照保存一条 Pending 安排草稿（revision 从 1 起），返回查询形态。
 
@@ -249,6 +281,7 @@ class ArrangementDraftService:
             ),
             proposed_arrangement_json=arrangement_target_to_json(target),
             base_business_version=preparation.snapshot.context_version,
+            parent_draft_id=parent_draft_id,
         )
         return await self._to_view(draft)
 
@@ -300,6 +333,17 @@ class ArrangementDraftService:
             workout=planned,
             catalog={exercise.id: exercise for exercise in catalog},
         )
+        parent_diff = None
+        if draft.parent_draft_id is not None:
+            parent = await self._drafts.get(draft.parent_draft_id)
+            if parent is None:
+                raise InvalidDraftRow(
+                    f"重算子草稿的旧草稿不存在：{draft.parent_draft_id}"
+                )
+            parent_target = arrangement_target_from_json(
+                _require_arrangement_json(parent)
+            )
+            parent_diff = arrangement_field_diff(target, parent_target)
         return ArrangementDraftView(
             draft=draft,
             base_profile=(
@@ -311,6 +355,8 @@ class ArrangementDraftService:
             plan_version=version,
             session=session,
             planned_workout=planned,
+            diff=arrangement_field_diff(target, planned),
+            parent_diff=parent_diff,
         )
 
 
@@ -319,6 +365,36 @@ def _require_arrangement_json(draft: Draft) -> str:
     if draft.proposed_arrangement_json is None:
         raise InvalidDraftRow(f"安排草稿缺少目标快照：{draft.id}")
     return draft.proposed_arrangement_json
+
+
+def arrangement_field_diff(
+    target: ArrangementTarget, baseline: ArrangementDiffBaseline | None
+) -> tuple[ArrangementFieldDiff, ...]:
+    """拟议当次目标相对基线的结构化字段对比；无基线时 ``before`` 为 None（不伪造旧值）。
+
+    基线可以是绑定版本该训练日的正式计划目标（「拟议 → 正式业务数据」），也可以是旧草稿的
+    当次目标（重算子草稿的「旧草稿 → 新草稿」，01 1.6）；两者都有完整动作集合，复用同一
+    入口，不另造第二套 Diff 逻辑（与计划 :func:`plan_drafts.plan_field_diff` 同一约定）。
+    """
+    if baseline is None:
+        before_exercises: tuple[PlanExerciseItem, ...] | None = None
+        before_reason: str | None = None
+    elif isinstance(baseline, ArrangementTarget):
+        before_exercises = baseline.exercises
+        before_reason = baseline.adjustment_reason
+    else:
+        before_exercises = baseline.exercises
+        before_reason = None  # 正式计划训练日不是草稿，没有调整说明
+    return (
+        ArrangementFieldDiff(
+            field="exercises", before=before_exercises, after=target.exercises
+        ),
+        ArrangementFieldDiff(
+            field="adjustment_reason",
+            before=before_reason,
+            after=target.adjustment_reason,
+        ),
+    )
 
 
 def require_arrangement_binding(

@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import json
 import math
-from collections.abc import Iterable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Protocol
 
@@ -387,6 +387,7 @@ class ContextCompressor:
         conversation_id: str,
         run_id: str,
         tool_characters: int = 0,
+        on_compression: Callable[[str], None] | None = None,
     ) -> None:
         self._summaries = summaries
         self._harness = harness
@@ -396,7 +397,13 @@ class ContextCompressor:
         self._conversation_id = conversation_id
         self._run_id = run_id
         self._tool_characters = tool_characters
+        self._on_compression = on_compression
         self._attempted_signature: str | None = None
+
+    def _notify_compression(self, state: str) -> None:
+        """压缩状态通知（S4-07 传输观察者）：只告知展示层，不改变压缩决策与提交。"""
+        if self._on_compression is not None:
+            self._on_compression(state)
 
     @property
     def attempted(self) -> bool:
@@ -455,32 +462,37 @@ class ContextCompressor:
         )
         if plan is None:
             return None
+        # 压缩状态事件（S4-07）：只在真要开始整理时告知展示层，结束必发（含放弃后保留旧上下文）。
+        self._notify_compression("started")
         try:
-            content = await self._generate(plan, summary)
-            if content is None:
-                return None  # 空摘要不算成功：保留旧上下文
-            # 取消先发生则不提交（存储层还会在事务内再次条件校验 Run 状态）。
-            self._budget.require_running()
-            await self._summaries.commit_summary(
-                run_id=self._run_id,
-                content=content,
-                covered_from_seq=plan.covered_from_seq,
-                covered_to_seq=plan.covered_to_seq,
-                source_message_ids=list(plan.source_message_ids),
+            try:
+                content = await self._generate(plan, summary)
+                if content is None:
+                    return None  # 空摘要不算成功：保留旧上下文
+                # 取消先发生则不提交（存储层还会在事务内再次条件校验 Run 状态）。
+                self._budget.require_running()
+                await self._summaries.commit_summary(
+                    run_id=self._run_id,
+                    content=content,
+                    covered_from_seq=plan.covered_from_seq,
+                    covered_to_seq=plan.covered_to_seq,
+                    source_message_ids=list(plan.source_message_ids),
+                )
+            except ExecutionFailure:
+                # 可恢复的生成／容量失败：保留旧上下文继续；放不下时由普通容量闸结束。
+                return None
+            # 提交成功才启用：新摘要 + 保留尾段的投影，锚点随上下文重写失效。
+            self._estimator.clear()
+            history = projected_message_history(
+                facts_request=facts_request,
+                interactions=plan.remaining,
+                summary_content=content,
             )
-        except ExecutionFailure:
-            # 可恢复的生成／容量失败：保留旧上下文继续；放不下时由普通容量闸结束。
-            return None
-        # 提交成功才启用：新摘要 + 保留尾段的投影，锚点随上下文重写失效。
-        self._estimator.clear()
-        history = projected_message_history(
-            facts_request=facts_request,
-            interactions=plan.remaining,
-            summary_content=content,
-        )
-        return RequestProjection(
-            tuple(history), self._estimate(history, user_text), compressed=True
-        )
+            return RequestProjection(
+                tuple(history), self._estimate(history, user_text), compressed=True
+            )
+        finally:
+            self._notify_compression("finished")
 
     async def _generate(
         self, plan: SummaryPlan, previous: ActiveSummary | None

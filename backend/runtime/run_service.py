@@ -14,6 +14,8 @@
 from collections.abc import Callable
 from typing import Any
 
+from app.draft_repo import DraftRepo
+from app.drafts import DraftNotCorrectable, DraftService
 from runtime.error_codes import INTERRUPTED_BY_RESTART, ORDINARY_FAILURE_CODES
 from storage.errors import InvalidInput, NotFound
 from storage.run_repo import RunRepo
@@ -24,14 +26,23 @@ RunRecord = dict[str, Any]
 class RunService:
     """全局单 Run 的请求入口（HTTP 与执行驱动的唯一前置编排）。"""
 
+    _repo: RunRepo
+    _active_execution: Callable[[], str | None] | None
+    _drafts: DraftRepo | None
+    _baseline: DraftService | None
+
     def __init__(
         self,
         repo: RunRepo,
         *,
         active_execution: Callable[[], str | None] | None = None,
+        drafts: DraftRepo | None = None,
+        baseline: DraftService | None = None,
     ) -> None:
         self._repo = repo
         self._active_execution = active_execution
+        self._drafts = drafts
+        self._baseline = baseline
 
     def _slot_holder(self) -> str | None:
         """进程内仍占执行名额的 Run（S4-03 draining）；未接入探针时为 ``None``。"""
@@ -56,6 +67,79 @@ class RunService:
             run_id,
             client_request_id,
             text,
+            active_execution=self._slot_holder(),
+        )
+
+    async def regenerate_draft(
+        self,
+        *,
+        parent_draft_id: str,
+        run_id: str,
+        client_request_id: str,
+    ) -> dict[str, Any]:
+        """重新生成草稿（S4-08 Q1=C/Q2=A）：旧草稿身份 → 新 Run，绝不修改旧草稿。
+
+        - **幂等**：已有 Pending 子草稿（按 ``parent_draft_id`` 匹配）时直接返回其来源 Run，
+          ``created=False``，不启动第二次执行；子草稿进入终态（已确认／已丢弃）后允许再生成。
+          同一 ``client_request_id`` 的重复提交由 ``create_recalc_run`` 在同一事务内先于 busy
+          返回已有 Run——子草稿尚未产生时也幂等，不建第二个 Run、不重启执行。
+        - **资格**：旧草稿必须仍 Pending 且过期（``base_business_version`` 与当前
+          ``context_version`` 不符）；已确认／已丢弃／已是最新的旧草稿拒绝（409
+          ``invalid_request``），不新建 Run，也不改动旧草稿。
+        - **全局单 Run**：与对话 Run 共用 :meth:`RunRepo.create_recalc_run` 的同事务幂等与 busy
+          判定（draining 名额同样计入），不建第二套状态机。
+
+        返回 ``{"created", "run", "parent"}``；``parent`` 供调用方构造执行入口（同一次读取，
+        不接受调用方另传旧草稿内容）。
+        """
+        if self._drafts is None or self._baseline is None:
+            raise RuntimeError("RunService 未接入草稿／档案仓库：无法重新生成草稿")
+        parent = await self._drafts.get(parent_draft_id)
+        if parent is None:
+            raise NotFound(f"重新生成的旧草稿不存在: {parent_draft_id}")
+        child = await self._drafts.find_pending_child(parent_draft_id)
+        if child is not None:
+            run = (
+                None if child.run_id is None else await self._repo.get_run(child.run_id)
+            )
+            if run is None:
+                raise NotFound(f"重新生成的子草稿缺少来源 Run: {child.id}")
+            return {"created": False, "run": run, "parent": parent}
+        if parent.status != "pending":
+            # 已确认／已丢弃的旧草稿不允许重算（Q2=A）；复用既有 409 ``invalid_request`` 映射
+            # （stage2.md 的草稿状态不允许该操作），不新增语义错误码。
+            raise DraftNotCorrectable(
+                f"仅 Pending 草稿可重新生成: {parent_draft_id}（当前 {parent.status}）"
+            )
+        current = await self._baseline.prepare_generation_baseline()
+        if parent.base_business_version == current.context_version:
+            raise DraftNotCorrectable(
+                f"旧草稿已基于最新业务版本，无需重新生成: {parent_draft_id}"
+            )
+        result = await self._repo.create_recalc_run(
+            str(parent.conversation_id),
+            run_id,
+            client_request_id,
+            active_execution=self._slot_holder(),
+        )
+        return {
+            "created": bool(result["created"]),
+            "run": result["run"],
+            "parent": parent,
+        }
+
+    async def request_review(
+        self, *, run_id: str, client_request_id: str
+    ) -> dict[str, Any]:
+        """显式复盘生成（S4-08 Q3=B）：创建一个 ``kind='review'`` 的 Agent Run。
+
+        复盘只由用户显式请求触发（无定时、无周任务、无聊天工具入口）：本方法经
+        :meth:`RunRepo.create_review_run` 复用同一幂等查重→busy 顺序与全局单 Run 限制，
+        不建第二套状态机；生成、幂等先于 busy 与预算／取消一律由执行驱动沿用。
+        """
+        return await self._repo.create_review_run(
+            run_id,
+            client_request_id,
             active_execution=self._slot_holder(),
         )
 

@@ -6,8 +6,12 @@ Host/Origin 校验中间件与健康检查；业务路由（routes_*.py）与前
 并关闭本应用已建立的连接（S0-02）。
 
 Stage 2 S2-07 装配：只读档案路由与草稿业务路由（纠错/确认/丢弃）在已有路由位置
-接线，错误形状统一由 ``api.dto.install_error_handlers`` 注册；创建草稿、重算、
-聊天/Run 与设置面仍不在此阶段（stage2.md §5 S2-07）。
+接线，错误形状统一由 ``api.dto.install_error_handlers`` 注册。
+
+Stage 4 S4-07 装配：对话／Run 路由与 SSE（``api.routes_chat``）、进程内事件流
+（``runtime.events``）、唯一执行驱动（``runtime.run_task``，带状态观察者）与处理每 Run 一次的
+生产模型工厂（``api.deps.make_model_factory``）在 lifespan 内装配；模型仍只在本机调用
+Provider，本层不打印、不落盘凭据。
 """
 
 from collections.abc import AsyncIterator
@@ -17,16 +21,22 @@ from urllib.parse import urlsplit
 
 from fastapi import FastAPI, Request
 
+from api.deps import make_model_factory
 from api.dto import install_error_handlers
+from api.routes_chat import router as chat_router
 from api.routes_drafts import router as drafts_router
 from api.routes_readonly import router as readonly_router
+from app.draft_repo import DraftRepo
+from app.drafts import DraftService
 from config import (
     database_path,
     freeze_effective_harness,
     local_timezone_name,
     resolve_data_dir,
 )
+from runtime.events import RunEventStream
 from runtime.run_service import RunService
+from runtime.run_task import ExecutionDriver
 from storage.db import Database
 from storage.run_repo import RunRepo
 from storage.setting_repo import DEFAULT_PROVIDER, SettingRepo
@@ -109,7 +119,8 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
             # 08 8.4：迁移完成后，在一个事务内把遗留 pending/running 标为 failed 并追加
             # interrupted_by_restart 事件；不做断点续跑，由用户手动重试（S4-02）。
             # 恢复先于对外服务：启动失败则拒绝启动，不带着“还在跑”的假状态服务请求。
-            await RunService(RunRepo(db)).recover_interrupted_runs()
+            repo = RunRepo(db)
+            await RunService(repo).recover_interrupted_runs()
             settings = SettingRepo(db)
             # 固定业务时区（07 7.3 / S0-05）：首次启动采样本机时区并持久化，
             # 之后只读已保存值，不随系统时区变化重取。采样或解析失败向上抛，
@@ -119,6 +130,21 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
             )["timezone"]
             provider = await settings.get_provider_status(DEFAULT_PROVIDER)
             app.state.provider_has_api_key = bool(provider and provider["has_api_key"])
+            # S4-07：进程内事件流（只服务实时显示，不落库、不重放）与**唯一**执行驱动；
+            # 驱动的状态观察者只把状态变化转成产品事件，不参与状态判定（08 8.2/8.7）。
+            events = RunEventStream()
+            driver = ExecutionDriver(repo, on_status=events.publish_status)
+            app.state.run_events = events
+            app.state.run_driver = driver
+            app.state.run_service = RunService(
+                repo,
+                active_execution=lambda: driver.active_run_id,
+                drafts=DraftRepo(db),
+                baseline=DraftService(db),
+            )
+            # 每次 Run 开始时才读一次凭据并构造模型（凭据只在进程内流转，10.3）；
+            # 本 Run 的限制取启动时冻结的有效 Harness（08 8.5）。
+            app.state.model_factory = make_model_factory(db, app.state.harness_config)
             yield
         finally:
             # 唯一退出路径都关闭本应用连接（S0-02）：启动失败、正常停服，
@@ -137,6 +163,7 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
     app.add_middleware(LoopbackGuardMiddleware)
     app.include_router(readonly_router)
     app.include_router(drafts_router)
+    app.include_router(chat_router)
     install_error_handlers(app)
 
     @app.get("/healthz")

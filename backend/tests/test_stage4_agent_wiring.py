@@ -788,11 +788,23 @@ def test_agent_tool_surface_is_read_and_pending_draft_only() -> None:
 
 def test_no_public_draft_creation_route_is_exposed(tmp_path: Path) -> None:
     app = create_app(tmp_path)
-    routes = {
-        (getattr(route, "path", ""), method)
-        for route in app.routes
-        for method in getattr(route, "methods", ())
-    }
+    # FastAPI 0.141 把 include_router 保留为 _IncludedRouter：必须展开子路由，
+    # 否则直接遍历 app.routes 看不到任何子路由，本守卫会空转（S4-07 发现）。
+    routes: set[tuple[str, str]] = set()
+    stack = list(app.routes)
+    while stack:
+        route = stack.pop()
+        included = getattr(route, "original_router", None)
+        if included is not None:
+            stack.extend(included.routes)
+            continue
+        path = getattr(route, "path", None)
+        if path is None:
+            continue
+        for method in getattr(route, "methods", ()) or ():
+            routes.add((path, method))
+    # 非空断言：路由表确实被展开（上面的展开口径本身可验证）
+    assert ("/api/drafts/{draft_id}", "GET") in routes
     assert not any(
         path == "/api/drafts" and method in ("POST", "PUT", "PATCH")
         for path, method in routes

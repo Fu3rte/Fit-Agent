@@ -739,12 +739,10 @@ async def test_loopback_boundaries_and_bypass_scan_cover_stage3_endpoints(
         bypass = (
             ("POST", "/api/drafts"),  # 公开创建草稿
             ("GET", "/api/drafts"),
-            ("POST", "/api/drafts/plan-draft-1/recalc"),  # 假重算
             ("PUT", "/api/plan"),  # 直写正式事实
             ("POST", "/api/plan"),
             ("POST", "/api/records"),
             ("PUT", "/api/records/anything"),
-            ("POST", "/api/reviews"),  # 公开生成／保存复盘正文
             ("POST", "/api/runs"),  # 假 Run／聊天／模型路由
             ("GET", "/api/runs/active"),
             ("POST", "/api/chat"),
@@ -754,6 +752,33 @@ async def test_loopback_boundaries_and_bypass_scan_cover_stage3_endpoints(
         for method, path in bypass:
             status, _ = await _asgi_json(app, method, path, json_body={})
             assert status in (404, 405), (method, path)
+
+        # S4-08：重新生成已有真实入口（创建 Agent Run），但对不合格旧草稿不得假成功：
+        # 本例旧草稿不是 Pending，明确 409 invalid_request，不返回假草稿（stage2.md §5 S2-06、
+        # S4-08 Q2=A 的资格约束）。重算不修改旧草稿、不公开建草稿入口仍由上述扫描保证。
+        # 幂等键由客户端给出（缺字段 400 归 /reviews 同口径，见下）。
+        status, body = await _asgi_json(
+            app,
+            "POST",
+            "/api/drafts/plan-draft-1/recalc",
+            json_body={"client_request_id": "k"},
+        )
+        assert status == 409, body
+        assert body["error_code"] == "invalid_request", body
+
+        # S4-08 Q3=B：复盘生成已是显式真实入口（只创建 Run），不再属于「能力缺失」清单；
+        # 形状不符的请求（缺 client_request_id）必须 400 拒绝且不创建 Run。
+        async def run_count(conn):
+            async with conn.execute("SELECT COUNT(*) AS n FROM runs") as cursor:
+                row = await cursor.fetchone()
+            assert row is not None
+            return int(row["n"])
+
+        before_runs = await db.under_lock(run_count)
+        status, body = await _asgi_json(app, "POST", "/api/reviews", json_body={})
+        assert status == 400, body
+        assert body["error_code"] == "invalid_request", body
+        assert await db.under_lock(run_count) == before_runs
 
 
 async def test_responses_expose_no_stack_trace_or_sql(tmp_path: Path) -> None:

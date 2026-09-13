@@ -1,37 +1,3 @@
-"""计划草稿应用层（S3-04/S3-05）：准备、创建、查询、结构化 Diff、纠错与丢弃。
-
-正本：stage3.md §5 S3-04、S3-05、§4.1（草稿扩展）、§4.4（D9 payload 与日程投影）、
-architecture/01 1.3（草稿生命周期与基线绑定）、04 4.1/4.2（版本、日程锁定与替换取消）。
-五条硬边界：
-
-- **同一快照准备生成输入**：:meth:`PlanDraftService.prepare_generation_input` 在单一读事务内
-  读正式档案＋限制（``action_restrictions`` 是档案事实的一部分）＋``context_version``＋
-  可推荐候选＋当前正式计划及其日程；生成侧（S3-03）与创建侧都只凭这份快照，不在保存时
-  改读最新版本（01 1.3：``base_business_version`` 绑定读取时刻）。
-- **内部创建，不开 HTTP 面**：Pending 计划草稿只能经本服务创建（stage3.md §3：不发布公开
-  建草稿路由）；来源关联现有会话／Run 身份，``run_id`` 可空——本阶段没有真实模型执行，
-  不得凭空伪造一次 Run。领域结构校验复用 S3-03 规则；**不做**确认时的安全复查（S3-06）。
-- **仅拟议，不落正式事实**：创建与查询都不写 ``plan_versions``／``scheduled_sessions``／
-  ``user_profile``，不推进 ``context_version``。替换场景的旧日程取消清单是生成读取时刻的
-  提案预览（``cancelled_at`` 仍为 NULL）；确认时由 S3-06 在确认事务内按当刻规则重算实际
-  取消集，不照搬本预览。
-- **来源不混淆**：``source_plan_version_id`` 与取消预览都取自准备快照，不接受调用方传入
-  另一版本或另一批日程；查询按草稿身份与会话身份作用域。
-- **纠错与丢弃只作用于 Pending**（S3-05）：纠错以所见 revision 做乐观并发控制，只整体替换
-  日期与 D9 payload（F2-03 的可变字段：日期／训练日／动作候选／组次／次数区间／RIR），
-  经全量复查后 revision+1；丢弃只改变状态且重复丢弃幂等。身份、来源、``kind``、生成基线、
-  ``source_plan_version_id``、``mode``、取消预览、档案补丁、状态与提交凭据在结构上不可经
-  纠错改写；终态（Committed／Discarded）不可纠错。确认事务与日程原子切换（S3-06）不在
-  本模块；已丢弃计划草稿的不可确认由各自确认入口的 kind／状态守卫保证。
-
-计划草稿提议以 :class:`~domain.plan.schema.PlanProposal` 信封保存（scope 行字段 + D9 payload
-+ 取消预览，编解码归 ``domain/plan/schema``）：D9 已拍行字段在 ``plan_versions`` 行上、不进
-``payload_json``，而草稿表没有这些列，故在信封顶层承载。可选拟议档案补丁
-（``proposed_profile_patch_json``）与草稿的 ``proposed_profile_json``（拟议条件）成对保存：
-确认前不改正式档案（01 1.5）。限制引用复查与档案草稿创建同口径，复用
-``domain/actions/repo`` 的目录读取。
-"""
-
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from datetime import date
@@ -146,6 +112,7 @@ class PlanDraftView:
     schedules: tuple[ProjectedSession, ...]
     plan_diff: tuple[PlanFieldDiff, ...]
     profile_diff: tuple[ProfileFieldDiff, ...] | None
+    parent_plan_diff: tuple[PlanFieldDiff, ...] | None = None
 
 
 class PlanDraftService:
@@ -201,6 +168,7 @@ class PlanDraftService:
         business_date: date,
         mode: PlanMode = "regular",
         patch: ProfilePatch | None = None,
+        parent_draft_id: str | None = None,
     ) -> PlanDraftView:
         """按生成快照保存一条 Pending 计划草稿（revision 从 1 起），返回查询形态。
 
@@ -278,6 +246,7 @@ class PlanDraftService:
             proposed_plan_json=proposal_to_json(proposal),
             proposed_profile_patch_json=None if patch is None else patch_to_json(patch),
             base_business_version=preparation.snapshot.context_version,
+            parent_draft_id=parent_draft_id,
         )
         return await self._to_view(draft)
 
@@ -470,6 +439,15 @@ class PlanDraftService:
                 raise InvalidDraftRow(
                     f"草稿绑定的来源计划版本不存在：{proposal.source_plan_version_id}"
                 )
+        parent_plan_diff = None
+        if draft.parent_draft_id is not None:
+            parent = await self._drafts.get(draft.parent_draft_id)
+            if parent is None:
+                raise InvalidDraftRow(
+                    f"重算子草稿的旧草稿不存在：{draft.parent_draft_id}"
+                )
+            parent_proposal = proposal_from_json(_require_plan_json(parent))
+            parent_plan_diff = plan_field_diff(proposal, parent_proposal)
         return PlanDraftView(
             draft=draft,
             base_profile=base_profile,
@@ -485,6 +463,7 @@ class PlanDraftService:
             profile_diff=(
                 None if patch is None else profile_diff(base_profile, proposed_profile)
             ),
+            parent_plan_diff=parent_plan_diff,
         )
 
 
@@ -563,10 +542,17 @@ def proposed_cancellations(
     )
 
 
+#: 计划 Diff 的对比基线：正式版本，或重算子草稿对应的旧草稿拟议（两者字段同形）。
+PlanDiffBaseline = PlanVersionRecord | PlanProposal
+
+
 def plan_field_diff(
-    proposal: PlanProposal, base_plan: PlanVersionRecord | None
+    proposal: PlanProposal, base_plan: PlanDiffBaseline | None
 ) -> tuple[PlanFieldDiff, ...]:
     """拟议计划相对绑定基线的结构化字段对比；无基线时 before 为 None（不伪造旧值）。
+
+    基准可以是绑定的来源正式版本，也可以是旧草稿的拟议（重算子草稿的「旧草稿 → 新草稿」
+    Diff，01 1.6）；两者都有相同的日期／模式／D9 payload 字段，不另造第二套 Diff 逻辑。
 
     列出计划全部可变语义（行字段、完整训练日处方、日历循环、模板来源、旧日程取消预览），
     不把 D9 payload 压成摘要或文本 diff：处方（组次／次数／RIR／时限）、负荷与校准、渐进、

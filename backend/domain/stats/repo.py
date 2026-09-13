@@ -7,7 +7,7 @@ PR 不存结果（06 6.3）：每次查询都从迁移 010 的视图现算，因
 
 import aiosqlite
 
-from domain.stats.schema import InvalidReviewRow
+from domain.stats.schema import InvalidReviewRow, PrValue
 from storage.db import Database
 
 
@@ -67,3 +67,53 @@ class StatsRepo:
                 return _single_value(await cursor.fetchone())
 
         return await self._db.under_lock(op)
+
+    async def pr_values_in_transaction(
+        self, conn: aiosqlite.Connection
+    ) -> tuple[tuple[PrValue, ...], tuple[str, ...]]:
+        """现算**全部** PR 数值与参与计算的来源修订 id（复盘生成时冻结，06 6.4）。
+
+        与 :meth:`pr_max_load`／:meth:`pr_max_reps_at_load` 同一口径：每个「动作＋负重口径」
+        取最高换算重量，再取该重量下的单组最高次数；候选过滤条件仍在视图里（本层不复制
+        第二套过滤）。排序固定为 ``(exercise_id, load_notation)``，快照可逐字节复现。
+        来源修订 id 去重后按 ``(exercise_id, load_notation, revision_id)`` 排序，不含未进入
+        快照的行。
+        """
+        async with conn.execute(
+            "SELECT c.exercise_id AS exercise_id, c.load_notation AS load_notation,"
+            " c.load_kg_key AS load_kg_key, MAX(c.reps) AS best_reps"
+            " FROM pr_candidates AS c"
+            " JOIN (SELECT exercise_id, load_notation, MAX(load_kg_key) AS load_kg_key"
+            "       FROM pr_candidates GROUP BY exercise_id, load_notation) AS m"
+            "   ON c.exercise_id = m.exercise_id"
+            "  AND c.load_notation = m.load_notation"
+            "  AND c.load_kg_key = m.load_kg_key"
+            " GROUP BY c.exercise_id, c.load_notation, c.load_kg_key"
+            " ORDER BY c.exercise_id, c.load_notation",
+        ) as cursor:
+            value_rows = await cursor.fetchall()
+        values = tuple(
+            PrValue(
+                exercise_id=str(row["exercise_id"]),
+                load_notation=str(row["load_notation"]),
+                load_kg_key=_column_int("PR 换算重量键", row["load_kg_key"]),
+                best_reps=_column_int("PR 单组最高次数", row["best_reps"]),
+            )
+            for row in value_rows
+        )
+        async with conn.execute(
+            "SELECT DISTINCT c.exercise_id AS exercise_id,"
+            " c.load_notation AS load_notation, c.revision_id AS revision_id"
+            " FROM pr_candidates AS c"
+            " JOIN (SELECT exercise_id, load_notation, MAX(load_kg_key) AS load_kg_key"
+            "       FROM pr_candidates GROUP BY exercise_id, load_notation) AS m"
+            "   ON c.exercise_id = m.exercise_id"
+            "  AND c.load_notation = m.load_notation"
+            "  AND c.load_kg_key = m.load_kg_key"
+            " ORDER BY c.exercise_id, c.load_notation, c.revision_id",
+        ) as cursor:
+            revision_rows = await cursor.fetchall()
+        revision_ids = tuple(
+            dict.fromkeys(str(row["revision_id"]) for row in revision_rows)
+        )
+        return values, revision_ids

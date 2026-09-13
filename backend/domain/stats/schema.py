@@ -79,6 +79,18 @@ class ReviewStatSnapshot:
 
 
 @dataclass(frozen=True, slots=True)
+class ReviewBasis:
+    """复盘生成时冻结的确定性依据（06 6.4）：统计快照 + 精确来源修订 id。
+
+    由 :meth:`~domain.stats.service.StatsService.review_basis` 在**同一事务**内现算并冻结；
+    模型只收到这些事实写解释正文，保存时 ``ReviewStore`` 再校验来源修订仍是当前修订。
+    """
+
+    snapshot: ReviewStatSnapshot = ReviewStatSnapshot()
+    source_revision_ids: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
 class ReviewSourceRevisions:
     """一条来源修订引用的**读取**结果：所引修订 + 该训练身份的当刻当前修订。
 

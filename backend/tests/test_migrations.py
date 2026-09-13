@@ -17,7 +17,7 @@ from storage.db import Database
 from storage.errors import FutureSchemaVersion, MigrationError
 from storage.migrations import load_migrations
 from storage.run_repo import RunRepo
-from tests.support import open_database
+from tests.support import open_database, seed_legacy_run
 
 EXPECTED_RUNTIME_TABLES = {
     "conversations",
@@ -287,7 +287,7 @@ async def test_failed_013_rolls_back_muscle_column_and_version(tmp_path: Path) -
     migrations_dir = tmp_path / "migrations"
     migrations_dir.mkdir()
     for source in sorted(real_dir.glob("0*.sql")):
-        if source.name.startswith(("013", "014")):
+        if source.name.startswith(("013", "014", "015")):
             continue
         (migrations_dir / source.name).write_text(
             source.read_text(encoding="utf-8"), encoding="utf-8"
@@ -325,6 +325,14 @@ async def test_failed_013_rolls_back_muscle_column_and_version(tmp_path: Path) -
         assert "muscle" in columns
 
 
+async def _column_names(db: Database, table: str) -> set[str]:
+    async def op(conn):
+        async with conn.execute(f"PRAGMA table_info({table})") as cursor:
+            return {str(row["name"]) for row in await cursor.fetchall()}
+
+    return await db.under_lock(op)
+
+
 async def _index_names(db: Database) -> set[str]:
     async def op(conn):
         async with conn.execute(
@@ -345,7 +353,7 @@ async def test_failed_014_rolls_back_summary_tables_and_version(tmp_path: Path) 
     migrations_dir = tmp_path / "migrations"
     migrations_dir.mkdir()
     for source in sorted(real_dir.glob("0*.sql")):
-        if source.name.startswith("014"):
+        if source.name.startswith(("014", "015")):
             continue
         (migrations_dir / source.name).write_text(
             source.read_text(encoding="utf-8"), encoding="utf-8"
@@ -372,3 +380,68 @@ async def test_failed_014_rolls_back_summary_tables_and_version(tmp_path: Path) 
         tables = await _table_names(db)
         assert {"summaries", "summary_sources"} <= tables
         assert "idx_summaries_conversation_coverage" in await _index_names(db)
+
+
+async def test_failed_015_rolls_back_recalc_columns_and_version(tmp_path: Path) -> None:
+    """015 失败注入：两个 ALTER 都已执行、末尾语句失败 → 整片回滚（列不存在、版本停在 014）。
+
+    注入脚本 = 真实 015 全文 + 非法 SQL；修复后把真实 015 原文放入临时目录重跑，
+    验证升级路径不需删库（07 7.2）且既有 Run 的 ``kind`` 默认回填为 ``chat``。
+    """
+    real_dir = Path(__file__).resolve().parents[1] / "storage" / "migrations"
+    migrations_dir = tmp_path / "migrations"
+    migrations_dir.mkdir()
+    for source in sorted(real_dir.glob("0*.sql")):
+        if source.name.startswith("015"):
+            continue
+        (migrations_dir / source.name).write_text(
+            source.read_text(encoding="utf-8"), encoding="utf-8"
+        )
+    real_sql = (real_dir / "015_stage4_recalc_and_aux_runs.sql").read_text(
+        encoding="utf-8"
+    )
+    _write_migration(
+        migrations_dir,
+        15,
+        "stage4_recalc_and_aux_runs",
+        f"{real_sql}\nTHIS IS NOT VALID SQL;",
+    )
+    path = tmp_path / "app.db"
+    async with open_database(path, migrate=False, migrations_dir=migrations_dir) as db:
+        with pytest.raises(MigrationError, match="stage4_recalc_and_aux_runs"):
+            await db.migrate()
+        assert await db.pragma_value("user_version") == 14
+        assert "parent_draft_id" not in await _column_names(db, "business_drafts")
+        assert "kind" not in await _column_names(db, "runs")
+        # 升级前的旧字库里已有一条 Run（无 kind 列）：见下方回填断言
+        await seed_legacy_run(
+            db,
+            conversation_id="c-legacy",
+            run_id="r-legacy",
+            client_request_id="cri-legacy",
+            text="旧库用户请求",
+        )
+
+        # 修复：把真实 015 原文放入临时目录重跑（不删用户库）
+        (migrations_dir / "015_stage4_recalc_and_aux_runs.sql").write_text(
+            real_sql, encoding="utf-8"
+        )
+        assert await db.migrate() == 15
+        assert "parent_draft_id" in await _column_names(db, "business_drafts")
+        assert "kind" in await _column_names(db, "runs")
+        # 既有 Run 的 kind 默认回填为 chat（旧行不是 recalc／review），行本身仍可读
+        row = await _run_row(db, "r-legacy")
+        assert row["kind"] == "chat"
+        assert row["status"] == "pending"
+
+
+async def _run_row(db: Database, run_id: str) -> dict:
+    async def op(conn):
+        async with conn.execute(
+            "SELECT status, kind FROM runs WHERE id = ?", (run_id,)
+        ) as cursor:
+            row = await cursor.fetchone()
+        assert row is not None, f"Run 不存在：{run_id}"
+        return dict(row)
+
+    return await db.under_lock(op)

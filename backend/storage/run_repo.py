@@ -30,6 +30,11 @@ from storage.errors import ConversationBusy, InvalidInput, NotFound, RunStateCon
 _CANCELLABLE_STATUSES = ("pending", "running")
 
 
+#: 复盘 Run 的专用内部会话 id：复盘只依据全局统计，不属于任何用户对话；``runs`` 行的
+#: 会话外键需要一个稳定的归属，重复显式生成本就不应把复盘绑到某一轮聊天上。
+REVIEW_CONVERSATION_ID = "reviews"
+
+
 def _now() -> str:
     return datetime.now(UTC).isoformat()
 
@@ -117,32 +122,17 @@ class RunRepo:
         if not isinstance(user_text, str) or not user_text:
             raise InvalidInput("用户请求文本必须是非空字符串")
         async with self._db.transaction() as conn:
-            async with conn.execute(
-                "SELECT id FROM runs WHERE client_request_id = ?",
-                (client_request_id,),
-            ) as cursor:
-                existing = await cursor.fetchone()
-            if existing is not None:
-                return {
-                    "created": False,
-                    "run": await self._get_run_locked(conn, str(existing["id"])),
-                }
-            async with conn.execute(
-                "SELECT id FROM runs WHERE status IN ('pending', 'running') LIMIT 1"
-            ) as cursor:
-                active = await cursor.fetchone()
-            if active is not None or active_execution is not None:
-                holder = active["id"] if active is not None else active_execution
-                raise ConversationBusy(
-                    f"已有活跃 Run，拒绝创建新 Run（08 8.2）: {holder}"
-                )
-            now = _now()
-            await conn.execute(
-                "INSERT INTO runs (id, conversation_id, client_request_id, status,"
-                " error_code, retry_of_run_id, created_at, updated_at)"
-                " VALUES (?, ?, ?, 'pending', NULL, ?, ?, ?)",
-                (run_id, conversation_id, client_request_id, retry_of_run_id, now, now),
+            existing = await self._claim_run_slot_locked(
+                conn,
+                run_id=run_id,
+                conversation_id=conversation_id,
+                client_request_id=client_request_id,
+                kind="chat",
+                retry_of_run_id=retry_of_run_id,
+                active_execution=active_execution,
             )
+            if existing is not None:
+                return existing
             # 单独方法便于故障注入测试“Run 已插入、用户消息步骤失败”的中途回滚。
             await self._insert_user_message_locked(
                 conn,
@@ -151,6 +141,114 @@ class RunRepo:
                 user_text=user_text,
             )
             return {"created": True, "run": await self._get_run_locked(conn, run_id)}
+
+    async def create_recalc_run(
+        self,
+        conversation_id: str,
+        run_id: str,
+        client_request_id: str,
+        active_execution: str | None = None,
+    ) -> dict[str, Any]:
+        """重新生成草稿的辅助 Run（``kind='recalc'``）：同一事务幂等查重＋全局单 Run 判定。
+
+        与对话 Run 共用同一创建顺序与判定（幂等查重先于 busy），但**不写用户消息**：重算
+        意图来自旧草稿（``runtime/context.recalc_intent_text``），不是用户当轮发言，也不进
+        对话历史投影（015 迁移的 ``runs.kind``）。
+        """
+        async with self._db.transaction() as conn:
+            existing = await self._claim_run_slot_locked(
+                conn,
+                run_id=run_id,
+                conversation_id=conversation_id,
+                client_request_id=client_request_id,
+                kind="recalc",
+                retry_of_run_id=None,
+                active_execution=active_execution,
+            )
+            if existing is not None:
+                return existing
+            return {"created": True, "run": await self._get_run_locked(conn, run_id)}
+
+    async def create_review_run(
+        self,
+        run_id: str,
+        client_request_id: str,
+        active_execution: str | None = None,
+    ) -> dict[str, Any]:
+        """显式复盘生成的辅助 Run（``kind='review'``）：与对话／重算同一创建顺序与判定。
+
+        复盘是全局统计，没有用户会话：Run 落在稳定的专用内部会话
+        :data:`REVIEW_CONVERSATION_ID`（缺则同一事务内创建，不暴露为业务会话内容）。同样
+        **不写用户消息**：生成意图由服务端固定给出（``runtime/context.review_intent_text``）；
+        幂等查重先于 busy（相同 ``client_request_id`` 返回已有 Run），并受全局单 Run 限制。
+        """
+        async with self._db.transaction() as conn:
+            await conn.execute(
+                "INSERT OR IGNORE INTO conversations (id, created_at) VALUES (?, ?)",
+                (REVIEW_CONVERSATION_ID, _now()),
+            )
+            existing = await self._claim_run_slot_locked(
+                conn,
+                run_id=run_id,
+                conversation_id=REVIEW_CONVERSATION_ID,
+                client_request_id=client_request_id,
+                kind="review",
+                retry_of_run_id=None,
+                active_execution=active_execution,
+            )
+            if existing is not None:
+                return existing
+            return {"created": True, "run": await self._get_run_locked(conn, run_id)}
+
+    async def _claim_run_slot_locked(
+        self,
+        conn: aiosqlite.Connection,
+        *,
+        run_id: str,
+        conversation_id: str,
+        client_request_id: str,
+        kind: str,
+        retry_of_run_id: str | None,
+        active_execution: str | None,
+    ) -> dict[str, Any] | None:
+        """幂等查重 + 全局单 Run 判定 + 插入 pending Run（同一事务）。
+
+        返回已有 Run 的 ``{"created": False, "run": ...}``（相同 ``client_request_id``）；
+        无重复时插入 pending Run 并返回 ``None``，消息等其他写入由调用方在同一事务内继续。
+        """
+        async with conn.execute(
+            "SELECT id FROM runs WHERE client_request_id = ?",
+            (client_request_id,),
+        ) as cursor:
+            existing = await cursor.fetchone()
+        if existing is not None:
+            return {
+                "created": False,
+                "run": await self._get_run_locked(conn, str(existing["id"])),
+            }
+        async with conn.execute(
+            "SELECT id FROM runs WHERE status IN ('pending', 'running') LIMIT 1"
+        ) as cursor:
+            active = await cursor.fetchone()
+        if active is not None or active_execution is not None:
+            holder = active["id"] if active is not None else active_execution
+            raise ConversationBusy(f"已有活跃 Run，拒绝创建新 Run（08 8.2）: {holder}")
+        now = _now()
+        await conn.execute(
+            "INSERT INTO runs (id, conversation_id, client_request_id, status,"
+            " error_code, retry_of_run_id, kind, created_at, updated_at)"
+            " VALUES (?, ?, ?, 'pending', NULL, ?, ?, ?, ?)",
+            (
+                run_id,
+                conversation_id,
+                client_request_id,
+                retry_of_run_id,
+                kind,
+                now,
+                now,
+            ),
+        )
+        return None
 
     async def _insert_user_message_locked(
         self,
@@ -179,7 +277,7 @@ class RunRepo:
     ) -> dict[str, Any]:
         async with conn.execute(
             "SELECT id, conversation_id, client_request_id, status, error_code,"
-            " retry_of_run_id, created_at, updated_at FROM runs WHERE id = ?",
+            " kind, retry_of_run_id, created_at, updated_at FROM runs WHERE id = ?",
             (run_id,),
         ) as cursor:
             row = await cursor.fetchone()
@@ -191,13 +289,27 @@ class RunRepo:
         async def op(conn: aiosqlite.Connection) -> aiosqlite.Row | None:
             async with conn.execute(
                 "SELECT id, conversation_id, client_request_id, status, error_code,"
-                " retry_of_run_id, created_at, updated_at FROM runs WHERE id = ?",
+                " kind, retry_of_run_id, created_at, updated_at FROM runs WHERE id = ?",
                 (run_id,),
             ) as cursor:
                 return await cursor.fetchone()
 
         row = await self._db.under_lock(op)
         return None if row is None else dict(row)
+
+    async def list_runs(self, conversation_id: str) -> list[dict[str, Any]]:
+        """该会话的全部 Run（按创建顺序），供会话查询恢复状态用；不写任何内容。"""
+
+        async def op(conn: aiosqlite.Connection) -> list[aiosqlite.Row]:
+            async with conn.execute(
+                "SELECT id, conversation_id, client_request_id, status, error_code,"
+                " kind, retry_of_run_id, created_at, updated_at FROM runs"
+                " WHERE conversation_id = ? ORDER BY created_at, id",
+                (conversation_id,),
+            ) as cursor:
+                return list(await cursor.fetchall())
+
+        return [dict(row) for row in await self._db.under_lock(op)]
 
     async def get_run_by_client_request_id(
         self, client_request_id: str
@@ -212,7 +324,7 @@ class RunRepo:
                 return None
             async with conn.execute(
                 "SELECT id, conversation_id, client_request_id, status, error_code,"
-                " retry_of_run_id, created_at, updated_at FROM runs WHERE id = ?",
+                " kind, retry_of_run_id, created_at, updated_at FROM runs WHERE id = ?",
                 (row["id"],),
             ) as cursor:
                 return await cursor.fetchone()

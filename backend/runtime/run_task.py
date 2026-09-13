@@ -12,9 +12,10 @@
   （即 ``complete_run`` 的输入）；可分类失败抛 :class:`ExecutionFailure`（原因码限普通失败码）。
   本层不做错误分类、重试、预算、摘要与 SSE；未分类异常不映射成任何错误码，向上抛出
   （Run 停在 ``running``，由启动恢复收口），不伪造失败原因。
-- **取消入口**：只有显式 :meth:`ExecutionDriver.cancel`（08 8.3 仅取消按钮触发）。本层没有
-  SSE/观察者接缝，断开或刷新没有可触发取消的路径。已发生的副作用不回滚、不补写「已回滚」
-  痕迹；取消后不写迟到成功消息，也不启动后续模型／工具尝试。
+- **取消入口**：只有显式 :meth:`ExecutionDriver.cancel`（08 8.3 仅取消按钮触发）。事件流
+  （SSE）只经 :attr:`ExecutionDriver.on_status` 单向观察状态变化，**没有**「观察者触发执行」的
+  接缝：断开或刷新既不取消也不重跑，观察者缺席不影响执行。已发生的副作用不回滚、不补写
+  「已回滚」痕迹；取消后不写迟到成功消息，也不启动后续模型／工具尝试。
 """
 
 import asyncio
@@ -53,19 +54,40 @@ class ActiveExecution:
 
     ``cancel_requested`` 由驱动写入、``work`` 只读：底层调用被取消但无法立即退出时，
     据此拒绝启动后续模型／工具尝试（08 8.3、8.6）。
+
+    ``execution_task`` 是驱动自己持有的执行任务强引用：``asyncio`` 只对任务保持弱引用，
+    而生产入口（``api.routes_chat``）不保留 ``start`` 的返回值，引用必须由驱动持有到名额释放，
+    否则执行中可能被 GC 而静默停摆（Run 停在 ``running``）。
     """
 
     run_id: str
     cancel_requested: bool = False
     work_task: asyncio.Task[FrameworkMessages] | None = None
+    execution_task: asyncio.Task[None] | None = None
 
 
 class ExecutionDriver:
-    """单进程执行驱动；生产进程内唯一实例（全局单 Run 的进程内部分，08 8.2）。"""
+    """单进程执行驱动；生产进程内唯一实例（全局单 Run 的进程内部分，08 8.2）。
 
-    def __init__(self, repo: RunRepo) -> None:
+    ``on_status`` 是 S4-07 的传输观察者（进程内事件流）：每次状态提交成功后拿到库内 Run 行，
+    只用于向 SSE 发状态事件；它不是执行入口，抛错也不改变已提交的状态（本层不吞异常，
+    观察者自身的缺陷必须暴露）。未接线时行为与 S4-03 完全一致。
+    """
+
+    def __init__(
+        self,
+        repo: RunRepo,
+        *,
+        on_status: Callable[[dict[str, Any]], None] | None = None,
+    ) -> None:
         self._repo = repo
+        self._on_status = on_status
         self._active: ActiveExecution | None = None
+
+    def _announce(self, run: dict[str, Any]) -> None:
+        """状态提交成功后通知传输观察者（不落库、不参与状态判定）。"""
+        if self._on_status is not None:
+            self._on_status(run)
 
     @property
     def active_run_id(self) -> str | None:
@@ -86,7 +108,8 @@ class ExecutionDriver:
             raise RuntimeError(f"执行名额已被占用: {self._active.run_id}")
         active = ActiveExecution(run_id=run_id)
         self._active = active
-        return asyncio.create_task(self._execute(active, work))
+        active.execution_task = asyncio.create_task(self._execute(active, work))
+        return active.execution_task
 
     async def cancel(self, run_id: str) -> dict[str, Any]:
         """显式取消：条件持久化 ``cancelled``，再尽力中断当前底层调用（08 8.3）。
@@ -102,6 +125,7 @@ class ExecutionDriver:
             if active.work_task is not None:
                 # 尽力中断，不等待退出：draining 期间名额继续占用，底层调用退出后才释放。
                 active.work_task.cancel()
+        self._announce(run)
         return run
 
     async def _execute(
@@ -111,11 +135,12 @@ class ExecutionDriver:
     ) -> None:
         try:
             try:
-                await self._repo.start_run(active.run_id)
+                started = await self._repo.start_run(active.run_id)
             except RunStateConflict:
                 return  # 启动前已被取消或已是终态：绝不启动底层调用
             if active.cancel_requested:
                 return  # cancel 与 pending→running 竞争且取消已提交：同样不启动
+            self._announce(started)
             active.work_task = asyncio.create_task(work(active))
             result = (await asyncio.gather(active.work_task, return_exceptions=True))[0]
             if active.cancel_requested:
@@ -129,16 +154,19 @@ class ExecutionDriver:
             else:
                 await self._complete(active.run_id, result)
         finally:
+            active.execution_task = None  # 与名额释放同步解除强引用
             self._active = None  # 底层调用实际结束后才释放名额（08 8.3）
 
     async def _complete(self, run_id: str, messages: FrameworkMessages) -> None:
         try:
-            await self._repo.complete_run(run_id, messages)
+            run = await self._repo.complete_run(run_id, messages)
         except RunStateConflict:
             return  # 另一终态（取消等）已提交：丢弃迟到成功，不写任何消息（07 7.5）
+        self._announce(run)
 
     async def _fail(self, run_id: str, error_code: str) -> None:
         try:
-            await self._repo.fail_run(run_id, error_code)
+            run = await self._repo.fail_run(run_id, error_code)
         except RunStateConflict:
             return  # 另一终态已提交：不追加失败事件
+        self._announce(run)

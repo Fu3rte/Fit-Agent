@@ -28,7 +28,9 @@ from pydantic_ai.messages import (
     ModelMessage,
     ModelMessagesTypeAdapter,
     ModelRequest,
+    ModelResponse,
     SystemPromptPart,
+    TextPart,
     UserPromptPart,
 )
 
@@ -43,6 +45,7 @@ from domain.profile.schema import (
     profile_to_json,
 )
 from domain.profile.service import ProfileService
+from domain.stats.schema import ReviewBasis, review_basis_to_json
 from storage.db import Database
 from storage.run_repo import RunRepo
 
@@ -251,6 +254,72 @@ def draft_facts(draft: Draft) -> dict[str, Any]:
     }
 
 
+def recalc_intent_text(draft: Draft) -> str:
+    """重新生成 Run 的输入文本（S4-08 Q1=C）：旧草稿身份与拟议载荷 + 确定性边界。
+
+    重算 Run 不写用户消息、不进对话历史投影，本函数在 Run 起点按库内原文生成 user prompt：
+    载荷只按存储原文给出，不重新解释、不补造内容；模型仍须经同一 propose_* 工具链与领域
+    校验落盘子草稿。
+    """
+    payload_field = {
+        "profile_update": "proposed_profile_json",
+        "plan": "proposed_plan_json",
+        "training_record": "proposed_record_json",
+        "arrangement": "proposed_arrangement_json",
+    }[draft.kind]
+    payload = getattr(draft, payload_field)
+    return (
+        "用户请求：按最新正式数据重新生成草稿（仅重新生成，不自动确认）。\n"
+        f"旧草稿 id={draft.id}，kind={draft.kind}，"
+        f"生成时业务版本={draft.base_business_version}。\n"
+        f"旧草稿拟议内容（库内原文 JSON）：{payload}\n"
+        "请重新读取最新正式业务事实，调用与旧草稿同类的 propose_* 工具生成一条新的 Pending "
+        "草稿；不得修改、确认、丢弃或合并旧草稿；新草稿经用户确认前正式事实不变。"
+    )
+
+
+def review_basis_text(basis: ReviewBasis, *, business_date: date) -> str:
+    """复盘生成时冻结的确定性事实 → 本次请求的系统文本（06 6.4；可逐字比较）。
+
+    只有这个函数产出的数值是模型可写的依据：快照原样序列化，不重算、不摘要、不补造；
+    模型不得改写或编造任何数值（保存前由 ``runtime.agent_factory`` 再校验一次）。
+    """
+    projection = {
+        "business_date": business_date.isoformat(),
+        "basis": json.loads(review_basis_to_json(basis.snapshot)),
+        "source_revision_ids": list(basis.source_revision_ids),
+    }
+    return (
+        "以下是本次复盘生成时冻结的确定性统计事实（唯一数值来源）：\n"
+        + json.dumps(projection, ensure_ascii=False, sort_keys=True, indent=2)
+        + "\n"
+    )
+
+
+def review_basis_request(basis: ReviewBasis, *, business_date: date) -> ModelRequest:
+    """把冻结的复盘依据包成请求部件：一次生成只注入这一条 ``SystemPromptPart``。"""
+    return ModelRequest(
+        parts=[
+            SystemPromptPart(
+                content=review_basis_text(basis, business_date=business_date)
+            )
+        ]
+    )
+
+
+def review_intent_text() -> str:
+    """复盘生成的用户意图文本（不写用户消息，由 Run 起点直接给出）。
+
+    与重算 Run 同一形式：意图是服务端按已拍 Q3=B 固定生成的，不是用户当轮发言，不进
+    对话历史投影。
+    """
+    return (
+        "用户请求：根据本次冻结的统计事实写一份复盘解释正文（Markdown）。\n"
+        "只解释表现、指出缺失信息并给出下一步建议；不得改写、重算或编造任何数值，"
+        "正文出现的每个数字都必须来自给定事实；没有数据支持的因果关系不得补充。"
+    )
+
+
 def facts_prompt(facts: BusinessFacts) -> str:
     """当前事实投影 → 本次请求的唯一 ``SystemPromptPart`` 文本（确定性、可比较）。"""
     projection = {
@@ -316,6 +385,10 @@ async def load_conversation_interactions(
             continue
         run = await repo.get_run(run_id)
         status = "pending" if run is None else str(run["status"])
+        # 辅助 Run（recalc／review）不进对话历史投影：它们没有用户消息，其框架消息不能被
+        # 后续对话当成用户说过的话（S4-08；runs.kind 由 015 迁移加入）。
+        if run is not None and str(run.get("kind") or "chat") != "chat":
+            continue
         text = _user_request_text(run_rows)
         if status == "completed":
             messages = _framework_history(run_rows, user_text=text)
@@ -404,6 +477,22 @@ def _user_request_text(rows: Sequence[dict[str, Any]]) -> str | None:
         if row["kind"] == "user_request":
             return str(_load_json(str(row["payload_json"]))["text"])
     return None
+
+
+def visible_answer_text(payload_json: str) -> str:
+    """已保存框架消息 → 可见回答文本（只取 ``TextPart``）。
+
+    隐藏推理（``ThinkingPart``）、工具调用与工具结果、Token／Cache 与任何 provider 细节
+    都不属于产品可见内容，因此不在这里出现（08 8.7/8.8）；无可见文本时返回空字符串，
+    由调用方决定不展示空区（不伪造「已回答」）。
+    """
+    return "".join(
+        part.content
+        for message in ModelMessagesTypeAdapter.validate_json(payload_json)
+        if isinstance(message, ModelResponse)
+        for part in message.parts
+        if isinstance(part, TextPart)
+    )
 
 
 def framework_messages(

@@ -30,8 +30,12 @@ from app.arrangement_drafts import (
     ArrangementDraftView,
     ArrangementPreparation,
 )
-from app.drafts import DraftService, profile_patch
-from app.plan_drafts import PlanDraftService, require_long_term_revision
+from app.drafts import Draft, DraftService, profile_patch
+from app.plan_drafts import (
+    PLAN_DRAFT_KIND,
+    PlanDraftService,
+    require_long_term_revision,
+)
 from app.plan_reads import PlanReadService
 from app.record_drafts import RecordDraftService
 from domain.plan.rules import ArrangementAdjustment
@@ -82,6 +86,9 @@ class ToolIdentity:
 
     ``message_red_flags`` 是当前 Run 最新用户消息命中的 C 层兜底红旗词（2026-09-12 拍板）：
     非空时本 Run 的安全复核强制不可用、也不生成任何处方草稿，只做精确子串文本兜底。
+
+    ``on_draft_persisted`` 是草稿落盘**之后**的就绪通知接缝（S4-07）：通知严格晚于持久化，
+    且通知不是草稿当前状态的事实源。未接线时为 ``None``，工具结果不变。
     """
 
     conversation_id: str
@@ -89,11 +96,18 @@ class ToolIdentity:
     business_date: date
     cancel_requested: Callable[[], bool] | None = None
     message_red_flags: tuple[str, ...] = ()
+    on_draft_persisted: Callable[[Draft], None] | None = None
     budget: RunBudget | None = None
     """本次 Run 的执行预算（S4-05b）：工具调用计数与取消／Run 剩余时间闸的唯一来源。
 
     生产路径恒非空（``runtime.agent_factory.build_run_work`` 每 Run 注入）；直接构造工具面
     的单元测试可为 ``None``，此时 ``cancel_requested`` 是唯一的取消探针。
+    """
+    parent_draft_id: str | None = None
+    parent_kind: str | None = None
+    """重新生成 Run 的旧草稿身份（S4-08）：非空时本次 Run 只能产生 ``parent_kind`` 同类的
+    子草稿，并把它作为新草稿的 ``parent_draft_id``；普通对话 Run 两字段均为 ``None``。
+
     """
 
 
@@ -110,6 +124,18 @@ class BusinessTools:
         self._plan_drafts = PlanDraftService(db)
         self._record_drafts = RecordDraftService(db)
         self._arrangement_drafts = ArrangementDraftService(db)
+
+    def _created(self, view: Any) -> dict[str, Any]:
+        """草稿创建服务返回（事务已提交）→ 工具结果 ＋ 就绪通知。
+
+        通知严格晚于落盘：只在 ``create_*_draft`` 返回之后调用；通知只携带身份与修订，
+        草稿当前状态仍以业务查询为准（08 8.7）。
+        """
+        result = _created(view)
+        notify = self._identity.on_draft_persisted
+        if notify is not None:
+            notify(view.draft)
+        return result
 
     # ---------- 只读查询 ----------
 
@@ -229,6 +255,16 @@ class BusinessTools:
 
     # ---------- 提出 Pending 草稿（四族） ----------
 
+    def _recalc_kind_allowed(self, kind: str) -> bool:
+        """重新生成 Run 的确定性类别边界（S4-08 Q1=C）：只允许产生与旧草稿同 kind 的草稿。
+
+        非重算 Run（``parent_draft_id is None``）恒允许；不在此处拦截的情况下，库层
+        ``_require_recalc_parent`` 也会拒绝 kind 不一致的父子关联。
+        """
+        return (
+            self._identity.parent_draft_id is None or self._identity.parent_kind == kind
+        )
+
     async def propose_profile_draft(self, proposed: dict[str, Any]) -> dict[str, Any]:
         """提出一条**待用户确认**的档案草稿。
 
@@ -236,6 +272,8 @@ class BusinessTools:
         缺字段、状态非法或限制引用不合法时不落库，返回需追问的结果。
         """
         self._require_active()
+        if not self._recalc_kind_allowed("profile_update"):
+            return _recalc_kind_block("profile_update", self._identity.parent_kind)
         try:
             profile = profile_from_json(json.dumps(proposed, ensure_ascii=False))
             baseline = await self._profile_drafts.prepare_generation_baseline()
@@ -245,10 +283,11 @@ class BusinessTools:
                 conversation_id=self._identity.conversation_id,
                 run_id=self._identity.run_id,
                 proposed=profile,
+                parent_draft_id=self._identity.parent_draft_id,
             )
         except _REJECTED_INPUT as exc:
             return _ask_user("profile_update", exc)
-        return _created(view)
+        return self._created(view)
 
     async def propose_plan_draft(
         self,
@@ -285,6 +324,8 @@ class BusinessTools:
         不落库（2026-09-12 拍板：本 Run 不给任何处方草稿）。
         """
         self._require_active()
+        if not self._recalc_kind_allowed("plan"):
+            return _recalc_kind_block("plan", self._identity.parent_kind)
         if self._identity.message_red_flags:
             return _message_red_flag_block("plan", self._identity.message_red_flags)
         try:
@@ -322,7 +363,14 @@ class BusinessTools:
                     return _blocked("plan", generation)
                 payload = generation.payload
             else:
-                if not long_term_adjustment:
+                # 重新生成 Run（旧草稿为计划）由用户显式请求本身构成长期调整授权
+                # （01 1.6）：不在 Run 内重复追问「只记录还是调整长期计划」；普通对话
+                # Run 仍按 04 4.5 要求显式 ``long_term_adjustment=True``。
+                recalc_plan = (
+                    self._identity.parent_draft_id is not None
+                    and self._identity.parent_kind == PLAN_DRAFT_KIND
+                )
+                if not long_term_adjustment and not recalc_plan:
                     return _needs_long_term_decision()
                 # 档案缺事实不给处方：长期修订不因「计划已存在」放宽这条 fail-closed 边界。
                 profile = preparation.snapshot.profile
@@ -375,10 +423,11 @@ class BusinessTools:
                 review_on=review,
                 business_date=self._identity.business_date,
                 patch=patch,
+                parent_draft_id=self._identity.parent_draft_id,
             )
         except _REJECTED_INPUT as exc:
             return _ask_user("plan", exc)
-        return _created(view)
+        return self._created(view)
 
     async def propose_record_draft(self, record: dict[str, Any]) -> dict[str, Any]:
         """提出一条**待用户确认**的训练记录草稿。
@@ -389,6 +438,8 @@ class BusinessTools:
         同日多练时本工具不按日期推断归属。
         """
         self._require_active()
+        if not self._recalc_kind_allowed("training_record"):
+            return _recalc_kind_block("training_record", self._identity.parent_kind)
         try:
             payload = record_draft_from_json(
                 json.dumps(
@@ -410,10 +461,11 @@ class BusinessTools:
                 completion_declared=payload.completion_declared,
                 is_return_phase=payload.is_return_phase,
                 feedback=payload.feedback,
+                parent_draft_id=self._identity.parent_draft_id,
             )
         except _REJECTED_INPUT as exc:
             return _ask_user("training_record", exc)
-        return _created(view)
+        return self._created(view)
 
     async def propose_arrangement_draft(
         self,
@@ -436,6 +488,8 @@ class BusinessTools:
         当次安排同样是处方：当前 Run 消息命中 C 层兜底红旗词时不落库（2026-09-12 拍板）。
         """
         self._require_active()
+        if not self._recalc_kind_allowed("arrangement"):
+            return _recalc_kind_block("arrangement", self._identity.parent_kind)
         if self._identity.message_red_flags:
             return _message_red_flag_block(
                 "arrangement", self._identity.message_red_flags
@@ -454,11 +508,12 @@ class BusinessTools:
                     scheduled_session_id=scheduled_session_id,
                     adjustments=decoded,
                     adjustment_reason=adjustment_reason,
+                    parent_draft_id=self._identity.parent_draft_id,
                 )
             )
         except _REJECTED_INPUT as exc:
             return _ask_user("arrangement", exc)
-        return _created(view)
+        return self._created(view)
 
     # ---------- 取消 ----------
     def _require_active(self) -> None:
@@ -599,6 +654,21 @@ def _needs_long_term_decision() -> dict[str, Any]:
             "未获用户明确要求调整长期计划前不生成计划草稿；用户回绝则本次不生成计划草稿。"
             "当次安排（propose_arrangement_draft）只改对应训练，不构成长期调整的同意。"
         ),
+    }
+
+
+def _recalc_kind_block(kind: str, parent_kind: str | None) -> dict[str, Any]:
+    """重新生成 Run 提出不同类别草稿 → 不落库，返回确定性拒绝（S4-08 Q1=C）。
+
+    形状沿用 :func:`_ask_user`（``created=False`` + ``needs_user_input``）：只说明边界，
+    不静默把子草稿换类别，也不落任何草稿。
+    """
+    return {
+        "created": False,
+        "kind": kind,
+        "needs_user_input": True,
+        "reason": f"重新生成只能产生与旧草稿同类的草稿（旧草稿类别：{parent_kind}）",
+        "note": "不要为不同类别的草稿调用本工具；按旧草稿类别重新生成。",
     }
 
 

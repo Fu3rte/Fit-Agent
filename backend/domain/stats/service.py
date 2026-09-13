@@ -17,14 +17,22 @@
 
 from datetime import date
 
-from domain.plan.repo import PlanRepo, ScheduledSessionRecord
+import aiosqlite
+
+from domain.plan.repo import PlanRepo, PlanVersionRecord, ScheduledSessionRecord
 from domain.plan.rules import session_lock_state
 from domain.plan.schema import InvalidPlanRow
 from domain.records.repo import RecordRepo
 from domain.records.schema import InvalidRecordRow
 from domain.stats.repo import StatsRepo
 from domain.stats.rules import judge_target_sets, plan_week_bounds
-from domain.stats.schema import BucketCounts, TargetJudgement, WeekCompletion
+from domain.stats.schema import (
+    BucketCounts,
+    ReviewBasis,
+    ReviewStatSnapshot,
+    TargetJudgement,
+    WeekCompletion,
+)
 from storage.db import Database
 
 
@@ -56,46 +64,109 @@ class StatsService:
             )
             if version is None:
                 return None
-            week_start, week_end = plan_week_bounds(version.starts_on, week_no)
-            sessions = await self._plans.list_sessions_in_transaction(
-                conn, plan_version_id
+            completion, _ = await self._week_completion_in_transaction(
+                conn, version=version, week_no=week_no, business_date=business_date
             )
-            due = [
-                session
-                for session in sessions
-                if _is_due_denominator_member(
-                    session,
-                    week_start=week_start,
-                    week_end=week_end,
-                    business_date=business_date,
+            return completion
+
+    async def review_basis(self, *, business_date: date) -> ReviewBasis:
+        """复盘生成时冻结的确定性依据（06 6.4）：快照 + 精确来源修订 id。
+
+        同一事务内现算：当前正式计划各已到期周的完成率与全部 PR 数值；来源修订 id 只包
+        括真正参与快照的行（完成率分子命中的训练身份当前修订 + 进入 PR 快照的候选修订），
+        去重后按固定顺序排列。无正式计划时 ``per_week`` 为空，但 PR 快照仍照常现算：
+        「没有完成率」不等于「没有可解释的 PR」。
+
+        本方法不写库、不推进版本；返回的快照就是保存时冻存的同一份数值（不再现算）。
+        """
+        per_week: list[WeekCompletion] = []
+        source_ids: list[str] = []
+        async with self._db.transaction() as conn:
+            version = await self._plans.read_current_in_transaction(conn)
+            if version is not None:
+                week_no = 1
+                while True:
+                    week_start, _ = plan_week_bounds(version.starts_on, week_no)
+                    if week_start >= version.review_on:
+                        break
+                    (
+                        completion,
+                        revision_ids,
+                    ) = await self._week_completion_in_transaction(
+                        conn,
+                        version=version,
+                        week_no=week_no,
+                        business_date=business_date,
+                    )
+                    if completion is not None:
+                        per_week.append(completion)
+                        source_ids.extend(revision_ids)
+                    week_no += 1
+            prs, pr_source_ids = await self._prs.pr_values_in_transaction(conn)
+        return ReviewBasis(
+            snapshot=ReviewStatSnapshot(
+                per_week=tuple(per_week),
+                prs=prs,
+            ),
+            source_revision_ids=tuple(dict.fromkeys([*source_ids, *pr_source_ids])),
+        )
+
+    async def _week_completion_in_transaction(
+        self,
+        conn: aiosqlite.Connection,
+        *,
+        version: PlanVersionRecord,
+        week_no: int,
+        business_date: date,
+    ) -> tuple[WeekCompletion | None, tuple[str, ...]]:
+        """一个 Wn 的完成率 + 命中分子的训练身份当前修订 id（供复盘冻结来源）。"""
+        week_start, week_end = plan_week_bounds(version.starts_on, week_no)
+        sessions = await self._plans.list_sessions_in_transaction(conn, version.id)
+        due = [
+            session
+            for session in sessions
+            if _is_due_denominator_member(
+                session,
+                week_start=week_start,
+                week_end=week_end,
+                business_date=business_date,
+            )
+        ]
+        if not due:
+            return None, ()
+        numerator = 0
+        revision_ids: list[str] = []
+        for session in due:
+            arrangement_ids = (
+                await self._plans.list_arrangement_revision_ids_in_transaction(
+                    conn, session.id
                 )
-            ]
-            if not due:
-                return None
-            numerator = 0
-            for session in due:
-                arrangement_ids = (
-                    await self._plans.list_arrangement_revision_ids_in_transaction(
+            )
+            if not arrangement_ids:
+                continue
+            for arrangement_id in arrangement_ids:
+                if await self._records.is_completed_arrangement_revision_in_transaction(
+                    conn, arrangement_id
+                ):
+                    # 同一次安排最多贡献一次完成：命中即跳出，不按记录条数累计。
+                    numerator += 1
+                    record = await self._records.read_session_in_transaction(
                         conn, session.id
                     )
-                )
-                if not arrangement_ids:
-                    continue
-                for arrangement_id in arrangement_ids:
-                    if await self._records.is_completed_arrangement_revision_in_transaction(
-                        conn, arrangement_id
-                    ):
-                        # 同一次安排最多贡献一次完成：命中即跳出，不按记录条数累计。
-                        numerator += 1
-                        break
-            return WeekCompletion(
-                plan_version_id=plan_version_id,
+                    if record is not None and record.current_revision_id is not None:
+                        revision_ids.append(record.current_revision_id)
+                    break
+        return (
+            WeekCompletion(
+                plan_version_id=version.id,
                 week_no=week_no,
                 week_start=week_start,
                 week_end=week_end,
                 numerator=numerator,
                 denominator=len(due),
-            )
+            ),
+            tuple(revision_ids),
+        )
 
     async def judge_session(self, session_id: str) -> TargetJudgement | None:
         """一次训练当前修订的组级三桶判定（06 6.2）；不作判定时返回 None。

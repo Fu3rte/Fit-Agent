@@ -668,6 +668,11 @@ async def test_failed_record_migration_rolls_back_and_can_be_retried(
         DEFAULT_MIGRATIONS_DIR / SUMMARY_MIGRATION_FILE,
         directory / SUMMARY_MIGRATION_FILE,
     )
+    # 015 是 S4-08 的重算父子关联与辅助 Run 类型：补齐后临时目录才是生产最新编号。
+    shutil.copy(
+        DEFAULT_MIGRATIONS_DIR / "015_stage4_recalc_and_aux_runs.sql",
+        directory / "015_stage4_recalc_and_aux_runs.sql",
+    )
     broken = directory / RECORD_MIGRATION_FILE
     original = (DEFAULT_MIGRATIONS_DIR / RECORD_MIGRATION_FILE).read_text(
         encoding="utf-8"

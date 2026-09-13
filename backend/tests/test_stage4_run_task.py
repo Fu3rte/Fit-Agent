@@ -431,3 +431,36 @@ async def test_execution_completes_without_any_observer(tmp_path: Path) -> None:
         assert await _kinds(repo, "r1") == ["user_request", "framework"]
         assert json.loads((await repo.list_framework_messages("r1"))[0]["payload_json"])
         _assert_no_leaks(driver, baseline)
+
+
+async def test_driver_holds_the_execution_task_until_slot_release(
+    tmp_path: Path,
+) -> None:
+    """S4-07：生产入口丢弃 ``start`` 的返回值，驱动必须自己持有执行任务强引用。
+
+    ``asyncio`` 只对任务保持弱引用（无强引用时可能在执行中被 GC）：本用例白盒断言引用在
+    名额占用期间存在、在名额释放时一并解除。
+    """
+    async with open_database(tmp_path / "app.db") as db:
+        repo = RunRepo(db)
+        await _pending_run(repo, "r1", "cr-1")
+        driver = ExecutionDriver(repo)
+        baseline = _tracked_tasks()
+        running = asyncio.Event()
+        gate = asyncio.Event()
+
+        async def work(active: ActiveExecution) -> FrameworkMessages:
+            running.set()
+            await gate.wait()
+            return _messages()
+
+        task = driver.start("r1", work)
+        await running.wait()
+        active = driver._active
+        assert active is not None
+        assert active.execution_task is task and not task.done()
+        gate.set()
+        await task
+        assert active.execution_task is None
+        assert driver.active_run_id is None
+        _assert_no_leaks(driver, baseline)

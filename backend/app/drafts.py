@@ -24,7 +24,7 @@ from typing import Any
 
 import aiosqlite
 
-from app.draft_repo import PROFILE_UPDATE_KIND, Draft, DraftRepo
+from app.draft_repo import PROFILE_UPDATE_KIND, Draft, DraftRepo, InvalidDraftRow
 from domain.actions.repo import ExerciseRepo
 from domain.actions.service import ActionCatalogService
 from domain.profile.repo import ProfileRepo
@@ -190,13 +190,16 @@ class DraftView:
     """草稿的当前查询形态：行数据 + 解码后的基线／拟议档案 + 结构化 Diff。
 
     ``base_profile is None`` 表示生成时未建档，与显式全未知基线
-    （``base_profile == Profile.empty()``）是两种语义。
+    （``base_profile == Profile.empty()``）是两种语义。``parent_diff`` 仅重算子草稿
+    （``draft.parent_draft_id`` 非空）有值：旧草稿拟议档案 → 新草稿拟议档案（01 1.6
+    「新草稿展示与旧草稿的 Diff」）；``diff`` 始终是拟议 → 正式业务数据。
     """
 
     draft: Draft
     base_profile: Profile | None
     proposed_profile: Profile
     diff: tuple[ProfileFieldDiff, ...]
+    parent_diff: tuple[ProfileFieldDiff, ...] | None = None
 
 
 class DraftService:
@@ -230,6 +233,7 @@ class DraftService:
         conversation_id: str,
         run_id: str | None,
         proposed: Profile,
+        parent_draft_id: str | None = None,
     ) -> DraftView:
         """按生成基线保存一条 Pending 档案草稿（revision 从 1 起），返回查询形态。
 
@@ -254,8 +258,9 @@ class DraftService:
             ),
             proposed_profile_json=profile_to_json(proposed),
             base_business_version=generation_baseline.context_version,
+            parent_draft_id=parent_draft_id,
         )
-        return self._to_view(draft)
+        return await self._to_view(draft)
 
     async def get_draft(self, draft_id: str) -> DraftView | None:
         """按身份读取档案草稿（含结构化 Diff）；不存在返回 None。
@@ -263,7 +268,7 @@ class DraftService:
         只服务 ``kind='profile_update'``：其他 kind 明确报错，不按档案形状解码。
         """
         draft = await self._drafts.get(draft_id)
-        return None if draft is None else self._to_view(draft)
+        return None if draft is None else await self._to_view(draft)
 
     async def list_drafts(self, conversation_id: str) -> tuple[DraftView, ...]:
         """该会话已持久化**档案草稿**的当前状态（01 1.2：不依赖历史通知）。
@@ -274,7 +279,7 @@ class DraftService:
         drafts = await self._drafts.list_for_conversation(
             conversation_id, kind=PROFILE_UPDATE_KIND
         )
-        return tuple(self._to_view(draft) for draft in drafts)
+        return tuple([await self._to_view(draft) for draft in drafts])
 
     async def revise_profile_draft(
         self, *, draft_id: str, seen_revision: int, proposed: Profile
@@ -324,7 +329,7 @@ class DraftService:
                 proposed_profile_json=profile_to_json(proposed),
                 expected_revision=seen_revision,
             )
-        return self._to_view(updated)
+        return await self._to_view(updated)
 
     async def discard_draft(self, *, draft_id: str) -> DraftView:
         """丢弃待确认草稿：只改变草稿状态，正式事实与业务版本不变（01 1.3）。
@@ -348,11 +353,11 @@ class DraftService:
             if draft.status == "committed":
                 raise DraftNotDiscardable(f"已提交草稿不可被丢弃撤销：{draft_id}")
             if draft.status == "discarded":
-                return self._to_view(draft)
+                return await self._to_view(draft)
             updated = await self._drafts.record_discard_in_transaction(
                 conn, draft_id=draft_id
             )
-        return self._to_view(updated)
+        return await self._to_view(updated)
 
     async def _require_known_restriction_targets(self, proposed: Profile) -> None:
         """具体动作限制必须引用目录内身份（含停用动作）；模式词表由结构校验覆盖。"""
@@ -392,7 +397,7 @@ class DraftService:
             self._runs, conversation_id=conversation_id, run_id=run_id
         )
 
-    def _to_view(self, draft: Draft) -> DraftView:
+    async def _to_view(self, draft: Draft) -> DraftView:
         """行 → 查询形态：解码快照并计算 Diff；解码失败即草稿数据损坏，显式失败。
 
         只接受档案草稿形状：其他 kind 是 kind 分派遗漏（:class:`DraftKindMismatch`），
@@ -408,9 +413,20 @@ class DraftService:
             else profile_from_json(draft.base_profile_json)
         )
         proposed = profile_from_json(draft.proposed_profile_json)
+        parent_diff = None
+        if draft.parent_draft_id is not None:
+            parent = await self._drafts.get(draft.parent_draft_id)
+            if parent is None:
+                raise InvalidDraftRow(
+                    f"重算子草稿的旧草稿不存在：{draft.parent_draft_id}"
+                )
+            parent_diff = profile_diff(
+                profile_from_json(parent.proposed_profile_json), proposed
+            )
         return DraftView(
             draft=draft,
             base_profile=base_profile,
             proposed_profile=proposed,
             diff=profile_diff(base_profile, proposed),
+            parent_diff=parent_diff,
         )

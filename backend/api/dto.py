@@ -94,8 +94,9 @@ from domain.stats.schema import (
     WeekCompletion,
     review_basis_to_json,
 )
+from runtime.context import visible_answer_text
 from runtime.error_codes import CONVERSATION_BUSY
-from storage.errors import ConversationBusy
+from storage.errors import ConversationBusy, NotFound, RunStateConflict
 
 _STALE_DETAIL_NO_FIELD_CHANGE = "业务版本已变化，当前快照无字段差异"
 
@@ -182,8 +183,14 @@ def draft_dto(view: DraftView) -> dict[str, Any]:
         "status": draft.status,
         "revision": draft.revision,
         "base_business_version": draft.base_business_version,
+        "parent_draft_id": draft.parent_draft_id,
         "payload": {"profile": profile_facts_dto(view.proposed_profile)},
         "diff": [_field_diff_dto(item) for item in view.diff],
+        "parent_diff": (
+            None
+            if view.parent_diff is None
+            else [_field_diff_dto(item) for item in view.parent_diff]
+        ),
         "committed_revision": draft.committed_revision,
         "committed_business_version": draft.committed_business_version,
     }
@@ -342,6 +349,8 @@ def _restriction_from_dto(raw: object) -> ActionRestriction:
 _ERROR_STATUS: tuple[tuple[type[Exception], int, str], ...] = (
     (InvalidRequestShape, 400, "invalid_request"),
     (ConversationBusy, 409, CONVERSATION_BUSY),
+    (NotFound, 404, "invalid_request"),
+    (RunStateConflict, 409, "invalid_request"),
     (UnknownDraft, 404, "invalid_request"),
     (DraftRevisionConflict, 409, "draft_modified"),
     (DraftStale, 409, "draft_stale"),
@@ -601,13 +610,17 @@ def review_dto(view: ReviewView) -> dict[str, Any]:
 
 
 def _draft_row_dto(draft: Any) -> dict[str, Any]:
-    """草稿行的传输字段（与档案草稿同一形状）：身份、kind、状态、revision 与提交凭据。"""
+    """草稿行的传输字段（与档案草稿同一形状）：身份、kind、状态、revision、父子关联与提交凭据。
+
+    ``parent_draft_id`` 是重算子草稿指向旧草稿的关联（01 1.6）；普通草稿为 ``null``。
+    """
     return {
         "id": draft.id,
         "kind": draft.kind,
         "status": draft.status,
         "revision": draft.revision,
         "base_business_version": draft.base_business_version,
+        "parent_draft_id": draft.parent_draft_id,
         "committed_revision": draft.committed_revision,
         "committed_business_version": draft.committed_business_version,
     }
@@ -652,6 +665,11 @@ def plan_draft_dto(view: PlanDraftView) -> dict[str, Any]:
             ),
         },
         "diff": _structured_diff_dto(view.plan_diff),
+        "parent_plan_diff": (
+            None
+            if view.parent_plan_diff is None
+            else _structured_diff_dto(view.parent_plan_diff)
+        ),
         "profile_diff": (
             None
             if view.profile_diff is None
@@ -672,11 +690,15 @@ def record_draft_dto(view: RecordDraftView) -> dict[str, Any]:
             "status": view.status,
         },
         "diff": _structured_diff_dto(view.diff),
+        "parent_diff": (
+            None if view.parent_diff is None else _structured_diff_dto(view.parent_diff)
+        ),
     }
 
 
 def arrangement_draft_dto(view: ArrangementDraftView) -> dict[str, Any]:
-    """安排草稿 → 传输对象：当次完整目标（快照形状）＋绑定版本该训练日（原计划对照）。"""
+    """安排草稿 → 传输对象：当次完整目标（快照形状）＋绑定版本该训练日（原计划对照）
+    ＋结构化 Diff（拟议 → 正式；重算子草稿另有旧草稿 → 新草稿）。"""
     return {
         **_draft_row_dto(view.draft),
         "payload": {
@@ -688,6 +710,10 @@ def arrangement_draft_dto(view: ArrangementDraftView) -> dict[str, Any]:
             "id": view.plan_version.id,
             "version": view.plan_version.version,
         },
+        "diff": _structured_diff_dto(view.diff),
+        "parent_diff": (
+            None if view.parent_diff is None else _structured_diff_dto(view.parent_diff)
+        ),
     }
 
 
@@ -747,3 +773,128 @@ def record_payload_from_dto(body: dict[str, Any]) -> RecordDraftPayload:
         return record_draft_from_json(json.dumps(payload, ensure_ascii=False))
     except InvalidRecordRow as exc:
         raise InvalidRequestShape(f"记录载荷形状不合法：{exc}") from exc
+
+
+# ---------- Stage 4：会话／Run 传输映射（S4-07；stage4.md §6 冻结拼写） ----------
+
+
+def run_dto(run: dict[str, Any]) -> dict[str, Any]:
+    """Run 行 → 冻结传输字段（stage4.md §6）：``id`` 以 ``run_id`` 拼写，其余原样。
+
+    五态是唯一权威状态（08 8.1）；``error_code`` 只给机器可读原因（不是 HTTP 错误码）。
+    ``client_request_id`` 是客户端的幂等键，不属于对外 Run 字段，不外发。
+    """
+    return {
+        "run_id": str(run["id"]),
+        "conversation_id": str(run["conversation_id"]),
+        "status": str(run["status"]),
+        "error_code": run["error_code"],
+        "retry_of_run_id": run["retry_of_run_id"],
+        "created_at": run["created_at"],
+        "updated_at": run["updated_at"],
+    }
+
+
+def _message_payload_text(payload_json: str) -> str:
+    """消息负载文本字段（``user_request``／``partial`` 的 ``{"text": ...}``）。
+
+    负载由本仓写入路径 ``json.dumps`` 产出；解析不了或缺文本字段只能是库内行损坏，
+    显式保存为服务端故障（500），不静默当成空回答。
+    """
+    payload = _roundtrip_json(payload_json)
+    text = payload.get("text") if isinstance(payload, dict) else None
+    if not isinstance(text, str):
+        raise ValueError(f"消息负载缺少文本字段：{payload!r}")
+    return text
+
+
+def session_messages_dto(
+    message_rows: Sequence[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """已保存消息 → 查询恢复投影：用户请求 + 可见回答（未完成的标 ``complete=false``）。
+
+    - 可见回答只取框架消息里的 ``TextPart``（``runtime.context.visible_answer_text``）：隐藏
+      推理、工具调用与结果、Token／Cache 一律不出现在传输面（08 8.8）。
+    - **不重复拼接**：一个 Run 只要已有完整回答（``completed`` 同事务写入的框架消息），
+      就不再输出该 Run 的 partial 行——部分回答只是完整回答的前缀（08 8.7、07 7.4）。
+    - 取消／失败保留的文本以 ``kind='partial'``、``complete=false`` 给出：明确是未完成回答，
+      不冒充完整成功 Assistant 消息。
+    """
+    order: list[str] = []
+    per_run: dict[str, dict[str, Any]] = {}
+    for row in message_rows:
+        run_id = str(row["run_id"])
+        entry = per_run.get(run_id)
+        if entry is None:
+            entry = {
+                "seq": int(row["seq"]),
+                "user_text": None,
+                "answer": [],
+                "partial": [],
+            }
+            per_run[run_id] = entry
+            order.append(run_id)
+        kind = str(row["kind"])
+        if kind == "user_request":
+            entry["user_text"] = _message_payload_text(str(row["payload_json"]))
+        elif kind == "framework":
+            visible = visible_answer_text(str(row["payload_json"]))
+            if visible:
+                entry["answer"].append(visible)
+        elif kind == "partial":
+            entry["partial"].append(_message_payload_text(str(row["payload_json"])))
+    messages: list[dict[str, Any]] = []
+    for run_id in order:
+        entry = per_run[run_id]
+        if entry["user_text"] is not None:
+            messages.append(
+                {
+                    "seq": entry["seq"],
+                    "run_id": run_id,
+                    "role": "user",
+                    "kind": "user_request",
+                    "text": entry["user_text"],
+                    "complete": True,
+                }
+            )
+        answer = "".join(entry["answer"])
+        if answer:
+            messages.append(
+                {
+                    "seq": entry["seq"],
+                    "run_id": run_id,
+                    "role": "assistant",
+                    "kind": "answer",
+                    "text": answer,
+                    "complete": True,
+                }
+            )
+        elif entry["partial"]:
+            messages.append(
+                {
+                    "seq": entry["seq"],
+                    "run_id": run_id,
+                    "role": "assistant",
+                    "kind": "partial",
+                    "text": "".join(entry["partial"]),
+                    "complete": False,
+                }
+            )
+    return messages
+
+
+def session_dto(
+    conversation: dict[str, Any],
+    runs: Sequence[dict[str, Any]],
+    message_rows: Sequence[dict[str, Any]],
+) -> dict[str, Any]:
+    """会话 + 已保存消息 + Run 状态：断线／刷新后的查询恢复入口（不重放事件）。
+
+    草稿当前状态仍走已有的 ``GET /api/sessions/{id}/drafts``（本函数不复制草稿语义）。
+    """
+    return {
+        "session_id": str(conversation["id"]),
+        "created_at": conversation["created_at"],
+        "runs": [run_dto(run) for run in runs],
+        "messages": session_messages_dto(message_rows),
+    }

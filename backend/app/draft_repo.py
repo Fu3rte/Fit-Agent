@@ -48,6 +48,7 @@ from typing import Literal, cast
 import aiosqlite
 
 from storage.db import Database, require_outer_transaction
+from storage.errors import InvalidInput
 
 DraftStatus = Literal["pending", "committed", "discarded"]
 DRAFT_STATUSES: tuple[DraftStatus, ...] = ("pending", "committed", "discarded")
@@ -96,6 +97,7 @@ class Draft:
     proposed_arrangement_json: str | None
     proposed_record_json: str | None
     base_business_version: int
+    parent_draft_id: str | None
     revision: int
     status: DraftStatus
     committed_revision: int | None
@@ -122,6 +124,7 @@ def _row_to_draft(row: aiosqlite.Row) -> Draft:
     raw_patch = row["proposed_profile_patch_json"]
     raw_arrangement = row["proposed_arrangement_json"]
     raw_record = row["proposed_record_json"]
+    raw_parent = row["parent_draft_id"]
     committed_revision = row["committed_revision"]
     committed_business_version = row["committed_business_version"]
     return Draft(
@@ -138,6 +141,7 @@ def _row_to_draft(row: aiosqlite.Row) -> Draft:
         ),
         proposed_record_json=None if raw_record is None else str(raw_record),
         base_business_version=int(row["base_business_version"]),
+        parent_draft_id=None if raw_parent is None else str(raw_parent),
         revision=int(row["revision"]),
         status=cast(DraftStatus, status),
         committed_revision=(
@@ -160,6 +164,7 @@ async def _select_row(
         "SELECT id, kind, conversation_id, run_id, base_profile_json,"
         " proposed_profile_json, proposed_plan_json, proposed_profile_patch_json,"
         " proposed_arrangement_json, proposed_record_json, base_business_version,"
+        " parent_draft_id,"
         " revision, status, committed_revision, committed_business_version,"
         " created_at, updated_at"
         " FROM business_drafts WHERE id = ?",
@@ -174,6 +179,35 @@ async def _require_row(conn: aiosqlite.Connection, draft_id: str) -> Draft:
     if row is None:
         raise RuntimeError(f"草稿写入后读回失败：{draft_id}")
     return _row_to_draft(row)
+
+
+async def _require_recalc_parent(
+    conn: aiosqlite.Connection,
+    parent_draft_id: str,
+    kind: DraftKind,
+    conversation_id: str,
+) -> None:
+    """重新生成草稿的旧草稿校验（库层最小保证）：存在、仍 Pending、同会话、kind 一致。
+
+    「是否过期（``base_business_version != 当前 context_version``）」与「是否已有 Pending
+    子草稿」属应用层语义（runtime/run_service.py）；本层拒绝即抛 :class:`InvalidInput`
+    （映射 409 ``invalid_request``），同事务回滚，不落半条草稿。
+    """
+    async with conn.execute(
+        "SELECT kind, conversation_id, status FROM business_drafts WHERE id = ?",
+        (parent_draft_id,),
+    ) as cursor:
+        row = await cursor.fetchone()
+    if row is None:
+        raise InvalidInput(f"重新生成的旧草稿不存在: {parent_draft_id}")
+    if str(row["kind"]) != kind:
+        raise InvalidInput(
+            f"重新生成只能产生与旧草稿同类别的草稿: {row['kind']} != {kind}"
+        )
+    if str(row["conversation_id"]) != conversation_id:
+        raise InvalidInput(f"重新生成的旧草稿不属于同一会话: {parent_draft_id}")
+    if str(row["status"]) != "pending":
+        raise InvalidInput(f"仅 Pending 草稿可重新生成: {parent_draft_id}")
 
 
 class DraftRepo:
@@ -191,6 +225,7 @@ class DraftRepo:
         base_profile_json: str | None,
         proposed_profile_json: str,
         base_business_version: int,
+        parent_draft_id: str | None = None,
     ) -> Draft:
         """保存一条 Pending 档案草稿（``kind='profile_update'``，revision 从 1 起）并返回落库后的行。
 
@@ -217,6 +252,7 @@ class DraftRepo:
             proposed_arrangement_json=None,
             proposed_record_json=None,
             base_business_version=base_business_version,
+            parent_draft_id=parent_draft_id,
         )
 
     async def create_plan_pending(
@@ -230,6 +266,7 @@ class DraftRepo:
         proposed_plan_json: str,
         proposed_profile_patch_json: str | None,
         base_business_version: int,
+        parent_draft_id: str | None = None,
     ) -> Draft:
         """保存一条 Pending 计划草稿（``kind='plan'``，revision 从 1 起）并返回落库后的行。
 
@@ -255,6 +292,7 @@ class DraftRepo:
             proposed_arrangement_json=None,
             proposed_record_json=None,
             base_business_version=base_business_version,
+            parent_draft_id=parent_draft_id,
         )
 
     async def create_arrangement_pending(
@@ -267,6 +305,7 @@ class DraftRepo:
         proposed_profile_json: str,
         proposed_arrangement_json: str,
         base_business_version: int,
+        parent_draft_id: str | None = None,
     ) -> Draft:
         """保存一条 Pending 安排草稿（``kind='arrangement'``，revision 从 1 起）并返回落库后的行。
 
@@ -290,6 +329,7 @@ class DraftRepo:
             proposed_arrangement_json=proposed_arrangement_json,
             proposed_record_json=None,
             base_business_version=base_business_version,
+            parent_draft_id=parent_draft_id,
         )
 
     async def create_record_pending(
@@ -302,6 +342,7 @@ class DraftRepo:
         proposed_profile_json: str,
         proposed_record_json: str,
         base_business_version: int,
+        parent_draft_id: str | None = None,
     ) -> Draft:
         """保存一条 Pending 训练记录草稿（``kind='training_record'``，revision 从 1 起）。
 
@@ -325,6 +366,7 @@ class DraftRepo:
             proposed_arrangement_json=None,
             proposed_record_json=proposed_record_json,
             base_business_version=base_business_version,
+            parent_draft_id=parent_draft_id,
         )
 
     async def _insert_pending(
@@ -341,20 +383,29 @@ class DraftRepo:
         proposed_arrangement_json: str | None,
         proposed_record_json: str | None,
         base_business_version: int,
+        parent_draft_id: str | None = None,
     ) -> Draft:
-        """单一事务内插入 Pending 草稿并读回；列与 kind 的配对由调用方法固定。"""
+        """单一事务内插入 Pending 草稿并读回；列与 kind 的配对由调用方法固定。
+
+        ``parent_draft_id`` 非空时（重新生成）：在同一事务内校验父草稿存在、仍 pending、
+        属于同一会话且 kind 一致——不成立即拒绝，不落半条草稿。
+        """
         now = _now()
 
         async with self._db.transaction() as conn:
+            if parent_draft_id is not None:
+                await _require_recalc_parent(
+                    conn, parent_draft_id, kind, conversation_id
+                )
             await conn.execute(
                 "INSERT INTO business_drafts (id, kind, conversation_id, run_id,"
                 " base_profile_json, proposed_profile_json, base_business_version,"
                 " revision, status, committed_revision, committed_business_version,"
                 " created_at, updated_at, proposed_plan_json,"
                 " proposed_profile_patch_json, proposed_arrangement_json,"
-                " proposed_record_json)"
+                " proposed_record_json, parent_draft_id)"
                 " VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', NULL, NULL, ?, ?, ?, ?, ?,"
-                " ?)",
+                " ?, ?)",
                 (
                     draft_id,
                     kind,
@@ -370,6 +421,7 @@ class DraftRepo:
                     proposed_profile_patch_json,
                     proposed_arrangement_json,
                     proposed_record_json,
+                    parent_draft_id,
                 ),
             )
             return await _require_row(conn, draft_id)
@@ -410,7 +462,8 @@ class DraftRepo:
                 "SELECT id, kind, conversation_id, run_id, base_profile_json,"
                 " proposed_profile_json, proposed_plan_json,"
                 " proposed_profile_patch_json, proposed_arrangement_json,"
-                " proposed_record_json, base_business_version, revision, status,"
+                " proposed_record_json, base_business_version, parent_draft_id,"
+                " revision, status,"
                 " committed_revision, committed_business_version, created_at, updated_at"
                 " FROM business_drafts WHERE conversation_id = ?"
                 " AND (? IS NULL OR kind = ?)"
@@ -419,6 +472,27 @@ class DraftRepo:
             ) as cursor:
                 rows = await cursor.fetchall()
             return tuple(_row_to_draft(row) for row in rows)
+
+        return await self._db.under_lock(op)
+
+    async def find_pending_child(self, parent_draft_id: str) -> Draft | None:
+        """按 ``parent_draft_id`` 查仍 Pending 的子草稿（重算重复请求的幂等事实）。
+
+        只认 Pending：子草稿一旦进入终态（已确认／已丢弃），后续请求可以再生成新子草稿
+        （Q2=A）；匹配多条时取最早一条（正常流程只会有一条 Pending 子草稿）。
+        """
+
+        async def op(conn: aiosqlite.Connection) -> Draft | None:
+            async with conn.execute(
+                "SELECT id FROM business_drafts WHERE parent_draft_id = ?"
+                " AND status = 'pending' ORDER BY created_at, id LIMIT 1",
+                (parent_draft_id,),
+            ) as cursor:
+                row = await cursor.fetchone()
+            if row is None:
+                return None
+            selected = await _select_row(conn, str(row["id"]))
+            return None if selected is None else _row_to_draft(selected)
 
         return await self._db.under_lock(op)
 

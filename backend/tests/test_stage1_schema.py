@@ -23,7 +23,7 @@ from storage.errors import FutureSchemaVersion, MigrationError
 from storage.migrations import DEFAULT_MIGRATIONS_DIR, load_migrations
 from storage.run_repo import RunRepo
 from storage.setting_repo import DEFAULT_PROVIDER, SettingRepo
-from tests.support import open_database
+from tests.support import open_database, seed_legacy_run
 
 STAGE0_TABLES = {
     "conversations",
@@ -224,11 +224,13 @@ async def test_stage0_upgrade_preserves_runtime_rows_timezone_and_credentials(
         assert await db.pragma_value("user_version") == 1
         runs = RunRepo(db)
         settings = SettingRepo(db)
-        await runs.create_conversation("c-legacy")
-        await runs.create_run_with_user_message(
-            "c-legacy", "r-legacy", "cri-legacy", "旧库用户请求"
+        await seed_legacy_run(
+            db,
+            conversation_id="c-legacy",
+            run_id="r-legacy",
+            client_request_id="cri-legacy",
+            text="旧库用户请求",
         )
-        await runs.append_run_events("r-legacy", [("note", {"legacy": True})])
         assert (await settings.initialize_business_timezone(lambda: "Asia/Shanghai"))[
             "initialized"
         ]

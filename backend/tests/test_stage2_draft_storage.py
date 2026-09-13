@@ -42,7 +42,7 @@ from storage.errors import FutureSchemaVersion, MigrationError
 from storage.migrations import DEFAULT_MIGRATIONS_DIR, load_migrations
 from storage.run_repo import RunRepo
 from storage.setting_repo import DEFAULT_PROVIDER, SettingRepo
-from tests.support import open_database
+from tests.support import open_database, seed_legacy_run
 
 STAGE0_TABLES = {
     "conversations",
@@ -273,11 +273,13 @@ async def test_stage1_upgrade_adds_drafts_and_preserves_sessions_profile_catalog
         assert await db.pragma_value("user_version") == STAGE1_VERSION
         runs = RunRepo(db)
         settings = SettingRepo(db)
-        await runs.create_conversation("c-legacy")
-        await runs.create_run_with_user_message(
-            "c-legacy", "r-legacy", "cri-legacy", "旧库用户请求"
+        await seed_legacy_run(
+            db,
+            conversation_id="c-legacy",
+            run_id="r-legacy",
+            client_request_id="cri-legacy",
+            text="旧库用户请求",
         )
-        await runs.append_run_events("r-legacy", [("note", {"legacy": True})])
         assert (await settings.initialize_business_timezone(lambda: "Asia/Shanghai"))[
             "initialized"
         ]
@@ -342,11 +344,13 @@ async def test_stage0_upgrade_reaches_latest_and_preserves_legacy_sessions(
         assert "exercises" not in tables
         assert "business_drafts" not in tables
         runs = RunRepo(db)
-        await runs.create_conversation("c-stage0")
-        await runs.create_run_with_user_message(
-            "c-stage0", "r-stage0", "cri-stage0", "Stage 0 旧用户请求"
+        await seed_legacy_run(
+            db,
+            conversation_id="c-stage0",
+            run_id="r-stage0",
+            client_request_id="cri-stage0",
+            text="Stage 0 旧用户请求",
         )
-        await runs.append_run_events("r-stage0", [("note", {"legacy": True})])
 
     # 用生产迁移目录（含 002–004）重开同一库：缺失迁移依序执行
     async with open_database(path) as db:

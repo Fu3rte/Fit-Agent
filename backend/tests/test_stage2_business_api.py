@@ -1197,7 +1197,6 @@ async def test_loopback_host_and_origin_boundaries_apply_to_business_endpoints(
 SIDE_SCAN_CASES: tuple[tuple[str, str], ...] = (
     ("POST", "/api/drafts"),  # 公开创建草稿
     ("GET", "/api/drafts"),
-    ("POST", "/api/drafts/d1/recalc"),  # 重算假成功
     ("PUT", "/api/profile"),  # 直接写正式档案
     ("POST", "/api/profile"),
     ("POST", "/api/runs"),  # 假 Run／聊天／模型路由
@@ -1217,7 +1216,28 @@ async def test_no_public_creation_recalc_write_or_fake_run_routes(
 
             # 405 = 路径存在但方法未接线（例如 /api/profile 只读）；两者都表示能力未提供
             assert status in (404, 405), (method, path, status)
+        # 重算已是 S4-08 Q1=C 的已拍真实入口，不再属于「能力缺失」清单；改用真实入口
+        # 拒绝断言：不存在的旧草稿不创建 Run、不产生草稿、不改正式事实。
+        status, body = await _asgi_json(
+            app,
+            "POST",
+            "/api/drafts/d1/recalc",
+            json_body={"client_request_id": "k"},
+        )
+        assert status == 404, status
+        assert body["error_code"] == "invalid_request"
+        assert await _run_count(db) == 0
         assert await _formal(db) == ProfileSnapshot(profile=None, context_version=0)
+
+
+async def _run_count(db: Database) -> int:
+    async def op(conn):
+        async with conn.execute("SELECT COUNT(*) AS n FROM runs") as cursor:
+            row = await cursor.fetchone()
+        assert row is not None
+        return int(row["n"])
+
+    return await db.under_lock(op)
 
 
 LEAK_CASES = cast(

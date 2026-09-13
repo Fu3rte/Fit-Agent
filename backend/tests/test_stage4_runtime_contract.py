@@ -7,7 +7,7 @@
 2. 目录外模型 id（含框架已知的旧别名）拒绝启动：不推断、不降级到别的模型。
 3. 错误码封闭集合恰为已冻结的六个（含 2026-09-12 拍板新增的 ``model_request_failed``），
    且 ``conversation_busy`` 的 HTTP 409 映射只登记一次。
-4. 本片不新增公开 HTTP 面：聊天／Run／SSE 路由仍未接入（不预支 S4-03/S4-07）。
+4. 冻结的对话／Run／SSE 路由集合（S4-07 交付后按 stage4.md §6 正向断言，不新增旁路）。
 
 离线：全部为纯函数与静态表检查，不构造客户端、不读凭据、不发请求
 （真实连通性证据见 ``scripts/deepseek_smoke.py``，默认套件保持离线）。
@@ -134,10 +134,53 @@ def test_conversation_busy_http_mapping_is_registered_once() -> None:
     assert entries == [(409, CONVERSATION_BUSY)]
 
 
-def test_no_chat_run_or_sse_route_is_exposed(tmp_path: Path) -> None:
-    app = create_app(tmp_path)
-    paths = {getattr(route, "path", "") for route in app.routes}
-    for forbidden in ("/api/chat", "/api/runs", "/api/events", "/api/models"):
-        assert not any(path.startswith(forbidden) for path in paths), forbidden
-    # 也没有新增公开建草稿入口（S3-14 旁路扫描口径）
-    assert not any(path == "/api/drafts" for path in paths)
+def test_chat_run_and_sse_route_surface_is_the_frozen_one(tmp_path: Path) -> None:
+    """S4-07 接线后：对话／Run／SSE 路由就是 stage4.md §6 冻结的那一组，且不新增旁路。
+
+    本用例原为 S4-01 的切片内负向守卫（当时禁止预支 S4-07 的 HTTP 面）；S4-07 交付后按已拍
+    契约改为正向断言，并修正路由枚举：FastAPI 0.141 把 ``include_router`` 条目保留为
+    ``_IncludedRouter``，直接读 ``app.routes`` 看不到任何子路由（旧写法已空转）。
+    """
+    frozen = {
+        ("/api/sessions", "POST"),
+        ("/api/sessions/{session_id}", "GET"),
+        ("/api/sessions/{session_id}/requests", "POST"),
+        ("/api/runs/{run_id}", "GET"),
+        ("/api/runs/{run_id}/retry", "POST"),
+        ("/api/runs/{run_id}/cancel", "POST"),
+        ("/api/runs/{run_id}/events", "GET"),
+    }
+    table = _route_table(create_app(tmp_path))
+    assert frozen <= table
+    # 非空断言：路由表确实被展开了（空表会让上面的子集断言也“通过”）
+    assert ("/healthz", "GET") in table
+    assert ("/api/profile", "GET") in table
+    # 不得新增旁路：没有公开建草稿入口，也没有聊天以外的执行面或事件面
+    assert not any(
+        path == "/api/drafts" and method in ("POST", "PUT", "PATCH")
+        for path, method in table
+    )
+    for forbidden in ("/api/chat", "/api/events", "/api/models"):
+        assert not any(path.startswith(forbidden) for path in _paths(table)), forbidden
+
+
+def _route_table(app) -> set[tuple[str, str]]:
+    """(路径, 方法) 全集：展开 ``_IncludedRouter``（FastAPI 0.141 不再扁平化子路由）。"""
+    table: set[tuple[str, str]] = set()
+    stack = list(app.routes)
+    while stack:
+        route = stack.pop()
+        included = getattr(route, "original_router", None)
+        if included is not None:
+            stack.extend(included.routes)
+            continue
+        path = getattr(route, "path", None)
+        if path is None:
+            continue
+        for method in getattr(route, "methods", ()) or ():
+            table.add((path, method))
+    return table
+
+
+def _paths(table: set[tuple[str, str]]) -> set[str]:
+    return {path for path, _method in table}
