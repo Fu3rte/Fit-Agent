@@ -45,10 +45,10 @@
 | 草稿读取 | `/api/drafts/{draft_id}` | GET | — | 同上单条；载荷按 kind 映射，不按错形状解码 | 404 `invalid_request` |
 | 草稿纠错 | `/api/drafts/{draft_id}/revise` | POST | `{revision, payload}`（revision 必带，F3） | `{draft}`；只改草稿不提交；载荷形状按 kind（plan 带日期字段） | 400 `invalid_request`；404；409 `draft_modified`（所见 revision 不符）；409 `invalid_request`（非 Pending 等） |
 | 草稿确认 | `/api/drafts/{draft_id}/confirm` | POST | `{revision}` | 提交凭据（F4/F10）：公共 `{draft_id, status:"committed", committed_revision, committed_business_version}` + kind 附加（计划 `plan_version_id` + `plan_version` / 安排 `arrangement_revision_id`/`arrangement_revision_no`/`scheduled_session_id`/`accepted_at` / 记录 `training_session_id`/`session_revision_id`/`revision_no`/`revision_status`）；幂等重放返回同一份 | 400；404；409 `draft_modified`；409 `draft_stale`（业务基线过期 → 过渡态，触发 recalc，F10）；409 `invalid_request`；422 `invalid_request`（向作废身份追加——`InvalidRecordFact`） |
-| 记录作废 | `/api/drafts/{draft_id}/void` | POST | `{revision}` | 提交凭据；追加 `voided` 修订；仅记录草稿；**作废即终态**（S4-09；后端缺口，归 F6-01/后端 owner，见 §3） | 400；404；409 `draft_modified`；409 `invalid_request`（非记录 kind——`DraftKindMismatch`）；422 `invalid_request`（向作废身份追加——`InvalidRecordFact`，待 F6-01） |
+| 记录作废 | `/api/drafts/{draft_id}/void` | POST | `{revision}` | 提交凭据；追加 `voided` 修订；仅记录草稿；**作废即终态**（已实现，2026-09-13；证据见 `../../pre-prj/stage/evidence/S4-evidence.md` §1／§2 S4-09 行） | 400；404；409 `draft_modified`；409 `invalid_request`（非记录 kind——`DraftKindMismatch`）；422 `invalid_request`（向作废身份追加——`InvalidRecordFact`，已实现） |
 | 草稿丢弃 | `/api/drafts/{draft_id}/discard` | POST | `{}`（空对象） | `{draft_id, status}`；只改草稿状态；重复丢弃同结果；安排草稿无丢弃入口（后端按 kind 明确拒绝） | 400；404；409 `invalid_request` |
 
-### 1.4 Provider（`routes_settings.py`；**后端缺口，归 F6-01/后端 owner**）
+### 1.4 Provider（`routes_settings.py`；**已实现**，2026-09-13）
 
 | 能力 | 前端最终路径 | 方法 | 请求体关键字段 | 响应投影要点 | 错误码 |
 | --- | --- | --- | --- | --- | --- |
@@ -56,7 +56,7 @@
 | Provider 录入/替换 | `/api/provider/api-key` | PUT | `{"api_key": "..."}`（body 键恰为 `api_key`） | `{provider, has_api_key: true}` 安全投影 | 400 `invalid_request`（形状/空 Key；不回显 Key） |
 | Provider 删除 | `/api/provider/api-key` | DELETE | — | `{provider, has_api_key: false}`；幂等（未配置同样返回 false） | — |
 
-> **路径拼写说明**：路径草案沿用前端 mock `/api/provider`；stage4/10.3 只定 `has_api_key` 行为边界，不冻结路径拼写；拼写归 F6-01 工作项 2（Provider 路由）。**2026-09-14 backend 全量回滚后**：`routes_settings.py` 为空壳、无 HTTP 路由；上表为契约形状（非已实现声明），归后端 owner 重做。无 Key 时 Run 以 `model_request_failed` fail-closed 结束（该行为不依赖 F6-01 路由，属运行时既有边界）。
+> **路径拼写说明**：路径草案沿用前端 mock `/api/provider`；stage4/10.3 只定 `has_api_key` 行为边界，不冻结路径拼写；拼写归 F6-01 工作项 2（Provider 路由）。**2026-09-13 已实现**：`GET /api/provider`＋`PUT/DELETE /api/provider/api-key` 按上表形状返回（后端证据：`tests/test_provider_settings_api.py` **6 passed**（Subtask C 当前字节复跑；初版 4 例）＋回环 curl 冒烟，见 `../../pre-prj/stage/evidence/S4-evidence.md` §1／§2／§3）。无 Key 时 Run 以 `model_request_failed` fail-closed 结束（该行为不依赖 F6-01 路由，属运行时既有边界）。
 
 ## 2. F1–F10 逐项结论
 
@@ -77,8 +77,9 @@
 
 ## 3. S4-09 硬前置
 
-- **作废终态拦截**：**后端缺口，归 F6-01/后端 owner**（2026-09-14 backend 全量回滚；此前工作区实现与定向回归均已作废）。契约仍为：当前修订 `voided` 的身份在确认与作废共用路径上抛 `InvalidRecordFact`（HTTP **422** `invalid_request`）；实现与回归由后端 owner 重做。
-- F6-06 更正/作废剧本依赖该拦截；在 F6-01 完成前**不得**标 PASS 或声称已联调通过。
+- **作废终态拦截**：**已实现**（2026-09-13，归后端 owner）。契约：当前修订 `voided` 的身份在确认与作废共用路径上抛 `InvalidRecordFact`（HTTP **422** `invalid_request`）；定向回归 `tests/test_stage3_record_confirm.py` **11 passed**（终态拒绝＋incomplete→valid 正对照），缺陷注射探针证明产出路径被覆盖；证据见 `../../pre-prj/stage/evidence/S4-evidence.md` §1／§2 S4-09 行／§3。
+- F6-06 更正／作废剧本依赖该拦截；拦截已实现，但真实后端下的剧本重走仍属 F6-06（未执行前不得称已联调）。
+- **S4-09 后端完成判定（2026-09-13，owner 拍 A）**：S4-09 后端任务按自动化／协议级／真实模型最小联调证据判完成（作废终态、Provider 路由、静态托管均已实现并有测试与回环证据；已完成判定的正本见 `../../pre-prj/stage/evidence/S4-evidence.md` §3 新小节）。真实浏览器五页走查、设置页 UI 闭环与 Windows 未执行——豁免为 S4-09 阻塞，仍属本阶段 F6-03–F6-10 的未执行证据缺口，不得当 PASS。
 
 ## 4. 明确不为联调新增的端点（已拍，前端不得依赖）
 
@@ -95,21 +96,21 @@
 | `GET /api/review`（单文档） | `GET /api/reviews` 列表取最新（F8） |
 | 公开建草稿 `POST /api/drafts`、直写正式事实、`/api/chat`、`/api/models` | 不存在；对话是唯一变更入口 |
 
-## 5. 待 F6-01 实现的后端缺口标注
+## 5. F6-01 后端实现现状（2026-09-13 更新）
 
 | 缺口 | 现状 | 归属 |
 | --- | --- | --- |
-| 静态托管（FastAPI 托管 `frontend` 构建产物 + SPA 回退；运行时无 Node） | 未接线 | F6-01 / 后端 owner |
-| Provider HTTP 路由 | **后端缺口**（`routes_settings.py` 为空壳，无 GET/PUT/DELETE；2026-09-14 回滚） | F6-01 / 后端 owner（契约形状见 §1.4） |
-| 作废终态拦截 | **后端缺口**（此前工作区实现已随回滚作废） | F6-01 / 后端 owner（契约见 §3） |
+| 静态托管（FastAPI 托管 `frontend` 构建产物 + SPA 回退；运行时无 Node） | **已接线**（Subtask C 已 `npm run build` 重建 dist，并以 f6-02＋窄回环验 `/`／`/profile`／`/records`／`/review`／`/settings` 回退 index.html；真实浏览器走查未做） | F6-01 / 后端 owner |
+| Provider HTTP 路由 | **已实现**（`GET /api/provider`＋`PUT/DELETE /api/provider/api-key`，`tests/test_provider_settings_api.py` **6 passed**；Subtask C 窄回环探针验过 GET/PUT/DELETE 与不回显） | F6-01 / 后端 owner（契约形状见 §1.4） |
+| 作废终态拦截 | **已实现**（`tests/test_stage3_record_confirm.py` 11 passed） | F6-01 / 后端 owner（契约见 §3） |
 
-> 三项均**未完成**；静态托管/Provider/作废终态相关联调项在 F6-01 完成前不得标 PASS。前端 `f6-02-probe` 对 Provider 404 / 非 SPA 记 SKIP，不冒充后端已交付。
+> 后端三项已实现并经协议级联调验证（Subtask C：`npm run build`＋f6-02 探针 15 PASS；Subtask D 真实模型最小联调 4 Runs／$0.01963052）；**S4-09 后端任务已按 owner 2026-09-13 拍 A 判完成，F6-01 后端完成**。仍未执行（Stage 6 缺口，不是 F6-01 后端阻塞）：真实浏览器五页走查与浏览器 SSE／断线恢复、真实 Provider 完整业务流式、Windows 验证；F6-03–F6-11 未完成前，关联联调项不得标 PASS。前端 `f6-02-probe` 对 Provider／SPA 的断言已按重跑后的后端事实转 PASS（旧 SKIP 已消失）。
 
 ## 6. 冲突记录
 
-- 与后端代码抽查结果（2026-09-14 回滚后）：表中路径/方法/字段仍为契约正本（`routes_chat.py` / `routes_readonly.py` / `routes_drafts.py` + stage4 §6 冻结拼写）；**Provider 路由与作废终态拦截的「已实现」声明已随 backend 全量回滚作废**，现为后端缺口。
+- 与后端代码抽查结果（2026-09-13 重做后）：表中路径/方法/字段仍为契约正本（`routes_chat.py` / `routes_readonly.py` / `routes_drafts.py` + stage4 §6 冻结拼写）；**Provider 路由与作废终态拦截已于 2026-09-13 重做并实现**（测试与 curl 冒烟证据见 S4-evidence），此前「已实现」声明曾随当日早先的全量回滚作废，现已恢复为已实现状态。
 - 与前端 mock/contract.ts 的差异即 F1–F10 本体，已按 handover 方向收口为「本阶段改」，不在此文件展开代码。
-- Provider 端点契约形状：GET `/api/provider` + PUT/DELETE `/api/provider/api-key`（见 §1.4）；**未在当前 backend 实现**，归 F6-01/后端 owner。无 Key 时 fail-closed 行为边界仍按 10.3。
+- Provider 端点契约形状：GET `/api/provider` + PUT/DELETE `/api/provider/api-key`（见 §1.4）；**已在当前 backend 实现**，归 F6-01/后端 owner。无 Key 时 fail-closed 行为边界仍按 10.3。
 
 ---
 

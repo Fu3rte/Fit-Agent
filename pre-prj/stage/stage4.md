@@ -1,6 +1,6 @@
 # Stage 4：Agent 运行时后端计划
 
-> 状态（2026-09-12 同步）：S4-01–S4-08 已实现并经离线验证（S4-04 的 B 方案按已拍暂缓，见 S4-04 行；S4-07／S4-08 经独立静态复审 OK_WITH_NOTES；最新全量门 922 passed，worker 实跑＋supervisor 复跑，证据见 `evidence/S4-evidence.md` §1／§7）；S4-09 前后端联调、全量发布验收与 Windows 人工验收未开始。2026-09-13 owner 新拍「训练身份作废即终态」（正本见 `../design-decisions.md` 与 `../architecture/05-training-records.md` §5.3）；当前后端记录确认流程尚未实现该终态拦截，属新决策引入的 S4-09 集成缺口（S4-01–S4-08 证据形成于该决策之前，不覆盖此断言，也不得据此当作旧测试失败或旧切片不合规）。Stage 4 整体未发布验收；已完成切片不构成真实 DeepSeek 调用或 Windows 验收授权。
+> 状态（2026-09-12 同步）：S4-01–S4-08 已实现并经离线验证（S4-04 的 B 方案按已拍暂缓，见 S4-04 行；S4-07／S4-08 经独立静态复审 OK_WITH_NOTES；最新全量门 922 passed，worker 实跑＋supervisor 复跑，证据见 `evidence/S4-evidence.md` §1／§7）；2026-09-13 owner 新拍「训练身份作废即终态」（正本见 `../design-decisions.md` 与 `../architecture/05-training-records.md` §5.3）。**2026-09-13 状态增量**：S4-09 已完成后端底座四项（作废终态拦截＋定向回归、Provider 设置路由、前端构建产物静态托管＋SPA 回退、Stage 6 OpenAI 兼容 Provider 运行时适配＋USD 50 持久费用账本），全量门 **952 passed**（34.70s，exit 0；Subtask C 在结算边界修复后当前字节复跑；此前 949 为修复前字节；C 运行日按实测为 2026-09-13，见 S4-evidence §3 C 小节）；费用定向 `tests/test_stage6_provider_runtime.py` **19 passed**（当前字节；修复前 16）。**2026-09-13 precommit 自动门（当前字节；每项只跑一次、无付费调用）**：全量门 **953 passed**（33.89s，exit 0；较上次记录 952 增 1 例——本次字节含 D 跟进新增的 `propose_profile_draft` 三态词表断言，未做逐例差异核对）、27 个改动／未跟踪 Python 文件 `ruff check`＋`ruff format --check` 全过、`pyright` 1.1.411 **0 errors／0 warnings／0 informations**、`cd frontend && npm run build` **`✓ built in 3.81s`**（exit 0）、F6-02 回环探针 **15 PASS／0 FAIL／0 SKIP**（归档已更新）、`git diff --check` 通过、`git diff --cached` 为空（无 staged）；工作区为**待提交 checkpoint（commit-ready，未提交）**，范围＝本片全部未提交改动（后端 S4-09 四项底座＋Stage 6 Provider 运行时与 USD 50 费用账本＋协议／真实最小联调证据与文档）。协议级联调（Subtask C，无付费调用）：`npm run build` 重建 `frontend/dist`（`✓ built in 4.40s`）、F6-02 回环探针 **15 PASS／0 FAIL／0 SKIP**、窄回环探针 27 项全过、定向协议 pytest **113 passed**。费用口径拍板（USD 账本＋固定 1 USD = 6.5 CNY、按 Token 非 PTU、最高档＋缓存未命中、思维链＋回复输出上界）已按 owner 授权同步进 `PLAN.md`／`../design-decisions.md`／08／10 正本。证据见 `evidence/S4-evidence.md` §1／§2 S4-09 行／§3 新增小节；**2026-09-13 owner 拍 A（完成判定）**：S4-09 后端任务按自动化／协议级／真实模型最小联调证据判**完成**——协议级已验，**真实模型最小联调已由 Subtask D 执行**（2026-09-13：4 Runs／9 个模型响应行／累计账本 $0.01963052，USD 50 内；smoke 流式＋真实 usage＋结算、草稿行落盘（即时顺序离线验证）、会话查询恢复、复盘查询，见 S4-evidence §1／§3「Subtask D」；本批唯一账本目录 `/tmp/fit-agent-stage6-d`，换新目录不构成新授权），真实浏览器五页走查／SSE、完整业务剧本、设置页 UI 闭环与 Windows 人工验收仍未执行——拍 A 仅把这些缺口豁免为 S4-09 的阻塞，仍属 Stage 4 整体、前端 Stage 6 与最终发布验收的未执行缺口（不得写成 PASS）；Subtask D 为本阶段唯一付费调用批，已完成切片不构成浏览器／Windows 验收或 09 章测评授权。Stage 4 整体未发布验收。
 > 项目契约：`../../PLAN.md`；设计正本：`../design-decisions.md`、`../architecture/07-data-persistence.md`、`../architecture/08-agent-runtime.md`。
 > 输入交接：`stage3-handover.md`。旧 `../refs/pi-python-harness-plan.md` 已否决，仅参考压缩边界，不恢复移植路线。
 
@@ -58,7 +58,7 @@ S4-01–S4-08 的实现与离线验证已按 owner 后续指令完成（状态�
 
 每片先交窄验证证据与交接，再补扩展证据。不重复长等待探针；同类环境错误首次出现即记录并停止该探针。未拍前置项阻塞对应切片，不阻塞其他已授权且无依赖的切片。S4-01–08 默认只允许离线桩／测试模型；真实 DeepSeek 调用与费用、Windows 成品验收必须按第 4、7 章另行取得授权并单独留证。
 
-**实现进度（2026-09-12）**：S4-01–S4-08 已实现并离线验证（S4-04 的 B 方案按已拍暂缓，见 S4-04 行；逐片状态见各行末；完整证据见 `evidence/S4-evidence.md` §1／§2）；S4-09 未开始。
+**实现进度（2026-09-12）**：S4-01–S4-08 已实现并离线验证（S4-04 的 B 方案按已拍暂缓，见 S4-04 行；逐片状态见各行末；完整证据见 `evidence/S4-evidence.md` §1／§2）；S4-09 当时未开始（2026-09-13 完成片内后端任务并按 owner 拍 A 判完成，见标题行与 S4-09 行）。
 
 ### S4-01：生产框架能力离线复核与契约冻结
 
@@ -108,7 +108,7 @@ S4-01–S4-08 的实现与离线验证已按 owner 后续指令完成（状态�
 - **依赖**：S4-02–06。
 - **验收**：只输出 Run 状态、回答块、依据与说明结果、已持久化草稿引用、压缩状态和 heartbeat；不透传隐藏推理、框架原始轨迹、工具调试信息、Token/Cache 或密钥；草稿持久化后才发就绪通知；最终 Assistant 成功消息与 `completed` 同事务提交；取消／失败保留的文本明确为未完成；断线不取消、不重跑、不依赖事件重放，查询恢复已保存消息、Run 和草稿时不重复拼接；heartbeat 不入库、不分配恢复游标。
 - **验证**：HTTP/SSE 自动化覆盖正常流、幂等提交、busy、手动重试、取消、流中断、慢流 heartbeat、断开后查询、刷新、服务重启、脱敏和错误形状；Host/Origin 边界沿用既有测试。
-- **实现状态（2026-09-12）**：已实现并离线验证（七条冻结路由、SSE 产品事件、部分回答分批落盘、heartbeat 与断线查询；证据见 `evidence/S4-evidence.md` §2 S4-07 与 §4）；独立静态复审经修复后 OK_WITH_NOTES（首轮 BLOCK 的 1 条 P1＋2 条 P2 已处置，见 `evidence/S4-evidence.md` §3）；真实 Provider 流式、真实浏览器 SSE 与 Windows 未验证。
+- **实现状态（2026-09-12）**：已实现并离线验证（七条冻结路由、SSE 产品事件、部分回答分批落盘、heartbeat 与断线查询；证据见 `evidence/S4-evidence.md` §2 S4-07 与 §4）；独立静态复审经修复后 OK_WITH_NOTES（首轮 BLOCK 的 1 条 P1＋2 条 P2 已处置，见 `evidence/S4-evidence.md` §3）；真实 Provider 流式在本片未验证（Stage 6 最小真实流式 smoke 已由 S4-09 Subtask D 验证，完整业务流式仍缺）、真实浏览器 SSE 与 Windows 未验证。
 
 ### S4-08：一键重算与显式复盘
 
@@ -120,10 +120,11 @@ S4-01–S4-08 的实现与离线验证已按 owner 后续指令完成（状态�
 
 ### S4-09：前后端联调、全量回归与交接
 
-- **工作**：以后端冻结契约和前端独立计划联调完整对话、草稿、确认、取消、刷新、重启、压缩提示和过期重算；跑后端全量自动化，整理接口示例、版本、未验证项和 Stage 5 交接。后端不越界修改 `frontend/`。并补齐 2026-09-13 新拍「作废即终态」的确认路径拦截（当前 `app/confirm.py` 允许在作废后继续追加修订）与定向回归。
+- **工作**：以后端冻结契约和前端独立计划联调完整对话、草稿、确认、取消、刷新、重启、压缩提示和过期重算；跑后端全量自动化，整理接口示例、版本、未验证项和 Stage 5 交接。后端不越界修改 `frontend/`。并补齐 2026-09-13 新拍「作废即终态」的确认路径拦截（已于 2026-09-13 实现，见实现状态与证据）与定向回归；Provider 设置 HTTP 路由（10.3）与前端构建产物静态托管（10.1，SPA 回退）同属本片后端底座。
 - **依赖**：S4-01–08；前端独立计划对应切片完成；真实 DeepSeek 与 Windows 验收分别取得第 4、7 章要求的授权。
-- **验收**：离线桩／测试模型完整闭环通过；既有 Stage 0–3 用例与 Stage 4 新用例全过，无新增 skip/xfail；前端断线后按查询恢复，不依赖 SSE 重放；Run 完成与草稿生效明确分离；无公开建草稿、Agent 正式确认、第二套恢复机制、Queue/Steer 或密钥泄漏。另：某次训练当前修订为作废后，再对该身份发起更正／复活（含补全）在确认路径 fail-closed 拒绝，复用既有 `invalid_request` 语义、不新增错误码，且该断言有定向回归用例覆盖；S4-01–08 旧证据不覆盖此项。未获授权时，真实 DeepSeek 与 Windows 明确记为未执行，不以 Linux 或桩替代。
-- **实现状态（2026-09-12）**：未开始。前端适配（含 `frontend/src/lib/api.ts` 的 `/recalc` 请求体）、真实浏览器 SSE、真实 DeepSeek 联调与 Windows 人工验收均未执行。**2026-09-13 新增缺口**：「作废即终态」未实现——当前记录确认流程仍接受作废后追加修订（实测见 `evidence/S4-evidence.md` §3／§5 第 21 条）；终态拦截＋定向回归完成前不得宣称 S4-09 或 Stage 4 完成。
+- **验收**：离线桩／测试模型完整闭环通过；既有 Stage 0–3 用例与 Stage 4 新用例全过，无新增 skip/xfail；前端断线后按查询恢复，不依赖 SSE 重放；Run 完成与草稿生效明确分离；无公开建草稿、Agent 正式确认、第二套恢复机制、Queue/Steer 或密钥泄漏。另：某次训练当前修订为作废后，再对该身份发起更正／复活（含补全）在确认路径 fail-closed 拒绝（复用既有 `invalid_request` 语义、不新增错误码，已实现并有定向回归用例覆盖），且 Provider 查询只回 `has_api_key` 与只读展示、前端构建产物由 FastAPI 托管且运行时不需要 Node.js。未获授权时，真实调用与 Windows 明确记为未执行，不以 Linux 或桩替代。
+- **实现状态（2026-09-12 记录；2026-09-13 增量）**：片内后端底座已开工并完成三项（作废终态拦截＋定向回归、Provider 设置路由、静态托管＋SPA 回退），命令／退出码／证据见 `evidence/S4-evidence.md` §1／§2 S4-09 行／§3；**2026-09-13 增量（Stage 6 OpenAI 兼容 Provider 运行时适配＋USD 50 持久费用账本）**：目录新增 `qwen3.7-flash`（owner `MODEL_NAME` 实际值，端点取 owner `MODEL_BASE_URL`）、profile 按 provider 覆盖、生产路径（对话／重算／复盘 Run）接入新账本（每 stage 一行，与历史 Stage 4 USD 10 不混用；固定 1 USD = 6.5 CNY；最高档＋缓存未命中＋保守输出上界），命令与证据见 `evidence/S4-evidence.md` §1／§3「2026-09-13 实现」小节；其后按 owner 拍板选项 1A 修复三处结算边界（0/0 usage 视为未知、流已结算后收尾异常不改判不二次结算、非流式先结算再判 `finish_reason`），`tests/test_stage6_provider_runtime.py` **19 passed**（当前字节；修复前 16；全量门 **952 passed**／34.70s 已由 Subtask C 在修复后字节复跑）；费用口径拍板已同步进 `PLAN.md`／`../design-decisions.md`／`../architecture/08-agent-runtime.md`／`../architecture/10-deployment-credentials.md` 正本（纯文档、无语义变化）。**Subtask D 增量（真实模型最小联调，2026-09-13）**：真实 Stage 6 兼容端点 4 Runs／9 个模型响应行全部 completed，累计账本 **$0.01963052**（USD 50 内，持久账本唯一目录 `/tmp/fit-agent-stage6-d`；换新目录不构成新授权）；smoke 真实流式＋usage＋结算、可见 SSE 无思考标记、草稿行随 Run 落盘（通知即时顺序由离线用例固定）、会话查询恢复、复盘 `GET /api/reviews` 取正文均通过；首跑草稿工具缺 Fact 三态词表（模型 4 次非法 state，零落库）已如实记录，随后跟进把既有词表写进工具描述并加离线断言（校验未改；真实模型复验未做）；证据见 `evidence/S4-evidence.md` §1／§3「Subtask D」。报告准确性更正：迁移 016 无专属回滚／失败注入用例（仅 `CREATE TABLE`，013／014／015 才有注入用例）；复盘 Run 不能手动重试（`/api/runs/{id}/retry` 抛 `NotFound`），详见 S4-evidence §3。以下仍未执行：真实浏览器 SSE、完整业务剧本（F6-04–F6-08）、设置页 UI 闭环、Windows 人工验收（真实模型最小流式与 usage 已由 Subtask D 验证）；前端 `/recalc` 已按契约带 `{client_request_id}`（源码核对）且协议级路由形状已验（Subtask C），浏览器闭环未走查。**2026-09-13 owner 拍 A（完成判定）**：S4-09 后端任务按上述自动化／协议级／真实模型最小联调证据判**完成**；真实浏览器走查、设置页 UI 与 Windows 明确豁免为 S4-09 阻塞，仍是 Stage 4 整体、Stage 6 与发布验收的未执行缺口。拍板记录（日期／问题／选项 A、B／选择 A／适用边界／受影响文档）见 `evidence/S4-evidence.md` §3「2026-09-13 owner 拍板：S4-09 后端任务完成判定」。
+- **完成判定（2026-09-13，owner 拍 A）**：S4-09 后端任务判完成（片内后端底座四项＋Subtask C 协议级验证＋Subtask D 真实模型最小联调）；真实浏览器五页与 SSE、设置页 UI 闭环、完整业务剧本（F6-04–F6-08）、Windows 人工验收仍未执行——豁免仅解除其对本任务的阻塞，不构成 Stage 4 结项、Stage 6 完成或发布验收，缺口按「未执行」留档。precommit 自动门已于 2026-09-13 在当前字节通过（953 passed／ruff／pyright／build／f6-02 15 PASS／git 检查；无 staged），当前 diff 为待提交 checkpoint；本片未提交，Stage 4 整体仍未完成。
 - **验证**：记录自动化与联调命令、退出码、代码版本和结果；获授权后另跑真实 DeepSeek 最小联调与同版本 Windows 清单，证据写入 `pre-prj/stage/evidence/S4-evidence-windows.md`；未获授权则不创建虚假通过证据。
 
 ## 6. 给前端 owner 的契约与并行边界
@@ -162,4 +163,4 @@ S4-01 输出可由前端 mock 的端点/请求/响应/错误码/SSE 示例文档
 - 自动化：领域与已有事务回归；Run 终态竞态、draining、幂等、重启事务、预算准入、错误映射、压缩提交竞态、SSE 恢复契约及脱敏。
 - 模型行为：离线桩只证明控制语义，不证明生成质量。真实 DeepSeek 调用须另行授权；Stage 5 正式测评的 pass³ 与裁判校准不由 Stage 4 桩测试替代。
 - Windows：按同一代码版本人工验证安装启动、业务闭环、断线/刷新/取消/重启；未执行则明确未执行，不能用 Linux 代替。
-- 交付：后端计划与已拍正本无冲突，前端契约可独立实现，各切片有命令/退出码/版本/结果及未验证项，最后给出 Stage 4 交接。**当前状态（2026-09-12）**：S4-01–08 已实现并离线验证（证据见 `evidence/S4-evidence.md` §1／§2／§7；最新全量门 922 passed；S4-07／S4-08 独立静态复审 OK_WITH_NOTES；supervisor 最终门实跑）；S4-09 与本节列出的真实模型、Windows、前端联调验收均未执行——不得据此宣称 Stage 4 整体验收通过或已发布。
+- 交付：后端计划与已拍正本无冲突，前端契约可独立实现，各切片有命令/退出码/版本/结果及未验证项，最后给出 Stage 4 交接。**当前状态（2026-09-13）**：S4-01–08 已实现并离线验证（证据见 `evidence/S4-evidence.md` §1／§2／§7）；S4-09 后端任务已按 owner 2026-09-13 拍 A 判完成（F6-01 三项后端底座＋Stage 6 Provider 运行时适配与 USD 50 费用账本，全量门 **952 passed**；协议级联调已验：`npm run build`＋f6-02 探针 15 PASS＋窄回环 27 项＋定向 pytest 113 passed；**真实模型最小联调已由 Subtask D 执行**：4 Runs／9 个模型响应行／$0.01963052 账本，见 S4-evidence §1／§3），但真实浏览器五页走查与 SSE／设置页 UI 闭环／完整业务剧本／Windows 人工验收均未执行——拍 A 已豁免其阻塞 S4-09，但仍属 Stage 4 整体与前端 Stage 6 的未执行缺口，不得据此宣称 Stage 4 整体验收通过或已发布。

@@ -19,7 +19,7 @@ from pydantic_ai.models import Model
 import config
 from runtime.provider import build_model
 from storage.db import Database
-from storage.setting_repo import DEFAULT_PROVIDER, SettingRepo, business_date
+from storage.setting_repo import SettingRepo, business_date
 
 
 class ProviderNotConfigured(RuntimeError):
@@ -48,11 +48,14 @@ def make_model_factory(
     """生产模型工厂（每次 Run 调用一次）：凭据只在进程内读取，不进日志与事件。
 
     ``harness`` 是启动时冻结的有效配置（08 8.5）；本 Run 的限制由它固定，
-    运行中修改配置文件不影响已开始的 Run。
+    运行中修改配置文件不影响已开始的 Run。凭据槽位与端点、模型 id 同源（都取冻结目录的
+    模型事实）：换了端点就不会误用上一个端点的 Key（10.3 只固定同库存储与 Key 边界）。
     """
 
     async def factory() -> Model:
-        api_key = await SettingRepo(db).get_provider_api_key_internal(DEFAULT_PROVIDER)
+        api_key = await SettingRepo(db).get_provider_api_key_internal(
+            harness.spec.provider
+        )
         if api_key is None:
             raise ProviderNotConfigured(
                 "未配置模型 Provider 密钥：本次 Run 不发起任何模型请求"

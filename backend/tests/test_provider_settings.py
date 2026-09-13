@@ -35,10 +35,11 @@ import aiosqlite
 import pytest
 
 from config import DATABASE_FILENAME
+from runtime.models import QWEN37_FLASH
 from storage.db import Database
 from storage.errors import InvalidInput, NotFound, RunStateConflict
 from storage.run_repo import RunRepo
-from storage.setting_repo import DEFAULT_PROVIDER, SettingRepo
+from storage.setting_repo import SettingRepo
 from tests.support import (
     BACKEND_ROOT,
     dump_framework_message,
@@ -81,6 +82,8 @@ _SCANNED_TABLES = frozenset(
         # Stage 4 新增的摘要两表（S4-06a，014 迁移）：同样必须被扫描覆盖
         "summaries",
         "summary_sources",
+        # Stage 6 新增的费用账本（016 迁移）：同样必须被扫描覆盖
+        "fee_ledger",
     }
 )
 
@@ -325,22 +328,22 @@ async def test_default_projection_returns_only_has_api_key(tmp_path: Path) -> No
     key = fake_api_key("project")
     async with open_database(tmp_path / "app.db") as db:
         repo = SettingRepo(db)
-        assert await repo.get_provider_status(DEFAULT_PROVIDER) is None
-        assert await repo.get_provider_api_key_internal(DEFAULT_PROVIDER) is None
+        assert await repo.get_provider_status(QWEN37_FLASH.provider) is None
+        assert await repo.get_provider_api_key_internal(QWEN37_FLASH.provider) is None
 
-        written = await repo.set_provider_api_key(DEFAULT_PROVIDER, key)
+        written = await repo.set_provider_api_key(QWEN37_FLASH.provider, key)
         # 录入返回投影精确等于 provider + has_api_key：多字段（含掩码）即越界
-        assert written == {"provider": DEFAULT_PROVIDER, "has_api_key": True}
+        assert written == {"provider": QWEN37_FLASH.provider, "has_api_key": True}
         assert_no_key(written, key, "录入返回投影")
 
-        status = await repo.get_provider_status(DEFAULT_PROVIDER)
+        status = await repo.get_provider_status(QWEN37_FLASH.provider)
         assert status is not None
         assert set(status) == {"provider", "has_api_key", "updated_at"}
         assert status["has_api_key"] is True
         assert_no_key(status, key, "默认查询投影")
 
         # 内部取 Key 路径：唯一允许返回 Key 的入口，与公开投影隔离
-        assert await repo.get_provider_api_key_internal(DEFAULT_PROVIDER) == key
+        assert await repo.get_provider_api_key_internal(QWEN37_FLASH.provider) == key
 
 
 async def test_replace_and_explicit_delete_survive_reopen(tmp_path: Path) -> None:
@@ -351,32 +354,32 @@ async def test_replace_and_explicit_delete_survive_reopen(tmp_path: Path) -> Non
     third = fake_api_key("replace-c")
 
     async with open_database(path) as db:
-        await SettingRepo(db).set_provider_api_key(DEFAULT_PROVIDER, first)
+        await SettingRepo(db).set_provider_api_key(QWEN37_FLASH.provider, first)
     async with open_database(path) as db:  # 重开：录入保持
         repo = SettingRepo(db)
-        assert await repo.get_provider_api_key_internal(DEFAULT_PROVIDER) == first
-        replaced = await repo.set_provider_api_key(DEFAULT_PROVIDER, second)
-        assert replaced == {"provider": DEFAULT_PROVIDER, "has_api_key": True}
+        assert await repo.get_provider_api_key_internal(QWEN37_FLASH.provider) == first
+        replaced = await repo.set_provider_api_key(QWEN37_FLASH.provider, second)
+        assert replaced == {"provider": QWEN37_FLASH.provider, "has_api_key": True}
     async with open_database(path) as db:  # 重开：替换保持，旧 Key 不再是存储值
         repo = SettingRepo(db)
-        assert await repo.get_provider_api_key_internal(DEFAULT_PROVIDER) == second
-        status = await repo.get_provider_status(DEFAULT_PROVIDER)
+        assert await repo.get_provider_api_key_internal(QWEN37_FLASH.provider) == second
+        status = await repo.get_provider_status(QWEN37_FLASH.provider)
         assert status is not None and status["has_api_key"] is True
-        assert await repo.delete_provider_api_key(DEFAULT_PROVIDER) == {
-            "provider": DEFAULT_PROVIDER,
+        assert await repo.delete_provider_api_key(QWEN37_FLASH.provider) == {
+            "provider": QWEN37_FLASH.provider,
             "has_api_key": False,
         }
     async with open_database(path) as db:  # 重开：显式删除保持
         repo = SettingRepo(db)
-        assert await repo.get_provider_api_key_internal(DEFAULT_PROVIDER) is None
-        status = await repo.get_provider_status(DEFAULT_PROVIDER)
+        assert await repo.get_provider_api_key_internal(QWEN37_FLASH.provider) is None
+        status = await repo.get_provider_status(QWEN37_FLASH.provider)
         assert status is not None and status["has_api_key"] is False
         assert_no_key(status, second, "删除后的默认投影")
         # 删除后仍可重新录入（显式删除不是终态锁）
-        await repo.set_provider_api_key(DEFAULT_PROVIDER, third)
+        await repo.set_provider_api_key(QWEN37_FLASH.provider, third)
     async with open_database(path) as db:
         assert (
-            await SettingRepo(db).get_provider_api_key_internal(DEFAULT_PROVIDER)
+            await SettingRepo(db).get_provider_api_key_internal(QWEN37_FLASH.provider)
             == third
         )
 
@@ -388,8 +391,8 @@ async def test_delete_and_query_are_scoped_per_provider(tmp_path: Path) -> None:
         repo = SettingRepo(db)
         await repo.set_provider_api_key("other-provider", key)
         with pytest.raises(NotFound):
-            await repo.delete_provider_api_key(DEFAULT_PROVIDER)
-        assert await repo.get_provider_status(DEFAULT_PROVIDER) is None
+            await repo.delete_provider_api_key(QWEN37_FLASH.provider)
+        assert await repo.get_provider_status(QWEN37_FLASH.provider) is None
         assert await repo.get_provider_api_key_internal("other-provider") == key
 
 
@@ -401,15 +404,17 @@ async def test_validation_failures_reject_without_leaking_key(tmp_path: Path) ->
     key = fake_api_key("validate")
     async with open_database(tmp_path / "app.db") as db:
         repo = SettingRepo(db)
-        await repo.set_provider_api_key(DEFAULT_PROVIDER, key)
+        await repo.set_provider_api_key(QWEN37_FLASH.provider, key)
 
         for bad in ("", "   ", "\n\t", None, 12345, b"bytes"):
             with pytest.raises(InvalidInput) as raised:
-                await repo.set_provider_api_key(DEFAULT_PROVIDER, cast(str, bad))
+                await repo.set_provider_api_key(QWEN37_FLASH.provider, cast(str, bad))
             assert_no_key(exception_evidence(raised), key, "Key 校验失败的异常详情")
-            assert DEFAULT_PROVIDER in str(raised.value)  # 只带 provider 标识
+            assert QWEN37_FLASH.provider in str(raised.value)  # 只带 provider 标识
             # 校验失败不落库、不清库
-            assert await repo.get_provider_api_key_internal(DEFAULT_PROVIDER) == key
+            assert (
+                await repo.get_provider_api_key_internal(QWEN37_FLASH.provider) == key
+            )
 
         for bad_provider in ("", "  ", None, 7):
             with pytest.raises(InvalidInput) as raised:
@@ -419,7 +424,9 @@ async def test_validation_failures_reject_without_leaking_key(tmp_path: Path) ->
             assert_no_key(
                 exception_evidence(raised), key, "provider 校验失败的异常详情"
             )
-            assert await repo.get_provider_api_key_internal(DEFAULT_PROVIDER) == key
+            assert (
+                await repo.get_provider_api_key_internal(QWEN37_FLASH.provider) == key
+            )
 
         with pytest.raises(NotFound) as raised:
             await repo.delete_provider_api_key("missing-provider")
@@ -443,12 +450,12 @@ async def test_storage_failure_rolls_back_and_exception_has_no_key(
     caplog.set_level(logging.DEBUG)
     async with open_database(tmp_path / "app.db") as db:
         repo = SettingRepo(db)
-        await repo.set_provider_api_key(DEFAULT_PROVIDER, key)
+        await repo.set_provider_api_key(QWEN37_FLASH.provider, key)
         assert_no_key_in_logs(caplog, key)
 
         monkeypatch.setattr("storage.setting_repo._now", lambda: object())
         with pytest.raises(sqlite3.ProgrammingError) as raised:
-            await repo.set_provider_api_key(DEFAULT_PROVIDER, replacement)
+            await repo.set_provider_api_key(QWEN37_FLASH.provider, replacement)
         evidence = exception_evidence(raised)
         assert_no_key(evidence, key, "存储失败 traceback（旧 Key）")
         assert_no_key(evidence, replacement, "存储失败 traceback（新 Key）")
@@ -459,12 +466,15 @@ async def test_storage_failure_rolls_back_and_exception_has_no_key(
         monkeypatch.undo()
 
         # 失败不留下半套写入：旧 Key 仍在，库可继续正常使用并可完成替换
-        status = await repo.get_provider_status(DEFAULT_PROVIDER)
+        status = await repo.get_provider_status(QWEN37_FLASH.provider)
         assert status is not None and status["has_api_key"] is True
         assert_no_key(status, replacement, "失败后的默认投影")
-        assert await repo.get_provider_api_key_internal(DEFAULT_PROVIDER) == key
-        await repo.set_provider_api_key(DEFAULT_PROVIDER, replacement)
-        assert await repo.get_provider_api_key_internal(DEFAULT_PROVIDER) == replacement
+        assert await repo.get_provider_api_key_internal(QWEN37_FLASH.provider) == key
+        await repo.set_provider_api_key(QWEN37_FLASH.provider, replacement)
+        assert (
+            await repo.get_provider_api_key_internal(QWEN37_FLASH.provider)
+            == replacement
+        )
         # 重试写入同样不留下 Key；失败后的库仍可正常走安全窗口
         assert_no_key_in_logs(caplog, replacement)
         assert_echoing_logger_untouched()
@@ -497,12 +507,15 @@ async def test_key_never_copied_into_logs_trace_run_events_or_other_tables(
         runs = RunRepo(db)
 
         projection = trace.record(
-            "provider.set", await settings.set_provider_api_key(DEFAULT_PROVIDER, key)
+            "provider.set",
+            await settings.set_provider_api_key(QWEN37_FLASH.provider, key),
         )
         status = trace.record(
-            "provider.status", await settings.get_provider_status(DEFAULT_PROVIDER)
+            "provider.status", await settings.get_provider_status(QWEN37_FLASH.provider)
         )
-        assert await settings.get_provider_api_key_internal(DEFAULT_PROVIDER) == key
+        assert (
+            await settings.get_provider_api_key_internal(QWEN37_FLASH.provider) == key
+        )
 
         # 运行时四表写入路径（S0-06 已拍操作）；事件负载直接取默认投影
         await runs.create_conversation("c1")
@@ -575,8 +588,8 @@ async def test_internal_key_value_is_not_written_back_anywhere(tmp_path: Path) -
     async with open_database(tmp_path / "app.db") as db:
         settings = SettingRepo(db)
         runs = RunRepo(db)
-        await settings.set_provider_api_key(DEFAULT_PROVIDER, key)
-        secret = await settings.get_provider_api_key_internal(DEFAULT_PROVIDER)
+        await settings.set_provider_api_key(QWEN37_FLASH.provider, key)
+        secret = await settings.get_provider_api_key_internal(QWEN37_FLASH.provider)
         assert secret == key
 
         await runs.create_conversation("c1")
@@ -589,7 +602,7 @@ async def test_internal_key_value_is_not_written_back_anywhere(tmp_path: Path) -
             [
                 (
                     "provider_status",
-                    await settings.get_provider_status(DEFAULT_PROVIDER) or {},
+                    await settings.get_provider_status(QWEN37_FLASH.provider) or {},
                 )
             ],
         )
@@ -622,7 +635,7 @@ async def _check_real_entrypoint_has_no_key(data_dir: Path, log_level: str) -> N
     key = fake_api_key(f"http-{log_level}")
     data_dir.mkdir()
     async with open_database(data_dir / DATABASE_FILENAME) as db:
-        await SettingRepo(db).set_provider_api_key(DEFAULT_PROVIDER, key)
+        await SettingRepo(db).set_provider_api_key(QWEN37_FLASH.provider, key)
 
     port = free_port()
     process = start_app(data_dir, port, log_level=log_level)
@@ -688,7 +701,7 @@ async def test_sqlite_statement_trace_expansion_is_not_wired_yet(
     caplog.set_level(logging.DEBUG)
     async with open_database(tmp_path / "app.db") as db:
         statements = await attach_sql_trace(db)
-        await SettingRepo(db).set_provider_api_key(DEFAULT_PROVIDER, expanded_key)
+        await SettingRepo(db).set_provider_api_key(QWEN37_FLASH.provider, expanded_key)
         traced = [sql for sql in statements if expanded_key in sql]
         assert traced, "sqlite3 trace 回调本应展开绑定参数却没展开"
         assert any("provider_config" in sql for sql in traced)
@@ -738,7 +751,7 @@ async def test_bound_parameter_echo_is_suppressed_only_during_the_credential_wri
                     " VALUES (?, ?, ?)"
                     " ON CONFLICT(provider) DO UPDATE SET api_key = excluded.api_key,"
                     " updated_at = excluded.updated_at",
-                    (DEFAULT_PROVIDER, secret, "2026-09-09T12:00:00+00:00"),
+                    (QWEN37_FLASH.provider, secret, "2026-09-09T12:00:00+00:00"),
                 )
 
             await db.under_lock(op)
@@ -746,13 +759,17 @@ async def test_bound_parameter_echo_is_suppressed_only_during_the_credential_wri
         # 1) 正控制：不经压制窗口 → 参数回显型 DEBUG 日志带出明文 Key。
         await raw_write(raw_key)
         assert loggers_with_key(caplog, raw_key) == {DEFAULT_ECHOING_LOGGER}
-        assert await settings.get_provider_api_key_internal(DEFAULT_PROVIDER) == raw_key
+        assert (
+            await settings.get_provider_api_key_internal(QWEN37_FLASH.provider)
+            == raw_key
+        )
 
         # 2) 边界：同一连接、同一 DEBUG 级别，经 SettingRepo 写入 → 全量 records 零命中。
-        await settings.set_provider_api_key(DEFAULT_PROVIDER, repo_key)
+        await settings.set_provider_api_key(QWEN37_FLASH.provider, repo_key)
         assert_no_key_in_logs(caplog, repo_key)
         assert (
-            await settings.get_provider_api_key_internal(DEFAULT_PROVIDER) == repo_key
+            await settings.get_provider_api_key_internal(QWEN37_FLASH.provider)
+            == repo_key
         )
         assert_echoing_logger_untouched()
 
@@ -760,13 +777,14 @@ async def test_bound_parameter_echo_is_suppressed_only_during_the_credential_wri
         await raw_write(after_key)
         assert loggers_with_key(caplog, after_key) == {DEFAULT_ECHOING_LOGGER}
         assert (
-            await settings.get_provider_api_key_internal(DEFAULT_PROVIDER) == after_key
+            await settings.get_provider_api_key_internal(QWEN37_FLASH.provider)
+            == after_key
         )
 
         # 4) 并发边界：两个写入窗口重叠，先退出的不得替后退出的恢复级别。
         await asyncio.gather(
-            settings.set_provider_api_key(DEFAULT_PROVIDER, concurrent_a),
-            settings.set_provider_api_key(DEFAULT_PROVIDER, concurrent_b),
+            settings.set_provider_api_key(QWEN37_FLASH.provider, concurrent_a),
+            settings.set_provider_api_key(QWEN37_FLASH.provider, concurrent_b),
         )
         assert_no_key_in_logs(caplog, concurrent_a)
         assert_no_key_in_logs(caplog, concurrent_b)
@@ -839,7 +857,7 @@ async def test_cancel_during_suppression_fence_waits_for_fence_before_restoring(
         await asyncio.to_thread(entered_blocker.wait)
 
         task = asyncio.create_task(
-            SettingRepo(db).set_provider_api_key(DEFAULT_PROVIDER, key)
+            SettingRepo(db).set_provider_api_key(QWEN37_FLASH.provider, key)
         )
         await begin_submitted.wait()
         # BEGIN 已下发且工作线程被占住：写入任务持锁停在 BEGIN 等待点。
@@ -893,8 +911,8 @@ async def test_cancel_during_suppression_fence_waits_for_fence_before_restoring(
 
         # 取消发生在提交之后：凭据写入不回滚、库仍可用；压制计数也没泄漏给下一个窗口。
         repo = SettingRepo(db)
-        assert await repo.get_provider_api_key_internal(DEFAULT_PROVIDER) == key
-        await repo.set_provider_api_key(DEFAULT_PROVIDER, retry_key)
+        assert await repo.get_provider_api_key_internal(QWEN37_FLASH.provider) == key
+        await repo.set_provider_api_key(QWEN37_FLASH.provider, retry_key)
         assert_no_key_in_logs(caplog, retry_key)
         assert (driver.level, driver.disabled) == original_state
 

@@ -22,7 +22,7 @@ import platformdirs
 import tzlocal
 
 from runtime.models import (
-    DEEPSEEK_FLASH,
+    QWEN37_FLASH,
     ModelSpec,
     UnknownModelId,
     require_supported_model_id,
@@ -57,6 +57,15 @@ def resolve_data_dir(override: str | os.PathLike[str] | None = None) -> Path:
 def database_path(data_dir: Path) -> Path:
     """数据目录内的唯一数据库文件（10.2：Windows 为 ``%LOCALAPPDATA%\\Fit-Agent\\app.db``）。"""
     return data_dir / DATABASE_FILENAME
+
+
+def frontend_dist_dir() -> Path:
+    """前端生产构建产物目录（10.1）：仓库内 ``frontend/dist``，由 FastAPI 静态托管。
+
+    只做位置解析，不判断是否存在（未构建／未打包时由托管层按缺失处理，不假装已交付前端）；
+    构建产物随项目一起发布，运行时不需要 Node.js（10.1）。
+    """
+    return Path(__file__).resolve().parent.parent / "frontend" / "dist"
 
 
 # ---------------------------------------------------------------------------
@@ -97,9 +106,14 @@ class HarnessConfigError(ValueError):
 
 @dataclass(frozen=True)
 class HarnessConfig:
-    """加载并逐项校验后的源配置（尚未做容量派生与交叉校验）。"""
+    """加载并逐项校验后的源配置（尚未做容量派生与交叉校验）。
 
-    model_id: str = DEEPSEEK_FLASH.model_id
+    默认模型 id 是 Stage 6 目录项（owner env ``MODEL_NAME`` 的实际值，2026-09-13）：
+    生产端点已改拍为 OpenAI 兼容端点，**不再默认 DeepSeek 官方 URL**（10 章 2026-09-13
+    补充）；``deepseek-flash`` 仍在目录里可选（历史端点与测试），但不作为默认值。
+    """
+
+    model_id: str = QWEN37_FLASH.model_id
     max_model_requests: int = 20
     max_tool_calls: int = 32
     max_output_tokens: int = 8192
@@ -135,7 +149,7 @@ def load_harness_config(data_dir: Path) -> HarnessConfig:
         raise HarnessConfigError(
             f"Harness 配置含未知项 {sorted(unknown)}（{path}）；只允许 {sorted(allowed)}"
         )
-    model_id = document.get("model", DEEPSEEK_FLASH.model_id)
+    model_id = document.get("model", QWEN37_FLASH.model_id)
     if not isinstance(model_id, str):
         raise HarnessConfigError(
             f"Harness 配置项 model 必须是字符串，实际为 {type(model_id).__name__}"

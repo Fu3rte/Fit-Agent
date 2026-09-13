@@ -1,4 +1,4 @@
-"""生产 Provider 接入：DeepSeek OpenAI 兼容端点上的 ``deepseek-flash``（S4-01 接缝）。
+"""生产 Provider 接入：OpenAI 兼容端点上的目录模型（S4-01 接缝；Stage 6 换商见 :mod:`runtime.models`）。
 
 三件事，不多做：
 
@@ -22,6 +22,7 @@ from openai import AsyncOpenAI
 from pydantic_ai.models.openai import OpenAIChatModel
 from pydantic_ai.profiles import ModelProfile
 from pydantic_ai.providers.deepseek import DeepSeekProvider
+from pydantic_ai.providers.openai import OpenAIProvider
 
 from runtime.models import (
     DEEPSEEK_FLASH,
@@ -68,7 +69,12 @@ def build_model(
     timeout_seconds: float | None = None,
     connect_timeout_seconds: float | None = None,
 ) -> OpenAIChatModel:
-    """按目录构造框架模型对象；未知模型 id 抛 :class:`runtime.models.UnknownModelId`。"""
+    """按目录构造框架模型对象；未知模型 id 抛 :class:`runtime.models.UnknownModelId`。
+
+    Provider 类按目录 ``spec.provider`` 选（两个都是 OpenAI 兼容端点）：DeepSeek 走
+    ``DeepSeekProvider``，Stage 6 的阿里云百炼兼容端点走通用 ``OpenAIProvider``；
+    端点地址始终取目录单一来源。
+    """
     spec: ModelSpec = require_supported_model_id(model_id)
     profile: ModelProfile = resolve_model_profile(model_id)
     client = build_openai_client(
@@ -77,8 +83,13 @@ def build_model(
         timeout_seconds=timeout_seconds,
         connect_timeout_seconds=connect_timeout_seconds,
     )
+    provider = (
+        DeepSeekProvider(openai_client=client)
+        if spec.provider == DEEPSEEK_FLASH.provider
+        else OpenAIProvider(openai_client=client)
+    )
     return OpenAIChatModel(
         model_id,
-        provider=DeepSeekProvider(openai_client=client),
+        provider=provider,
         profile=profile,
     )

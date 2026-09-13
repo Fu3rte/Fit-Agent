@@ -59,10 +59,12 @@ from runtime.context import (
 )
 from runtime.error_codes import MODEL_REQUEST_FAILED
 from runtime.events import RunEventStream, visible_text_delta
+from runtime.fees import FeeLedger
 from runtime.run_task import ActiveExecution, ExecutionFailure, FrameworkMessages
 from runtime.tools import BusinessTools, ToolIdentity
 from storage.db import Database
 from storage.errors import RunStateConflict
+from storage.fee_repo import FeeRepo
 from storage.run_repo import RunRepo
 
 if (
@@ -196,7 +198,11 @@ async def _prepare_run(
     # 压缩与投影（S4-06b）：估算整套请求输入；触发点先摘要最老的完整交互，
     # 摘要经条件提交成功后才替换投影（失败保留旧上下文，放不下由容量闸结束）。
     estimator = PromptEstimator()
-    budgeted = BudgetedModel(model, budget, estimator=estimator)
+    # 费用护栏（Stage 6，08「Stage 6 联调费用护栏」）：每 Run 一个账本句柄；Run 开始时先把
+    # 上一次进程崩溃遗留的在途预留按未知 usage 扣账（08：不释放预留额），再构造预算模型。
+    ledger = FeeLedger(FeeRepo(db))
+    await ledger.prepare_run()
+    budgeted = BudgetedModel(model, budget, estimator=estimator, ledger=ledger)
     summaries = SummaryRepo(db)
     summary = await load_active_summary(summaries, conversation_id)
     # 只取有效摘要覆盖终点之后的消息：摘要 + 尾段才是完整上下文（不重复投影已摘要历史）。
@@ -413,8 +419,9 @@ def build_review_run_work(
 ) -> Callable[[ActiveExecution], Coroutine[Any, Any, FrameworkMessages]]:
     """显式复盘生成 Run 的执行入口（S4-08 Q3=B）：确定性冻结 → 只写解释 → 事务内保存。
 
-    与对话／重算 Run 同一驱动、预算、取消与 SSE 查询边界（调用方传同一 ``ExecutionDriver``）：
-    本函数不建第二套状态机，也不注册任何业务工具——复盘只输出 Markdown 解释正文。
+    与对话／重算 Run 同一驱动、预算、费用护栏、取消与 SSE 查询边界（调用方传同一
+    ``ExecutionDriver``）：本函数不建第二套状态机，也不注册任何业务工具——复盘只输出
+    Markdown 解释正文。
 
     - **先冻结**：Run 起点在同一事务内现算统计快照与精确来源修订 id（06 6.4），模型只收到
       这份事实；无定时／按周自动触发，只有本 Run 被显式请求才会执行。
@@ -429,7 +436,13 @@ def build_review_run_work(
         budget = RunBudget(harness, cancelled=lambda: active.cancel_requested)
         basis = await StatsService(db).review_basis(business_date=business_date)
         basis_request = review_basis_request(basis, business_date=business_date)
-        agent: Agent[None, str] = Agent(BudgetedModel(model, budget), name=AGENT_NAME)
+        # 费用护栏同 _prepare_run：复盘 Run 的模型请求同样发送前预留、完成后结算
+        # （08「Stage 6 联调费用护栏」：每次实际请求都纳入累计额度，余额不足不发送）。
+        ledger = FeeLedger(FeeRepo(db))
+        await ledger.prepare_run()
+        agent: Agent[None, str] = Agent(
+            BudgetedModel(model, budget, ledger=ledger), name=AGENT_NAME
+        )
         result = await agent.run(
             user_prompt=review_intent_text(),
             message_history=[basis_request],

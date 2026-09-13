@@ -50,6 +50,8 @@ STAGE3_RECORD_TABLES = {
 STAGE3_REVIEW_TABLES = {"reviews", "review_source_revisions"}
 # S4-06a 由 014 迁移新增的摘要两表（stage4.md S4-06；表集合断言显式扩展、不删测试）。
 STAGE4_SUMMARY_TABLES = {"summaries", "summary_sources"}
+# S4-09／Stage 6 由 016 迁移新增的费用账本单表（Stage 6 USD 50 护栏）。
+STAGE6_FEE_TABLES = {"fee_ledger"}
 
 STAGE2_VERSION = 4  # 004_stage2_business_drafts.sql 执行后的 user_version
 STAGE3_PLAN_VERSION = (
@@ -308,6 +310,7 @@ async def test_empty_database_creates_record_tables_with_minimum_indexes(
             | STAGE3_RECORD_TABLES
             | STAGE3_REVIEW_TABLES
             | STAGE4_SUMMARY_TABLES
+            | STAGE6_FEE_TABLES
             | {"sqlite_sequence"}
         )
 
@@ -672,6 +675,11 @@ async def test_failed_record_migration_rolls_back_and_can_be_retried(
     shutil.copy(
         DEFAULT_MIGRATIONS_DIR / "015_stage4_recalc_and_aux_runs.sql",
         directory / "015_stage4_recalc_and_aux_runs.sql",
+    )
+    # 016 是 S4-09／Stage 6 的费用账本（无业务表）：补齐后临时目录才是生产最新编号。
+    shutil.copy(
+        DEFAULT_MIGRATIONS_DIR / "016_stage6_fee_ledger.sql",
+        directory / "016_stage6_fee_ledger.sql",
     )
     broken = directory / RECORD_MIGRATION_FILE
     original = (DEFAULT_MIGRATIONS_DIR / RECORD_MIGRATION_FILE).read_text(

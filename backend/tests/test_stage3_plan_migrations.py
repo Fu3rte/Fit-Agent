@@ -61,6 +61,8 @@ STAGE3_RECORD_TABLES = {
 STAGE3_REVIEW_TABLES = {"reviews", "review_source_revisions"}
 # S4-06a 由 014 迁移新增的摘要两表（stage4.md S4-06；表集合断言显式扩展、不删测试）。
 STAGE4_SUMMARY_TABLES = {"summaries", "summary_sources"}
+# S4-09／Stage 6 由 016 迁移新增的费用账本单表（Stage 6 USD 50 护栏）。
+STAGE6_FEE_TABLES = {"fee_ledger"}
 # Stage 3 表已全部落地：统计侧 ``pr_candidates`` 是视图（010），不在 type='table' 扫描内。
 LATER_STAGE_TABLES: set[str] = set()
 DRAFT_PAYLOAD_COLUMNS = (
@@ -342,6 +344,7 @@ async def test_empty_database_creates_stage3_plan_tables_without_statistics_side
             | STAGE3_RECORD_TABLES
             | STAGE3_REVIEW_TABLES
             | STAGE4_SUMMARY_TABLES
+            | STAGE6_FEE_TABLES
             | {"sqlite_sequence"}
         )
         assert tables & LATER_STAGE_TABLES == set()  # 统计／复盘侧表归 S3-12／S3-13
@@ -613,6 +616,8 @@ async def test_failed_stage3_migration_rolls_back_and_can_be_retried(
         "014_stage4_summaries.sql",
         # 015 是 S4-08 的重算父子关联与辅助 Run 类型：同样补齐才是生产最新编号。
         "015_stage4_recalc_and_aux_runs.sql",
+        # 016 是 S4-09／Stage 6 的费用账本（无业务表）：同样补齐才是生产最新编号。
+        "016_stage6_fee_ledger.sql",
     ):
         shutil.copy(DEFAULT_MIGRATIONS_DIR / name, directory / name)
     broken = directory / PLAN_TABLES_MIGRATION_FILE

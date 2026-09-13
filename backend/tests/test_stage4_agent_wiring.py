@@ -55,7 +55,7 @@ from domain.records.schema import (
     SetFacts,
     record_draft_to_json,
 )
-from runtime.agent_factory import agent_tool_functions, build_run_work
+from runtime.agent_factory import agent_tool_functions, build_agent, build_run_work
 from runtime.context import (
     INTERRUPTION_MARKER,
     facts_prompt,
@@ -784,6 +784,24 @@ def test_agent_tool_surface_is_read_and_pending_draft_only() -> None:
         "confirm.py",
     ):
         assert forbidden not in source, forbidden
+
+
+def test_propose_profile_draft_description_exposes_fact_states() -> None:
+    """真实模型首跑（S4-09 Subtask D）拿不到 state 词表：生成描述必须暴露它。
+
+    ``Fact`` 三态是既有校验词表（``domain/profile/schema.py``）；本用例只断言模型
+    实际看到的工具描述（生产装配 :func:`build_agent` 的产物）含三个合法值。
+    """
+    tools = BusinessTools(None, ToolIdentity("c1", "r1", BUSINESS_DATE))  # type: ignore[arg-type]
+    agent = build_agent(_ScriptedModel([]).model(), tools)
+    definitions = {
+        tool.name: tool.tool_def
+        for toolset in agent.toolsets
+        for tool in getattr(toolset, "tools", {}).values()
+    }
+    description = definitions["propose_profile_draft"].description or ""
+    for state in ("unknown", "denied", "known"):
+        assert state in description, state
 
 
 def test_no_public_draft_creation_route_is_exposed(tmp_path: Path) -> None:

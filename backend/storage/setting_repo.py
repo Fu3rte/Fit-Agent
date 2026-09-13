@@ -24,9 +24,6 @@ from storage.errors import InvalidInput, NotFound
 # 07 7.3 固定业务时区在 app_config 中的键
 BUSINESS_TIMEZONE_KEY = "business_timezone"
 
-# 首版唯一 Provider（PLAN.md：仅 DeepSeek 官方兼容端点完成 spike 验证）
-DEFAULT_PROVIDER = "deepseek"
-
 
 def _now() -> str:
     return datetime.now(UTC).isoformat()

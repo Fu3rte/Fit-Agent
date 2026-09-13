@@ -37,11 +37,12 @@ from domain.profile.schema import (
     profile_to_json,
 )
 from domain.profile.service import ProfileService
+from runtime.models import QWEN37_FLASH
 from storage.db import Database
 from storage.errors import FutureSchemaVersion, MigrationError
 from storage.migrations import DEFAULT_MIGRATIONS_DIR, load_migrations
 from storage.run_repo import RunRepo
-from storage.setting_repo import DEFAULT_PROVIDER, SettingRepo
+from storage.setting_repo import SettingRepo
 from tests.support import open_database, seed_legacy_run
 
 STAGE0_TABLES = {
@@ -68,6 +69,8 @@ STAGE3_RECORD_TABLES = {
 STAGE3_REVIEW_TABLES = {"reviews", "review_source_revisions"}
 # S4-06a 由 014 迁移新增摘要两表（stage4.md S4-06；07 7.4 摘要持久化）。
 STAGE4_SUMMARY_TABLES = {"summaries", "summary_sources"}
+# S4-09／Stage 6 由 016 迁移新增的费用账本单表（Stage 6 USD 50 护栏）。
+STAGE6_FEE_TABLES = {"fee_ledger"}
 # Stage 3 表已全部落地：统计侧 ``pr_candidates`` 是视图（010），不在 type='table' 扫描内。
 LATER_STAGE_TABLES: set[str] = set()
 
@@ -251,6 +254,7 @@ async def test_fresh_database_creates_only_the_draft_table_beyond_stage1(
             | STAGE3_RECORD_TABLES
             | STAGE3_REVIEW_TABLES
             | STAGE4_SUMMARY_TABLES
+            | STAGE6_FEE_TABLES
             | {"sqlite_sequence"}
         )
         assert tables & LATER_STAGE_TABLES == set()  # 统计／复盘侧表仍不得建
@@ -283,7 +287,7 @@ async def test_stage1_upgrade_adds_drafts_and_preserves_sessions_profile_catalog
         assert (await settings.initialize_business_timezone(lambda: "Asia/Shanghai"))[
             "initialized"
         ]
-        await settings.set_provider_api_key(DEFAULT_PROVIDER, FAKE_KEY)
+        await settings.set_provider_api_key(QWEN37_FLASH.provider, FAKE_KEY)
         async with db.transaction() as conn:
             await ProfileService(db).write_profile_in_transaction(conn, seeded)
             await conn.execute(
@@ -311,7 +315,8 @@ async def test_stage1_upgrade_adds_drafts_and_preserves_sessions_profile_catalog
         ]
         assert await settings.get_business_timezone() == "Asia/Shanghai"
         assert (
-            await settings.get_provider_api_key_internal(DEFAULT_PROVIDER) == FAKE_KEY
+            await settings.get_provider_api_key_internal(QWEN37_FLASH.provider)
+            == FAKE_KEY
         )
 
         # 档案与统一业务版本不变

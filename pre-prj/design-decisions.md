@@ -112,7 +112,7 @@
 - **选项**：A 作废即终态——当前修订为 `voided` 后该训练身份不再接受任何后续更正／复活修订；B 允许作废后继续经同一草稿链路追加更正修订（只增不改历史）。
 - **选择**：**A**。
 - **边界**：只约束「当前已确认修订被作废」的训练身份。不删除历史修订（旧修订仍可追溯）、不改训练稳定身份、不跳过草稿确认流程、不改变普通 `valid`／`incomplete` 记录的更正与补全（补全仍按 5.2 转 `valid`）；作废退出统计与「不回退旧有效版本」口径不变（第 5、6 章）。
-- **实现状态**：当前后端确认流程尚未实现终态拦截（`backend/app/confirm.py` 的记录确认仍允许向作废身份追加修订，实测见 `stage/evidence/S4-evidence.md` §3）；终态拦截与定向回归归 S4-09，见 `stage/stage4.md` S4-09。
+- **实现状态**：终态拦截已于 2026-09-13 实现——`backend/app/confirm.py::_resolve_target` 对当前修订 `voided` 的身份抛 `InvalidRecordFact`（422 `invalid_request`），定向回归 `tests/test_stage3_record_confirm.py` 11 passed；此前「尚未实现」的实测记录保留为历史（见 `stage/evidence/S4-evidence.md` §3）。S4-09 其余验收项仍未完成。
 - **受影响文档**：本文件；`PLAN.md`「未拍决策唯一索引」；`architecture/05-training-records.md` §5.3 与验收标准；`frontend/plans/stage4.md`；`stage/stage4.md` S4-09；`stage/evidence/S4-evidence.md`。
 
 ## Stage 6 真实联调 Provider 范围（2026-09-13 用户拍板）
@@ -130,8 +130,20 @@
   3. 产品运行时仍按第 10 章从 Provider 配置同库读 Key；env 仅适用于真实验证进程，且 `.env` 有值 ≠ 进程已读到；Key 不进入文档、日志、证据。
   4. 不扩大到 Anthropic 或本地 Qwen；不建多 Provider 设置页（仍单端点场景，Base URL/模型名属配置实现细节）。
   5. 09 章 Agent 正式测评不并入 Stage 6（同日 C1）。
-- **实现状态**：截至登记时，后端模型目录/Harness 仍按 DeepSeek `deepseek-flash` 离线实现；换商适配与真实调用归 Stage 6 / S4-09，**尚未执行**。
+- **实现状态**：登记时后端模型目录/Harness 仍按 DeepSeek `deepseek-flash` 离线实现；2026-09-13 已按本决策完成离线换商适配（目录新增 `qwen3.7-flash`、Provider 类按目录 `spec.provider` 选、profile 覆盖、Stage 6 账本接线），证据见 `stage/evidence/S4-evidence.md` §3「2026-09-13 实现」；**真实调用尚未执行，未发起任何付费调用**。
 - **受影响文档**：`PLAN.md` 技术栈表与「未拍决策唯一索引」；本文件（3.1A、思考模式行及本节）；`architecture/08-agent-runtime.md`（思考模式默认、容量、Stage 6 费用护栏、⚠️ 节）；`architecture/10-deployment-credentials.md`（Provider 配置可含兼容 Base URL）；`frontend/plans/stage6.md`；执行前只读核对模型规格。
+
+## Stage 6 联调账本计价与预留口径（2026-09-13 用户拍板）
+
+用户本轮确认以下设计；文档同步本身不构成「已联调」或计费已执行；不改变本节之外的护栏语义。
+
+- **日期**：2026-09-13。
+- **问题**：官方价目只有人民币（按单次请求输入长度分档），而 Stage 6 账本额度是 USD 50；同时该业务空间端点按 Token 还是 PTU／模型单元时长计费未确认——如何计价、如何预留。
+- **选项**：A 账本仍以 USD 记账，固定保守汇率 `1 USD = 6.5 CNY`，按官方最高价格档＋缓存未命中全价预留，输出按「最大思维链 + 最大回复」保守合计预留；B 账本改以 CNY 记账（硬上限 325 CNY，同时报告 USD 等值）；C 暂缓费用账本、只实现模型 profile。
+- **选择**：**A**；并确认该端点按 **Token 计费**（非 PTU／模型单元时长）。账本仍以 USD 计价，固定保守汇率 `1 USD = 6.5 CNY` 是唯一换算点；预留取最高价格档 + 缓存未命中全价；输出预留取保守合计（最大思维链 262,144 + 最大回复 131,072，思考内容按输出 Token 计费，可见 `max_tokens` 不是总输出上界）。
+- **边界**：只适用 Stage 6 联调账本（USD 50，与 Stage 4 的 10 美元分开记账、不累加、不互相解冻）；固定汇率是保守换算上界——实际汇率不低于 6.5 时，USD 上限对应的真实花费不超过 USD 50；预检与结算都不按缓存命中折扣估算；不改变预留不足不发送、未知 usage 保守扣账、取消不退预留、跨重启累计等已拍护栏规则。
+- **实现状态**：后端费用护栏（`runtime/fees.py`、016 迁移 ＋ `storage/fee_repo.py`、`runtime/budget.py`／`agent_factory.py` 接线）已按本口径离线实现并回归；**未发起任何付费调用**，真实 usage／计费以端点实际返回为准。
+- **受影响文档**：`PLAN.md`「未拍决策唯一索引」；本文件；`architecture/08-agent-runtime.md`「Stage 6 联调费用护栏」；`architecture/10-deployment-credentials.md` 10.4；`frontend/plans/stage6.md`；`stage/stage4.md` 与 `stage/evidence/S4-evidence.md`。
 
 ## Stage 1–3 已拍决策回填（2026-09-12 补记）
 

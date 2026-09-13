@@ -268,8 +268,10 @@ class BusinessTools:
     async def propose_profile_draft(self, proposed: dict[str, Any]) -> dict[str, Any]:
         """提出一条**待用户确认**的档案草稿。
 
-        ``proposed`` 是八字段全量的三态对象（与档案读取同一形状，``{state, value}``）。
-        缺字段、状态非法或限制引用不合法时不落库，返回需追问的结果。
+        ``proposed`` 是八字段全量的三态对象（与档案读取同一形状，``{state, value}``）；
+        ``state`` 只能是 ``unknown``／``denied``／``known`` 三种之一（非 ``known`` 时
+        ``value`` 必须为 ``null``；词表与既有校验一致）。缺字段、状态非法或限制引用
+        不合法时不落库，返回需追问的结果。
         """
         self._require_active()
         if not self._recalc_kind_allowed("profile_update"):

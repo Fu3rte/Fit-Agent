@@ -919,6 +919,11 @@ class ConfirmService:
         本笔为 ``revision_no=1`` 且无前序修订。给出 id 时只向该既有身份追加：修订号按当前修订
         +1（只追加、恰好 +1），``previous_revision_id`` 取当前修订（历史链不断），绝不按日期
         挑选身份（05 5.4）。作废不能作用在尚未建立的训练上。
+
+        作废即终态（05 5.3；2026-09-13 用户拍板 A）：当前修订为 ``voided`` 的身份不再接受
+        任何后续修订——更正、复活与补全都 fail-closed 拒绝，复用既有 ``invalid_request``
+        语义（``InvalidRecordFact`` → 422），不新增错误码。只约束当前修订已作废的身份：
+        ``valid``／``incomplete`` 记录的更正与补全照旧，历史修订与稳定身份不动。
         """
         training_session_id = payload.training_session_id
         if training_session_id is None:
@@ -937,6 +942,11 @@ class ConfirmService:
         if session is None or session.current is None:
             raise InvalidDraftRow(
                 f"记录草稿绑定的训练身份不存在或没有当前修订：{training_session_id}"
+            )
+        if session.current.status == "voided":
+            raise InvalidRecordFact(
+                "训练身份的当前修订已作废（终态），不再接受后续更正／复活／补全修订："
+                f"{training_session_id}"
             )
         return (
             session.id,

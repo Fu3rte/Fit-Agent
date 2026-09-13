@@ -12,6 +12,10 @@ Stage 4 S4-07 装配：对话／Run 路由与 SSE（``api.routes_chat``）、进
 （``runtime.events``）、唯一执行驱动（``runtime.run_task``，带状态观察者）与处理每 Run 一次的
 生产模型工厂（``api.deps.make_model_factory``）在 lifespan 内装配；模型仍只在本机调用
 Provider，本层不打印、不落盘凭据。
+
+Stage 6 F6-01 装配：Provider 设置路由（``api.routes_settings``，10.3）与前端构建产物静态托管＋
+SPA 回退（10.1，``frontend/dist``，运行时不需要 Node.js）；静态路由最后注册，不抢 ``/api/*`` 与
+``/healthz``。
 """
 
 from collections.abc import AsyncIterator
@@ -19,18 +23,21 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import FileResponse
 
 from api.deps import make_model_factory
 from api.dto import install_error_handlers
 from api.routes_chat import router as chat_router
 from api.routes_drafts import router as drafts_router
 from api.routes_readonly import router as readonly_router
+from api.routes_settings import router as settings_router
 from app.draft_repo import DraftRepo
 from app.drafts import DraftService
 from config import (
     database_path,
     freeze_effective_harness,
+    frontend_dist_dir,
     local_timezone_name,
     resolve_data_dir,
 )
@@ -39,7 +46,7 @@ from runtime.run_service import RunService
 from runtime.run_task import ExecutionDriver
 from storage.db import Database
 from storage.run_repo import RunRepo
-from storage.setting_repo import DEFAULT_PROVIDER, SettingRepo
+from storage.setting_repo import SettingRepo
 
 # 10.1：仅本机回环访问；Host/Origin 校验只放行回环主机名
 _LOOPBACK_HOSTNAMES = frozenset({"localhost", "127.0.0.1", "::1"})
@@ -100,8 +107,14 @@ class LoopbackGuardMiddleware:
         await self.app(scope, receive, send)
 
 
-def create_app(data_dir: str | Path | None = None) -> FastAPI:
-    """装配最小后端应用；``data_dir`` 仅用于测试与人工验收的临时数据隔离。"""
+def create_app(
+    data_dir: str | Path | None = None, *, frontend_dist: str | Path | None = None
+) -> FastAPI:
+    """装配最小后端应用。
+
+    ``data_dir`` 仅用于测试与人工验收的临时数据隔离；``frontend_dist`` 仅用于测试与打包裁剪
+    时显式指定前端构建产物目录（缺省即 10.1 固定的 ``frontend/dist``）。
+    """
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -128,7 +141,9 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
             app.state.business_timezone = (
                 await settings.initialize_business_timezone(local_timezone_name)
             )["timezone"]
-            provider = await settings.get_provider_status(DEFAULT_PROVIDER)
+            provider = await settings.get_provider_status(
+                app.state.harness_config.spec.provider
+            )
             app.state.provider_has_api_key = bool(provider and provider["has_api_key"])
             # S4-07：进程内事件流（只服务实时显示，不落库、不重放）与**唯一**执行驱动；
             # 驱动的状态观察者只把状态变化转成产品事件，不参与状态判定（08 8.2/8.7）。
@@ -164,6 +179,7 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
     app.include_router(readonly_router)
     app.include_router(drafts_router)
     app.include_router(chat_router)
+    app.include_router(settings_router)
     install_error_handlers(app)
 
     @app.get("/healthz")
@@ -177,4 +193,40 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
             "provider_has_api_key": request.app.state.provider_has_api_key,
         }
 
+    _install_frontend_static(
+        app,
+        Path(frontend_dist) if frontend_dist is not None else frontend_dist_dir(),
+    )
     return app
+
+
+def _install_frontend_static(app: FastAPI, dist_dir: Path) -> None:
+    """托管前端生产构建产物并做 SPA 回退（10.1）。
+
+    本路由**最后**注册，因此已注册的 ``/api/*`` 与 ``/healthz`` 先匹配、不被静态托管抢走：
+    仅当路径未命中业务路由时才进这里。命中 ``dist`` 内真实文件即按文件返回（含
+    ``index.html`` 与 ``assets/*``）；其余非 ``/api`` 路径回退 ``index.html``（前端路由由浏览器侧
+    解释）。``/api`` 前缀下的未匹配路径仍是 404，不把 API 404 变成 HTML；``dist`` 缺失
+    （未构建／未打包）时非 ``/api`` 路径同样 404，不假装前端已交付。
+    """
+    index = dist_dir / "index.html"
+
+    @app.get("/{path:path}")
+    async def serve_frontend(path: str) -> FileResponse:
+        if path == "api" or path.startswith("api/"):
+            raise HTTPException(status_code=404)
+        if path:
+            candidate = _dist_file(dist_dir, path)
+            if candidate is not None:
+                return FileResponse(candidate)
+        if index.is_file():
+            return FileResponse(index)
+        raise HTTPException(status_code=404)
+
+
+def _dist_file(dist_dir: Path, path: str) -> Path | None:
+    """``dist`` 内的真实文件路径；越界（``..`` 逃逸）与不存在的路径一律 ``None``。"""
+    candidate = (dist_dir / path).resolve()
+    if candidate.is_relative_to(dist_dir.resolve()) and candidate.is_file():
+        return candidate
+    return None

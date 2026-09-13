@@ -64,6 +64,13 @@ from runtime.error_codes import (
     MODEL_REQUEST_TIMEOUT,
     RUN_TIMEOUT,
 )
+from runtime.fees import (
+    FeeLedger,
+    MissingPrice,
+    Reservation,
+    reservation_usd,
+    usage_usd,
+)
 from runtime.run_task import ExecutionFailure
 
 if (
@@ -281,6 +288,11 @@ class BudgetedModel(WrapperModel):
     不成立即以 ``context_budget_exceeded`` 结束、**不实际发送**；成功请求把真实
     ``usage.input_tokens`` 与本次字符数记入 :class:`~runtime.compression.PromptEstimator` 锚点
     （摘要请求不记锚点：它的输入不是后续投影的前缀，取消与重试仍走同一条预算路径）。
+
+    费用护栏（Stage 6）：传入 :class:`~runtime.fees.FeeLedger` 时，每次**实际发送**的请求
+    （普通、摘要、重试、纠错各算一次）都在发送前预留费用上界、完成后按真实 usage 结算；
+    余额不足或模型缺已核实价目即不发送（沿用已冻结的 ``model_request_failed``，不新增错误码），
+    usage 未知（失败、断流、取消、0/0、崩漏）时预留额不退，由下一次 Run 开始时的孤儿结算扣账。
     """
 
     def __init__(
@@ -289,10 +301,53 @@ class BudgetedModel(WrapperModel):
         budget: RunBudget,
         *,
         estimator: PromptEstimator | None = None,
+        ledger: FeeLedger | None = None,
     ) -> None:
         super().__init__(wrapped)
         self.budget = budget
         self.estimator = estimator if estimator is not None else PromptEstimator()
+        self.ledger = ledger
+
+    async def _reserve_fee(self) -> Reservation | None:
+        """发送前的费用预留；余额不足／缺价一律不发送（fail-closed）。"""
+        if self.ledger is None:
+            return None
+        try:
+            amount = reservation_usd(
+                self.budget.harness.spec.model_id,
+                self.budget.harness.effective_input_tokens,
+            )
+        except MissingPrice as exc:
+            raise ExecutionFailure(MODEL_REQUEST_FAILED) from exc
+        reservation = await self.ledger.reserve(amount)
+        if reservation is None:
+            raise ExecutionFailure(MODEL_REQUEST_FAILED)
+        return reservation
+
+    async def _settle_fee(
+        self, reservation: Reservation | None, usage: object | None
+    ) -> None:
+        """按真实 usage 结算；``usage`` 缺失或为 0/0 时按预留额保守扣账（未知 usage）。
+
+        ``input_tokens`` 与 ``output_tokens`` 同时为 0 不是已知用量（Provider 未回传 usage
+        的另一种形态），与 ``usage=None`` 同等处理，不把未知费用记为零。
+        """
+        if self.ledger is None or reservation is None:
+            return
+        actual: float | None = None
+        if usage is not None:
+            input_tokens = int(getattr(usage, "input_tokens", 0))
+            output_tokens = int(getattr(usage, "output_tokens", 0))
+            if input_tokens or output_tokens:
+                try:
+                    actual = usage_usd(
+                        self.budget.harness.spec.model_id,
+                        input_tokens=input_tokens,
+                        output_tokens=output_tokens,
+                    )
+                except MissingPrice:
+                    actual = None  # 缺价不把未知费用记为零：按预留额扣账
+        await self.ledger.settle(reservation, actual_usd=actual)
 
     async def request(
         self,
@@ -340,6 +395,7 @@ class BudgetedModel(WrapperModel):
             characters = self._gate_request(
                 messages, model_request_parameters, summary=summary
             )
+            reservation = await self._reserve_fee()
             timeout = self.budget.begin_model_request()
             try:
                 async with asyncio.timeout(timeout):
@@ -347,8 +403,10 @@ class BudgetedModel(WrapperModel):
                         messages, model_settings, model_request_parameters
                     )
             except asyncio.CancelledError:
-                raise  # 用户取消：不重试、不映射错误码，终态由执行驱动裁决
+                # 取消不重试、不映射错误码；预留不退，由下一次 Run 开始的孤儿结算按未知 usage 扣账
+                raise
             except BaseException as exc:  # noqa: BLE001 - 分类后按白名单决定重试或终态
+                await self._settle_fee(reservation, usage=None)
                 decision = classify_model_failure(exc, output_emitted=False)
                 if decision is None:
                     raise  # 未分类异常不发明原因码（S4-03 语义）
@@ -360,6 +418,9 @@ class BudgetedModel(WrapperModel):
                     await self.budget.wait_before_retry(delay)
                     continue
                 raise ExecutionFailure(decision.error_code) from exc
+            # 先结算已知 usage 再判 finish_reason：被拒绝的结果同样按真实用量入账，
+            # 不留占用全额预留的孤儿预留
+            await self._settle_fee(reservation, usage=response.usage)
             require_supported_finish_reason(response)
             if record_anchor:
                 self.estimator.record(characters, response.usage.input_tokens)
@@ -415,7 +476,9 @@ class BudgetedModel(WrapperModel):
             characters = self._gate_request(
                 messages, model_request_parameters, summary=False
             )
+            reservation = await self._reserve_fee()
             timeout = self.budget.begin_model_request()
+            settled = False
             try:
                 async with asyncio.timeout(timeout):
                     async with self.wrapped.request_stream(
@@ -430,10 +493,17 @@ class BudgetedModel(WrapperModel):
                         self.estimator.record(
                             characters, response_stream.usage.input_tokens
                         )
+                        await self._settle_fee(reservation, usage=response_stream.usage)
+                        settled = True
                         return
             except asyncio.CancelledError:
                 raise
             except BaseException as exc:  # noqa: BLE001 - 同上
+                if settled:
+                    # 流已完整交付且已结算（当前异常只可能来自内层流收尾）：不改判结果、
+                    # 不二次结算；取消仍按上面的分支上抛
+                    return
+                await self._settle_fee(reservation, usage=None)
                 output_emitted = yielded and (
                     stream is not None
                     and stream.time_to_first_chunk(started) is not None

@@ -1,7 +1,7 @@
 # 前端 Stage 6 开发计划：真实联调与交付验收
 
-> 状态：**§8 A–F 已于 2026-09-13 owner 拍板**；整体计划仍待 owner 一句「按此开工」后实施。拍板本身 ≠ 已开工或已验收。
-> 依赖：Stage 0–5 前端 mock 闭环已结项（见 [stage5.md](stage5.md) / [stage5-evidence.md](stage5-evidence.md)）；后端 S4-01–08 离线实现（`pre-prj/stage/stage4.md`），**S4-09 前后端联调未开始**。
+> 状态：**§8 A–F 已于 2026-09-13 owner 拍板**；F6-00／F6-02 前端侧与 F6-01 后端已完成（2026-09-13；S4-09 后端任务按 owner 拍 A 判完成——浏览器／设置页 UI／Windows 豁免为 S4-09 阻塞）；**F6-03–F6-11 未开始/未完成**。拍板本身 ≠ 已开工或已验收。
+> 依赖：Stage 0–5 前端 mock 闭环已结项（见 [stage5.md](stage5.md) / [stage5-evidence.md](stage5-evidence.md)）；后端 S4-01–08 离线实现（`pre-prj/stage/stage4.md`），S4-09 协议级联调与真实模型最小联调已执行（Subtask C／D，2026-09-13；见 S4-evidence §1／§3），**真实浏览器、设置页 UI 闭环与 Windows 仍未验**；**S4-09 后端任务已于 2026-09-13 按 owner 拍 A 判完成——浏览器／设置页 UI／Windows 豁免为 S4-09 阻塞，仍是本阶段未执行证据缺口（F6-03–F6-10 未完成）。**
 > 本文件细化 [business-roadmap.md](business-roadmap.md) 阶段 6「真实联调与交付验收」：Provider 配置 → 真实运行 → 逐条复验闭环 → Windows 人工验收。
 > **红线**：mock 通过不得声称为真实链路通过；本计划落盘 ≠ 开工或验收。
 > **契约提醒**：B 档 Provider 范围已于 2026-09-13 同步写入 `PLAN.md`、`pre-prj/design-decisions.md`（「Stage 6 真实联调 Provider 范围」）、`pre-prj/architecture/08-agent-runtime.md`（思考/容量/Stage 6 费用护栏）与 `10-deployment-credentials.md`。同步 ≠ 已实现换商或已计费。
@@ -42,8 +42,8 @@
 | 统计 | `GET /api/stats` 聚合 | `/api/stats/completion` + `/api/stats/pr` | **前端聚合**（handover F7 已拍方向） |
 | 复盘读 | `GET /api/review` 最新一条 | `GET /api/reviews` 列表 + `/{id}` | **前端取最新**；字段 `body_markdown` |
 | 安排读回 | `GET /api/arrangements`（mock-only） | **无**对应 HTTP 端点 | **已拍 A2**：前端自行投影，不增后端端点 |
-| Provider | `/api/provider` 系列 | **路由未实现**（`routes_settings.py` 空壳；仅 S0-07 存储层） | **后端补设置路由**（10.3） |
-| 静态托管 | Vite dev + mock 插件 | 生产需 FastAPI 托管 `frontend` 构建产物 | **后端接静态托管**；运行时无 Node |
+| Provider | `/api/provider` 系列 | **已实现**（2026-09-13：查询／PUT／DELETE；只回 `has_api_key` 与只读展示） | **后端已补设置路由**（10.3）；F6-03 做真实存储闭环复验 |
+| 静态托管 | Vite dev + mock 插件 | **已接线**（2026-09-13：FastAPI 托管 `frontend` 构建产物＋SPA 回退） | 运行时无 Node；五页浏览器走查待做 |
 | 计划/档案/记录 | 聚合形状 | `/api/plan`、`/api/plan/guidance`、拆分端点 | 按 F1/F5/F6 映射 |
 | 草稿 kind | mock 三类偏旧 | `profile_update`/`plan`/`training_record`/`arrangement` | F2 |
 | revise/confirm | 部分形状偏旧 | revise 必带 `revision`；confirm 返回提交凭据 | F3/F4/F10 |
@@ -53,10 +53,10 @@
 
 | 缺口 | 现状 | 处理 |
 | --- | --- | --- |
-| 作废即终态拦截 | `app/confirm.py` 仍接受向作废身份追加修订（2026-09-13 拍 A 未落地） | **后端必做**；定向回归后方可联调更正链路 |
-| Provider HTTP 路由 | 未实现 | 后端按 10.3 补查询／PUT／DELETE；只回 `has_api_key` |
-| 静态文件托管 | 未接线 | 后端托管前端 `dist`；SPA 回退到 `index.html`（实现细节） |
-| 真实模型流式 | 离线桩已验，真实 Provider 流式未验 | 联调时实测保活、断流、`finish_reason`、思考分片 |
+| 作废即终态拦截 | **已实现**（2026-09-13：`app/confirm.py` 当前修订 `voided` 时拒绝，定向回归 11 passed） | 后端已完成；联调时按真实后端重走更正/作废剧本验证 |
+| Provider HTTP 路由 | **已实现**（2026-09-13：`GET /api/provider`＋`PUT/DELETE /api/provider/api-key`，只回 `has_api_key` 与只读展示） | 已完成；F6-03 按真实存储闭环复验 |
+| 静态文件托管 | **已接线**（2026-09-13：FastAPI 托管 `frontend/dist`＋SPA 回退；`dist` 缺失时非 `/api` 路径 404） | 托管机制与 `npm run build` 复跑已完成（Subtask C）；五页浏览器走查仍缺 |
+| 真实模型流式 | **最小真实流式已验**（2026-09-13 Subtask D：真实端点 1 请求流式＋真实 usage，思考只进存储不进 SSE；证据见 S4-evidence §3「Subtask D」） | 完整业务剧本（保活、断流、`finish_reason` 分类、多轮真实工具）仍待 F6-04–F6-08 联调 |
 | 复盘 Run 与前端 | SSE 仅状态；正文经 `GET /api/reviews` | 前端按此口径；不改后端事件白名单 |
 
 ### 3.3 授权与费用边界（2026-09-13 owner 已拍 B）
@@ -108,7 +108,8 @@
 - **依赖**：F6-00；S4-01–08 既有实现。
 - **验收标准**：作废后追加更正被 `invalid_request` 拒绝；设置路由只回 `has_api_key`；`npm run build` 产物可被后端托管并打开五页；pytest 全绿（无新增 skip 掩盖联调缺口）。
 - **验证方式**：后端自动化 + 回环 curl 冒烟；证据归 `pre-prj/stage/evidence/`（后端侧）。
-- **实现状态**：**未完成，归后端 owner**（2026-09-14 backend 全量回滚；作废终态 / Provider 路由 / 静态托管均待后端 owner 重做；此前「已完成」作废，不得再当 F6-01 完成证据）。
+- **实现状态**：**F6-01 后端完成（2026-09-13 owner 拍 A；归后端 owner；日期按实测 UTC 时间戳，见 S4-evidence §3 C 小节与新拍板小节）**：四项均已实现并有后端证据——（1）作废终态拦截＋定向回归（`tests/test_stage3_record_confirm.py` 11 passed）；（2）`GET/PUT/DELETE /api/provider` 只回 `has_api_key` 与只读展示（`tests/test_provider_settings_api.py` **6 passed**，Subtask C 复跑当前字节；初版 4 例）；（3）`frontend/dist` 静态托管＋SPA 回退（`tests/test_frontend_static.py` 3 passed）；（4）Stage 6 OpenAI 兼容 Provider 运行时适配＋USD 50 持久费用账本（`tests/test_stage6_provider_runtime.py` **19 passed**；全量门 **952 passed**／34.70s 为结算边界修复后当前字节，Subtask C 复跑）。**2026-09-13 precommit 自动门（当前字节）**：全量门 **953 passed**（33.89s，exit 0）、27 个改动／未跟踪 Python 文件 ruff check＋format --check＋pyright（1.1.411，0 errors／0 warnings／0 informations）全过、`npm run build` exit 0（`✓ built in 3.81s`）、F6-02 探针复跑 **15 PASS／0 FAIL／0 SKIP**（归档已更新）、`git diff --check` 通过且无 staged；当前 diff 为待提交 checkpoint（未提交）。**2026-09-13 Subtask C 协议级联调**：`npm run build` 重建 dist（`✓ built in 4.40s`）、F6-02 回环探针 **15 PASS／0 FAIL／0 SKIP**、窄回环 27 项全过、定向协议 pytest 113 passed，见 `pre-prj/stage/evidence/S4-evidence.md` §1／§3。**2026-09-13 Subtask D 真实模型最小联调**：真实 Stage 6 兼容端点 **4 Runs／9 个模型响应行**全部 completed、累计账本 **$0.01963052**（USD 50 内；授权批账本目录唯一 `/tmp/fit-agent-stage6-d`）；smoke 真实流式＋真实 usage＋结算、可见 SSE 无思考标记、草稿行随 Run 落盘（通知即时顺序由离线用例固定）、会话查询恢复与复盘 `GET /api/reviews` 取正文均通过（见 S4-evidence §1／§3「Subtask D」）；草稿工具描述已补 `Fact` 三态词表＋离线断言（校验未改；真实模型复验未做）。**豁免项（不阻塞 F6-01 后端完成；仍是本阶段未执行证据缺口，不得当 PASS）**：真实浏览器打开五页走查未做（仅 HTTP 路由级验证 SPA 回退；浏览器 SSE／断线恢复未验）；设置页 UI 录入闭环（F6-03+）与完整业务剧本（F6-04–F6-08）未开始；Windows（F6-10）未验。完成判定依据：owner 2026-09-13 拍 A（自动化＋协议级＋真实模型最小联调），正本见 `pre-prj/stage/evidence/S4-evidence.md` §3「2026-09-13 owner 拍板：S4-09 后端任务完成判定」。
+- **历史状态**：2026-09-13 backend 全量回滚后曾记「未完成，归后端 owner；此前『已完成』作废」；本行按当日重做的后端底座＋Subtask C 协议验证＋Subtask D 真实最小联调更新（日期按实测 UTC 时间戳）；同日 owner 拍 A 后本项后端部分封口，浏览器／UI／Windows 缺口转入 F6-03–F6-10。
 
 ### F6-02：前端真实 API 适配
 
@@ -122,7 +123,7 @@
 - **依赖**：F6-01 可并行开发，联调以 F6-01 完成为准。
 - **验收标准**：`tsc -b` 与 `npm run build` 零错误；对真实后端（无真实模型时用无 Key 或离线可测路径）查询类端点可读；确认/丢弃/修订请求体与后端 400/409 语义一致；前端无残留对 `/api/stats` 聚合、`/api/review`、`/api/runs` POST、`/api/events` 的生产调用；联调后 `src/mock/` 已删。
 - **验证方式**：类型检查 + 构建 + 对真实后端的协议探针（新 `f6-02`，仅回环、无真实模型）。
-- **实现状态**：**已完成**（2026-09-13，前端侧）：传输/看板/安排/mock 删除落地；`tsc`+`build` exit 0；探针不依赖 F6-01 断言通过（Provider 路由 / 静态托管缺失记 SKIP，待后端 owner 重做后再验）；已知限制：安排徽章生产恒「尚无安排」（无会话列表+无 `scheduled_session_id`）；RecordsPage 三桶 UI 生产不可达；f2–f5 探针退役。**注意**：2026-09-13 旧探针证据（15/15 PASS 含 provider/静态托管）基于已回滚的后端临时实现，**不得再当 F6-01 完成证据**；当前 [stage6-evidence-assets/f6-02-probe.txt](stage6-evidence-assets/f6-02-probe.txt) 为 2026-09-14 回滚后重跑（13 PASS + 2 SKIP）。
+- **实现状态**：**已完成**（2026-09-13，前端侧）：传输/看板/安排/mock 删除落地；`tsc`+`build` exit 0；探针不依赖 F6-01 断言通过（Provider 路由 / 静态托管缺失记 SKIP，待后端 owner 重做后再验）；已知限制：安排徽章生产恒「尚无安排」（无会话列表+无 `scheduled_session_id`）；RecordsPage 三桶 UI 生产不可达；f2–f5 探针退役。**注意**：2026-09-13 旧探针证据（15/15 PASS 含 provider/静态托管）基于已回滚的后端临时实现，**不得再当 F6-01 完成证据**。**2026-09-13 后端重做后（同日）**：Provider 路由与静态托管已在当前 backend 实现；Subtask C 已重跑探针 → **15 PASS／0 FAIL／0 SKIP**（[stage6-evidence-assets/f6-02-probe.txt](stage6-evidence-assets/f6-02-probe.txt) 已按本次 Linux 运行更新，Provider／静态托管两项 SKIP 转 PASS；此前 Windows 13 PASS+2 SKIP 运行已被该文件覆盖，旧记录只保留在本行历史描述中）。**2026-09-13 precommit 门再次复跑（当前字节）**：15 PASS／0 FAIL／0 SKIP（归档头 `2026-09-13T13:18:38.040Z`），确认后端重做后探针仍全绿。
 
 ### F6-03：Provider 配置闭环（真实存储 + 兼容端点）
 
@@ -136,6 +137,7 @@
 - **验收标准**：录入后查询仅 `has_api_key=true`；删除后 `false` 且跨重启一致；网络响应、浏览器控制台、后端日志抽样无 Key 明文；冒烟通过或失败原因可复现。
 - **验证方式**：协议探针 `f6-03` + owner 浏览器走查 + 可选单轮冒烟；日志抽样人工核对。
 - **验证证据**：探针输出 + 走查记录 + usage/费用汇总；不落 Key 值。
+- **实现状态增量（2026-09-13，后端 Subtask D）**：最小真实连通冒烟已由后端证据脚本在临时数据目录执行（4 Runs／9 个模型响应行／累计 $0.01963，经生产 Provider／profile／费用账本；见 S4-evidence §3「Subtask D」）；本批账本／数据目录为 `/tmp/fit-agent-stage6-d`（**唯一**；换新 `--data-dir` 只会另起一份 $50 账本，**不构成新的付费调用授权**）；**设置页 UI 录入闭环与 owner 浏览器走查仍未做**，F6-03 不标完成。
 
 ### F6-04：建档闭环（真实）
 
@@ -257,15 +259,15 @@
 
 ### 契约文档同步（2026-09-13 已完成文档侧）
 
-B 档改 Provider 范围已写入：`PLAN.md`（技术栈表 + 未拍索引）；`pre-prj/design-decisions.md`（3.1A/思考模式行 +「Stage 6 真实联调 Provider 范围」）；`pre-prj/architecture/08-agent-runtime.md`（思考默认、容量重核说明、Stage 6 费用护栏）；`10-deployment-credentials.md`。同步 ≠ 代码已适配或已发起计费。
+B 档改 Provider 范围已写入：`PLAN.md`（技术栈表 + 未拍索引）；`pre-prj/design-decisions.md`（3.1A/思考模式行 +「Stage 6 真实联调 Provider 范围」）；`pre-prj/architecture/08-agent-runtime.md`（思考默认、容量重核说明、Stage 6 费用护栏）；`10-deployment-credentials.md`。同步 ≠ 代码已适配或已发起计费。2026-09-13 又按 owner 授权把已拍费用口径（USD 账本＋固定 1 USD = 6.5 CNY、按 Token 非 PTU、最高档＋缓存未命中预留、思维链＋回复输出上界）补登进同一四份正本（`PLAN.md` 未拍索引、`design-decisions.md`「Stage 6 联调账本计价与预留口径（2026-09-13 用户拍板）」、08「计价与预留口径」、10.4）；仅同步既有拍板，不改变语义，同步 ≠ 已计费。
 
 ## 9. 阶段完成条件
 
 - [x] §8 A–F 经 owner 拍板（2026-09-13）
 - [x] owner 明示「按 stage6.md 开工」（F6-00–02 已实施，2026-09-13）
-- [x] F6-00 + F6-02 前端侧完成，传输对照表冻结且前端无 mock 私有生产调用（F3 后 mock 已删）（2026-09-13，复审 PASS_WITH_NOTES；F6-01 除外）
-- [ ] F6-01 后端缺口（作废终态、Provider 路由、静态托管）完成并有后端证据（**未完成，归后端 owner**；2026-09-14 backend 全量回滚）
-- [ ] F6-03–F6-07 主闭环在真实后端通过（含 `qwen3.7-flash` 或 env 实际模型；费用计入 USD 50）
+- [x] F6-00 + F6-02 前端侧完成，传输对照表冻结且前端无 mock 私有生产调用（F3 后 mock 已删）（2026-09-13，复审 PASS_WITH_NOTES；F6-01 后端另判完成，见下行）
+- [x] F6-01 后端完成（2026-09-13 owner 拍 A，依据自动化＋协议级＋真实模型最小联调）：作废终态、Provider 路由、静态托管、Stage 6 Provider 运行时＋USD 50 费用账本**已实现**（2026-09-13；费用定向 19 passed／全量门 **952 passed**＝结算边界修复后当前字节）；协议级联调已验（Subtask C：`npm run build` 重建＋f6-02 探针 15 PASS＋窄回环 27 项＋定向协议 pytest 113 passed）；**真实模型最小联调已由 Subtask D 执行**（4 Runs／$0.01963：smoke＋草稿行落盘（即时顺序离线验证）＋会话恢复＋复盘查询；本批账本目录 `/tmp/fit-agent-stage6-d` 为唯一）；**豁免项（不阻塞 F6-01 后端完成；仍是本阶段未执行证据缺口，不得当 PASS）：真实浏览器打开五页走查与浏览器 SSE／断线恢复、设置页 UI 闭环（F6-03+）、完整业务剧本（F6-04–F6-08）、Windows（F6-10）**（后端侧证据见 `pre-prj/stage/evidence/S4-evidence.md` §1／§2 S4-09 行／§3「Subtask D」与新拍板小节）；2026-09-13 precommit 自动门（当前字节）：全量门 **953 passed**／ruff＋format＋pyright 全过／`npm run build` exit 0／f6-02 **15 PASS**／无 staged——可作 checkpoint 提交候选（未提交）
+- [ ] F6-03–F6-07 主闭环在真实后端通过（含 `qwen3.7-flash` 或 env 实际模型；费用计入 USD 50；授权批账本目录唯一——换新数据目录只另起一份账本、不构成新的调用授权）
 - [ ] F6-09 安全/失败/重启清单通过或缺口入证据
 - [ ] F6-10 Windows 清单实测完成，版本一致
 - [ ] F6-11 `stage6-evidence.md` 归档；build/pytest/探针退出码齐全
@@ -276,7 +278,7 @@ B 档改 Provider 范围已写入：`PLAN.md`（技术栈表 + 未拍索引）�
 
 | 风险 | 缓解 |
 | --- | --- |
-| S4-09 未开工导致前端空转 | F6-02 可先按冻结契约改客户端；联调门以 F6-01 为准 |
+| S4-09 后端任务完成后前端仍空转 | F6-02 已按冻结契约完成；浏览器闭环与其余项按 F6-03–F6-10 推进，联调门以 F6-01 已留后端证据为准 |
 | 换商后 Harness 容量/思考/计价不适用 | F6-03 前只读核对模型规格；不适用即停，不沿用 deepseek-flash 参数 |
 | 真实模型行为与 mock 剧本不一致 | 以领域校验与确认事务为权威；模型差记缺陷不静默改已拍语义 |
 | 费用失控 | 调用前预留；未知 usage 保守扣账；USD 50 封顶 |
@@ -286,4 +288,4 @@ B 档改 Provider 范围已写入：`PLAN.md`（技术栈表 + 未拍索引）�
 
 ---
 
-**下一步**：A–F 已拍。请 owner 一句确认「按 stage6.md 开工」；是否同步改 `PLAN.md` 等正本另示。确认前不实施、不发起计费请求。
+**下一步**：F6-00／F6-02 前端侧与 F6-01 后端已于 2026-09-13 完成（S4-09 后端任务按 owner 拍 A 判完成）；后续按 F6-03 → F6-11 顺序推进（Provider 设置页 UI 闭环、五条业务闭环真实复验、Windows 与发布验收、证据结项）。F6-03 起涉及真实模型调用，按已批 USD 50 额度与「授权批账本目录唯一」口径执行；本阶段结项前不得写「已交付」。

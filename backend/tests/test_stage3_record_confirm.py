@@ -394,6 +394,89 @@ async def test_voiding_requires_an_existing_identity_and_other_kinds_are_rejecte
             await _void(db, draft_id="profile-draft-1")
 
 
+async def test_voided_identity_is_terminal_and_rejects_later_revisions(
+    tmp_path: Path,
+) -> None:
+    """05 5.3（2026-09-13 拍 A）：当前修订已作废即终态，确认路径 fail-closed 复用 invalid_request。
+
+    只约束已作废身份：不删历史修订、不动当前指针、不跳过草稿确认；拒绝后零写入。
+    """
+    async with open_database(tmp_path / "app.db") as db:
+        await _conversation(db)
+        await _create(db, exercises=(_weight_log(sets=(_weight_set(value="80"),)),))
+        valid = await _confirm(db, draft_id="record-draft-1")
+        await _create(
+            db,
+            draft_id="record-draft-2",
+            training_session_id=valid.training_session_id,
+            exercises=(_weight_log(sets=(_weight_set(value="80"),)),),
+        )
+        voided = await _void(db, draft_id="record-draft-2")
+        revisions_before = await _revisions(db, valid.training_session_id)
+        context_before = await _context_version(db)
+
+        # 对已作废身份再发起「更正／复活」：草稿能创建，但确认必须被拒绝
+        await _create(
+            db,
+            draft_id="record-draft-3",
+            training_session_id=valid.training_session_id,
+            exercises=(_weight_log(sets=(_weight_set(value="85"),)),),
+        )
+        with pytest.raises(InvalidRecordFact):
+            await _confirm(db, draft_id="record-draft-3")
+        # 终态身份不再接受任何新修订：再作废同样拒绝（不产生第三笔修订）
+        with pytest.raises(InvalidRecordFact):
+            await _void(db, draft_id="record-draft-3")
+
+        # 零写入：无新修订、当前指针未变、业务版本未推进、草稿仍未提交
+        assert await _revisions(db, valid.training_session_id) == revisions_before
+        assert await _context_version(db) == context_before
+        sessions = await _sessions(db)
+        assert sessions[0]["current_revision_id"] == voided.session_revision_id
+        rows = await _fetch(
+            db,
+            "SELECT status, revision FROM business_drafts WHERE id = ?",
+            ("record-draft-3",),
+        )
+        assert rows[0]["status"] == "pending"
+        assert rows[0]["revision"] == 1
+        # 旧修订与其事实仍在（不物理删除、不回退旧有效版本后重算）
+        assert [
+            row["load_value_text"] for row in await _sets(db, valid.session_revision_id)
+        ] == ["80"]
+
+
+async def test_incomplete_identity_can_still_be_completed_by_a_later_revision(
+    tmp_path: Path,
+) -> None:
+    """作废终态不误伤普通记录：incomplete 补全为 valid 照旧可追加修订（05 5.3 边界）。"""
+    async with open_database(tmp_path / "app.db") as db:
+        await _conversation(db)
+        await _create(
+            db,
+            exercises=(
+                _weight_log(sets=(_weight_set(set_type=None, value="50", reps=5),)),
+            ),
+        )
+        incomplete = await _confirm(db, draft_id="record-draft-1")
+        assert incomplete.status == "incomplete"
+
+        await _create(
+            db,
+            draft_id="record-draft-2",
+            training_session_id=incomplete.training_session_id,
+            exercises=(_weight_log(sets=(_weight_set(value="50", reps=5),)),),
+        )
+        completed = await _confirm(db, draft_id="record-draft-2")
+
+        assert completed.status == "valid"
+        assert completed.revision_no == 2
+        assert completed.training_session_id == incomplete.training_session_id
+        revisions = await _revisions(db, incomplete.training_session_id)
+        assert [row["status"] for row in revisions] == ["incomplete", "valid"]
+        assert revisions[1]["previous_revision_id"] == incomplete.session_revision_id
+
+
 # ---------- 绑定实际使用的安排修订，不随后续接受改绑 ----------
 
 

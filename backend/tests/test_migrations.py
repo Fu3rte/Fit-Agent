@@ -43,6 +43,8 @@ STAGE3_RECORD_TABLES = {
 STAGE3_REVIEW_TABLES = {"reviews", "review_source_revisions"}
 # S4-06a 由 014 迁移新增的摘要两表：覆盖范围与来源关联（07 7.4 摘要持久化）。
 STAGE4_SUMMARY_TABLES = {"summaries", "summary_sources"}
+# S4-09／Stage 6 由 016 迁移新增的费用账本单表：Stage 6 USD 50 护栏的持久账本（08）。
+STAGE6_FEE_TABLES = {"fee_ledger"}
 # Stage 3 表已全部落地：统计侧 ``pr_candidates`` 是视图（010），不在 type='table' 扫描内。
 LATER_STAGE_TABLES: set[str] = set()
 LATEST_VERSION = len(load_migrations())
@@ -71,6 +73,7 @@ async def test_fresh_initialize_creates_runtime_tables(tmp_path: Path) -> None:
             | STAGE3_RECORD_TABLES
             | STAGE3_REVIEW_TABLES
             | STAGE4_SUMMARY_TABLES
+            | STAGE6_FEE_TABLES
             | {"sqlite_sequence"}
         )
         assert tables & LATER_STAGE_TABLES == set()  # 不建统计／复盘侧表
@@ -287,7 +290,7 @@ async def test_failed_013_rolls_back_muscle_column_and_version(tmp_path: Path) -
     migrations_dir = tmp_path / "migrations"
     migrations_dir.mkdir()
     for source in sorted(real_dir.glob("0*.sql")):
-        if source.name.startswith(("013", "014", "015")):
+        if source.name.startswith(("013", "014", "015", "016")):
             continue
         (migrations_dir / source.name).write_text(
             source.read_text(encoding="utf-8"), encoding="utf-8"
@@ -353,7 +356,7 @@ async def test_failed_014_rolls_back_summary_tables_and_version(tmp_path: Path) 
     migrations_dir = tmp_path / "migrations"
     migrations_dir.mkdir()
     for source in sorted(real_dir.glob("0*.sql")):
-        if source.name.startswith(("014", "015")):
+        if source.name.startswith(("014", "015", "016")):
             continue
         (migrations_dir / source.name).write_text(
             source.read_text(encoding="utf-8"), encoding="utf-8"
@@ -392,7 +395,7 @@ async def test_failed_015_rolls_back_recalc_columns_and_version(tmp_path: Path) 
     migrations_dir = tmp_path / "migrations"
     migrations_dir.mkdir()
     for source in sorted(real_dir.glob("0*.sql")):
-        if source.name.startswith("015"):
+        if source.name.startswith(("015", "016")):
             continue
         (migrations_dir / source.name).write_text(
             source.read_text(encoding="utf-8"), encoding="utf-8"

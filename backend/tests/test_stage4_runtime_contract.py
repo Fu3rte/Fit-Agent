@@ -42,14 +42,16 @@ from runtime.models import (
 from storage.errors import ConversationBusy
 
 
-def test_deepseek_flash_is_the_only_supported_model() -> None:
+def test_supported_models_are_the_catalog_entries_only() -> None:
     spec = require_supported_model_id("deepseek-flash")
     assert spec == DEEPSEEK_FLASH
     assert spec.provider == "deepseek"
     assert spec.base_url == "https://api.deepseek.com"
     assert spec.context_window == 1_000_000
     assert spec.max_output_tokens == 384_000
-    assert set(SUPPORTED_MODELS) == {"deepseek-flash"}
+    # Stage 6（2026-09-13 拍板）新增 owner 指定的 OpenAI 兼容端点模型：目录恰为这两个，
+    # 其余 id（含框架旧别名与快照版）仍被启动校验拒绝。
+    assert set(SUPPORTED_MODELS) == {"deepseek-flash", "qwen3.7-flash"}
 
 
 @pytest.mark.parametrize(
