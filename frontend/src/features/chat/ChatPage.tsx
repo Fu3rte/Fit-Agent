@@ -180,6 +180,8 @@ export default function ChatPage() {
   const [edits, setEdits] = useState<Record<string, DraftPayload>>({});
   /** 确认遇到 409 draft_stale 的草稿 */
   const [staleIds, setStaleIds] = useState<ReadonlySet<string>>(new Set());
+  /** draft_stale 冲突时的变更项说明（F4-06：卡内展示相关变更项） */
+  const [staleDetails, setStaleDetails] = useState<Record<string, string>>({});
   /** 一键重算后旧草稿 -> 新草稿 */
   const [replacedBy, setReplacedBy] = useState<Record<string, string>>({});
   /** 重算新草稿 -> 新旧草稿 Diff */
@@ -761,6 +763,10 @@ export default function ChatPage() {
       const err = toApiError(error);
       if (err.error_code === "draft_stale") {
         setStaleIds((prev) => new Set(prev).add(draft.id));
+        setStaleDetails((prev) => ({
+          ...prev,
+          [draft.id]: err.detail ?? err.message ?? "",
+        }));
         toast.error("草稿已过期", { description: err.message });
       } else if (err.error_code === "draft_modified") {
         onDraftModified(draft.id);
@@ -898,6 +904,7 @@ export default function ChatPage() {
         }
         discardPending={discard.isPending && discard.variables === draft.id}
         staleError={staleIds.has(draft.id)}
+        staleDetail={staleDetails[draft.id]}
         recalcDiff={recalcDiffs[draft.id]}
         superseded={
           replacedBy[draft.id] !== undefined || draft.status === "stale"

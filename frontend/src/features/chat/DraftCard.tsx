@@ -38,6 +38,7 @@ const KIND_LABEL: Record<DraftKind, string> = {
   plan: "计划调整草稿",
   profile_update: "档案变更草稿",
   arrangement: "当次安排草稿",
+  training_void: "作废训练记录草稿",
 };
 
 const DISPOSITION_BADGE: Record<ArrangementItemDisposition, string> = {
@@ -143,6 +144,8 @@ export interface DraftCardProps {
   confirmPending: boolean;
   recalcPending: boolean;
   staleError: boolean;
+  /** draft_stale 冲突时的变更项说明（如「context_version 已从…推进」） */
+  staleDetail?: string;
   recalcDiff?: FieldDiff[];
   superseded: boolean;
   onRevise?: (payload: DraftPayload) => void;
@@ -160,6 +163,7 @@ export function DraftCard({
   confirmPending,
   recalcPending,
   staleError,
+  staleDetail,
   recalcDiff,
   superseded,
   onRevise,
@@ -234,7 +238,10 @@ export function DraftCard({
               <>
                 <div className="rounded-lg bg-bubble-out px-3 py-2 text-xs text-bubble-out-foreground">
                   <p className="font-medium">
-                    + {p.training_session_id ? "补充/更正训练记录" : "新增训练记录"}
+                    +{" "}
+                    {p.training_session_id
+                      ? "更正训练记录（不新增训练身份）"
+                      : "新增训练记录"}
                   </p>
                   <p>
                     {p.occurred_on}
@@ -444,6 +451,11 @@ export function DraftCard({
             <p className="font-medium text-destructive">
               业务数据已变更，此草稿无法直接确认
             </p>
+            {staleDetail && (
+              <p className="mt-0.5 text-muted-foreground">
+                相关变更：{staleDetail}
+              </p>
+            )}
             <p className="mt-0.5 text-muted-foreground">
               请按最新数据一键重算，生成新草稿并再次确认。
             </p>
@@ -455,7 +467,7 @@ export function DraftCard({
               disabled={recalcPending}
             >
               <RefreshCcw aria-hidden />
-              按最新数据一键重算
+              按最新数据重新生成草稿
             </Button>
           </div>
         </div>

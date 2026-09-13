@@ -1,0 +1,30 @@
+﻿# f4-07-evidence-probe.mjs evidence
+# date: 2026-09-13 13:45:12
+# cwd: frontend/
+# HEAD: ee72a18
+# note: PASS/FAIL counted from check() lines only
+# exit=0 PASS=11 FAIL=0
+
+
+--- 源码：入口预填 / CHECKIN ---
+PASS 源码：RecordsPage 含「发起更正」入口
+PASS 源码：预填文案含「我想更正 ${date} 的训练记录」模板（/records → 对话）
+PASS 源码：预填跳转目标为对话 navigate + state.prefill
+PASS 源码：CHECKIN 门禁含 更正|数据有误|作废（协议级入口）
+
+--- empty 空数据 ---
+PASS empty：records 空列表（长度 0，非 null/错误） — []
+PASS empty：stats 空（per_week []、buckets 0/0/0、prs []） — {"weeks":[],"buckets":{"met":0,"unmet":0,"pending":0},"prs":[]}
+PASS empty：arrangements 空列表
+
+--- empty 无法定位 ---
+PASS empty 更正（日期+动作）：无草稿、明确回复不生成 — {"draft":null,"cv":0,"n":0,"text":"未能在既有训练记录中定位到「2026-09-07 · 杠铃平板卧推」，因此**不生成更正草稿**。\n\n请确认日期与动作名，或到 /records 核对后再试；我不会凭模糊描述猜一条记录。\n"}
+PASS empty 作废（日期+动作）：无草稿、明确回复不生成 — {"draft":null,"cv":0,"text":"未能在既有训练记录中定位到「2026-09-07 · 杠铃平板卧推」，因此**不生成作废草稿**。\n\n请确认日期与动作名，或到 /records 核对后再试；我不会凭模糊描述猜一条记录。\n"}
+PASS empty 预填文案发送：同样无草稿、不推 cv — {"draft":null,"cv":0,"n":0,"text":"未能在既有训练记录中定位到「2026-09-07 · 杠铃平板卧推」，因此**不生成更正草稿**。\n\n请确认日期与动作名，或到 /records 核对后再试；我不会凭模糊描述猜一条记录。\n"}
+
+--- 复位 default ---
+PASS default 复位：4 身份、W2 1/3、三桶 1/1/1 — {"n":4,"w2":{"week":"W2","planned":3,"completed":1,"rate":33.3},"b":{"met":1,"unmet":1,"pending":1}}
+
+PASS 11 / FAIL 0
+全部通过
+

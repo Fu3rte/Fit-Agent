@@ -1,0 +1,48 @@
+﻿# f4-04-probe.mjs evidence
+# date: 2026-09-13 13:45:12
+# cwd: frontend/
+# HEAD: ee72a18
+# note: PASS/FAIL counted from check() lines only
+# exit=0 PASS=22 FAIL=0
+
+
+--- 前置基线 ---
+PASS 1 前置：ts-seed-0905 incomplete、缺 reps、保留 12kg 与 working、无对照 — {"status":"incomplete","sets":[{"weight_kg":12,"set_type":"working"}]}
+PASS 1 前置统计：三桶 1/1/1、W2 1/3、PR 仅卧推 80×8（无哑铃弯举） — {"buckets":{"met":1,"unmet":1,"pending":1},"prs":[{"exercise":"杠铃平板卧推","variant":"杠铃","best_weight_kg":80,"best_reps_at_weight":8}]}
+
+--- 更正生成 ---
+PASS 2 定位：ts-seed-0905、同一训练身份、pending — {"kind":"training_record","ts":"ts-seed-0905","on":"2026-09-05"}
+PASS 2 补齐次数：第1组 reps=12；12kg 与 set_type=work 保持（不编造未述字段） — [{"set_no":1,"set_type":"work","load":{"value_text":"12","unit":"kg"},"rir":null,"assistance":null,"reps":12}]
+PASS 2 无对照安排：不携带 arrangement_revision_id — null
+PASS 2 生成前后：records 仍 4 身份、0905 仍 incomplete、cv 不变、stats 不变 — {"n":4,"st":"incomplete","cv0":3,"cv1":3}
+PASS 2 回复含同一训练身份语义（不新增训练身份） — 已定位训练身份 **ts-seed-0905**（2026-09-05 · 哑铃弯举），将按**同一训练身份**生成完整修订草稿（不新增训练身份数量）。
+- 载荷 = 当前修订全部动作与组事实；未述字段保持原值，不清空、不编造。
+- 当前修订无对照安排：不携带 arrangement_revision_id。
+- 按你所述更新：第 1 组次数 — → 12。
+
+确认采纳后才追加修订写入正式记录；确
+PASS 2 Diff 第1组次数 old=— new=12（原缺失） — {"field":"动作 1 · 第 1 组 · 次数","old_value":"—","new_value":"12"}
+
+--- 确认转 valid / PR ---
+PASS 3 前置：更正稿补齐 reps=12 — [{"set_no":1,"set_type":"work","load":{"value_text":"12","unit":"kg"},"rir":null,"assistance":null,"reps":12}]
+PASS 3 确认成功：cv 恰好 +1、training_session_id=ts-seed-0905 — {"draft_id":"draft-107","status":"committed","newly_committed":true,"context_version":4,"summary":"训练记录已写入正式数据","committed_revision":1,"committed_business_version":4,"training_session_id":"ts-seed-0905"}
+PASS 3 转 valid：status=valid、kind=correction、身份数仍 4（身份不变） — {"n":4,"status":"valid","kind":"correction","set0":{"weight_kg":12,"reps":12,"set_type":"working"}}
+PASS 3 旧修订可追溯：revisions 含 incomplete 历史（无 reps）与当前 valid（reps=12） — [{"status":"incomplete"},{"status":"valid","reps":12}]
+PASS 3 PR 现算自动包含：哑铃弯举 12kg×12（独立完成、无辅助） — {"exercise":"哑铃弯举","variant":"dumbbell_per_hand","best_weight_kg":12,"best_reps_at_weight":12}
+PASS 3 无对照安排：三桶仍 1/1/1、W2 仍 1/3（不进三桶、不增加计划完成次数） — {"buckets":{"met":1,"unmet":1,"pending":1},"w2":{"week":"W2","planned":3,"completed":1,"rate":33.3},"arr":null,"judgement":null}
+PASS 3 重复确认幂等：newly_committed=false、cv 不再 +1 — {"newly":false,"cv":4}
+
+--- 仍 incomplete 可继续保存 ---
+PASS 4 前置：更正稿载入当前事实（仍无 reps、12kg 保持、不编造） — [{"set_no":1,"set_type":"work","load":{"value_text":"12","unit":"kg"},"rir":null,"assistance":null}]
+PASS 4 仍不完整确认：status 仍 incomplete、不进 PR、身份数不变、cv+1 — {"confirm":{"draft_id":"draft-112","status":"committed","newly_committed":true,"context_version":4,"summary":"训练记录已写入正式数据","committed_revision":1,"committed_business_version":4,"training_session_id":"ts-seed-0905"},"status":"incomplete","set0":{"weight_kg":12,"set_type":"working"},"prs":[{"exercise":"杠铃平板卧推","variant":"杠铃","best_weight_kg":80,"best_reps_at_weight":8}]}
+PASS 4 缺必填不得判 valid；补齐后同一链路再确认 → valid 且进 PR — {"status":"valid","reps":12,"pr":{"exercise":"哑铃弯举","variant":"dumbbell_per_hand","best_weight_kg":12,"best_reps_at_weight":12}}
+PASS 4 补全后身份仍不变：ts-seed-0905、身份数 4 — {"ts":"ts-seed-0905","n":4,"cv":5}
+
+--- revise 补齐 ---
+PASS 5 前置：按日期+动作定位、载入 incomplete 事实 — [{"set_no":1,"set_type":"work","load":{"value_text":"12","unit":"kg"},"rir":null,"assistance":null}]
+PASS 5 revise 补 reps=12 → 200、revision+1、diff 同步 — {"status":200,"rev":2,"diff":[{"field":"动作 1 · 第 1 组 · 次数","old_value":"—","new_value":"12"}]}
+PASS 5 确认：valid、PR 自动含 12kg×12、三桶仍 1/1/1 — {"status":"valid","pr":{"exercise":"哑铃弯举","variant":"dumbbell_per_hand","best_weight_kg":12,"best_reps_at_weight":12},"buckets":{"met":1,"unmet":1,"pending":1}}
+
+PASS 22 / FAIL 0
+全部通过
+

@@ -1,0 +1,72 @@
+﻿# f4-03-probe.mjs evidence
+# date: 2026-09-13 13:45:12
+# cwd: frontend/
+# HEAD: ee72a18
+# note: PASS/FAIL counted from check() lines only
+# exit=0 PASS=27 FAIL=0
+
+
+--- 对话作废草稿生成 ---
+PASS 1 对话生成：kind=training_void、pending、身份 ts-seed-0907 — {"kind":"training_void","payload":{"training_session_id":"ts-seed-0907"}}
+PASS 1 载荷只承载身份：无事实字段（occurred_on/exercises 均无） — {"training_session_id":"ts-seed-0907"}
+PASS 2 diff 含身份/事实摘要/影响范围三行 — [{"field":"作废训练身份","new_value":"ts-seed-0907（2026-09-07 · 杠铃平板卧推）"},{"field":"事实摘要（只读）","new_value":"2026-09-07 · 杠铃平板卧推：3 组 × 7 次 @ 75kg"},{"field":"影响范围","new_value":"确认后该次退出完成率/三桶/PR；历史修订保留可追溯、不物理删除、不回退旧有效版本；作废即终态（不再接受更正/复活）"}]
+PASS 2 回复含身份、影响范围（退出统计/历史保留）、终态语义 — 已定位训练身份 **ts-seed-0907**（2026-09-07 · 杠铃平板卧推），将生成**作废草稿**（只承载作废哪一次身份，无事实可编辑）。
+- 待作废事实摘要：
+  · 2026-09-07 · 杠铃平板卧推：3 组 × 7 次 @ 75kg
+- 影响范围：确认后该次**退出完成率/三桶/PR**；历史修订保留可追溯、不物理删除、不回退旧有效版本。
+- 作废即终态：该身份确认作废后不再接受后续更正或复活修订。
+
+确认采纳后才追加作废修订写入正式记录；确认前正式数据与业务版本不变。
+
+PASS 2 生成前后：records 仍 4 身份全非 voided、cv 不变、stats 不变 — {"n":4,"st":"valid","cv0":3,"cv1":3}
+
+--- 确认 / 幂等 / 回滚 / 终态 ---
+PASS 前置：W2 1/3、三桶 1/1/1、PR 卧推 80kg×8 — {"w2":{"week":"W2","planned":3,"completed":1,"rate":33.3},"buckets":{"met":1,"unmet":1,"pending":1},"prs":[{"exercise":"杠铃平板卧推","variant":"杠铃","best_weight_kg":80,"best_reps_at_weight":8}]}
+PASS 3 丢弃前：草稿可用 — {"kind":"training_void"}
+PASS 3 丢弃后的作废草稿确认被拒（409/400 invalid_request） — {"dis":200,"confirm":{"http_status":409,"error_code":"invalid_request","message":"草稿已丢弃，不可确认"}}
+PASS 3 丢弃路径未改正式数据：cv 不变、仍 valid — {"cv":3}
+PASS 4 按身份 id 定位生成作废稿 — {"training_session_id":"ts-seed-0907"}
+PASS 4 fail-next 作废确认：500 — {"http_status":500,"error_code":"invalid_request","message":"dev 注入失败：作废确认事务在写入中途失败"}
+PASS 4 fail-next 回滚：记录仍 valid、修订链未增、cv 不变、W2 仍 1/3 — {"st":"valid","revs":1,"cv":3}
+PASS 4 回滚后重做成功：cv+1、voided、旧修订仍在 — {"draft_id":"draft-111","status":"committed","newly_committed":true,"context_version":4,"summary":"训练身份已作废（整次退出统计，历史保留）","committed_revision":1,"committed_business_version":4,"training_session_id":"ts-seed-0907"}
+PASS 5 确认后：该次退出统计（W2 0/3、三桶 0/0/0）、PR 不变（80kg×8 来自 08-31） — {"w2":{"week":"W2","planned":3,"completed":0,"rate":0},"buckets":{"met":0,"unmet":0,"pending":0}}
+PASS 5 确认后：旧修订仍在（原 valid 事实可追溯）且当前 voided — [{"id":"rev-seed-0907","status":"valid"},{"id":"rec-113","status":"voided"}]
+PASS 6 重复确认幂等：newly_committed=false、cv 不再 +1 — {"newly":false,"cv":4}
+PASS 7 作废后再更正：无草稿、文案含终态、cv 不变 — 该训练身份（ts-seed-0907，2026-09-07 · 杠铃平板卧推）当前修订已作废（终态），不接受后续更正或复活修订，故**不生成草稿**。
+历史修订仍可在记录页只读追溯；如需记录新一练，请另起打卡反馈。
+
+PASS 7 作废后按 id 更正：同样无草稿、不推 cv — 该训练身份（ts-seed-0907，2026-09-07 · 杠铃平板卧推）当前修订已作废（终态），不接受后续更正或复活修订，故**不生成草稿**。
+历史修订仍可在记录页只读追溯；如需记录新一练，请另起打卡反馈。
+
+PASS 7 作废后补全（补充上一练 09-07）：无草稿、文案含终态 — 该训练身份（ts-seed-0907）当前修订已作废（终态），不接受后续更正或复活修订。
+如需记录新一练，请回复「新增一练」并给出事实；历史修订仍可在记录页只读追溯。
+
+PASS 7 终态后修订链不变、状态仍 voided — {"revsAfterVoid":"[\"rev-seed-0907\",\"rec-113\"]","cv":4}
+PASS 7 已作废身份再发作废：无草稿、文案可读、cv 不变 — 该训练身份（ts-seed-0907，2026-09-07 · 杠铃平板卧推）当前修订已作废（终态），无需再次作废，故**不生成草稿**。
+历史修订仍可在记录页只读追溯。
+
+
+--- 歧义与模糊澄清 ---
+PASS 9 前置：同日新增卧推草稿可生成 — {"kind":"training_record"}
+PASS 9 前置：确认后 records=5 — {"status":200,"n":5}
+PASS 9 候选不唯一：询问且不落草稿 — 2026-09-07 有多条「杠铃平板卧推」训练记录，候选不唯一。请先说明要作废哪一次：
+
+- 1. 2026-09-07 · 杠铃平板卧推（身份 ts-seed-0907，状态 valid）
+- 2. 2026-09-07 · 杠铃平板卧推（身份 ts-130，状态 valid）
+
+请直接回复其中一条的训练身份 id（如 `ts-seed-0907`），我再整理作废草稿。询问期间**不落草稿**。
+
+PASS 9 回 ts-seed-0907 后生成作废稿 — {"training_session_id":"ts-seed-0907"}
+PASS 10 无日期/动作/id：回澄清且不生成草稿 — 要作废整次训练，我需要你明确给出**日期（YYYY-MM-DD）+ 动作**（或直接给训练身份 id）才能定位。
+
+示例：「整次录错，作废 2026-09-07 的杠铃平板卧推」。
+本次**不生成草稿、也不编造定位**。
+
+PASS 10 日期无记录：不生成草稿 — 未能在既有训练记录中定位到「2026-01-01 · 杠铃平板卧推」，因此**不生成作废草稿**。
+
+请确认日期与动作名，或到 /records 核对后再试；我不会凭模糊描述猜一条记录。
+
+
+PASS 27 / FAIL 0
+全部通过
+

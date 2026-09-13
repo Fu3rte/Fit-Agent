@@ -378,8 +378,11 @@ export interface RecordSet {
 export type SetJudgement = "met" | "unmet" | "pending";
 
 /**
- * 训练记录对外列表（展示友好形状）：status 语义对齐 valid/incomplete
- * （incomplete 不进 PR 与完成率分子）；voided 可预留。
+ * 训练记录对外列表（展示友好形状）：status 对齐当前修订状态
+ * valid / incomplete / voided（05 5.3）：
+ * - incomplete 不进 PR 与完成率分子；
+ * - voided = 当前修订为作废：整次退出统计（完成率分子／三桶／PR 均不计该次）、
+ *   不物理删除、不回退旧有效版本，且该训练身份为终态（2026-09-13 拍 A）。
  * scheduled_session_id / arrangement_revision_id 为关联键（显式携带，不从日期推断）；
  * judgement / comparison 为服务端派生的展示扩展（stage3 F3-01）。
  */
@@ -387,8 +390,8 @@ export interface TrainingRecord {
   id: string;
   date: string;
   kind: "new" | "correction";
-  /** valid / incomplete（对齐 RecordRevisionStatus；替换 formal/pending_completion） */
-  status: "valid" | "incomplete";
+  /** 当前修订状态（对齐 RecordRevisionStatus + voided；替换 formal/pending_completion） */
+  status: "valid" | "incomplete" | "voided";
   exercise: string;
   variant: string;
   sets: RecordSet[];
@@ -409,6 +412,34 @@ export interface TrainingRecord {
     arranged_sets?: number;
     accepted_at?: string;
   };
+  /** 旧修订只读追溯摘要（F4-01，供 /records 内联展示）；缺省 = 无旧修订或未提供 */
+  revisions?: TrainingRevision[];
+  /**
+   * 回归期标签（F5-05；04 4.6）：接回版本（mode=return）生效后确认的训练记录标 "return"。
+   * 缺省 / "normal" = 常规口径。回归期不进 PR；工作组判定仍展示。恢复常规=新常规版本（不重激活旧版）。
+   */
+  period?: "normal" | "return";
+}
+
+/**
+ * 旧修订只读追溯摘要（05 5.3；F4-01，/records 内联只读追溯，不新增页面概念）：
+ * 训练身份维度的一条旧修订展示行——状态、日期、组事实摘要、修订说明与确认时间；
+ * 只读展示，不可编辑、不可再提交；当前修订仍由 TrainingRecord 表达。
+ */
+export interface TrainingRevision {
+  id: string;
+  /** 该修订当时的状态（05 5.3：incomplete / valid / voided） */
+  status: "valid" | "incomplete" | "voided";
+  /** 该修订的训练发生日期（YYYY-MM-DD） */
+  occurred_on: string;
+  /** 该修订确认／追加时间（ISO 8601） */
+  confirmed_at: string;
+  exercise: string;
+  variant: string;
+  /** 该修订的组事实摘要（展示兼容形状，同 RecordSet） */
+  sets: RecordSet[];
+  warmup_summary?: string;
+  revision_note?: string;
 }
 
 /** 修订状态：由事实完整性派生，不单独存第二份与事实冲突的状态（05 5.3） */
@@ -438,6 +469,15 @@ export interface RecordDraftPayload {
   training_session_id: string | null;
   arrangement_revision_id?: string | null;
   exercises: DraftExerciseLog[];
+}
+
+/**
+ * 作废草稿载荷（05 5.3；F4-01）：只承载「作废哪一次训练身份」，不承载任何可编辑事实；
+ * 确认后追加 voided 修订并切换当前修订指针，整次退出统计、不物理删除、不回退旧有效版本。
+ * 独立 kind（不扩展 RecordDraftPayload）：作废与更正语义互斥——作废无事实可编辑。
+ */
+export interface TrainingVoidPayload {
+  training_session_id: string;
 }
 
 /* --------------------------------- 统计/复盘 -------------------------------- */
@@ -471,11 +511,33 @@ export interface StatsSummary {
   data_updated_at: string;
 }
 
-/** 复盘沉淀；stale = 依据已变更·可重新生成（不静默改写） */
+/** 复盘依据快照（F5-01；语义对齐 06 6.4 / S4-08 review_basis）：生成时冻结的统计与来源修订 */
+export interface ReviewBasis {
+  per_week: WeekCompletion[];
+  buckets: Buckets;
+  prs: PrEntry[];
+  data_updated_at: string;
+  /** 生成时刻相关来源修订 id（当前训练修订 + 当次安排修订） */
+  source_revision_ids: string[];
+}
+
+/** 复盘存储条目（F5-01；append-only，重生成追加不覆盖；UI 不展示历史，探针可读回） */
+export interface ReviewEntry {
+  id: string;
+  text: string;
+  generated_at: string;
+  /** stale = 来源相对生成时是否变化（不静默改写正文与 generated_at） */
+  stale: boolean;
+  basis: ReviewBasis;
+}
+
+/** 复盘沉淀投影：GET /api/review 返回最新一条；无条目时为空态；stale = 依据已变更·可重新生成（不静默改写） */
 export interface ReviewDoc {
   text: string;
   stale: boolean;
   generated_at: string;
+  /** 最新条的依据快照（空态无） */
+  basis?: ReviewBasis;
 }
 
 export interface SessionSummary {
@@ -540,7 +602,8 @@ export type DraftKind =
   | "training_record"
   | "plan"
   | "profile_update"
-  | "arrangement";
+  | "arrangement"
+  | "training_void";
 
 /**
  * 草稿生命周期 Pending / Committed / Discarded（01 1.3）；Discarded 不得再提交。
@@ -598,7 +661,8 @@ export type DraftPayload =
   | RecordDraftPayload
   | PlanDraftPayload
   | ProfileDraftPayload
-  | ArrangementDraftPayload;
+  | ArrangementDraftPayload
+  | TrainingVoidPayload;
 
 export interface Draft {
   id: string;
@@ -643,6 +707,14 @@ export interface RecalcResult {
   new_draft: Draft;
   old_draft: Draft;
   draft_vs_draft_diff: FieldDiff[];
+}
+
+/**
+ * 一键重算请求（01 1.6 / S4-08）：携带幂等 client_request_id；
+ * 同一旧草稿已有 Pending 子草稿时服务端按幂等规则返回同一子草稿（01 1.6）。
+ */
+export interface RecalcRequest {
+  client_request_id: string;
 }
 
 /* ----------------------------- Run 状态与恢复 ------------------------------ */
@@ -702,7 +774,7 @@ export interface AcceptedArrangement {
  * - GET    /api/records                 -> {records: TrainingRecord[]}
  * - GET    /api/arrangements            -> {arrangements: AcceptedArrangement[]}
  * - GET    /api/stats                   -> StatsSummary
- * - GET    /api/review                  -> ReviewDoc
+ * - GET    /api/review                  -> ReviewDoc（最新条投影；无条目时空态）
  * - GET    /api/sessions                -> SessionSummary[]
  * - POST   /api/sessions                -> SessionSummary
  * - GET    /api/sessions/:id/messages   -> ChatMessage[]
@@ -712,7 +784,7 @@ export interface AcceptedArrangement {
  * - POST   /api/runs/:id/cancel         -> {run_id, status}
  * - POST   /api/drafts/:id/revise       body ReviseRequest -> ReviseResult
  * - POST   /api/drafts/:id/confirm      body ConfirmRequest -> ConfirmResult
- * - POST   /api/drafts/:id/recalc       -> RecalcResult
+ * - POST   /api/drafts/:id/recalc       body RecalcRequest -> RecalcResult
  * - POST   /api/drafts/:id/discard      -> DiscardResult
  */
 

@@ -14,7 +14,12 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { getReview, getStats } from "@/lib/api";
-import type { Buckets, PrEntry, WeekCompletion } from "@/lib/contract";
+import type {
+  Buckets,
+  PrEntry,
+  ReviewBasis,
+  WeekCompletion,
+} from "@/lib/contract";
 
 /* A3 白名单：与对话页同一套元素范围（p/标题/列表/表格/强调/代码/引用） */
 const markdownComponents = {
@@ -113,6 +118,39 @@ function PrRow({ pr }: { pr: PrEntry }) {
           {pr.best_weight_kg}kg × {pr.best_reps_at_weight} 次
         </div>
       </div>
+    </div>
+  );
+}
+
+/**
+ * 依据快照摘要（F5-03）：只读展示该条复盘生成时冻结的 per_week／三桶／PR／
+ * data_updated_at；不与现算统计混算，无 basis 时空态说明、不编造。
+ */
+function BasisSummary({ basis }: { basis: ReviewBasis }) {
+  const weekLine = basis.per_week
+    .map((w) => `${w.week} ${w.completed}/${w.planned}`)
+    .join(" · ");
+  const prLine = basis.prs
+    .map((p) => `${p.exercise} ${p.best_weight_kg}kg × ${p.best_reps_at_weight}`)
+    .join(" · ");
+  return (
+    <div className="mt-4 space-y-1.5 rounded-md border border-border/60 bg-secondary/30 px-3.5 py-3">
+      <div className="flex items-baseline justify-between gap-3">
+        <span className="text-xs font-medium text-muted-foreground">
+          依据快照（生成时冻结）
+        </span>
+        <span className="text-xs text-muted-foreground tabular-nums">
+          依据数据时间：{basis.data_updated_at}
+        </span>
+      </div>
+      <p className="text-xs text-muted-foreground">
+        完成率：{weekLine || "暂无"}
+      </p>
+      <p className="text-xs text-muted-foreground">
+        三桶：符合 {basis.buckets.met} 组 · 未符合 {basis.buckets.unmet} 组 ·
+        待补全 {basis.buckets.pending} 组
+      </p>
+      <p className="text-xs text-muted-foreground">PR：{prLine || "暂无"}</p>
     </div>
   );
 }
@@ -239,6 +277,17 @@ export default function ReviewPage() {
               <p className="text-sm text-muted-foreground">
                 暂无复盘沉淀，可在对话中生成。
               </p>
+            )}
+            {/* 依据快照摘要：只读冻结事实；空态不编造（F5-03） */}
+            {review.data?.basis ? (
+              <BasisSummary basis={review.data.basis} />
+            ) : (
+              review.data && (
+                <p className="mt-4 text-xs text-muted-foreground">
+                  暂无依据快照（空数据种子或尚未生成正式复盘）；页面不编造完成率与
+                  PR。
+                </p>
+              )
             )}
           </CardContent>
         </Card>

@@ -27,22 +27,29 @@ import type {
   PrEntry,
   Profile,
   ProfileDraftPayload,
+  ProgressionMethod,
   ProviderConfig,
   RawLoad,
   RecordDraftPayload,
   RecordRevisionStatus,
+  RecordSet,
   RecalcResult,
   Restriction,
+  ReviewBasis,
   ReviewDoc,
+  ReviewEntry,
   RunStatus,
   SessionSummary,
   SetFacts,
   StatsSummary,
   TrainingRecord,
+  TrainingRevision,
+  TrainingVoidPayload,
   WeekCompletion,
 } from "@/lib/contract";
 import {
   derivePlanBlocks,
+  dayAfter,
   dayDiff,
   deriveRangeLabel,
   effortPlainLabel,
@@ -124,6 +131,33 @@ interface OnboardingState {
   drafted_snapshot?: string;
 }
 
+/**
+ * mock-only 修订行（F4-01）：训练身份维度的一条完整修订事实（单动作粒度）。
+ * 对外不直接暴露——经 rebuildRecordProjection 投影为 TrainingRecord（当前修订）
+ * + revisions（只读追溯摘要）。同一 training_session_id 的多次确认以 revision_seq
+ * 追加；最后一条 seq = 当前修订（完整事实，不是展平行 append）。
+ */
+interface RecordRevisionRow {
+  id: string;
+  training_session_id: string;
+  /** 同一身份内单调递增；同一次多动作确认共享同一 seq */
+  revision_seq: number;
+  kind: "new" | "correction";
+  status: "valid" | "incomplete" | "voided";
+  date: string;
+  exercise: string;
+  variant: string;
+  sets: RecordSet[];
+  warmup_summary?: string;
+  schedule_snapshot?: string | null;
+  revision_note?: string;
+  scheduled_session_id?: string | null;
+  arrangement_revision_id?: string | null;
+  confirmed_at: string;
+  /** F5-05 回归期：接回版本生效后确认的修订标 "return"（不进 PR；契约 TrainingRecord.period） */
+  period?: "normal" | "return";
+}
+
 interface MockState {
   context_version: number;
   provider: ProviderConfig;
@@ -136,6 +170,9 @@ interface MockState {
   plan_history: PlanVersion[];
   /** 具体日程（04 4.2/4.4）：多版本共存，stored_status/locked_effective 由启用事务与日期规则给出 */
   schedules: PlanScheduleEntry[];
+  /** mock-only 修订存储（F4-01）：按训练身份 append-only；records 为其当前修订投影 */
+  record_revisions: RecordRevisionRow[];
+  /** 当前修订投影（每身份一条当前修订；judgement/comparison 由 recomputeStats 现算回填） */
   records: TrainingRecord[];
   /** 当次安排修订（S3-08）：确认写入的完整目标快照；不改 plan_versions */
   arrangement_revisions: {
@@ -144,7 +181,8 @@ interface MockState {
     accepted_at: string;
   }[];
   stats: StatsSummary;
-  review: ReviewDoc;
+  /** 复盘存储（F5-01）：append-only；UI 与 GET /api/review 只投影最新一条 */
+  review_entries: ReviewEntry[];
   sessions: SessionSummary[];
   messages: Map<string, ChatMessage[]>;
   drafts: Map<string, Draft>;
@@ -159,8 +197,12 @@ interface MockState {
   /** 唯一执行名额（08 8.3）：由正在执行的 Run 持有，runScript 实际退出（finally）后才释放；
    *  与 Run 状态解耦——取消立即置 cancelled，名额不提前释放。非权威状态，仅作并发互斥。 */
   execution_slot_run_id: string | null;
-  /** dev-only 故障注入位（F2-04）：置位后下一次计划确认事务在写入中途失败，用于验证整份回滚 */
+  /** dev-only 故障注入位（F2-04）：置位后下一次确认事务在写入中途失败，用于验证整份回滚 */
   dev_confirm_failure: boolean;
+  /** dev-only 故障注入位（F5-01）：置位后下一次复盘保存整份不落（一次性，命中自动解除） */
+  dev_review_save_failure: boolean;
+  /** recalc 请求体 client_request_id 留存（F4-06 完整幂等归后续；F4-01 只读取不静默丢弃） */
+  recalc_client_request_ids: Map<string, string>;
 }
 
 /**
@@ -354,16 +396,42 @@ function seedState(): MockState {
     }),
   ];
 
-  /* 种子事实（stage3 §3.5）：
+  /* 种子事实（stage3 §3.5；F4-01 种子收口）：
    * W1 2/3（08-31✓ / 09-02✓ / 09-04 漏）、W2 1/3（09-07✓ / 09-09 漏 / 09-11 今日待办）、
-   * 三桶 1/1/1 按 09-07 对照安排、PR 卧推 80kg×8；09-05 无安排 incomplete。
-   * 只有 09-07 记录显式携带 arrangement_revision_id（三桶只按对照安排判定）。 */
-  const records: TrainingRecord[] = [
+   * 三桶 1/1/1 按 09-07 对照安排、PR 卧推 80kg×8；09-05 无安排 incomplete
+   * （事实缺口：保留 12kg 与 working 组类型、不写每组次数，incomplete 由派生规则得出）。
+   * 只有 09-07 记录显式携带 arrangement_revision_id（三桶只按对照安排判定）。
+   * 四条种子各自独立训练身份，revisions 至少含自身当前修订。 */
+  const seed0905Status = deriveRecordDraftStatus({
+    occurred_on: "2026-09-05",
+    training_session_id: null,
+    exercises: [
+      {
+        position: 1,
+        exercise_id: "dumbbell-biceps-curl",
+        record_type: "reps_weight",
+        load_notation: "dumbbell_per_hand",
+        // 事实缺口：不写 reps → incomplete 派生（05 5.2）
+        sets: [
+          {
+            set_no: 1,
+            set_type: "work",
+            load: { value_text: "12", unit: "kg" },
+            rir: null,
+            assistance: null,
+          },
+        ],
+      },
+    ],
+  });
+  const record_revisions: RecordRevisionRow[] = [
     {
-      id: "rec-seed-0831",
-      date: "2026-08-31",
+      id: "rev-seed-0831",
+      training_session_id: "ts-seed-0831",
+      revision_seq: 0,
       kind: "new",
       status: "valid",
+      date: "2026-08-31",
       exercise: "杠铃平板卧推",
       variant: "杠铃",
       sets: [
@@ -376,12 +444,15 @@ function seedState(): MockState {
       schedule_snapshot: "W1 · 推日 · PPL v2",
       scheduled_session_id: "sched-v2-2026-08-31",
       arrangement_revision_id: null,
+      confirmed_at: "2026-08-31T12:00:00.000Z",
     },
     {
-      id: "rec-seed-0902",
-      date: "2026-09-02",
+      id: "rev-seed-0902",
+      training_session_id: "ts-seed-0902",
+      revision_seq: 0,
       kind: "new",
       status: "valid",
+      date: "2026-09-02",
       exercise: "自重引体向上",
       variant: "自重",
       sets: [
@@ -392,12 +463,15 @@ function seedState(): MockState {
       schedule_snapshot: "W1 · 拉日 · PPL v2",
       scheduled_session_id: "sched-v2-2026-09-02",
       arrangement_revision_id: null,
+      confirmed_at: "2026-09-02T12:00:00.000Z",
     },
     {
-      id: "rec-seed-0907",
-      date: "2026-09-07",
+      id: "rev-seed-0907",
+      training_session_id: "ts-seed-0907",
+      revision_seq: 0,
       kind: "new",
       status: "valid",
+      date: "2026-09-07",
       exercise: "杠铃平板卧推",
       variant: "杠铃",
       sets: [
@@ -410,19 +484,24 @@ function seedState(): MockState {
       schedule_snapshot: "W2 · 推日 · PPL v2 · 当次安排 deload",
       scheduled_session_id: "sched-v2-2026-09-07",
       arrangement_revision_id: "arr-seed-0907",
+      confirmed_at: "2026-09-07T12:00:00.000Z",
     },
     {
-      id: "rec-seed-0905",
-      date: "2026-09-05",
+      id: "rev-seed-0905",
+      training_session_id: "ts-seed-0905",
+      revision_seq: 0,
       kind: "new",
-      status: "incomplete",
+      status: seed0905Status, // incomplete（由缺 reps 派生，不写死与事实矛盾的字面量）
+      date: "2026-09-05",
       exercise: "哑铃弯举",
       variant: "哑铃",
-      sets: [{ weight_kg: 12, reps: 10, set_type: "working" }],
+      // 事实缺口：无 reps；保留 12kg 与 working（F4-01 种子收口）
+      sets: [{ weight_kg: 12, set_type: "working" }],
       schedule_snapshot: null,
       scheduled_session_id: null,
       arrangement_revision_id: null,
       revision_note: "无安排加练，待补全",
+      confirmed_at: "2026-09-05T12:00:00.000Z",
     },
   ];
 
@@ -433,7 +512,8 @@ function seedState(): MockState {
     data_updated_at: MOCK_UPDATED_AT,
   };
 
-  const review: ReviewDoc = {
+  const reviewEntry: ReviewEntry = {
+    id: "review-seed-1",
     text: [
       "## 阶段复盘（截至 2026-09-11）",
       "",
@@ -446,7 +526,16 @@ function seedState(): MockState {
       "> 复盘仅解释确定性统计结果；不修改数值，也不补充没有数据支持的因果结论。",
     ].join("\n"),
     stale: true,
+    // 生成时间早于 mock 时钟：业务数据相对生成时已变化 → stale（seed 即为「旧稿」演示态）
     generated_at: "2026-09-08T21:00:00+08:00",
+    // basis 在种子末尾由 freezeReviewBasis 按现算统计回填（与当时 stats 一致）
+    basis: {
+      per_week: [],
+      buckets: { met: 0, unmet: 0, pending: 0 },
+      prs: [],
+      data_updated_at: MOCK_UPDATED_AT,
+      source_revision_ids: [],
+    },
   };
 
   const provider: ProviderConfig = {
@@ -535,10 +624,11 @@ function seedState(): MockState {
     plan_history: [],
     /** 种子计划的日程：锁定双态——date <= MOCK_TODAY → locked_by_date_rule + stored locked */
     schedules,
-    records,
+    record_revisions,
+    records: [],
     arrangement_revisions,
     stats,
-    review,
+    review_entries: [reviewEntry],
     sessions,
     messages,
     drafts: new Map(),
@@ -548,9 +638,14 @@ function seedState(): MockState {
     runs: new Map(),
     execution_slot_run_id: null,
     dev_confirm_failure: false,
+    dev_review_save_failure: false,
+    recalc_client_request_ids: new Map(),
   };
-  // 启动即全量现算（stage3 §3.4：种子不再写字面 per_week/三桶/PR）
+  // 种子投影 + 启动即全量现算（stage3 §3.4：种子不再写字面 per_week/三桶/PR）
+  rebuildRecordProjection(state);
   recomputeStats(state);
+  // 种子旧稿的依据快照按现算统计冻结（探针可与 GET /api/stats 对照）
+  state.review_entries[0].basis = freezeReviewBasis(state);
   return state;
 }
 
@@ -587,6 +682,7 @@ function emptySeedState(): MockState {
     plan: null,
     plan_history: [],
     schedules: [],
+    record_revisions: [],
     records: [],
     arrangement_revisions: [],
     stats: {
@@ -595,11 +691,8 @@ function emptySeedState(): MockState {
       prs: [],
       data_updated_at: MOCK_UPDATED_AT,
     },
-    review: {
-      text: "当前没有可复盘的训练记录；完成打卡并确认后可生成复盘。",
-      stale: false,
-      generated_at: MOCK_UPDATED_AT,
-    },
+    // 复盘空态（F5-01）：无条目；GET /api/review 投影可识别空态（不编造完成率/正文）
+    review_entries: [],
     sessions: [],
     messages: new Map(),
     drafts: new Map(),
@@ -609,6 +702,8 @@ function emptySeedState(): MockState {
     runs: new Map(),
     execution_slot_run_id: null,
     dev_confirm_failure: false,
+    dev_review_save_failure: false,
+    recalc_client_request_ids: new Map(),
   };
 }
 
@@ -816,26 +911,113 @@ const nextId = (prefix: string) => `${prefix}-${(idSeq += 1)}`;
 
 /**
  * 记录草稿状态派生（05 5.3）：由事实完整性派生 incomplete/valid，不单独存第二份状态。
- * incomplete 不进 PR/完成率分子；必填次数/时长缺失（后端 D8）= incomplete。
+ * incomplete 不进 PR/完成率分子。三桶的 pending 是组级语义：valid 记录可含缺次数的组
+ * （对齐种子 09-07 judgement 1/1/1）；仅当全部组都缺次数/时长时才 incomplete。
  */
 export function deriveRecordDraftStatus(
   payload: RecordDraftPayload,
 ): RecordRevisionStatus {
   if (payload.exercises.length === 0) return "incomplete";
+  let hasCompleteSet = false;
   for (const ex of payload.exercises) {
-    if (ex.sets.length === 0) return "incomplete";
+    if (ex.sets.length === 0) continue;
     for (const s of ex.sets) {
       // 组类型未明确 = incomplete（不默认 work）
       if (s.set_type === undefined || s.set_type === null) return "incomplete";
-      // 缺次数且缺时长 = incomplete（不进 PR 与完成率分子）
       if (
-        (s.reps === undefined || s.reps === null) &&
-        (s.duration_seconds === undefined || s.duration_seconds === null)
+        (s.reps !== undefined && s.reps !== null) ||
+        (s.duration_seconds !== undefined && s.duration_seconds !== null)
       )
-        return "incomplete";
+        hasCompleteSet = true;
     }
   }
-  return "valid";
+  return hasCompleteSet ? "valid" : "incomplete";
+}
+
+/** 某训练身份的当前修订行（revision_seq 最大的一批；F4-01） */
+function currentRevisionRows(
+  state: MockState,
+  trainingSessionId: string,
+): RecordRevisionRow[] {
+  const rows = state.record_revisions.filter(
+    (r) => r.training_session_id === trainingSessionId,
+  );
+  if (rows.length === 0) return [];
+  const maxSeq = Math.max(...rows.map((r) => r.revision_seq));
+  return rows.filter((r) => r.revision_seq === maxSeq);
+}
+
+/** 该训练身份当前修订是否为 voided（终态；05 5.3 / 2026-09-13 拍 A） */
+function isVoidedIdentity(state: MockState, trainingSessionId: string): boolean {
+  const cur = currentRevisionRows(state, trainingSessionId);
+  return cur.length > 0 && cur.every((r) => r.status === "voided");
+}
+
+/** 下一修订序号（同一身份内 append-only 递增） */
+function nextRevisionSeq(state: MockState, trainingSessionId: string): number {
+  const rows = state.record_revisions.filter(
+    (r) => r.training_session_id === trainingSessionId,
+  );
+  return rows.length === 0
+    ? 0
+    : Math.max(...rows.map((r) => r.revision_seq)) + 1;
+}
+
+/** 修订行 → 只读追溯摘要（契约 TrainingRevision） */
+function toTrainingRevision(row: RecordRevisionRow): TrainingRevision {
+  return {
+    id: row.id,
+    status: row.status,
+    occurred_on: row.date,
+    confirmed_at: row.confirmed_at,
+    exercise: row.exercise,
+    variant: row.variant,
+    sets: row.sets.map((s) => ({ ...s })),
+    ...(row.warmup_summary ? { warmup_summary: row.warmup_summary } : {}),
+    ...(row.revision_note ? { revision_note: row.revision_note } : {}),
+  };
+}
+
+/**
+ * 当前修订投影（F4-01）：每个训练身份取最大 revision_seq 的修订批 →
+ * TrainingRecord（挂全链 revisions 供只读追溯，含自身当前修订）。
+ * sets 克隆：judgement 只写在投影上，不污染修订存储。
+ */
+function rebuildRecordProjection(state: MockState): void {
+  const byId = new Map<string, RecordRevisionRow[]>();
+  for (const r of state.record_revisions) {
+    const list = byId.get(r.training_session_id) ?? [];
+    list.push(r);
+    byId.set(r.training_session_id, list);
+  }
+  const projected: TrainingRecord[] = [];
+  for (const rows of byId.values()) {
+    const maxSeq = Math.max(...rows.map((r) => r.revision_seq));
+    const current = rows.filter((r) => r.revision_seq === maxSeq);
+    const revisions = [...rows]
+      .sort((a, b) => a.revision_seq - b.revision_seq || a.id.localeCompare(b.id))
+      .map(toTrainingRevision);
+    for (const cur of current) {
+      projected.push({
+        id: cur.id,
+        date: cur.date,
+        kind: cur.kind,
+        status: cur.status,
+        exercise: cur.exercise,
+        variant: cur.variant,
+        sets: cur.sets.map((s) => ({ ...s })),
+        ...(cur.warmup_summary ? { warmup_summary: cur.warmup_summary } : {}),
+        schedule_snapshot: cur.schedule_snapshot ?? null,
+        ...(cur.revision_note ? { revision_note: cur.revision_note } : {}),
+        scheduled_session_id: cur.scheduled_session_id ?? null,
+        arrangement_revision_id: cur.arrangement_revision_id ?? null,
+        training_session_id: cur.training_session_id,
+        revisions,
+        ...(cur.period ? { period: cur.period } : {}),
+      });
+    }
+  }
+  state.records = projected;
 }
 
 /** 记录载荷领域校验（stage3 §3.2：负数/非有限 RIR 不通过校验；revise 与 confirm 共用） */
@@ -886,6 +1068,24 @@ function setFactsToRecordSet(s: SetFacts): {
   };
 }
 
+/**
+ * 展示 RecordSet → 草稿 SetFacts（setFactsToRecordSet 的成对反向；F4-02）：
+ * working → "work"（SetType 拼写，禁止把 "working" 写进 SetFacts）；
+ * RIR 已拍记录侧隐藏，不载入草稿；weight_kg → RawLoad 原文。
+ */
+function recordSetToFacts(s: RecordSet, setNo: number): SetFacts {
+  return {
+    set_no: setNo,
+    set_type: s.set_type === "warmup" ? "warmup" : "work",
+    ...(s.weight_kg !== undefined
+      ? { load: { value_text: String(s.weight_kg), unit: "kg" as const } }
+      : {}),
+    ...(s.reps !== undefined ? { reps: s.reps } : {}),
+    rir: null,
+    assistance: s.assisted ? ("assisted" as const) : null,
+  };
+}
+
 /** 打卡剧本的动作短语表（确定性 mock 解析，不扩目录、不是通用 NLU） */
 const RECORD_EXERCISES: readonly { pattern: RegExp; id: string }[] = [
   { pattern: /卧推(?!架)/, id: "barbell-bench-press" },
@@ -897,6 +1097,28 @@ const RECORD_EXERCISES: readonly { pattern: RegExp; id: string }[] = [
   { pattern: /硬拉/, id: "barbell-deadlift" },
   { pattern: /划船/, id: "barbell-bent-over-row" },
 ];
+
+/** 更正意图（F4-02）：记录页预填与「更正 YYYY-MM-DD …」类消息；不吞打卡主路径 */
+const CORRECTION_INTENT = /更正|数据有误/;
+
+/** 作废意图（F4-03）：「整次录错，作废这次训练」类；优先于更正（互斥语义） */
+const VOID_INTENT = /作废/;
+
+/** 修订行/投影记录的动作名是否命中目录动作（中文名精确优先，退回短语表） */
+function exerciseMatchesName(name: string, exercise_id: string): boolean {
+  const cat = CATALOG.find((c) => c.id === exercise_id);
+  if (cat && name === cat.standard_name_zh) return true;
+  const entry = RECORD_EXERCISES.find((e) => e.id === exercise_id);
+  return entry ? entry.pattern.test(name) : false;
+}
+
+/** 显式日期解析（仅 YYYY-MM-DD；今天/昨天走既有 resolveRecordDate） */
+function resolveExplicitDate(message: string): string | undefined {
+  const explicit = message.match(/(\d{4}-\d{2}-\d{2})/);
+  if (explicit) return explicit[1];
+  if (/昨天|今天/.test(message)) return resolveRecordDate(message);
+  return undefined;
+}
 
 /** 同日补充歧义（stage3 §3.2/§7 第 11 步）：草稿前先询问，不自动选拆 */
 const SUPPLEMENT_CHOICE = /补充上一练|补充上一次|加到上一练/;
@@ -1019,6 +1241,14 @@ function recordScriptReply(
   state: MockState,
   message: string,
 ): { text: string; draft?: Draft } {
+  // 作废意图优先（F4-03）：与更正互斥（整次作废无事实可编辑）
+  if (VOID_INTENT.test(message)) {
+    return voidScriptReply(state, message);
+  }
+  // 更正意图（F4-02）：预填文案/「更正 YYYY-MM-DD …」不走打卡新增路径
+  if (CORRECTION_INTENT.test(message)) {
+    return correctionScriptReply(state, message);
+  }
   const occurred_on = resolveRecordDate(message);
   const facts = parseRecordMessage(message);
   const sameDayRecords = state.records.filter((r) => r.date === occurred_on);
@@ -1058,6 +1288,14 @@ function recordScriptReply(
     const last = [...sameDayRecords]
       .reverse()
       .find((r) => r.training_session_id);
+    // 生成路径 fail-closed（05 5.3 终态）：已作废身份不接受更正/复活
+    if (last?.training_session_id && last.status === "voided")
+      return {
+        text: [
+          `该训练身份（${last.training_session_id}）当前修订已作废（终态），不接受后续更正或复活修订。`,
+          "如需记录新一练，请回复「新增一练」并给出事实；历史修订仍可在记录页只读追溯。",
+        ].join("\n"),
+      };
     training_session_id = last?.training_session_id ?? null;
   }
 
@@ -1124,6 +1362,361 @@ function recordScriptReply(
 }
 
 /**
+ * 更正剧本（F4-02）：以用户明确给出的日期 + 动作定位既有训练身份 → 生成
+ * 同一 training_session_id 的**完整修订**草稿（载入当前修订全部事实，按显式
+ * 陈述的差异更新；未述字段保持原值）。候选不唯一先询问、无法定位回澄清、
+ * voided 终态拒绝——三者均不落草稿。不改正式数据与 context_version。
+ */
+function correctionScriptReply(
+  state: MockState,
+  message: string,
+): { text: string; draft?: Draft } {
+  // 歧义澄清回复：用户直接给出训练身份 id → 按 id 定位（不猜）
+  const tsIdMatch = message.match(/\b(ts-[A-Za-z0-9-]+)\b/);
+  let target: TrainingRecord | undefined;
+  let exercise_id: string | undefined;
+  let occurred_on: string | undefined;
+
+  if (tsIdMatch) {
+    const byId = state.records.find(
+      (r) => r.training_session_id === tsIdMatch[1],
+    );
+    if (!byId) {
+      return {
+        text: [
+          `未能按训练身份 ${tsIdMatch[1]} 定位到既有记录，**不生成草稿**。请到 /records 核对身份 id 后再试。`,
+        ].join("\n"),
+      };
+    }
+    target = byId;
+    occurred_on = byId.date;
+    exercise_id =
+      CATALOG.find((c) => c.standard_name_zh === byId.exercise)?.id;
+  } else {
+    occurred_on = resolveExplicitDate(message);
+    for (const { pattern, id } of RECORD_EXERCISES) {
+      if (pattern.test(message)) {
+        exercise_id = id;
+        break;
+      }
+    }
+  }
+
+  const cat = exercise_id ? CATALOG.find((c) => c.id === exercise_id) : undefined;
+  const nameZh = cat?.standard_name_zh ?? target?.exercise ?? exercise_id ?? "";
+
+  if (!target) {
+    if (!occurred_on || !exercise_id) {
+      return {
+        text: [
+          "要发起更正，我需要你明确给出**日期（YYYY-MM-DD）+ 动作**才能定位既有训练身份。",
+          "",
+          "示例：「更正 2026-09-07 的训练记录：杠铃平板卧推 数据有误」。",
+          "本次**不生成草稿、也不编造定位**。",
+        ].join("\n"),
+      };
+    }
+
+    // 按训练身份聚合候选（同身份多动作投影为多行；同日同名动作多次 = 多身份）
+    const bySession = new Map<string, TrainingRecord>();
+    for (const r of state.records) {
+      if (r.date !== occurred_on) continue;
+      if (!r.training_session_id) continue;
+      if (!exerciseMatchesName(r.exercise, exercise_id)) continue;
+      if (!bySession.has(r.training_session_id))
+        bySession.set(r.training_session_id, r);
+    }
+    const candidates = [...bySession.values()];
+
+    if (candidates.length === 0) {
+      return {
+        text: [
+          `未能在既有训练记录中定位到「${occurred_on} · ${nameZh}」，因此**不生成更正草稿**。`,
+          "",
+          "请确认日期与动作名，或到 /records 核对后再试；我不会凭模糊描述猜一条记录。",
+        ].join("\n"),
+      };
+    }
+
+    if (candidates.length > 1) {
+      const lines = candidates.map(
+        (c, i) =>
+          `${i + 1}. ${c.date} · ${c.exercise}（身份 ${c.training_session_id}，状态 ${c.status}）`,
+      );
+      return {
+        text: [
+          `${occurred_on} 有多条「${nameZh}」训练记录，候选不唯一。请先说明要更正哪一次：`,
+          "",
+          ...lines.map((l) => `- ${l}`),
+          "",
+          "请直接回复其中一条的训练身份 id（如 `ts-seed-0907`），我再整理更正草稿。询问期间**不落草稿**。",
+        ].join("\n"),
+      };
+    }
+    target = candidates[0];
+  }
+
+  const tsId = target.training_session_id as string;
+  // 生成路径 fail-closed（05 5.3 终态 / 2026-09-13 拍 A）：voided 不接受更正/复活
+  if (isVoidedIdentity(state, tsId) || target.status === "voided") {
+    return {
+      text: [
+        `该训练身份（${tsId}，${target.date} · ${target.exercise}）当前修订已作废（终态），不接受后续更正或复活修订，故**不生成草稿**。`,
+        "历史修订仍可在记录页只读追溯；如需记录新一练，请另起打卡反馈。",
+      ].join("\n"),
+    };
+  }
+
+  // 完整修订载荷：当前修订全部动作与组（RecordSet → SetFacts，working→work）
+  const rows = currentRevisionRows(state, tsId);
+  const exercises: DraftExerciseLog[] = rows.map((row, i) => {
+    const rowCat = CATALOG.find((c) => c.standard_name_zh === row.exercise);
+    return {
+      position: i + 1,
+      exercise_id:
+        rowCat?.id ??
+        exercise_id ??
+        RECORD_EXERCISES.find((e) => e.pattern.test(row.exercise))?.id ??
+        "unknown",
+      record_type: rowCat?.record_type ?? "reps_weight",
+      load_notation: rowCat?.load_convention ?? null,
+      ...(row.warmup_summary
+        ? { warmup_summary_text: row.warmup_summary }
+        : {}),
+      sets: row.sets.map((s, j) => recordSetToFacts(s, j + 1)),
+    };
+  });
+
+  // 用户明确说出的差异：第 N 组 …改成/为 M 次（未述组保持原值）
+  const edited = exercises.map((e) => ({
+    ...e,
+    sets: e.sets.map((s) => ({ ...s })),
+  }));
+  for (const clause of message.split(/[，。；;\n]/)) {
+    const sm = clause.match(/第\s*(\d+)\s*组/);
+    if (!sm) continue;
+    const hits = [...clause.matchAll(/(\d+)\s*次/g)];
+    const repsM = clause.match(/(?:改成|改为|应为)\s*(\d+)\s*次/) ?? hits[hits.length - 1];
+    if (!repsM) continue;
+    const setNo = Number(sm[1]);
+    const reps = Number(repsM[1]);
+    for (const e of edited) {
+      const idx = e.sets.findIndex((s) => s.set_no === setNo);
+      if (idx >= 0) e.sets[idx] = { ...e.sets[idx], reps };
+    }
+  }
+
+  const arrangementId =
+    target.arrangement_revision_id ??
+    rows.find((r) => r.arrangement_revision_id)?.arrangement_revision_id ??
+    null;
+  const previous: RecordDraftPayload = {
+    occurred_on: target.date,
+    training_session_id: tsId,
+    arrangement_revision_id: arrangementId,
+    exercises: exercises.map((e) => ({
+      ...e,
+      sets: e.sets.map((s) => ({ ...s })),
+    })),
+  };
+  const payload: RecordDraftPayload = {
+    occurred_on: target.date,
+    training_session_id: tsId,
+    arrangement_revision_id: arrangementId,
+    exercises: edited,
+  };
+  const draft: Draft = {
+    id: nextId("draft"),
+    kind: "training_record",
+    status: "pending",
+    revision: 1,
+    base_business_version: 0,
+    payload,
+    diff: recordDraftDiff(state, payload, previous),
+  };
+
+  const changedSets = edited.flatMap((e) =>
+    e.sets
+      .filter((s) => {
+        const p = previous.exercises
+          .find((x) => x.exercise_id === e.exercise_id)
+          ?.sets.find((x) => x.set_no === s.set_no);
+        return p && p.reps !== s.reps;
+      })
+      .map((s) => {
+        const prevReps = previous.exercises
+          .find((x) => x.exercise_id === e.exercise_id)
+          ?.sets.find((x) => x.set_no === s.set_no)?.reps;
+        return `第 ${s.set_no} 组次数 ${prevReps != null ? prevReps : "—"} → ${s.reps}`;
+      }),
+  );
+  return {
+    text: [
+      `已定位训练身份 **${tsId}**（${target.date} · ${target.exercise}），将按**同一训练身份**生成完整修订草稿（不新增训练身份数量）。`,
+      `- 载荷 = 当前修订全部动作与组事实；未述字段保持原值，不清空、不编造。`,
+      arrangementId
+        ? `- 继承当前修订关联安排 ${arrangementId}（更正不重指向）。`
+        : "- 当前修订无对照安排：不携带 arrangement_revision_id。",
+      changedSets.length > 0
+        ? `- 按你所述更新：${changedSets.join("；")}。`
+        : "- 尚未读到具体差异：草稿先载入当前事实，可在草稿卡内联改（如把第 2 组次数 5 改成 6）后确认。",
+      "",
+      "确认采纳后才追加修订写入正式记录；确认前正式数据与业务版本不变。",
+    ].join("\n"),
+    draft,
+  };
+}
+
+/**
+ * 作废剧本（F4-03）：复用 F4-02 定位链路（显式训练身份 id / 日期+动作；候选不唯一
+ * 先询问、无法定位回澄清、voided 终态拒绝——三者均不落草稿）。命中后生成
+ * training_void 草稿：只承载「作废哪一次训练身份」，不承载可编辑事实；回复文案
+ * 展示身份、事实摘要与影响范围（退出完成率/三桶/PR，历史保留）。不改正式数据。
+ */
+function voidScriptReply(
+  state: MockState,
+  message: string,
+): { text: string; draft?: Draft } {
+  // 歧义澄清回复：用户直接给出训练身份 id → 按 id 定位（不猜）
+  const tsIdMatch = message.match(/\b(ts-[A-Za-z0-9-]+)\b/);
+  let target: TrainingRecord | undefined;
+  let exercise_id: string | undefined;
+  let occurred_on: string | undefined;
+
+  if (tsIdMatch) {
+    const byId = state.records.find(
+      (r) => r.training_session_id === tsIdMatch[1],
+    );
+    if (!byId) {
+      return {
+        text: [
+          `未能按训练身份 ${tsIdMatch[1]} 定位到既有记录，**不生成作废草稿**。请到 /records 核对身份 id 后再试。`,
+        ].join("\n"),
+      };
+    }
+    target = byId;
+    occurred_on = byId.date;
+    exercise_id =
+      CATALOG.find((c) => c.standard_name_zh === byId.exercise)?.id;
+  } else {
+    occurred_on = resolveExplicitDate(message);
+    for (const { pattern, id } of RECORD_EXERCISES) {
+      if (pattern.test(message)) {
+        exercise_id = id;
+        break;
+      }
+    }
+  }
+
+  const cat = exercise_id ? CATALOG.find((c) => c.id === exercise_id) : undefined;
+  const nameZh = cat?.standard_name_zh ?? target?.exercise ?? exercise_id ?? "";
+
+  if (!target) {
+    if (!occurred_on || !exercise_id) {
+      return {
+        text: [
+          "要作废整次训练，我需要你明确给出**日期（YYYY-MM-DD）+ 动作**（或直接给训练身份 id）才能定位。",
+          "",
+          "示例：「整次录错，作废 2026-09-07 的杠铃平板卧推」。",
+          "本次**不生成草稿、也不编造定位**。",
+        ].join("\n"),
+      };
+    }
+
+    // 按训练身份聚合候选（同身份多动作投影为多行；同日同名动作多次 = 多身份）
+    const bySession = new Map<string, TrainingRecord>();
+    for (const r of state.records) {
+      if (r.date !== occurred_on) continue;
+      if (!r.training_session_id) continue;
+      if (!exerciseMatchesName(r.exercise, exercise_id)) continue;
+      if (!bySession.has(r.training_session_id))
+        bySession.set(r.training_session_id, r);
+    }
+    const candidates = [...bySession.values()];
+
+    if (candidates.length === 0) {
+      return {
+        text: [
+          `未能在既有训练记录中定位到「${occurred_on} · ${nameZh}」，因此**不生成作废草稿**。`,
+          "",
+          "请确认日期与动作名，或到 /records 核对后再试；我不会凭模糊描述猜一条记录。",
+        ].join("\n"),
+      };
+    }
+
+    if (candidates.length > 1) {
+      const lines = candidates.map(
+        (c, i) =>
+          `${i + 1}. ${c.date} · ${c.exercise}（身份 ${c.training_session_id}，状态 ${c.status}）`,
+      );
+      return {
+        text: [
+          `${occurred_on} 有多条「${nameZh}」训练记录，候选不唯一。请先说明要作废哪一次：`,
+          "",
+          ...lines.map((l) => `- ${l}`),
+          "",
+          "请直接回复其中一条的训练身份 id（如 `ts-seed-0907`），我再整理作废草稿。询问期间**不落草稿**。",
+        ].join("\n"),
+      };
+    }
+    target = candidates[0];
+  }
+
+  const tsId = target.training_session_id as string;
+  // 生成路径 fail-closed（05 5.3 终态 / 2026-09-13 拍 A）：voided 不接受更正/复活，也不接受二次作废
+  if (isVoidedIdentity(state, tsId) || target.status === "voided") {
+    return {
+      text: [
+        `该训练身份（${tsId}，${target.date} · ${target.exercise}）当前修订已作废（终态），无需再次作废，故**不生成草稿**。`,
+        "历史修订仍可在记录页只读追溯。",
+      ].join("\n"),
+    };
+  }
+
+  // 事实摘要：从当前修订行汇总组数/次数/负重（只读展示，不可编辑）
+  const rows = currentRevisionRows(state, tsId);
+  const factLines = rows.map((row) => {
+    const work = row.sets.filter((s) => s.set_type === "working");
+    const first = work[0];
+    const repsPart = first?.reps != null ? ` × ${first.reps} 次` : "（缺次数）";
+    const loadPart =
+      first?.weight_kg != null ? ` @ ${first.weight_kg}kg` : "";
+    return `${row.date} · ${row.exercise}：${work.length} 组${repsPart}${loadPart}`;
+  });
+
+  const draft: Draft = {
+    id: nextId("draft"),
+    kind: "training_void",
+    status: "pending",
+    revision: 1,
+    base_business_version: state.context_version,
+    payload: { training_session_id: tsId } satisfies TrainingVoidPayload,
+    diff: [
+      { field: "作废训练身份", new_value: `${tsId}（${target.date} · ${target.exercise}）` },
+      { field: "事实摘要（只读）", new_value: factLines.join("；") || "（无当前修订行）" },
+      {
+        field: "影响范围",
+        new_value:
+          "确认后该次退出完成率/三桶/PR；历史修订保留可追溯、不物理删除、不回退旧有效版本；作废即终态（不再接受更正/复活）",
+      },
+    ],
+  };
+
+  return {
+    text: [
+      `已定位训练身份 **${tsId}**（${target.date} · ${target.exercise}），将生成**作废草稿**（只承载作废哪一次身份，无事实可编辑）。`,
+      "- 待作废事实摘要：",
+      ...factLines.map((l) => `  · ${l}`),
+      "- 影响范围：确认后该次**退出完成率/三桶/PR**；历史修订保留可追溯、不物理删除、不回退旧有效版本。",
+      "- 作废即终态：该身份确认作废后不再接受后续更正或复活修订。",
+      "",
+      "确认采纳后才追加作废修订写入正式记录；确认前正式数据与业务版本不变。",
+    ].join("\n"),
+    draft,
+  };
+}
+
+/**
  * 计划版本号只追加（PRD 5.3：正式版本不原地改）
  */
 function nextPlanVersion(version: string): string {
@@ -1157,23 +1750,37 @@ function replacementPayload(
     plan_workouts: PlanVersion["payload"]["plan_workouts"];
     title: string;
     extra_diff?: FieldDiff[];
+    /** F5-05 接回草稿用 "return"；缺省 regular */
+    mode?: PlanVersion["mode"];
+    /** 自定义日历循环（最低版接回）；缺省 PPL 三日循环 */
+    calendar_cycle?: PlanVersion["payload"]["calendar_cycle"];
   },
 ): PlanDraftPayload | undefined {
   const { profile, plan_workouts } = input;
   const previous = state.plan;
   const version = previous ? nextPlanVersion(previous.version) : "v1";
+  const startsOn = PLAN_CANDIDATE.starts_on;
+  // 接回档只给未来 3–7 天简单日程（04 §4.6 / F5-05）：投影窗收窄到 starts_on+7，不另建第二套投影
+  const reviewOn =
+    input.mode === "return"
+      ? (() => {
+          let d = startsOn;
+          for (let i = 0; i < 7; i++) d = dayAfter(d);
+          return d;
+        })()
+      : PLAN_CANDIDATE.review_on;
   const payloadBody: PlanVersion["payload"] = {
     schema_version: 1,
-    template_key: "ppl",
+    template_key: input.mode === "return" ? "return" : "ppl",
     plan_workouts,
-    calendar_cycle: {
+    calendar_cycle: input.calendar_cycle ?? {
       anchor_date: PLAN_CANDIDATE.starts_on,
       slots: PPL_CALENDAR_SLOTS.map((s) => ({ ...s })),
     },
   };
   const schedules = projectSchedules(version, payloadBody, {
-    starts_on: PLAN_CANDIDATE.starts_on,
-    review_on: PLAN_CANDIDATE.review_on,
+    starts_on: startsOn,
+    review_on: reviewOn,
   });
   const cancellations = previous
     ? state.schedules
@@ -1192,9 +1799,9 @@ function replacementPayload(
     : [];
   const plan: PlanVersion = {
     version,
-    starts_on: PLAN_CANDIDATE.starts_on,
-    review_on: PLAN_CANDIDATE.review_on,
-    mode: "regular",
+    starts_on: startsOn,
+    review_on: reviewOn,
+    mode: input.mode ?? "regular",
     status: "active",
     payload: payloadBody,
   };
@@ -1486,6 +2093,592 @@ function planScriptReply(state: MockState): { text: string; draft?: Draft } {
   };
 }
 
+/* ------------------------- 中断接回（F5-05；04 4.6） ------------------------- */
+
+/**
+ * 接回中断阈值（已拍：代码常量，mock 不暴露设置页）：距最近已确认训练 ≥ INTERRUPT_DAYS
+ * 时，今日训练路径仅提示确认是否中断；确认后才进接回评估。无已确认记录 → 不判中断。
+ */
+const INTERRUPT_DAYS = 7;
+
+/** 显式接回意图：「重新开始／中断回归／接回」等，直接进接回评估（PRD §5.12） */
+const RETURN_EXPLICIT = /重新开始|中断回归|接回|中断接回/;
+
+/** ≥7 天澄清后的确认：用户明确表示「是中断」才评估；未确认不改计划 */
+const RETURN_CONFIRM = /(?:是|属于|确认).{0,4}中断|确认接回|确认重新开始|是中断|属于中断/;
+
+/** 病后语境（消息或档案身体情况）：未获专业允许 → 只转介／建议休息，不生成处方 */
+const POST_ILLNESS = /病后|术后|生病后|发烧后|流感后|重感冒后|康复期|病刚好|刚病好/;
+
+/** 明确「已获专业允许」恢复训练（须用户显式表达；接回评估读取消息） */
+const HAS_PRO_PERMISSION =
+  /已获专业允许|已获专业许可|医生允许|医生说.{0,6}(可以|能).{0,4}(训练|练|恢复)|专业人员确认.{0,4}(可以|恢复)|获准训练|获准恢复|专业允许/;
+
+/** 今日训练发起（含指导问句）：用于 ≥7 天间隔的中断确认闸门；打卡短语不走此闸门 */
+const TODAY_TRAIN_START =
+  /今日训练|今天训练|开始训练|开始今天|今天练什么|练什么|训练安排|给我.{0,4}指导/;
+
+function lastConfirmedTrainingDate(state: MockState): string | null {
+  let last: string | null = null;
+  for (const r of state.records) {
+    if (r.status !== "valid") continue;
+    if (!last || r.date > last) last = r.date;
+  }
+  return last;
+}
+
+/** 距最近已确认训练的日历天数；无已确认记录 → null（不判中断） */
+function interruptGapDays(state: MockState): number | null {
+  const last = lastConfirmedTrainingDate(state);
+  return last === null ? null : dayDiff(last, MOCK_TODAY);
+}
+
+const INTERRUPT_CLARIFY_PREFIX = "距最近一次已确认训练已超过 7 天";
+
+function interruptClarifyReply(state: MockState, gap: number): string {
+  const last = lastConfirmedTrainingDate(state);
+  return [
+    `${INTERRUPT_CLARIFY_PREFIX}（${last} → ${MOCK_TODAY}，间隔 ${gap} 天）。`,
+    "这是否属于训练中断？请回复「是中断」或「确认接回」后，我才进入接回评估；未确认前不修改计划、不生成接回草稿。",
+    "若你只是想看指导，可直接问「给我周三的训练指导」（不触发接回）。",
+  ].join("\n");
+}
+
+/** 最低版主项：优先档案可用的单侧/下肢模式；bodyweight 兜底 */
+function minimumMainExerciseId(profile: Profile): string {
+  const eq = profile.equipment;
+  if (eq.includes("哑铃")) return "bulgarian-split-squat";
+  if (eq.includes("杠铃")) return "barbell-back-squat";
+  return "pull-up";
+}
+
+type ReturnTier = "normal" | "regressed" | "minimum";
+
+function buildReturnProposal(
+  state: MockState,
+  tier: ReturnTier,
+): { payload: PlanDraftPayload; rows: FieldDiff[] } | { blocked: string } {
+  const profile = state.profile;
+  if (!profile) return { blocked: NO_PROFILE_PLAN_REPLY };
+  const last = lastConfirmedTrainingDate(state);
+  const benchCap = referenceWorkKg(state, "barbell-bench-press");
+  const ironRows: FieldDiff[] = [
+    {
+      field: "接回 · 铁律",
+      new_value: "不补课、不惩罚性训练；不照搬中断前重量",
+    },
+    {
+      field: "接回 · 负荷上限参考",
+      new_value: last
+        ? `最近确认记录（${last}）工作组为上限保守降载${benchCap !== undefined ? `（卧推参考上限 ${benchCap}kg）` : ""}`
+        : "无已确认记录 → needs_calibration（按校准路径，不猜重量）",
+    },
+  ];
+
+  if (tier === "minimum") {
+    const exId = minimumMainExerciseId(profile);
+    const snap = CATALOG.find((c) => c.id === exId);
+    if (!snap) return { blocked: "最低版主项不在目录内，未生成草稿" };
+    const item = planExercise(`return-min-1`, exId, {
+      work_sets: 2,
+      reps: { min: 8, max: 12 },
+      target_rir: { min: 2, max: 4 },
+      progression_method: "repetition_progression",
+    });
+    const payload = replacementPayload(state, {
+      profile,
+      mode: "return",
+      title: "中断接回 · 最低训练版",
+      plan_workouts: [
+        {
+          workout_key: "return_min",
+          name: "最低训练（启动活动 + 一个主要动作模式）",
+          estimated_minutes: 15,
+          exercises: [item],
+        },
+      ],
+      calendar_cycle: {
+        anchor_date: PLAN_CANDIDATE.starts_on,
+        slots: [
+          { kind: "workout", workout_key: "return_min" },
+          { kind: "rest" },
+          { kind: "rest" },
+        ],
+      },
+      extra_diff: [
+        ...ironRows,
+        {
+          field: "接回 · 结构",
+          new_value: "最低版：约 10–20 分钟；启动活动（快走/关节活动，约 5 分钟）+ 一个主要动作模式",
+        },
+      ],
+    });
+    if (!payload) return { blocked: "最低版未通过安全前置校验，未生成草稿" };
+    return {
+      payload,
+      rows: [
+        {
+          field: "接回档位",
+          new_value: "最低任务",
+        },
+      ],
+    };
+  }
+
+  const built = buildPplDraft({ profile, restrictions: state.restrictions });
+  if (!built.ok)
+    return {
+      blocked:
+        built.code === "red_flag"
+          ? professionalEvalBlock(built.red_flags)
+          : `按当前档案与限制无法生成接回计划（${built.reason}）；未生成草稿。`,
+    };
+
+  let plan_workouts = built.plan.payload.plan_workouts;
+  if (tier === "regressed") {
+    plan_workouts = plan_workouts.map((w) => ({
+      ...w,
+      exercises: w.exercises.map((e) => {
+        if (e.prescription.kind !== "reps") return e;
+        const work_sets = Math.max(2, e.prescription.work_sets - 1);
+        return {
+          ...e,
+          prescription: {
+            ...e.prescription,
+            work_sets,
+            target_rir: { min: 2, max: 3 },
+          },
+        };
+      }),
+    }));
+  }
+  const rows: FieldDiff[] = [
+    ...ironRows,
+    {
+      field: "接回 · 结构",
+      new_value:
+        tier === "regressed"
+          ? "降级版：保留原计划结构，主项更保守且 −1 组；RIR 下限抬到 2"
+          : "正常版：保留原结构，负荷按铁律重新确定（不照搬中断前重量）",
+    },
+  ];
+  const payload = replacementPayload(state, {
+    profile,
+    plan_workouts,
+    title:
+      tier === "regressed" ? "中断接回 · 降级版" : "中断接回 · 正常版",
+    mode: "return",
+    extra_diff: rows,
+  });
+  if (!payload)
+    return { blocked: "接回计划未通过安全前置校验（未生成草稿）。" };
+  return {
+    payload,
+    rows: [
+      {
+        field: "接回档位",
+        new_value: tier === "regressed" ? "降级接回" : "正常接回",
+      },
+    ],
+  };
+}
+
+/**
+ * 接回评估回复（F5-05）：红旗直接休息/转介；病后未获专业允许只转介；
+ * 否则按档案/可信记录选档生成 mode=return 的 plan 草稿（新版本，不静默覆盖）。
+ * 确认走既有 plan 事务；回归期=接回版本生效后记录打 period=return。
+ */
+function returnAssessmentReply(
+  state: MockState,
+  message: string,
+): { text: string; draft?: Draft } {
+  if (!state.profile) return { text: NO_PROFILE_PLAN_REPLY };
+
+  // 红旗直接第四档：接回无权解除红旗；不生成任何可执行三档处方
+  // 消息级与档案级身体情况都算红旗来源（读取时分类）
+  const redFlags = [
+    ...new Set([
+      ...classifyBodyConditions(state.profile.body_conditions).confirmed,
+      ...classifyBodyConditions(parseFacts(message).body_conditions).confirmed,
+    ]),
+  ];
+  if (redFlags.length > 0) {
+    return {
+      text: [
+        professionalEvalBlock(redFlags),
+        "接回评估命中红旗症状：**接回无权解除红旗阻断**。本次不生成正常／降级／最低任何可执行训练处方。",
+        "建议休息或线下专业评估；经专业人员确认可恢复训练后，再从对话发起接回。",
+      ].join("\n\n"),
+    };
+  }
+
+  const illnessContext =
+    POST_ILLNESS.test(message) ||
+    (state.profile.body_conditions ?? []).some((c) => POST_ILLNESS.test(c));
+  const hasPermission = HAS_PRO_PERMISSION.test(message);
+  if (illnessContext && !hasPermission) {
+    return {
+      text: [
+        "病后接回：你尚未明确表示「已获专业允许」恢复训练。",
+        "按已拍口径，本次**只转介／建议休息**，不生成最低活动建议或任何训练处方。",
+        "请先完成线下专业评估；若已获专业允许，请在回复中明确说明（例如「已获专业允许可以训练」）后再发起接回。",
+      ].join("\n"),
+    };
+  }
+
+  const last = lastConfirmedTrainingDate(state);
+  const gap = interruptGapDays(state);
+  const unlisted = classifyBodyConditions(state.profile.body_conditions)
+    .unlisted;
+  const tier: ReturnTier = !last
+    ? "minimum"
+    : unlisted.length > 0 || (gap !== null && gap >= 14)
+      ? "regressed"
+      : "normal";
+
+  const proposal = buildReturnProposal(state, tier);
+  if ("blocked" in proposal) return { text: proposal.blocked };
+
+  const scheduleNote =
+    tier === "minimum"
+      ? "未来 3–7 天：按最低版隔日执行（日程已投影在草稿内，确认后写入）。"
+      : "未来 3–7 天简单日程：按新版本日程执行；不补中断期间漏掉的课。";
+  const tierLabel =
+    tier === "minimum"
+      ? "最低任务"
+      : tier === "regressed"
+        ? "降级接回"
+        : "正常接回";
+
+  return {
+    text: [
+      `接回评估完成 → **${tierLabel}**（只追加新版本 ${proposal.payload.plan?.version}，mode=return；不静默覆盖 ${state.plan?.version ?? "（无）"}）。`,
+      "",
+      `- 中断间隔：${last ? `${last} → ${MOCK_TODAY}${gap !== null ? `（${gap} 天）` : ""}` : "无已确认记录 → 按最低/校准口径"}`,
+      `- 负荷铁律：不补课、不惩罚；不照搬中断前重量${last ? "（最近确认记录为上限保守降载）" : "；无记录 needs_calibration"}`,
+      `- 回归期：接回版本生效后的训练记录将标记「回归期」，不进 PR；恢复常规须复盘后另启新常规版本`,
+      "",
+      scheduleNote,
+      "",
+      "请确认后启用；确认前正式计划与日程不变。失败整份回滚、重复确认幂等。",
+    ].join("\n"),
+    draft: pendingPlanDraft(proposal.payload),
+  };
+}
+
+/* ---------------------- 渐进／负荷建议（F5-06；04 §4.4） ---------------------- */
+
+/**
+ * 器械允许的最小增量（mock 写死；符合「只建议器械允许的最小增量」）：
+ * 杠铃/绳索/固定器械 2.5kg、哑铃 1kg（单只）；自重不加重只推进次数。
+ */
+const MIN_LOAD_STEP: Record<string, number> = {
+  barbell: 2.5,
+  dumbbell: 1,
+  cable: 2.5,
+  leverage_machine: 2.5,
+  sled_machine: 2.5,
+};
+
+/** 次数区间上限（04 §4.4 正本）：外加负重 ≤12、自重 ≤15 */
+const REPS_CAP_EXTERNAL = 12;
+const REPS_CAP_BODYWEIGHT = 15;
+
+/** 显式渐进／加重意图（非显式不给负荷建议） */
+const PROGRESSION_HINT =
+  /加重|加重量|渐进|渐进建议|帮我加重|按最近表现(?:调整|加重)/;
+
+/** 长期渐进草稿意图：明确要落到计划（否则只出文本建议并询问是否要草稿） */
+const PROGRESSION_LONG =
+  /按最近表现|加重量|长期|调整计划|改长期|换计划|渐进.{0,4}(?:计划|调整)/;
+
+/** 一条渐进候选（文本建议单元；mock 展示派生，非契约真相） */
+interface ProgressionCandidate {
+  exercise_id: string;
+  name: string;
+  method: ProgressionMethod;
+  /** load = 建议加重；reps = 建议先推进次数；calibration = 无可信记录引导校准 */
+  kind: "load" | "reps" | "calibration";
+  basis_date?: string;
+  current_kg?: number;
+  next_kg?: number;
+  current_best_reps?: number;
+  next_reps?: number;
+  basis_record_revision_id?: string;
+  load_notation?: string;
+  unit?: string;
+  /** 计划次数区间上限（展示用） */
+  plan_max_reps?: number;
+}
+
+/**
+ * 从最近 valid 非 return 记录派生候选（04 §4.4）：
+ * - 无可信记录 → calibration（不猜重量）；
+ * - 已达计划次数区间上限 → load（当前重量 + 最小增量，次数回到下限）；
+ * - 未达上限 → reps（先推进次数到上限，不加重）；
+ * - 自重 → reps（上限 min(计划上限,15)）。
+ */
+function deriveProgressionCandidates(state: MockState): ProgressionCandidate[] {
+  const plan = state.plan;
+  if (!plan) return [];
+  const seen = new Set<string>();
+  const out: ProgressionCandidate[] = [];
+  for (const w of plan.payload.plan_workouts) {
+    for (const e of w.exercises) {
+      if (seen.has(e.exercise_id)) continue;
+      seen.add(e.exercise_id);
+      const name = e.display_snapshot.name;
+      const isExternal = e.record_type === "external_load_reps";
+      const isBodyweight = e.record_type === "bodyweight_reps";
+      if (!isExternal && !isBodyweight) continue; // 计时型不在本任务范围
+      const planMax =
+        e.prescription.kind === "reps"
+          ? e.prescription.reps_range.max
+          : undefined;
+      const cap = isBodyweight
+        ? Math.min(planMax ?? REPS_CAP_BODYWEIGHT, REPS_CAP_BODYWEIGHT)
+        : Math.min(planMax ?? REPS_CAP_EXTERNAL, REPS_CAP_EXTERNAL);
+
+      // 最近 valid 非 return 记录（含工作组）；load 候选另找「全部工作组达区间上限」的最近记录
+      let rec: TrainingRecord | undefined;
+      let metCapRec: TrainingRecord | undefined;
+      for (let i = state.records.length - 1; i >= 0; i--) {
+        const r = state.records[i];
+        if (r.status !== "valid") continue;
+        if (r.period === "return") continue;
+        if (r.exercise !== name) continue;
+        if (!rec) rec = r;
+        const working = r.sets.filter((s) => s.set_type === "working");
+        const withReps = working.filter((s) => s.reps !== undefined);
+        if (
+          !metCapRec &&
+          planMax !== undefined &&
+          withReps.length > 0 &&
+          withReps.every((s) => (s.reps as number) >= planMax)
+        )
+          metCapRec = r;
+        if (rec && metCapRec) break;
+      }
+      if (!rec) {
+        out.push({
+          exercise_id: e.exercise_id,
+          name,
+          method: e.progression.method,
+          kind: "calibration",
+        });
+        continue;
+      }
+      const working = rec.sets.filter((s) => s.set_type === "working");
+      const withReps = working.filter((s) => s.reps !== undefined);
+      const bestReps = withReps.length
+        ? Math.max(...withReps.map((s) => s.reps as number))
+        : undefined;
+      const lastKg = [...working]
+        .reverse()
+        .find((s) => s.weight_kg !== undefined && !s.assisted)?.weight_kg;
+
+      if (isExternal) {
+        const step =
+          MIN_LOAD_STEP[
+            CATALOG.find((c) => c.id === e.exercise_id)?.equipment_variant ??
+              "barbell"
+          ] ?? 2.5;
+        // load：存在「全部工作组达区间上限」的最近可信记录（如种子 08-31 卧推 80×8）
+        if (metCapRec && planMax !== undefined) {
+          const capWorking = metCapRec.sets.filter(
+            (s) => s.set_type === "working",
+          );
+          const capKg = [...capWorking]
+            .reverse()
+            .find((s) => s.weight_kg !== undefined && !s.assisted)?.weight_kg;
+          if (capKg !== undefined) {
+            const capBest = Math.max(
+              ...capWorking
+                .filter((s) => s.reps !== undefined)
+                .map((s) => s.reps as number),
+              0,
+            );
+            out.push({
+              exercise_id: e.exercise_id,
+              name,
+              method: e.progression.method,
+              kind: "load",
+              basis_date: metCapRec.date,
+              current_kg: capKg,
+              next_kg: capKg + step,
+              current_best_reps: capBest,
+              next_reps:
+                e.prescription.kind === "reps"
+                  ? e.prescription.reps_range.min
+                  : undefined,
+              basis_record_revision_id: metCapRec.id,
+              load_notation:
+                CATALOG.find((c) => c.id === e.exercise_id)?.load_convention ??
+                "barbell_includes_bar_total",
+              unit: "kg",
+              plan_max_reps: planMax,
+            });
+            continue;
+          }
+        }
+        if (lastKg === undefined) {
+          out.push({
+            exercise_id: e.exercise_id,
+            name,
+            method: e.progression.method,
+            kind: "calibration",
+            basis_date: rec.date,
+          });
+          continue;
+        }
+        out.push({
+          exercise_id: e.exercise_id,
+          name,
+          method: e.progression.method,
+          kind: "reps",
+          basis_date: rec.date,
+          current_kg: lastKg,
+          current_best_reps: bestReps,
+          next_reps: cap,
+          plan_max_reps: planMax,
+        });
+      } else {
+        // 自重：只推进次数；无次数事实 → 校准引导（不猜）
+        if (bestReps === undefined) {
+          out.push({
+            exercise_id: e.exercise_id,
+            name,
+            method: e.progression.method,
+            kind: "calibration",
+            basis_date: rec.date,
+          });
+          continue;
+        }
+        out.push({
+          exercise_id: e.exercise_id,
+          name,
+          method: e.progression.method,
+          kind: "reps",
+          basis_date: rec.date,
+          current_best_reps: bestReps,
+          next_reps: cap,
+          plan_max_reps: planMax,
+        });
+      }
+    }
+  }
+  return out;
+}
+
+function progressionCandidateLine(c: ProgressionCandidate): string {
+  switch (c.kind) {
+    case "calibration":
+      return `- ${c.name}（${progressionLabel(c.method)}）：无可信有效记录 → 引导校准，不猜重量`;
+    case "reps":
+      return `- ${c.name}（${progressionLabel(c.method)}）：先推进次数${c.current_best_reps !== undefined ? `（当前最好 ${c.current_best_reps} 次）` : ""} → 目标 ${c.next_reps} 次${c.current_kg !== undefined ? `（负荷保持 ${c.current_kg}kg）` : ""}${c.basis_date ? `｜依据 ${c.basis_date}` : ""}`;
+    case "load":
+      return `- ${c.name}（${progressionLabel(c.method)}）：已达区间上限 ${c.plan_max_reps} 次 → 最小增量加重 **${c.current_kg} → ${c.next_kg}kg**，次数回到区间下限${c.basis_date ? `｜依据 ${c.basis_date}` : ""}`;
+  }
+}
+
+/**
+ * 渐进建议回复（F5-06）：文本建议 + 可选长期计划草稿（load 候选才出草稿）。
+ * 不自动改正式计划；确认走既有 plan 事务；无可信记录只引导校准。
+ */
+function progressionScriptReply(
+  state: MockState,
+  message: string,
+): { text: string; draft?: Draft } {
+  if (!state.profile || !state.plan)
+    return {
+      text: "当前没有可用的正式计划与档案，无法给出基于可信历史的渐进建议。请先完成建档。",
+    };
+  const candidates = deriveProgressionCandidates(state);
+  const loadCands = candidates.filter((c) => c.kind === "load");
+  const header = [
+    "基于**已确认有效记录**与既定 progression 规则的渐进建议（不猜重量；缺体感不阻塞、也不当作轻松可加重）：",
+    "",
+    ...candidates.map(progressionCandidateLine),
+    "",
+  ];
+
+  const wantsDraft = PROGRESSION_LONG.test(message);
+  if (!wantsDraft || loadCands.length === 0) {
+    return {
+      text: [
+        ...header,
+        wantsDraft && loadCands.length === 0
+          ? "当前没有可直接加重的候选（无可信记录或未达区间上限）：维持原负荷或先校准；**未生成草稿**，正式计划与日程不变。"
+          : "以上为文本建议；**未自动修改正式计划**。若要落成长期计划草稿，请明确回复「按最近表现加重调整计划」。",
+      ].join("\n"),
+    };
+  }
+
+  // 长期草稿：以档案生成的 PPL 为基线（过安全校验），再写入 load 候选为 verified；
+  // 其余外加负重仍 needs_calibration（无可信记录不猜重）。复用既有 plan 事务。
+  const built = buildPplDraft({
+    profile: state.profile,
+    restrictions: state.restrictions,
+  });
+  if (!built.ok)
+    return {
+      text: [
+        ...header,
+        `渐进计划草稿生成失败（${built.reason}）；**未生成草稿**，正式计划保持不变。`,
+      ].join("\n"),
+    };
+  const loadById = new Map(loadCands.map((c) => [c.exercise_id, c]));
+  const plan_workouts = built.plan.payload.plan_workouts.map((w) => ({
+    ...w,
+    exercises: w.exercises.map((e) => {
+      const c = loadById.get(e.exercise_id);
+      if (!c || c.kind !== "load") return e;
+      return {
+        ...e,
+        load: {
+          kind: "verified" as const,
+          value: c.next_kg as number,
+          unit: c.unit ?? "kg",
+          load_notation:
+            c.load_notation ?? "barbell_includes_bar_total",
+          ...(c.basis_record_revision_id
+            ? { basis_record_revision_id: c.basis_record_revision_id }
+            : {}),
+        },
+      };
+    }),
+  }));
+  const rows: FieldDiff[] = loadCands.map((c) => ({
+    field: `${c.name} · 负荷`,
+    old_value: `${c.current_kg}kg`,
+    new_value: `${c.next_kg}kg（最小增量；次数回到区间下限）`,
+  }));
+  const payload = replacementPayload(state, {
+    profile: state.profile,
+    plan_workouts,
+    title: `渐进加重（${state.plan.version} → 拟议替换）`,
+    extra_diff: rows,
+  });
+  if (!payload)
+    return {
+      text: [
+        ...header,
+        "渐进计划草稿未通过安全前置校验；**未生成草稿**，正式计划保持不变。",
+      ].join("\n"),
+    };
+  return {
+    text: [
+      ...header,
+      `已按上述 load 候选生成**长期计划草稿**（只追加新版本 ${payload.plan?.version}，不静默覆盖 ${state.plan.version}）：`,
+      "",
+      ...rows.map((r) => `- ${r.field}：${r.old_value} → **${r.new_value}**`),
+      "",
+      "请确认后启用；确认前正式计划与日程不变。失败整份回滚、重复确认幂等。",
+    ].join("\n"),
+    draft: pendingPlanDraft(payload),
+  };
+}
+
 /**
  * F2-05：请求基于当前计划的训练日指导（只读，不生成任何草稿——计划修改仍须经对话草稿确认）。
  * 给出处方前先用最新身体情况分类与限制复核整份计划（04 4.5）：
@@ -1717,13 +2910,28 @@ function newPlanReply(state: MockState): { text: string; draft?: Draft } {
   };
 }
 
-/** 纠错后训练记录草稿的 diff 再生成（01 1.2；从纠错后 payload 派生；含安排对照摘要） */
+/**
+ * 训练记录草稿 diff（01 1.2；从纠错后 payload 派生；含安排对照摘要）。
+ * previous 给出时（F4-02 更正草稿）：字段级「修改前 → 修改后」，差异字段带 old_value。
+ */
 function recordDraftDiff(
   state: MockState,
   p: RecordDraftPayload,
+  previous?: RecordDraftPayload,
 ): FieldDiff[] {
+  const fmtSetLine = (sets: SetFacts[]) => {
+    const working = sets.filter((s) => s.set_type === "work");
+    const first = working[0];
+    return `${working.length} 组 x ${first?.reps ?? "?"} 次 @ ${first?.load?.value_text ?? "?"}${first?.load?.unit ?? ""}`;
+  };
   const rows: FieldDiff[] = [
-    { field: "训练记录 · 日期", new_value: p.occurred_on },
+    {
+      field: "训练记录 · 日期",
+      ...(previous && previous.occurred_on !== p.occurred_on
+        ? { old_value: previous.occurred_on }
+        : {}),
+      new_value: p.occurred_on,
+    },
     {
       field: "归属训练身份",
       new_value: p.training_session_id
@@ -1760,12 +2968,41 @@ function recordDraftDiff(
     }
   }
   for (const ex of p.exercises) {
-    const working = ex.sets.filter((s) => s.set_type === "work");
-    const first = working[0];
+    const prevEx = previous?.exercises.find(
+      (e) => e.exercise_id === ex.exercise_id,
+    );
+    const prevLine = prevEx ? fmtSetLine(prevEx.sets) : undefined;
+    const newLine = fmtSetLine(ex.sets);
     rows.push({
       field: `动作 ${ex.position} · 工作组`,
-      new_value: `${working.length} 组 x ${first?.reps ?? "?"} 次 @ ${first?.load?.value_text ?? "?"}${first?.load?.unit ?? ""}`,
+      ...(prevEx && prevLine !== newLine ? { old_value: prevLine } : {}),
+      new_value: newLine,
     });
+    // 组级差异（仅 previous 提供时；修改前 → 修改后）
+    if (prevEx) {
+      for (const s of ex.sets) {
+        const ps = prevEx.sets.find(
+          (x) => x.set_no === s.set_no && x.set_type === s.set_type,
+        );
+        if (!ps) continue;
+        if (ps.reps !== s.reps)
+          rows.push({
+            field: `动作 ${ex.position} · 第 ${s.set_no} 组 · 次数`,
+            old_value: ps.reps != null ? String(ps.reps) : "—",
+            new_value: s.reps != null ? String(s.reps) : "—",
+          });
+        if (ps.load?.value_text !== s.load?.value_text)
+          rows.push({
+            field: `动作 ${ex.position} · 第 ${s.set_no} 组 · 重量`,
+            old_value: ps.load
+              ? `${ps.load.value_text}${ps.load.unit}`
+              : "—",
+            new_value: s.load
+              ? `${s.load.value_text}${s.load.unit}`
+              : "—",
+          });
+      }
+    }
     if (ex.warmup_summary_text)
       rows.push({
         field: "热身",
@@ -2347,9 +3584,9 @@ const FACT_QUESTIONS: Record<AskedFact, string> = {
     "当前身体情况如何？一次说明就好：有没有哪里不适、是否影响某个动作（如「深蹲时膝盖锐痛」）、是否出现胸部异常不适、晕厥、异常气短、锐痛、麻木、放射痛这类需要线下专业评估的情况；都没有也请明确说「没有」。",
 };
 
-/** 打卡类请求（阶段 1 仅识别这些演示短语，不解析自然语言意图；F3-04 增同日补充歧义短语） */
+/** 打卡类请求（阶段 1 仅识别这些演示短语，不解析自然语言意图；F3-04 增同日补充歧义短语；F4-02 增更正意图） */
 const CHECKIN_PATTERN =
-  /打卡|训练记录|记录一下|记一下|帮我记|今天练|昨天练|今天做|昨天做|再补一组|补一组|补充上一练|新增一练|\d+\s*(?:kg|公斤)\D{0,6}\d+\s*组|\d+\s*组\s*[x×]?\s*\d+\s*次/;
+  /打卡|训练记录|记录一下|记一下|帮我记|今天练|昨天练|今天做|昨天做|再补一组|补一组|补充上一练|新增一练|更正|数据有误|作废|\d+\s*(?:kg|公斤)\D{0,6}\d+\s*组|\d+\s*组\s*[x×]?\s*\d+\s*次/;
 
 /** 用户明确否认的表达（仅用于把「没有」解释为对上一问的明确否认） */
 const DENIAL_PATTERN = /没有|没|无|不用|不需要|一切正常|都正常|没问题/;
@@ -3010,20 +4247,79 @@ function onboardingTurn(
   };
 }
 
-const REVIEW_REPLY = [
-  "## 本阶段复盘（基于最新有效记录重算）",
-  "",
-  "- 完成率：W1 **2/3（66.7%）**，W2 截至今日 **1/3（33.3%）**；漏练保留，不做补课。",
-  "- 组级判定（按当次安排）：符合 1 组 / 未符合 1 组 / 待补全 1 组。",
-  "- PR：杠铃平板卧推 **80kg x8**；自重引体不进重量 PR。",
-  "",
-  "| 计划周 | 应训练 | 已完成 | 完成率 |",
-  "| --- | --- | --- | --- |",
-  "| W1 | 3 | 2 | 66.7% |",
-  "| W2 | 3 | 1 | 33.3% |",
-  "",
-  "> 建议下一步：今日腿日尚未完成；按已接受安排优先于原计划处方。",
+/**
+ * 显式复盘生成意图（F5-02，2026-09-13 owner 收紧）：仅「生成/重新生成/更新 + 复盘」。
+ * 「给我看一下/看/展示/显示复盘」→ 只读解释最新条，不生成不落库。最简正则，勿上 NLP。
+ */
+const REVIEW_GENERATE = /(?:生成|重新生成|更新).{0,6}复盘|复盘.{0,4}(?:生成|更新)/;
+
+/** 复盘非显式询问（含「看/展示/显示复盘」）：解释口径，不生成不落库 */
+const REVIEW_EXPLAIN = [
+  "复盘是基于当前冻结统计的解释性正文，不会改写数值。",
+  "如需生成，请明确说「生成复盘」「重新生成复盘」或「更新复盘」；「看复盘」等只读询问不会落库。",
 ].join("\n");
+
+/** 空数据显式生成：可读拒绝，不编造完成率/PR（06 6.4；plans/stage5.md §3.1） */
+const REVIEW_EMPTY_REFUSE = [
+  "当前没有可复盘的正式训练事实（无完成率分母、无 PR），拒绝生成复盘正文。",
+  "请先完成打卡并确认记录后，再显式请求「生成复盘」。",
+].join("\n");
+
+/** 确定性正文：数字只允许来自冻结 basis（F5-02）；不得编造冻结外数字 */
+function renderReviewText(basis: ReviewBasis): string {
+  const weekRows = basis.per_week
+    .map(
+      (w) =>
+        `| ${w.week} | ${w.planned} | ${w.completed} | ${w.rate == null ? "—" : `${w.rate}%`} |`,
+    )
+    .join("\n");
+  const weekBullets = basis.per_week
+    .map(
+      (w) =>
+        `- ${w.week}：**${w.completed}/${w.planned}**${w.rate == null ? "" : `（${w.rate}%）`}`,
+    )
+    .join("\n");
+  const prLine = basis.prs
+    .map(
+      (p) =>
+        `- ${p.exercise}：**${p.best_weight_kg}kg × ${p.best_reps_at_weight}**`,
+    )
+    .join("\n");
+  return [
+    "## 本阶段复盘（基于冻结统计）",
+    "",
+    "- 完成率：",
+    weekBullets || "- 暂无完成率",
+    "",
+    `- 组级判定（按当次安排）：符合 ${basis.buckets.met} 组 / 未符合 ${basis.buckets.unmet} 组 / 待补全 ${basis.buckets.pending} 组。`,
+    "- PR：",
+    prLine || "- 暂无 PR",
+    "",
+    "| 计划周 | 应训练 | 已完成 | 完成率 |",
+    "| --- | --- | --- | --- |",
+    weekRows,
+    "",
+    `> 依据数据时间：${basis.data_updated_at}`,
+    "> 建议下一步仅为解释文本；不会自动创建草稿，也不会修改计划或日程。",
+  ].join("\n");
+}
+
+/** 对话路径显式生成：空数据拒绝；失败注入不落库；成功则 append 并回复依据时间 */
+function reviewGenerateReply(state: MockState): string {
+  const basis = freezeReviewBasis(state);
+  const hasFacts =
+    basis.per_week.some((w) => w.planned > 0) || basis.prs.length > 0;
+  if (!hasFacts) return REVIEW_EMPTY_REFUSE;
+  const entry = saveReviewEntry(state, renderReviewText(basis));
+  if (!entry)
+    return "复盘保存失败（故障注入命中），本次未落库；正式数据与 context_version 不变。请稍后重试生成。";
+  return [
+    entry.text,
+    "",
+    "---",
+    `已保存复盘（追加新条，不覆盖旧稿）。生成时间：${entry.generated_at}；依据数据时间：${entry.basis.data_updated_at}。`,
+  ].join("\n");
+}
 
 /**
  * 训练日指导意图（F2-05；04 4.5）：请求基于当前计划的训练指导。
@@ -3062,7 +4358,7 @@ const GENERIC_REPLY = [
   "- 调整计划：如「最近很累，帮我调整计划」",
   "- 当次安排：如「今天轻一点，减一组」",
   "- 训练打卡：如「今天卧推 80kg 4组 每组8次」",
-  "- 生成复盘：如「给我看一下复盘」",
+  "- 生成复盘：如「生成复盘」",
   "",
   "所有业务变更都会先以草稿卡展示，确认后才写入。",
 ].join("\n");
@@ -3108,7 +4404,42 @@ async function runScript(
     state.profile !== null &&
     ARRANGEMENT_PATTERN.test(message);
   const isPlan = /计划|调整|哑铃/.test(message);
-  const isReview = /复盘/.test(message);
+  // F5-02：仅显式意图生成复盘；模糊命中「复盘」只解释不落库
+  const isReviewGenerate = REVIEW_GENERATE.test(message);
+  const isReviewExplain = !isReviewGenerate && /复盘/.test(message);
+  // F5-04：复盘建议后的明确调整意图（最简正则，不依赖会话状态）。
+  // 长期/换/改长期/调整计划 → plan；裸「按建议」或当次语义 → arrangement（其内澄清/档位分流）。
+  // 正文建议本身不建草稿；无确认意图时 arrangementScriptReply 澄清路径不落草稿。
+  const isSuggestLong =
+    state.profile !== null &&
+    /换计划|改长期|计划调整|调整计划|调计划|按(?:复盘)?建议.{0,8}(?:计划|长期|调整)/.test(
+      message,
+    );
+  const isSuggestAdjust =
+    state.profile !== null && /按(?:复盘)?建议/.test(message);
+  // F5-06：显式渐进／加重意图（非显式不给负荷建议）；在 isSuggestLong 之前，
+  // 避免「按最近表现加重调整计划」被通用调整计划分支吞掉；不破坏 F5-04/05 探针。
+  const isProgression =
+    state.profile !== null &&
+    state.plan !== null &&
+    PROGRESSION_HINT.test(message);
+  // F5-05：显式接回意图（重新开始/中断回归/接回）或 ≥7 天后用户确认「是中断」→ 接回评估。
+  // 今日训练且间隔 ≥7 天但未确认 → 只澄清、不改计划；无已确认记录 → 不判中断。
+  const isReturnIntent =
+    state.profile !== null &&
+    state.plan !== null &&
+    (RETURN_EXPLICIT.test(message) || RETURN_CONFIRM.test(message));
+  const returnGap =
+    state.profile !== null ? interruptGapDays(state) : null;
+  const isTodayTrainStart =
+    !isReturnIntent &&
+    !isCheckIn &&
+    state.plan !== null &&
+    TODAY_TRAIN_START.test(message);
+  const needInterruptClarify =
+    isTodayTrainStart &&
+    returnGap !== null &&
+    returnGap >= INTERRUPT_DAYS;
   // 器械范围短语（plans/stage2.md §7 第 7 步，02 章：当日限制不得污染长期档案）：
   // 「以后只能用哑铃」= 长期档案补丁 + 新计划与新日程的组合草稿；「今天只能用哑铃」不写长期档案。
   // 尚未建档时仍走建档收集（无正式档案无法生成计划处方）。
@@ -3137,12 +4468,22 @@ async function runScript(
     const r = recordScriptReply(state, message);
     text = r.text;
     draft = r.draft;
+  } else if (needInterruptClarify) {
+    // F5-05：仅提示确认是否中断；未确认不进评估、不改计划
+    text = interruptClarifyReply(state, returnGap as number);
+  } else if (isReturnIntent) {
+    const r = returnAssessmentReply(state, message);
+    text = r.text;
+    draft = r.draft;
   } else if (equipmentScope === "today_only") {
     text = TODAY_ONLY_EQUIPMENT_REPLY;
   } else if (equipmentScope === "long_term") {
     const r = dumbbellOnlyReply(state);
     text = r.text;
     draft = r.draft;
+  } else if (isReviewGenerate) {
+    // 显式生成优先于建档（空种子也要能给出可读拒绝；F5-02）
+    text = reviewGenerateReply(state);
   } else if (isOnboarding) {
     const r = onboardingTurn(
       state,
@@ -3155,7 +4496,18 @@ async function runScript(
     draft = r.draft;
   } else if (isGuidance) {
     text = planGuidanceReply(state);
-  } else if (isArrangement) {
+  } else if (isProgression) {
+    // F5-06：显式渐进/加重 → 基于可信历史的候选建议；可选长期草稿（确认走既有事务）
+    const r = progressionScriptReply(state, message);
+    text = r.text;
+    draft = r.draft;
+  } else if (isSuggestLong) {
+    // F5-04：明确长期/换计划语义 → 复用计划草稿链路（Stage 2；含同事务取消旧版未来未锁定日程）
+    const r = planScriptReply(state);
+    text = r.text;
+    draft = r.draft;
+  } else if (isArrangement || isSuggestAdjust) {
+    // F5-04：「按建议」当次/裸建议 → 复用安排草稿链路（Stage 3；无确认意图时其内澄清不落草稿）
     const r = arrangementScriptReply(state, message);
     text = r.text;
     draft = r.draft;
@@ -3163,8 +4515,8 @@ async function runScript(
     const r = planScriptReply(state);
     text = r.text;
     draft = r.draft;
-  } else if (isReview) {
-    text = REVIEW_REPLY;
+  } else if (isReviewExplain) {
+    text = REVIEW_EXPLAIN;
   } else {
     text = GENERIC_REPLY;
   }
@@ -3533,6 +4885,12 @@ async function handleDevControls(
         revision: d.revision,
         base_business_version: d.base_business_version,
       })),
+      /** 复盘存储摘要（F5-01）：append-only 条目 id/时间/stale（只读诊断，不改状态） */
+      review_entries: state.review_entries.map((e) => ({
+        id: e.id,
+        generated_at: e.generated_at,
+        stale: e.stale,
+      })),
       dev_control: {
         suspended_seconds_remaining: Math.max(
           0,
@@ -3546,18 +4904,98 @@ async function handleDevControls(
     });
   }
 
-  /* 6) 注入下一次计划确认事务中途失败（F2-04；plans/stage2.md §7 第 8 步回滚验证）
-        确认事务在正式写入（档案补丁／计划／日程）之后、草稿提交与版本递增之前失败，
-        用于验证任一步失败时整份回滚；一次性，命中后自动解除 */
+  /* 6) 注入下一次确认事务中途失败（F2-04；plans/stage2.md §7 第 8 步回滚验证）
+        确认事务在正式写入（档案补丁／计划／日程／记录／更正／作废）之后、草稿提交与
+        版本递增之前失败，用于验证任一步失败时整份回滚；一次性，命中后自动解除 */
   if (path === "/api/dev/confirm/fail-next" && method === "POST") {
     await readBody(req);
     state.dev_confirm_failure = true;
     return json(res, 200, {
       ok: true,
       armed: true,
-      note: "下一次计划草稿确认将在正式写入后失败，并整份回滚（档案、计划与历史、全部日程、草稿状态、context_version）",
+      note: "下一次确认事务（计划/档案/安排/训练记录/更正/作废）将在正式写入后失败，并整份回滚（正式数据、修订指针、草稿状态、context_version）",
       dev_note: DEV_NOTE,
     });
+  }
+
+  /* 6.5) F5-01：复盘保存失败一次性注入 + 复盘保存 dev 桥。正式生成入口归 F5-02
+        对话剧本（显式意图识别后调用同一 saveReviewEntry）；本 dev 桥仅供
+        f5-01 探针走内部保存路径，非契约业务端点。 */
+  if (path === "/api/dev/review/fail-next" && method === "POST") {
+    await readBody(req);
+    state.dev_review_save_failure = true;
+    return json(res, 200, {
+      ok: true,
+      armed: true,
+      note: "下一次复盘保存整份不落（不追加条目、不推进 context_version）；一次性，命中自动解除",
+      dev_note: DEV_NOTE,
+    });
+  }
+  if (path === "/api/dev/review/save" && method === "POST") {
+    const body = await readJsonBody<{ text?: string }>(req);
+    if (!body.text || typeof body.text !== "string")
+      return apiError(res, {
+        http_status: 400,
+        error_code: "invalid_request",
+        message: "缺少 text",
+      });
+    const entry = saveReviewEntry(state, body.text);
+    if (!entry)
+      return apiError(res, {
+        http_status: 500,
+        error_code: "invalid_request",
+        message: "复盘保存失败（dev 注入），整份未落库",
+      });
+    return json(res, 200, {
+      entry,
+      review: projectReviewDoc(state),
+      dev_note: DEV_NOTE,
+    });
+  }
+
+  /* 7) mock-only：注入 training_void 待确认草稿（F4-01 自检搭桥）。F4-03 正式对话
+        生成（voidScriptReply）已就绪；本 dev 桥暂留供 f4-01 探针与失败注入搭桥，
+        非契约业务端点。 */
+  if (path === "/api/dev/drafts/training-void" && method === "POST") {
+    const body = await readJsonBody<{
+      training_session_id?: string;
+      session_id?: string;
+    }>(req);
+    if (
+      !body.training_session_id ||
+      typeof body.training_session_id !== "string"
+    )
+      return apiError(res, {
+        http_status: 400,
+        error_code: "invalid_request",
+        message: "缺少 training_session_id",
+      });
+    if (isVoidedIdentity(state, body.training_session_id))
+      return apiError(res, {
+        http_status: 409,
+        error_code: "invalid_request",
+        message: "该训练身份已作废（终态）",
+      });
+    if (currentRevisionRows(state, body.training_session_id).length === 0)
+      return apiError(res, {
+        http_status: 400,
+        error_code: "invalid_request",
+        message: "训练身份不存在",
+      });
+    const draft: Draft = {
+      id: nextId("draft"),
+      kind: "training_void",
+      status: "pending",
+      revision: 1,
+      base_business_version: state.context_version,
+      payload: { training_session_id: body.training_session_id },
+      diff: [
+        { field: "作废训练身份", new_value: body.training_session_id },
+      ],
+    };
+    state.drafts.set(draft.id, draft);
+    if (body.session_id) state.draft_sessions.set(draft.id, body.session_id);
+    return json(res, 200, { draft, dev_note: DEV_NOTE });
   }
 
   return apiError(res, {
@@ -3569,11 +5007,13 @@ async function handleDevControls(
 /* ------------------------------ 统计重算 ---------------------------------- */
 
 /**
- * 全量现算（stage3 §3.3/§3.4）：
+ * 全量现算（stage3 §3.3/§3.4；F4-01 修订模型）：
+ * - 记录口径：state.records = 每个训练身份的「当前修订」投影（旧修订不出现）；
+ *   status !== "valid"（含 incomplete、voided）一律不进完成率分子 / 三桶 / PR。
  * - 完成率：分母 = 该版本 [starts_on, review_on) 内 scheduled_on <= 业务日且未取消的应训练日；
  *   分子 = 关联该日程的 valid 记录且至少一个工作组（同一日程最多计一次）；分母 0 → rate null。
  * - 三桶：基准是当次安排快照（非计划处方）；只看次数；缺次数 → pending；无对照安排不进三桶。
- * - PR：排除 incomplete、辅助组、热身组；同重量最高次数按单组；自重/无重量不进重量 PR。
+ * - PR：排除 incomplete/voided、辅助组、热身组；同重量最高次数按单组；自重/无重量不进重量 PR。
  * - data_updated_at 用 mock 时钟（不依赖真实 Date.now）。
  */
 function recomputeStats(state: MockState): void {
@@ -3591,7 +5031,7 @@ function recomputeStats(state: MockState): void {
     rec.judgement = null;
     delete rec.comparison;
     for (const s of rec.sets) delete s.judgement;
-    if (rec.status !== "valid") continue; // incomplete 不进 PR / 完成率 / 三桶
+    if (rec.status !== "valid") continue; // incomplete/voided 不进 PR / 完成率 / 三桶；旧修订不在投影中
     const hasWork = rec.sets.some((s) => s.set_type === "working");
 
     // 完成率分子（显式关联；不从日期推断）
@@ -3647,29 +5087,32 @@ function recomputeStats(state: MockState): void {
       }
     }
 
-    // PR：valid + 工作组 + 非辅助 + 有重量与次数（自重不进重量 PR）
-    for (const set of rec.sets) {
-      if (
-        set.set_type !== "working" ||
-        set.assisted ||
-        set.weight_kg === undefined ||
-        set.reps === undefined
-      )
-        continue;
-      const key = `${rec.exercise}·${rec.variant}`;
-      const cur = prMap.get(key);
-      if (!cur || set.weight_kg > cur.best_weight_kg) {
-        prMap.set(key, {
-          exercise: rec.exercise,
-          variant: rec.variant,
-          best_weight_kg: set.weight_kg,
-          best_reps_at_weight: set.reps,
-        });
-      } else if (
-        set.weight_kg === cur.best_weight_kg &&
-        set.reps > cur.best_reps_at_weight
-      ) {
-        cur.best_reps_at_weight = set.reps;
+    // PR：valid + 工作组 + 非辅助 + 有重量与次数（自重不进重量 PR）；
+    // 回归期（period=return，F5-05）不进 PR，但工作组判定/完成率仍计入
+    if (rec.period !== "return") {
+      for (const set of rec.sets) {
+        if (
+          set.set_type !== "working" ||
+          set.assisted ||
+          set.weight_kg === undefined ||
+          set.reps === undefined
+        )
+          continue;
+        const key = `${rec.exercise}·${rec.variant}`;
+        const cur = prMap.get(key);
+        if (!cur || set.weight_kg > cur.best_weight_kg) {
+          prMap.set(key, {
+            exercise: rec.exercise,
+            variant: rec.variant,
+            best_weight_kg: set.weight_kg,
+            best_reps_at_weight: set.reps,
+          });
+        } else if (
+          set.weight_kg === cur.best_weight_kg &&
+          set.reps > cur.best_reps_at_weight
+        ) {
+          cur.best_reps_at_weight = set.reps;
+        }
       }
     }
   }
@@ -3719,7 +5162,70 @@ function recomputeStats(state: MockState): void {
     ),
     data_updated_at: mockNowIso(),
   };
-  state.review.stale = true;
+  // 业务数据变更 → 最新复盘条 stale（4385 口径改写到 append 结构）：正文与 generated_at 不改写
+  const latestReview = state.review_entries[state.review_entries.length - 1];
+  if (latestReview) latestReview.stale = true;
+}
+
+/* ------------------------------ 复盘（F5-01） -------------------------------- */
+
+/**
+ * 冻结当前统计 + 相关来源修订 id → 依据快照（06 6.4 / S4-08 review_basis 语义）。
+ * 保存时先冻结再 append；正文数字只允许来自本快照（渲染归 F5-02）。
+ */
+function freezeReviewBasis(state: MockState): ReviewBasis {
+  // 相关来源修订：每个训练身份的当前修订 id + 全部当次安排修订 id
+  const currentRevisionIds = new Map<string, string>();
+  for (const r of state.record_revisions)
+    currentRevisionIds.set(r.training_session_id, r.id);
+  return {
+    per_week: state.stats.per_week.map((w) => ({ ...w })),
+    buckets: { ...state.stats.buckets },
+    prs: state.stats.prs.map((p) => ({ ...p })),
+    data_updated_at: state.stats.data_updated_at,
+    source_revision_ids: [
+      ...currentRevisionIds.values(),
+      ...state.arrangement_revisions.map((r) => r.id),
+    ],
+  };
+}
+
+/**
+ * 复盘保存（F5-01）：冻结依据 → append 一条；失败注入命中时整份不落（一次性）。
+ * 重生成 = 再次调用追加，不覆盖旧条；保存不推进 context_version。
+ */
+function saveReviewEntry(state: MockState, text: string): ReviewEntry | null {
+  if (state.dev_review_save_failure) {
+    state.dev_review_save_failure = false; // 一次性注入，命中即解除
+    return null;
+  }
+  advanceMockClock();
+  const entry: ReviewEntry = {
+    id: nextId("review"),
+    text,
+    generated_at: mockNowIso(),
+    stale: false,
+    basis: freezeReviewBasis(state),
+  };
+  state.review_entries.push(entry);
+  return entry;
+}
+
+/** GET /api/review 投影：只返回最新一条；无条目时返回可识别空态（不编造完成率/正文） */
+function projectReviewDoc(state: MockState): ReviewDoc {
+  const entry = state.review_entries[state.review_entries.length - 1];
+  if (!entry)
+    return {
+      text: "当前没有可复盘的训练记录；完成打卡并确认后可生成复盘。",
+      stale: false,
+      generated_at: MOCK_UPDATED_AT,
+    };
+  return {
+    text: entry.text,
+    stale: entry.stale,
+    generated_at: entry.generated_at,
+    basis: entry.basis,
+  };
 }
 
 /* ------------------------------ 中间件主体 --------------------------------- */
@@ -3817,7 +5323,7 @@ function createHandler(state: MockState, hub: SseHub) {
       if (path === "/api/stats" && method === "GET")
         return json(res, 200, state.stats);
       if (path === "/api/review" && method === "GET")
-        return json(res, 200, state.review);
+        return json(res, 200, projectReviewDoc(state));
 
       /* 会话 */
       if (path === "/api/sessions" && method === "GET")
@@ -4013,7 +5519,9 @@ function createHandler(state: MockState, hub: SseHub) {
               ? "title" in body.payload && "diff" in body.payload
               : draft.kind === "arrangement"
                 ? "target" in body.payload
-                : "profile" in body.payload;
+                : draft.kind === "training_void"
+                  ? "training_session_id" in body.payload
+                  : "profile" in body.payload;
         if (!payloadMatchesKind)
           return apiError(res, {
             http_status: 400,
@@ -4024,6 +5532,28 @@ function createHandler(state: MockState, hub: SseHub) {
         // 展示与 Diff 随纠错更新（01 1.2）：diff 一律由服务端派生
         if (draft.kind === "training_record") {
           const rp = body.payload as RecordDraftPayload;
+          // 身份/关联不可改写（F4-02 / 05 5.1–5.2）：换目标或换依据必须丢弃重来
+          const prevRp = draft.payload as RecordDraftPayload;
+          if (
+            (rp.training_session_id ?? null) !==
+            (prevRp.training_session_id ?? null)
+          )
+            return apiError(res, {
+              http_status: 400,
+              error_code: "invalid_request",
+              message:
+                "training_session_id 不可改写（更正不换训练身份）；如需改目标请丢弃草稿后重新发起",
+            });
+          if (
+            (rp.arrangement_revision_id ?? null) !==
+            (prevRp.arrangement_revision_id ?? null)
+          )
+            return apiError(res, {
+              http_status: 400,
+              error_code: "invalid_request",
+              message:
+                "arrangement_revision_id 不可改写（更正不重指向安排关联）；如需换依据请丢弃草稿后重新发起",
+            });
           const recInvalid = recordPayloadError(rp);
           if (recInvalid)
             return apiError(res, {
@@ -4032,7 +5562,24 @@ function createHandler(state: MockState, hub: SseHub) {
               message: `训练记录载荷无效，纠错未生效：${recInvalid}`,
             });
           draft.payload = rp;
-          draft.diff = recordDraftDiff(state, rp);
+          draft.diff = recordDraftDiff(state, rp, prevRp);
+        } else if (draft.kind === "training_void") {
+          // 作废草稿无事实可编辑：只允许校正目标训练身份 id
+          const p = body.payload as TrainingVoidPayload;
+          if (
+            !p ||
+            typeof p.training_session_id !== "string" ||
+            p.training_session_id.trim() === ""
+          )
+            return apiError(res, {
+              http_status: 400,
+              error_code: "invalid_request",
+              message: "作废载荷缺少 training_session_id，纠错未生效",
+            });
+          draft.payload = p;
+          draft.diff = [
+            { field: "作废训练身份", new_value: p.training_session_id },
+          ];
         } else if (draft.kind === "plan") {
           const storedPatch = (draft.payload as PlanDraftPayload).profile_patch;
           const normalized = normalizePlanPayload(
@@ -4184,6 +5731,13 @@ function createHandler(state: MockState, hub: SseHub) {
               error_code: "invalid_request",
               message: `训练记录载荷无效，无法确认：${recInvalid}`,
             });
+          // 终态（05 5.3 / 2026-09-13 拍 A）：当前修订为 voided 的身份不再接受更正/复活
+          if (p.training_session_id && isVoidedIdentity(state, p.training_session_id))
+            return apiError(res, {
+              http_status: 409,
+              error_code: "invalid_request",
+              message: "该训练身份已作废（终态），不接受后续更正或复活",
+            });
           const status = deriveRecordDraftStatus(p);
           // 日程关联：仅当草稿显式携带已接受安排时，从安排 target 取（不从日期推断）
           const linkedArr = p.arrangement_revision_id
@@ -4195,19 +5749,26 @@ function createHandler(state: MockState, hub: SseHub) {
             linkedArr?.target.scheduled_session_id ?? null;
           // 稳定训练身份：null = 新建；有 id = 补充/更正（同日多练各自身份）
           trainingSessionId = p.training_session_id ?? nextId("ts");
-          // dev 故障注入：记录确认在写入后、提交前可注入失败并整份回滚
+          // dev 故障注入：记录/更正确认在写入后、提交前可注入失败并整份回滚
           if (state.dev_confirm_failure) {
             state.dev_confirm_failure = false;
             throw new Error("dev 注入失败：训练记录确认事务在写入中途失败");
           }
-          // 多动作：逐动作写入展示友好 TrainingRecord（同日多练以 training_session_id 显式区分）
+          // 多动作：逐动作 append 完整修订行（同一 revision_seq；F4-01 修订模型）
+          const seq = nextRevisionSeq(state, trainingSessionId);
+          const confirmedAt = mockNowIso();
+          // F5-05 回归期：接回版本（mode=return）生效后确认的训练打 period=return（不进 PR）
+          const periodTag: "normal" | "return" | undefined =
+            state.plan?.mode === "return" ? "return" : undefined;
           for (const ex of p.exercises) {
             const cat = CATALOG.find((c) => c.id === ex.exercise_id);
-            state.records.push({
+            state.record_revisions.push({
               id: nextId("rec"),
-              date: p.occurred_on,
+              training_session_id: trainingSessionId,
+              revision_seq: seq,
               kind: p.training_session_id ? "correction" : "new",
               status,
+              date: p.occurred_on,
               exercise: cat?.standard_name_zh ?? ex.exercise_id,
               variant: ex.load_notation ?? "",
               sets: ex.sets.map(setFactsToRecordSet),
@@ -4217,9 +5778,58 @@ function createHandler(state: MockState, hub: SseHub) {
               schedule_snapshot: null,
               scheduled_session_id: linkedSessionId,
               arrangement_revision_id: p.arrangement_revision_id ?? null,
-              training_session_id: trainingSessionId,
+              confirmed_at: confirmedAt,
+              ...(periodTag ? { period: periodTag } : {}),
             });
           }
+          rebuildRecordProjection(state);
+        } else if (draft.kind === "training_void") {
+          // 作废确认（F4-01 最小可用）：追加 voided 修订并切换当前修订指针；
+          // 不物理删除旧修订；终态后拒绝任何后续更正/复活
+          const p = draft.payload as TrainingVoidPayload;
+          if (
+            !p ||
+            typeof p.training_session_id !== "string" ||
+            p.training_session_id.trim() === ""
+          )
+            return apiError(res, {
+              http_status: 400,
+              error_code: "invalid_request",
+              message: "作废草稿缺少 training_session_id，无法确认",
+            });
+          const cur = currentRevisionRows(state, p.training_session_id);
+          if (cur.length === 0)
+            return apiError(res, {
+              http_status: 400,
+              error_code: "invalid_request",
+              message: "训练身份不存在，无法作废",
+            });
+          if (isVoidedIdentity(state, p.training_session_id))
+            return apiError(res, {
+              http_status: 409,
+              error_code: "invalid_request",
+              message: "该训练身份已作废（终态）",
+            });
+          // dev 故障注入：作废确认同样可整份回滚
+          if (state.dev_confirm_failure) {
+            state.dev_confirm_failure = false;
+            throw new Error("dev 注入失败：作废确认事务在写入中途失败");
+          }
+          const seq = nextRevisionSeq(state, p.training_session_id);
+          const confirmedAt = mockNowIso();
+          for (const row of cur) {
+            state.record_revisions.push({
+              ...row,
+              id: nextId("rec"),
+              revision_seq: seq,
+              status: "voided",
+              kind: "correction",
+              confirmed_at: confirmedAt,
+              revision_note: "整次训练已作废（退出统计，历史保留）",
+            });
+          }
+          rebuildRecordProjection(state);
+          trainingSessionId = p.training_session_id;
         } else if (draft.kind === "plan") {
           const p = draft.payload as PlanDraftPayload;
           if (!p.plan || !p.schedules)
@@ -4408,7 +6018,9 @@ function createHandler(state: MockState, hub: SseHub) {
             arrangementSummary ??
             (draft.kind === "training_record"
               ? "训练记录已写入正式数据"
-              : "档案与动作限制已写入正式数据"),
+              : draft.kind === "training_void"
+                ? "训练身份已作废（整次退出统计，历史保留）"
+                : "档案与动作限制已写入正式数据"),
           committed_revision: committedRevision,
           committed_business_version: state.context_version,
           ...(planVersionResult ? { plan_version: planVersionResult } : {}),
@@ -4425,6 +6037,24 @@ function createHandler(state: MockState, hub: SseHub) {
 
       const recalcMatch = path.match(/^\/api\/drafts\/([^/]+)\/recalc$/);
       if (recalcMatch && method === "POST") {
+        // 请求体收口（S4-08 正本 {client_request_id}）：读取并校验，不静默丢弃；
+        // 完整幂等（Pending 子草稿去重）归 F4-06
+        const recalcBody = JSON.parse((await readBody(req)) || "{}") as {
+          client_request_id?: string;
+        };
+        if (
+          typeof recalcBody.client_request_id !== "string" ||
+          recalcBody.client_request_id.trim() === ""
+        )
+          return apiError(res, {
+            http_status: 400,
+            error_code: "invalid_request",
+            message: "缺少 client_request_id（重算请求体正本字段）",
+          });
+        state.recalc_client_request_ids.set(
+          recalcMatch[1],
+          recalcBody.client_request_id,
+        );
         const old = state.drafts.get(recalcMatch[1]);
         if (!old)
           return apiError(res, {
@@ -4441,8 +6071,45 @@ function createHandler(state: MockState, hub: SseHub) {
             message: "该草稿已提交或已丢弃，不可重算",
           });
 
+        /** 新旧草稿 Diff：档案草稿按字段级展示口径；其余 payload 键级对比 */
+        const recalcDraftDiff = (o: Draft, f: Draft): FieldDiff[] => {
+          if (o.kind === "profile_update" && f.kind === "profile_update")
+            return profilePayloadDiff(
+              o.payload as ProfileDraftPayload,
+              f.payload as ProfileDraftPayload,
+            );
+          const op = o.payload as unknown as Record<string, unknown>;
+          const fp = f.payload as unknown as Record<string, unknown>;
+          const rows: FieldDiff[] = [];
+          for (const key of Object.keys(fp)) {
+            const a = JSON.stringify(op[key]);
+            const b = JSON.stringify(fp[key]);
+            if (a !== b)
+              rows.push({
+                field: `payload.${key}`,
+                old_value: a ?? "—",
+                new_value: b ?? "—",
+              });
+          }
+          return rows;
+        };
+
+        // 完整幂等（01 1.6 / F4-06）：同一旧草稿已有 Pending 子草稿时重复请求返回
+        // 同一子草稿（不重复生成）；子草稿进入终态后再生成不在本阶段范围
+        const pendingChild = [...state.drafts.values()].find(
+          (d) => d.parent_draft_id === old.id && d.status === "pending",
+        );
+        if (pendingChild) {
+          if (old.status !== "stale") old.status = "stale";
+          return json(res, 200, {
+            new_draft: pendingChild,
+            old_draft: old,
+            draft_vs_draft_diff: recalcDraftDiff(old, pendingChild),
+          } satisfies RecalcResult);
+        }
+
         // F0-02B1：重算仅是陈旧冲突恢复——只接受「pending 且 base 已落后于当前上下文」的草稿。
-        // 已重算过的 stale 草稿不可重复重算（重算动作在其新草稿上进行）；
+        // 已重算过且无 Pending 子草稿的 stale 草稿不可重复重算（终态后再生成不在本阶段）；
         // 仍基于最新上下文的 pending 草稿没有重算必要，直接走确认即可
         if (old.status === "stale")
           return apiError(res, {
@@ -4474,6 +6141,34 @@ function createHandler(state: MockState, hub: SseHub) {
             parent_draft_id: old.id,
             payload: { ...p },
             diff: recordDraftDiff(state, p),
+          };
+        } else if (old.kind === "training_void") {
+          // F4-06：作废草稿不得落 profile 兜底分支——保持 kind/payload，仅按最新上下文重绑基线
+          const p = old.payload as TrainingVoidPayload;
+          const target = state.records.find(
+            (r) => r.training_session_id === p.training_session_id,
+          );
+          fresh = {
+            id: nextId("draft"),
+            kind: "training_void",
+            status: "pending",
+            revision: 1,
+            base_business_version: state.context_version,
+            parent_draft_id: old.id,
+            payload: { ...p },
+            diff: [
+              {
+                field: "作废训练身份",
+                new_value: target
+                  ? `${p.training_session_id}（${target.date} · ${target.exercise}）`
+                  : p.training_session_id,
+              },
+              {
+                field: "影响范围",
+                new_value:
+                  "确认后该次退出完成率/三桶/PR；历史修订保留可追溯、不物理删除、不回退旧有效版本；作废即终态（不再接受更正/复活）",
+              },
+            ],
           };
         } else if (old.kind === "plan") {
           const oldPayload = old.payload as PlanDraftPayload;
@@ -4522,39 +6217,13 @@ function createHandler(state: MockState, hub: SseHub) {
         // 重算新草稿归属同一会话（sessions/:id/drafts 可恢复）
         const oldSession = state.draft_sessions.get(old.id);
         if (oldSession) state.draft_sessions.set(fresh.id, oldSession);
+        // 旧草稿不改写 payload（01 1.6：不自动合并/自动采纳）；仅标记 stale 表示已被子草稿取代
         old.status = "stale";
-
-        // 新旧草稿 Diff：档案草稿按字段级展示口径对比两份载荷；其余草稿保持原 payload 键级对比
-        let diff: FieldDiff[] = [];
-        if (old.kind === "profile_update" && fresh.kind === "profile_update") {
-          diff = profilePayloadDiff(
-            old.payload as ProfileDraftPayload,
-            fresh.payload as ProfileDraftPayload,
-          );
-        } else {
-          // SAFETY: payload 只做字段级序列化对比，不当成可变记录使用；DraftPayload 联合类型的键在此处按 JSON 视图遍历
-          const oldPayload = old.payload as unknown as Record<string, unknown>;
-          // SAFETY: 同上，fresh.payload 为刚生成的 DraftPayload，仅用于与旧草稿做 JSON 字段对比
-          const newPayload = fresh.payload as unknown as Record<
-            string,
-            unknown
-          >;
-          for (const key of Object.keys(newPayload)) {
-            const a = JSON.stringify(oldPayload[key]);
-            const b = JSON.stringify(newPayload[key]);
-            if (a !== b)
-              diff.push({
-                field: `payload.${key}`,
-                old_value: a ?? "—",
-                new_value: b ?? "—",
-              });
-          }
-        }
 
         const result: RecalcResult = {
           new_draft: fresh,
           old_draft: old,
-          draft_vs_draft_diff: diff,
+          draft_vs_draft_diff: recalcDraftDiff(old, fresh),
         };
         return json(res, 200, result);
       }

@@ -1,0 +1,52 @@
+﻿# f3-03-probe.mjs
+# date: 2026-09-13 13:47:36
+# exit=0 PASS=26 FAIL=0
+
+PASS ProfilePage 源码含「尚无安排」
+PASS ProfilePage 源码含「已接受安排」相关文案（经 planView label）
+PASS ScheduleSection 无输入控件（无 input/textarea/select/button 标签） — function ScheduleSection({
+  entries,
+  plan,
+  arrangements,
+}: {
+  entries: PlanScheduleEntry[];
+ 
+PASS 徽章分类：全等 → 未调整 — identical
+PASS 徽章分类：仅 keep 升目标用力 → 目标更保守 — more_conservative
+PASS 徽章分类：减组 → 已调整 — adjusted
+PASS 徽章分类：降目标用力（服务端本应拒）不标未调整 — adjusted
+PASS 徽章分类：条目集合不一致 → 已调整 — adjusted
+PASS 种子：09-07 安排已接受且卧推已调整（减组 4→3） — {"accepted_at":"2026-09-07T08:10:00.000Z","sets":[4,3]}
+PASS 种子：08-31 keep 安排与计划全等（未调整） — {"d":"keep","sets":4}
+PASS 种子：09-07 分类器 → 已接受安排 · 已调整 — adjusted
+PASS 种子：08-31 分类器 → 已接受安排 · 未调整 — identical
+PASS 种子：今日 09-11 尚无安排 — ["2026-08-31","2026-09-02","2026-09-07"]
+PASS 种子：今日腿日按日期规则锁定 — {"id":"sched-v2-2026-09-11","plan_version":"v2","date":"2026-09-11","plan_workout_key":"legs","weekday":5,"stored_status":"locked","locked_by_date_rule":true,"locked_effective":true}
+PASS 接受今日安排前：指导按计划腿日处方（深蹲 4 组） — 下一个应训练日：2026-09-11（周五）· 腿日 · 预计 60 分钟（计划 v2）
+- 杠铃背蹲 4 组 × 6-8 次，每一组结束还能再做 1-3 次的重量（双重渐进）
+- 杠铃罗马尼亚硬拉 3 组 × 8-10 次，每一组结束还能再做 1-3 次的重量（双重渐进）
+- 腿屈伸 3 组 × 12-15 次，每一
+PASS 指导主文案无 RIR 缩写（§3.1 目标用力大白话） — 还能再做 1-3 次的重量（双重渐进）
+PASS 生成今日 deload 安排草稿 — 已按「2026-09-11 状态一般」生成**当次安排草稿**（只影响这一练，不修改长期计划）（今日日程已按日期规则锁定，但处方仍可当次调整——日程锁定 ≠ 处
+PASS 确认今日安排落盘 — {"draft_id":"draft-106","status":"committed","newly_committed":true,"context_version":4,"summary":"当次安排已确认（修订 arr-108）：不修改长期计划，仅影响 2026-09-11","committed_revision":1,"committed_business_version":4,"arrangement_revision_id":"arr-108"}
+PASS 今日安排深蹲已减组（< 计划 4 组） — sets=3
+PASS 接受后：指导按已接受安排（深蹲组数=安排、标明按已接受安排） — 下一个应训练日：2026-09-11（周五）· 腿日 · 预计 60 分钟（计划 v2 · **按已接受安排**）
+安排原因：当日状态一般：各动作减 1 组（方案 1），其余目标保持计划
+- 杠铃背蹲 3 组 × 6-8 次，每一组结束还能再做 1-3 次的重量（双重渐进）
+- 杠铃罗马尼亚硬拉 2 组 × 8-10 次，每一组结束还能再做 1-3 次的重量（双重渐进）
+- 腿屈伸 2 组 × 1
+PASS 经档案链路新增命中腿日限制（草稿可确认） — profile_update 已记录：训练目标：增肌（肌肥大）；训练经验：初级（有少量训练经验）；每周频率：3 次；单次时长：60 分钟；可用器械：杠
+PASS 确认腿日限制档案更新 — {"draft_id":"draft-114","status":"committed","newly_committed":true,"context_version":5,"summary":"档案与动作限制已写入正式数据","committed_revision":1,"committed_business_version":5}
+PASS 限制后安全复核整份不可用 — {"context_version":5,"reviewed_at":"2026-09-13T05:49:03.346Z","red_flag_blocked":false,"usable":false,"conflicts":[{"exercise_id":"barbell-back-squat","exercise_name":"杠铃背蹲","restriction":{"name":"深蹲","scope":"movement_pattern","note":"补充档案：目标增肌，初级经验，每周 3 次，每次 60 分钟，可用器材：杠铃、哑铃、卧推架、引体架、绳索，体重 72.5kg，深蹲时膝部不适，没有其他不适。"}}]}
+PASS 限制冲突：整份阻断、不输出任何处方列表 — 按最新限制复核当前计划 v2：**整份计划指导已阻断**——任一动作命中限制时，我不会给出任何基于该计划或已接受安排的处方，也不会只跳过冲突动作、继续给其余「未冲突」动作的处方。
+- 冲突：杠铃背蹲 命中限制「深蹲」（动作模式）
+正式计划 v2 与它的当前日程仍可在「档案与限制」页查看（不隐藏、不改写，也不标为「部分可用」）。
+修改计划只能从对话发起：说明你
+PASS 阻断时旧计划与日程仍可查看（文案保留）
+PASS 红旗：建议线下专业评估、无处方、无草稿 — > ⚠️ 你报告的「最近胸部异常不适」属于需要专业评估的情况：建议尽快线下就医并由专业人员评估。
+> 我不会在此基础上给出任何训练建议；该描述已按原文记入身体情况，分类在读取时进行。Agent 不诊断，也不解除这类阻断。
+
+当前身体情况命中需要专业评估的症状，本次不给出任何基于计划的训练指导。请先完成线下专业评估；经专
+
+全部通过
+

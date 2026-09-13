@@ -123,7 +123,8 @@ check(
 check(
   "mock：种子日期 MOCK_TODAY=2026-09-11 且启动即 recomputeStats",
   /const MOCK_TODAY = "2026-09-11"/.test(serverSrc) &&
-    /recomputeStats\(state\);\s*\n\s*return state;/.test(serverSrc),
+    // F5-01 起 recomputeStats 与 return 之间可有 basis 回填等语句；断言「启动路径调用 recomputeStats」即可
+    /recomputeStats\(state\);[\s\S]{0,160}return state;/.test(serverSrc),
 );
 
 /* ---------- 2. 种子事实表（§3.5） ---------- */

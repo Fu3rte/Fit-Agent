@@ -46,7 +46,10 @@ const confirm = (id, revision) =>
   api("POST", `/api/drafts/${id}/confirm`, { revision });
 const revise = (id, payload, revision) =>
   api("POST", `/api/drafts/${id}/revise`, { payload, revision });
-const recalc = (id) => api("POST", `/api/drafts/${id}/recalc`, {});
+const recalc = (id) =>
+  api("POST", `/api/drafts/${id}/recalc`, {
+    client_request_id: `f2-04-recalc-${Date.now()}-${Math.random()}`,
+  });
 const discard = (id) => api("POST", `/api/drafts/${id}/discard`, {});
 
 async function startRun(session, message) {

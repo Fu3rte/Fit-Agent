@@ -14,6 +14,7 @@ import type {
   DraftPayload,
   ProfileResponse,
   ProviderConfig,
+  RecalcRequest,
   RecalcResult,
   ReviewDoc,
   ReviseRequest,
@@ -129,8 +130,17 @@ export const reviseDraft = (
 export const discardDraft = (draftId: string) =>
   post<DiscardResult>(`/api/drafts/${draftId}/discard`);
 
-export const recalcDraft = (draftId: string) =>
-  post<RecalcResult>(`/api/drafts/${draftId}/recalc`);
+/**
+ * 一键重算（01 1.6）：body 携带 client_request_id 幂等键（契约 RecalcRequest）；
+ * 未显式传入时生成一次性 UUID，请求体形状始终符合契约。
+ */
+export const recalcDraft = (
+  draftId: string,
+  client_request_id: string = crypto.randomUUID(),
+) => {
+  const body: RecalcRequest = { client_request_id };
+  return post<RecalcResult>(`/api/drafts/${draftId}/recalc`, body);
+};
 
 /* --------------------------------- SSE ------------------------------------ */
 

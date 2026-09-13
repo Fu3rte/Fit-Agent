@@ -716,16 +716,28 @@ function itemStructuralError(
   }
   if (ex.record_type === "external_load_reps") {
     const load = ex.load;
-    if (!load || load.kind !== "needs_calibration")
-      return `${label}外加负重动作在无可信记录时必须为 needs_calibration（不猜重）：${ex.item_key}`;
-    if (
-      load.steps.length === 0 ||
-      load.pass_criteria.trim() === "" ||
-      load.stop_criteria.trim() === ""
-    )
-      return `${label}动作须给出完整校准说明：${ex.item_key}`;
-    if (/RIR/.test(load.pass_criteria))
-      return `${label}校准通过标准不得把 RIR 当硬性条件（D3）：${ex.item_key}`;
+    // F5-06：有可信记录时允许 verified（basis_record_revision_id 必填）；
+    // 无可信记录仍必须 needs_calibration（D3 不猜重）。种子/首版生成路径仍恒为 needs_calibration。
+    if (!load) return `${label}外加负重动作必须携带负荷形态（verified | needs_calibration）：${ex.item_key}`;
+    if (load.kind === "verified") {
+      if (!(load.value > 0))
+        return `${label}已验证负荷须为正数：${ex.item_key}`;
+      if (!load.load_notation.trim())
+        return `${label}已验证负荷缺负重口径 load_notation：${ex.item_key}`;
+      if (!load.basis_record_revision_id?.trim())
+        return `${label}已验证负荷必须标注 basis_record_revision_id（可信历史来源）：${ex.item_key}`;
+    } else if (load.kind === "needs_calibration") {
+      if (
+        load.steps.length === 0 ||
+        load.pass_criteria.trim() === "" ||
+        load.stop_criteria.trim() === ""
+      )
+        return `${label}动作须给出完整校准说明：${ex.item_key}`;
+      if (/RIR/.test(load.pass_criteria))
+        return `${label}校准通过标准不得把 RIR 当硬性条件（D3）：${ex.item_key}`;
+    } else {
+      return `${label}负荷形态不在已拍两态内：${ex.item_key}`;
+    }
   } else if (ex.load !== undefined) {
     return `${label} load 仅用于外加负重动作：${ex.item_key}`;
   }

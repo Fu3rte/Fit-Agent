@@ -54,7 +54,10 @@ const confirm = (id, revision) =>
 const revise = (id, payload, revision) =>
   api("POST", `/api/drafts/${id}/revise`, { payload, revision });
 const discard = (id) => api("POST", `/api/drafts/${id}/discard`, {});
-const recalc = (id) => api("POST", `/api/drafts/${id}/recalc`, {});
+const recalc = (id) =>
+  api("POST", `/api/drafts/${id}/recalc`, {
+    client_request_id: `f3-06-recalc-${Date.now()}-${Math.random()}`,
+  });
 
 async function run(session, message) {
   const started = await api("POST", "/api/runs", {
