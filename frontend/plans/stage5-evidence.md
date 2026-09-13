@@ -1,110 +1,102 @@
-# Stage 5 验收证据（F5-01–F5-07）
+# Stage 5 验收证据（F5-01–F5-07：复盘闭环 + 接回/渐进）
 
-> 对应 `plans/stage5.md` 第 5 节 F5-01–07 与第 6 节证据格式。
-> **F5-07 证据层（2026-09-13）**：协议级第 7 节 11 步覆盖核对 + 探针全量重跑归档 + `npm run build` 零错误。
-> **证据分层：**
-> 1. **协议级**（mock HTTP / 模块级）：§2–§3 实际执行结果，可复现。
-> 2. **UI / 浏览器走查**：**owner 浏览器 §7 全剧本走查通过（2026-09-13）**，见 §3「浏览器」列与 §7 结论。
-> 3. mock 通过 ≠ 真实链路通过：未接真实后端/模型/数据库/Windows 验收。
-> 4. 范围：只改 `frontend/` 证据与探针；未改 `backend/`、`pre-prj/` 决策正本；不 commit。
+> 契约正本指针：`plans/stage5.md`（范围/任务/§7 剧本）；实现细节以 `src/lib/contract.ts` / `src/mock/server.ts` 为准。
+> **证据分层**：协议级可复现（vite 随机端口 + `/api/*`）/ UI=owner 浏览器 §7 全剧本走查（2026-09-13，口述确认，无截图）/ **mock≠真实链路** / 本阶段只改 `frontend/`，未改 `backend/`、`pre-prj/`。
+> **基线**：HEAD `24d9751`（Stage4+5 一并入库）；Windows；Node v22；证据日期 2026-09-13。
 
-## 0. 环境与代码版本
+## 1. 结果正本
 
-| 项 | 值 |
+| 门 | 命令/结论 | 实际 |
+|---|---|---|
+| 类型 | `node node_modules/typescript/bin/tsc -b --pretty false`（`npx tsc` 会命中占位包，勿用） | **EXIT=0** |
+| 构建 | `npm run build` | **EXIT=0**，`✓ built in 5.24s`（仅既有 chunk 警告） |
+| F5 探针合计 | f5-01…06 | **PASS=144 / FAIL=0**（27+31+22+19+29+16） |
+| 回归 | f4-01 + f4-05 + f3-02 + f3-01 | **PASS=129 / FAIL=0**（30+31+32+36） |
+| Owner | 浏览器 §7 全剧本 1–10 步 | **走查通过 + 整阶段结项（2026-09-13）** |
+
+## 2. 覆盖对照（探针 → 验收单元）
+
+| 探针 | 验证了什么 | PASS | 归档 |
+|---|---|---|---|
+| f5-01 | 契约 `ReviewBasis`/`ReviewEntry`；append-only；冻结快照+source_revision_ids；save fail-next 整份不落；stale 翻最新条；empty 无 basis 不编造；无新业务端点 | 27 | `stage5-evidence-assets/f5-01-probe-out.txt` |
+| f5-02 | 显式生成/重生成 append；正文数字=basis；模糊/「看复盘」不落库；empty 拒绝；对话 fail-next 不落可重做；cv/plan/草稿不变 | 31 | `f5-02-probe-out.txt` |
+| f5-03 | `/review` 最新条+BasisSummary；stale 徽章；预填「生成训练复盘」命中生成；只读无 RIR/无历史/无新路由 | 22 | `f5-03-probe-out.txt` |
+| f5-04 | 复盘建议不自动建草稿；`isSuggestLong`→plan / `isSuggestAdjust`→arrangement；确认/幂等/fail 回滚；旧版 future 未锁定取消；复盘 text 不改写 | 19 | `f5-04-probe-out.txt` |
+| f5-05 | 显式接回 + ≥7 天澄清；三档 mode=return；红旗/病后无许可只转介；`period=return` PR 排除；日程窗 7 天 | 29 | `f5-05-probe-out.txt` |
+| f5-06 | 显式渐进候选（达上限→最小增量 80→82.5）；无记录不猜重；长期 plan 草稿；非显式不给 | 16 | `f5-06-probe-out.txt` |
+| 回归 | Stage2–4 关键链 | 129 | `f5-07-regression-out.txt` |
+| §7 剧本 | 步 1–10 协议级+浏览器均 PASS；步 11 build | — | 本文件 §3 |
+
+实现落点（指针，不复述契约）：`contract.ts`（Review*、`TrainingRecord.period`）；`mock/server.ts`（intent 链：`REVIEW_GENERATE` → return/clarify → `isProgression` → `isSuggestLong` → arrangement/`isSuggestAdjust` → plan；`saveReviewEntry`/`returnAssessmentReply`/`deriveProgressionCandidates`）；`mock/plan.ts`（verified load 须 `basis_record_revision_id`）；`ReviewPage.tsx`（BasisSummary）。
+
+## 3. 特殊事件与拍板链
+
+| 事件 | 决定 → 落地 → 复核 |
 |---|---|
-| 平台 | Windows；Node v22.22.3；TypeScript 5.8.3；vite 7.3.6 |
-| 代码版本 | 复跑时 HEAD `ee72a18`；Stage 5 改动**在工作树未提交**（F5-01–06 实现 + 本任务证据归档；另修 `scripts/f3-01-probe.mjs` 正则一处） |
-| 证据日期 | 2026-09-13（F5-07 协议级闭环归档） |
-| mock 运行 | 探针以 vite 程序化启动（随机端口），不触碰用户 5173 |
-| 网络 | 进程内 fetch，无外网、无模型调用 |
-| 归档产物 | `plans/stage5-evidence-assets/`：`f5-0{1..6}-probe-out.txt`、`f5-07-regression-out.txt`（f4-01 + f4-05 + f3-02 + f3-01）、`f5-07-build.log` |
+| 「看/展示/显示复盘」曾进 `REVIEW_GENERATE` | owner 拍**收紧**：仅「生成/重新生成/更新+复盘」append；看类只读 → 改正则+GENERIC_REPLY 示例+补 f5-02「看复盘」不 append 断言 → f5-02 31 PASS |
+| 病后未获专业允许 | owner 拍**只转介/建议休息**（非 PRD §5.12「最低活动建议或转介」字面）→ `returnAssessmentReply` 无许可不落处方 → f5-05 PASS |
+| 中断 7 天 | owner 拍**代码常量** `INTERRUPT_DAYS=7`，不暴露设置 → 闸门只澄清，确认才评估 → f5-05 PASS |
+| 最低版日程曾投影 >7 名额 | 对齐正本「3–7 天」→ 接回 draft `review_on=starts_on+7`（仍单套 `projectSchedules`）→ f5-05 复跑 29 PASS |
+| f3-01 启动断言误伤 | 现象：F5-01 在 `recomputeStats` 与 `return state` 间插 basis 回填，原正则 FAIL → 放宽相邻行、**仍锁 recomputeStats 调用** → f3-01 36 PASS |
+| 渐进长期草稿基线 | 种子含档案外器械（腿屈伸），原样改 load 会 `catalogViolation` → 以 `buildPplDraft` 重生成再写 verified load（与 F5-04 同链路）→ f5-06 PASS |
+| B 档范围 | 原拍另拆 → owner 改拍并入 Stage5 为 F5-05/06 → 计划确认后实施；F5-06 曾后置再开工 |
 
-主要实现文件（F5-01–06，详见各 worker report）：`src/lib/contract.ts`、`src/lib/api.ts`、`src/mock/server.ts`、`src/mock/plan.ts`、`src/features/review/ReviewPage.tsx`、`scripts/f5-0{1..6}-probe.mjs`。  
-F5-07 本任务：**不新增业务代码**；未写 `f5-07-evidence-probe.mjs`（§7 空口均已被 f5-01–06 / f3–f4 既有探针覆盖，不硬造）；**探针修正**：`scripts/f3-01-probe.mjs` 启动 `recomputeStats` 断言正则放宽（F5-01 起 `recomputeStats` 与 `return state` 之间有 basis 回填两行，原 `\\s*\\n\\s*return` 过紧；不改业务语义）。
+## 4. Owner 浏览器走查（§7）
 
-## 1. 构建
+前置：default 种子 mock 日期 `2026-09-11`；`npm run dev`。
 
-| 命令 | 预期 | 实际 |
+| 步 | 操作要点 | 结论 |
 |---|---|---|
-| `node node_modules/typescript/bin/tsc -b --pretty false` | 零错误 | **EXIT=0**（2026-09-13 F5-07 复跑） |
-| `npm run build`（`tsc -b && vite build`） | 零错误 | **EXIT=0**，`✓ built in 5.24s`；仅既有 chunk>500kB 警告；归档 `f5-07-build.log` |
+| 1 | `/review` 统计只读、无输入 | PASS |
+| 2 | 对话「生成复盘」→ 最新条+冻结数字 | PASS |
+| 3 | 建议不自动生效 | PASS |
+| 4 | 调整意图→草稿→确认 cv+1；幂等/失败 | PASS |
+| 5 | 更正/作废→stale 徽章、正文不变 | PASS |
+| 6 | 重新生成再追加 | PASS |
+| 7 | empty 暂无/拒绝不编造 | PASS |
+| 8 | 失败注入不落→重做 | PASS |
+| 9 | 刷新查询恢复 | PASS |
+| 10 | 接回三档+渐进建议确认链 | PASS |
+| 11 | build+归档 | PASS（协议级） |
 
-## 2. 协议探针（F5-07 全量重跑归档）
+依据：`stage5.md` §7；口述确认（无截图）。
 
-方法：沿用 f2–f4 模式（vite 起服务 + `/api/*` + 模块断言）；无测试框架、无新依赖。下列为 **2026-09-13 F5-07 全量重跑**（exit 均为 0，FAIL 均为 0）。
+## 5. 复现
 
-| 探针 | 覆盖 | 结果 | 归档 |
-|---|---|---|---|
-| `f5-01-probe.mjs` | 契约 ReviewBasis/ReviewEntry；append-only 存储；冻结快照；保存失败整份不落；stale 翻转；empty 空态；无新业务端点 | **PASS=27 / FAIL=0** | `f5-01-probe-out.txt` |
-| `f5-02-probe.mjs` | 显式生成/重新生成；模糊不落库；empty 拒绝不编造；fail-next 不落库可重做；cv/plan 不变 | **PASS=31 / FAIL=0** | `f5-02-probe-out.txt` |
-| `f5-03-probe.mjs` | `/review` 最新条+basis；stale 徽章源码；预填文案命中生成路径；无输入控件/无历史列表/无 RIR | **PASS=22 / FAIL=0** | `f5-03-probe-out.txt` |
-| `f5-04-probe.mjs` | 复盘后建议不自动建草稿；长期/当次草稿；确认/幂等/回滚；复盘 text 不改写 | **PASS=19 / FAIL=0** | `f5-04-probe-out.txt` |
-| `f5-05-probe.mjs` | 显式/≥7 天接回；三档；红旗阻断；病后只转介；回归期 PR 排除 | **PASS=29 / FAIL=0** | `f5-05-probe-out.txt` |
-| `f5-06-probe.mjs` | 显式渐进；无记录不猜重；最小增量；长期草稿确认链；empty/非显式不给 | **PASS=16 / FAIL=0** | `f5-06-probe-out.txt` |
-| f4-01 + f4-05 + f3-02 + f3-01 回归 | Stage 2–4 关键链路未回归（契约/作废/只读看板/安排事务/打卡） | f4-01 **30/0**；f4-05 **31/0**；f3-02 **32/0**；f3-01 **36/0** | `f5-07-regression-out.txt` |
+```bash
+cd frontend
+node node_modules/typescript/bin/tsc -b --pretty false
+node scripts/f5-01-probe.mjs   # expect 27
+node scripts/f5-02-probe.mjs   # expect 31
+node scripts/f5-03-probe.mjs   # expect 22
+node scripts/f5-04-probe.mjs   # expect 19
+node scripts/f5-05-probe.mjs   # expect 29
+node scripts/f5-06-probe.mjs   # expect 16
+# 回归（可选门）
+node scripts/f4-01-probe.mjs   # 30
+node scripts/f4-05-probe.mjs   # 31
+node scripts/f3-02-probe.mjs   # 32
+node scripts/f3-01-probe.mjs   # 36
+npm run build                  # EXIT=0
+```
 
-**F5 合计 PASS=144 / FAIL=0**（27+31+22+19+29+16）。  
-**回归合计 PASS=129 / FAIL=0**（30+31+32+36）。
+- 入库：本文件、`f5-0{1..6}-probe-out.txt`、`f5-07-regression-out.txt`、探针脚本。（原 f5-01–06 worker report 已并入本文件并删除）
+- 不入库：`*.log`（`.gitignore`；`f5-07-build.log` 本地可留）。
 
-## 3. 第 7 节 11 步覆盖对照
+## 6. 缺口（红线：不得当成已验证）
 
-前置均为 mock default 种子（mock 日期 `2026-09-11`）。下表「协议级结果」列一律为协议级结论；「浏览器」列另记 owner 走查（2026-09-13 全剧本通过）。
-
-| §7 步 | 主覆盖探针 | 协议级结果 | 浏览器 |
-|---|---|---|---|
-| 1 统计只读（W1 2/3、W2 1/3、三桶、PR、data_updated_at；无输入控件） | f5-01 种子基线 + f5-03（basis/stats 对齐、源码无 input）+ f4-05 回归 | **协议级已覆盖 / PASS** | **已走查 / PASS** |
-| 2 显式生成（冻结→追加→最新条+generated_at） | f5-02 §1；f5-03 预填→生成路径 | **协议级已覆盖 / PASS** | **已走查 / PASS** |
-| 3 建议不自动生效（生成后正式计划/日程/cv 不变、无草稿） | f5-04 §1（generate 后 draft=0、cv 不变） | **协议级已覆盖 / PASS** | **已走查 / PASS** |
-| 4 后续调整（意图→草稿 Diff→确认 cv+1；幂等；fail 回滚） | f5-04 §3（plan v3 cancels=12；fail-next 回滚；重复确认 newly_committed=false） | **协议级已覆盖 / PASS** | **已走查 / PASS** |
-| 5 依据变更与 stale（正文/generated_at 逐字不变+徽章文案） | f5-01 作废→stale；f5-03 徽章源码+更正后 stale；f4-05 回归 | **协议级已覆盖 / PASS** | **已走查 / PASS** |
-| 6 重新生成（再追加；UI 仍只最新） | f5-02 重新生成条数+1、旧条保留 | **协议级已覆盖 / PASS** | **已走查 / PASS** |
-| 7 空数据（empty：「暂无」；拒绝或空态，不编造） | f5-01/f5-02/f5-03 empty 分支；f5-06 empty 加重不猜重 | **协议级已覆盖 / PASS** | **已走查 / PASS** |
-| 8 失败注入（保存失败不落；重做成功） | f5-01 save fail-next；f5-02 对话路径 fail-next 可重做 | **协议级已覆盖 / PASS** | **已走查 / PASS** |
-| 9 刷新恢复（最新复盘与正式状态经查询恢复） | GET `/api/review` 最新投影 + GET `/api/stats` 现算（f5-01/02/03 运行时读回）；草稿侧沿用 f3-06 协议口径（本阶段未另跑 f3-06） | **协议级已覆盖（查询恢复）/ PASS** | **已走查 / PASS** |
-| 10 接回与渐进（三档草稿确认+回归期；渐进确认） | f5-05 + f5-06 | **协议级已覆盖 / PASS** | **已走查 / PASS** |
-| 11 构建与归档 | `npm run build` EXIT=0 + 本文件与 assets/ | **协议级已覆盖 / PASS** | n/a |
-
-## 4. F5-01–07 验收对照
-
-| 任务 | 验收要点 | 结论 |
-|---|---|---|
-| F5-01 | 契约唯一来源；append-only；冻结；失败整份不落；stale 口径 | 协议级 PASS（27/0）+ f4 回归；owner 走查通过 |
-| F5-02 | 仅显式生成；正文数字=冻结；重生成不覆盖；空数据拒绝 | 协议级 PASS（31/0）；owner 走查通过 |
-| F5-03 | 最新条+basis；徽章；预填；只读无 RIR；无新路由 | 协议级 PASS（22/0）；owner 走查通过 |
-| F5-04 | 建议不自动生效；复用草稿事务；幂等/回滚 | 协议级 PASS（19/0）；owner 走查通过 |
-| F5-05 | 接回触发/三档/红旗/病后转介/回归期 PR 排除 | 协议级 PASS（29/0）；owner 走查通过 |
-| F5-06 | 显式渐进；不猜重；最小增量；既有确认链 | 协议级 PASS（16/0）；owner 走查通过 |
-| F5-07 | 第 7 节协议覆盖核对 + 证据归档 + build | 协议级 PASS（全量重跑 + 回归 + build 0）；owner 浏览器 §7 全剧本走查通过；Stage 5 已结项（2026-09-13） |
-
-## 5. mock 边界（不得标为已验证）
-
-以下**明确未验证**，不得写成已通过：
-
-- 真实后端复盘 Run（`POST /api/reviews`）、真实 `ReviewStore` 竞态回滚
-- 真实模型/Agent 复盘正文解释质量与数字保真
-- 真实数据库、真实 HTTP/SSE、Provider
-- Windows 验收（owner 本机验收流）
-- 09 章 pass³／裁判校准正式测评
-- 交接 F1／F5–F9 端点拆分与形状重构
-
-（owner 浏览器 §7 全剧本走查已于 2026-09-13 通过，不再列入未验证项；mock 通过仍≠真实链路通过。）
-
-## 6. 未覆盖 / 已知边界（摘自 F5-01–06 worker reports）
-
-| 项 | 出处 | 说明 |
-|---|---|---|
-| 当次安排加重草稿 | f5-06 | 安排 `keep`/`deload` 语义限制；仅交付长期 plan 草稿路径，**未拍** |
-| 渐进长期草稿基线 = `buildPplDraft` 重生成 | f5-06 | 非种子原样改 load；确认后动作集可能与种子不完全一致（与 F5-04 同链路） |
-| 最低版日程投影名额可能 >7 | f5-05 | 复用 `projectSchedules` 未截断；文案写 3–7 天 |
-| 完成率仍计回归期记录 | f5-05 | 仅 PR 排除；若 06 章要求完成率也排除需另拍 |
-| 档案级红旗接回二次断言弱 | f5-05 | 消息级红旗已覆盖；档案红旗靠既有 buildPpl/planPayloadError 拦截 |
-| load 候选用「最近一条达区间上限的 valid 记录」 | f5-06 | 非字面「最近一条记录」（09-07 deload 未达上限） |
-| 当次加重处置未拍 | f5-06 缺口 | 触发条件性待拍：必须另拍语义才能实施 |
-| 对话流式分段优化 | f5-02 | 正文一次生成；沿用既有 text.split |
-| 子草稿终态后再 recalc（01 1.6 完整语义） | Stage4 遗留 | 本阶段未扩 |
+1. **mock≠真实**：真实 `POST /api/reviews` / `ReviewStore` 竞态、真实模型正文质量、真实 DB/HTTP/SSE/Provider、Windows 验收、09 章测评、F1/F5–F9 端点拆分——均未验证。
+2. **当次加重处置未拍**：安排 keep/deload 语义限制；仅长期 plan 渐进草稿路径。
+3. **渐进草稿基线 = `buildPplDraft` 重生成**：确认后动作集可能与种子不完全一致。
+4. **完成率仍计回归期**：仅 PR 排除 `period=return`；若 06 章要求完成率也排除需另拍。
+5. **档案级红旗接回二次断言弱**：消息级红旗已覆盖；档案红旗靠既有 plan 校验。
+6. **load 候选 =「最近一条达区间上限的 valid 记录」**，非字面「最近一条记录」。
+7. **`帮我加重` 只出文本**；长期意图才出草稿（改 `PROGRESSION_LONG` 一行可扩）。
+8. **子草稿终态后再 recalc**（01 1.6 完整语义）Stage4 遗留，本阶段未扩。
+9. **接回日程窗**：已收窄 `review_on=starts_on+7`；若未来放宽复核窗，须再截断投影，勿默认 `projectSchedules` 全窗。
+10. **§7 步 9**：刷新恢复协议级读回 `/api/review`+`/api/stats`；草稿侧沿用 f3-06 既有口径，本阶段**未另跑 f3-06**。
+11. **有意不作为**：未写 `f5-07-evidence-probe.mjs`（空口已被 f5-01–06 覆盖，不硬造）。
 
 ## 7. 结论
 
-F5-01–06 协议级完成（各 worker report）；F5-07 完成协议级证据归档：**F5 合计 PASS=144 / FAIL=0**，回归 f4-01/f4-05/f3-02/f3-01 **PASS=129 / FAIL=0**，`npm run build` **EXIT=0**。  
-**Stage 5 已结项（协议级 + owner 走查，2026-09-13）**——owner 浏览器 §7 全剧本走查通过 + 整阶段结项确认。  
-真实链路、真实 ReviewStore、真实模型与 Windows 验收不在本证据范围（Stage 6 及后续）。mock 通过不得声称为真实链路通过。
+**Stage 5 已结项（协议级 + owner 走查，2026-09-13）**：F5-01–07 完成；F5=144/0，回归=129/0，build EXIT=0。mock 通过不得声称为真实链路通过。
