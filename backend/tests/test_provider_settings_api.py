@@ -17,7 +17,7 @@ from pathlib import Path
 from fastapi.testclient import TestClient
 
 from api.app import create_app
-from runtime.models import QWEN37_FLASH
+from runtime.models import QWEN36_FLASH, QWEN37_FLASH
 
 #: 与产品投影同一来源（不再写死历史 Provider 标识）。
 
@@ -118,16 +118,16 @@ def test_provider_label_and_credential_slot_follow_the_frozen_catalog_spec(
 ) -> None:
     """Provider 标识与凭据槽位同取冻结模型目录（2026-09-13 复审 P2 的处置）。
 
-    默认 Harness（无 ``harness.toml``）的模型是 Stage 6 目录项（owner env ``MODEL_NAME``
-    实际值）：公开 ``provider`` 字段、``base_url``、模型 id 与**凭据槽位**必须同源，
+    默认 Harness（无 ``harness.toml``）的模型是 Stage 6 目录项（owner 指定
+    ``qwen3.6-flash``）：公开 ``provider`` 字段、``base_url``、模型 id 与**凭据槽位**必须同源，
     不得遗留写死的历史 Provider 标识。
     """
     data_dir = tmp_path / "data"
     with TestClient(create_app(data_dir), base_url=BASE_URL) as client:
         body = client.get("/api/provider").json()
-        assert body["provider"] == QWEN37_FLASH.provider == "aliyun-bailian"
-        assert body["base_url"] == QWEN37_FLASH.base_url
-        assert body["model"]["name"] == QWEN37_FLASH.model_id
+        assert body["provider"] == QWEN36_FLASH.provider == "aliyun-bailian"
+        assert body["base_url"] == QWEN36_FLASH.base_url
+        assert body["model"]["name"] == QWEN36_FLASH.model_id
         client.put("/api/provider/api-key", json={"api_key": FAKE_KEY})
     # 凭据确实落在该槽位上：同目录重启后仍可经 has_api_key 读到
     with TestClient(create_app(data_dir), base_url=BASE_URL) as client:

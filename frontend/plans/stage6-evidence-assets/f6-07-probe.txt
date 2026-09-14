@@ -1,0 +1,20 @@
+passed=13 failed=0
+# F6-07 probe — 2026-09-13T16:03:04.708Z
+# backend=D:\Repository\Fit_Agent\backend\.venv\Scripts\python.exe data_dir=C:\Users\Ericcc\AppData\Local\Temp\fit-agent-f6-07-E15Lxu base=http://127.0.0.1:52972
+# loopback only; no real model / no real API key / empty DB
+
+PASS backend_ready — uvicorn http://127.0.0.1:52972
+PASS GET /api/reviews → 200 [] — status=200 n=0
+PASS GET /api/reviews/nonexistent → 404 invalid_request — status=404 error_code=invalid_request
+PASS POST /api/reviews empty body → 400 invalid_request — status=400 error_code=invalid_request
+PASS PUT /api/reviews → 404/405 (无公开写入口) — status=405
+PASS PATCH /api/reviews → 404/405 (无公开写入口) — status=405
+PASS GET /api/reviews has no side-effect (still []) — before_n=0 after_n=0
+PASS POST /api/reviews accepted — status=200 created=true run=34ecbf4f1d104fb998c2eddb23a3f3eb
+PASS Run terminal failed error_code=model_request_failed (no key) — status=failed error_code=model_request_failed
+PASS after failed Run: GET /api/reviews still [] — status=200 n=0
+PASS idempotent POST /api/reviews → created=false same run — status=200 created=false run=34ecbf4f1d104fb998c2eddb23a3f3eb
+PASS idempotent: GET /api/reviews still [] (no second review row) — status=200 n=0
+PASS after mis-ops: GET /api/reviews still [] — status=200 n=0
+
+# summary: passed=13 failed=0

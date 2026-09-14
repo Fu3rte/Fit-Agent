@@ -2,8 +2,9 @@
 
 覆盖（每条都是可失败断言，不依赖真实网络）：
 
-1. ``qwen3.7-flash`` 进入目录，端点与窗口／输出上限取官方只读核对值；目录外 id 仍拒绝启动；
-2. 该模型的 framework profile 如实声明混合思考（默认开启）且窗口取目录值；
+1. ``qwen3.7-flash`` 与 ``qwen3.6-flash`` 进入目录（owner 指定 3.6 为默认因 3.7 quota
+   不可用），端点与窗口／输出上限取官方只读核对值／同族保守沿用；目录外 id 仍拒绝启动；
+2. 两个模型的 framework profile 如实声明混合思考（默认开启）且窗口取目录值；
 3. 生产模型构造走目录端点，并使用通用 OpenAI 兼容 provider（不是 DeepSeek 专属 provider）；
 4. 冻结 Harness 容量参数在新模型下仍成立（有效输入 250,000 + 输出预留 + 安全余量 ≤ 窗口）；
 5. 费用预留算术取官方最高档 + 缓存未命中 + 固定保守汇率；
@@ -44,6 +45,7 @@ from runtime.fees import (
 )
 from runtime.models import (
     ALIYUN_BAILIAN_BASE_URL,
+    QWEN36_FLASH,
     QWEN37_FLASH,
     UnknownModelId,
     require_supported_model_id,
@@ -56,7 +58,7 @@ from storage.fee_repo import FeeRepo
 from storage.run_repo import RunRepo
 from tests.support import open_database
 
-MODEL_ID = "qwen3.7-flash"
+MODEL_ID = "qwen3.6-flash"  # owner 指定的默认生产模型（3.7 403 quota 不可用时的可用同族）
 CONVERSATION_ID = "c1"
 #: 预留算术的手算期望（官方最高档 1.2/4.8 元每百万 token ÷ 固定 6.5；输入 250,000、
 #: 输出上界 262,144（最大思维链）+ 131,072（最大输出））。
@@ -83,13 +85,21 @@ def _text_model(text: str, counter: list[int] | None = None) -> FunctionModel:
 
 async def test_qwen_catalog_entry_uses_official_facts_and_owner_endpoint() -> None:
     spec = require_supported_model_id(MODEL_ID)
-    assert spec is QWEN37_FLASH
+    assert spec is QWEN36_FLASH
     assert spec.base_url == ALIYUN_BAILIAN_BASE_URL
     assert spec.context_window == 1_000_000
     assert spec.max_output_tokens == 131_072
+    # 3.7 仍在目录里可选（quota 恢复后可切回），事实与端点不变
+    spec37 = require_supported_model_id("qwen3.7-flash")
+    assert spec37 is QWEN37_FLASH
+    assert spec37.base_url == ALIYUN_BAILIAN_BASE_URL
+    assert spec37.context_window == 1_000_000
+    assert spec37.max_output_tokens == 131_072
 
 
 async def test_unknown_model_id_is_still_rejected() -> None:
+    with pytest.raises(UnknownModelId):
+        require_supported_model_id("qwen3.6-flash-2026-04-16")
     with pytest.raises(UnknownModelId):
         require_supported_model_id("qwen3.7-flash-2026-07-15")
 

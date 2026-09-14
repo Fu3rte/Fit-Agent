@@ -22,7 +22,7 @@ import platformdirs
 import tzlocal
 
 from runtime.models import (
-    QWEN37_FLASH,
+    QWEN36_FLASH,
     ModelSpec,
     UnknownModelId,
     require_supported_model_id,
@@ -108,12 +108,13 @@ class HarnessConfigError(ValueError):
 class HarnessConfig:
     """加载并逐项校验后的源配置（尚未做容量派生与交叉校验）。
 
-    默认模型 id 是 Stage 6 目录项（owner env ``MODEL_NAME`` 的实际值，2026-09-13）：
-    生产端点已改拍为 OpenAI 兼容端点，**不再默认 DeepSeek 官方 URL**（10 章 2026-09-13
-    补充）；``deepseek-flash`` 仍在目录里可选（历史端点与测试），但不作为默认值。
+    默认模型 id 是 Stage 6 目录项（owner 指定：``qwen3.6-flash`` 因 3.7 403 quota
+    不可用而入目录并设为默认）：生产端点已改拍为 OpenAI 兼容端点，**不再默认
+    DeepSeek 官方 URL**（10 章 2026-09-13 补充）；``deepseek-flash`` 与 ``qwen3.7-flash``
+    仍在目录里可选（历史端点与测试），但不作为默认值。
     """
 
-    model_id: str = QWEN37_FLASH.model_id
+    model_id: str = QWEN36_FLASH.model_id
     max_model_requests: int = 20
     max_tool_calls: int = 32
     max_output_tokens: int = 8192
@@ -149,7 +150,7 @@ def load_harness_config(data_dir: Path) -> HarnessConfig:
         raise HarnessConfigError(
             f"Harness 配置含未知项 {sorted(unknown)}（{path}）；只允许 {sorted(allowed)}"
         )
-    model_id = document.get("model", QWEN37_FLASH.model_id)
+    model_id = document.get("model", QWEN36_FLASH.model_id)
     if not isinstance(model_id, str):
         raise HarnessConfigError(
             f"Harness 配置项 model 必须是字符串，实际为 {type(model_id).__name__}"

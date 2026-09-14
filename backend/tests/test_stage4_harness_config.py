@@ -30,7 +30,7 @@ from config import (
     load_harness_config,
     require_capacity_invariants,
 )
-from runtime.models import QWEN37_FLASH
+from runtime.models import QWEN36_FLASH
 
 BOUND_KEYS = sorted(HARNESS_BOUNDS)
 
@@ -49,8 +49,8 @@ def test_defaults_when_config_file_absent(tmp_path: Path) -> None:
     assert load_harness_config(tmp_path) == HarnessConfig()
 
     effective = effective_harness_config(load_harness_config(tmp_path))
-    # 默认模型是 Stage 6 目录项（10 章 2026-09-13：不再默认 DeepSeek 官方 URL）
-    assert effective.spec is QWEN37_FLASH
+    # 默认模型是 Stage 6 目录项（owner 指定 qwen3.6-flash；不再默认 DeepSeek 官方 URL）
+    assert effective.spec is QWEN36_FLASH
     assert effective.context_window == 1_000_000
     assert effective.max_model_requests == 20
     assert effective.max_tool_calls == 32
@@ -79,7 +79,7 @@ def test_partial_file_keeps_defaults_for_missing_keys(tmp_path: Path) -> None:
     _write_config(tmp_path, "max_model_requests = 5\n")
     config = load_harness_config(tmp_path)
     assert config.max_model_requests == 5
-    assert config.model_id == QWEN37_FLASH.model_id
+    assert config.model_id == QWEN36_FLASH.model_id
     assert config.max_tool_calls == 32
     assert config.effective_input_tokens == 250_000
 

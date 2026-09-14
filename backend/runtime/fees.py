@@ -14,6 +14,8 @@ Stage 4 护栏同构。本模块是这条护栏的唯一实现点。
   即按全价），因此预检与结算都不打折。
 - 思考内容按输出 Token 计费（官方「深度思考模型的用法」），可见 ``max_tokens`` 不是总输出
   上界：输出预留上界取官方「最大思维链长度 262,144 + 最大输出长度 131,072」的保守合计。
+- ``qwen3.6-flash``：未单独核到 3.6 价目，按 3.7 最高档（1.2／4.8 元每百万 token）
+  保守预留；输出上界同 3.7 思维链口径。
 
 币种：官方价目只有人民币，账本按已拍口径以 **USD** 计价，只在这里做一次换算，
 汇率取固定保守值 ``1 USD = 6.5 CNY``（owner 2026-09-13 拍板）：实际汇率不低于该值时，
@@ -26,7 +28,7 @@ import math
 from collections.abc import Mapping
 from dataclasses import dataclass
 
-from runtime.models import DEEPSEEK_FLASH, QWEN37_FLASH
+from runtime.models import DEEPSEEK_FLASH, QWEN36_FLASH, QWEN37_FLASH
 from storage.fee_repo import FeeRepo
 
 #: 本护栏的账本身份：Stage 6 与历史 Stage 4（USD 10，脚本级）不共用行、不互相解冻。
@@ -68,6 +70,10 @@ PRICES: Mapping[str, ModelPrice] = {
     ),
     QWEN37_FLASH.model_id: _cny_top_tier(
         1.2, 4.8, 262_144 + QWEN37_FLASH.max_output_tokens
+    ),
+    # 未单独核到 3.6 价目，按 3.7 最高档保守预留；输出上界同 3.7 思维链口径。
+    QWEN36_FLASH.model_id: _cny_top_tier(
+        1.2, 4.8, 262_144 + QWEN36_FLASH.max_output_tokens
     ),
 }
 

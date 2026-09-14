@@ -49,9 +49,10 @@ def test_supported_models_are_the_catalog_entries_only() -> None:
     assert spec.base_url == "https://api.deepseek.com"
     assert spec.context_window == 1_000_000
     assert spec.max_output_tokens == 384_000
-    # Stage 6（2026-09-13 拍板）新增 owner 指定的 OpenAI 兼容端点模型：目录恰为这两个，
+    # Stage 6（2026-09-13 拍板）新增 owner 指定的 OpenAI 兼容端点模型；后因
+    # qwen3.7-flash 403 quota 不可用、qwen3.6-flash 可用而补入 3.6：目录恰为这三个，
     # 其余 id（含框架旧别名与快照版）仍被启动校验拒绝。
-    assert set(SUPPORTED_MODELS) == {"deepseek-flash", "qwen3.7-flash"}
+    assert set(SUPPORTED_MODELS) == {"deepseek-flash", "qwen3.7-flash", "qwen3.6-flash"}
 
 
 @pytest.mark.parametrize(

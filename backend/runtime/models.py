@@ -3,8 +3,9 @@
 目录里每个模型都在启动校验阶段**校验 id**：目录外一律**拒绝启动**，不做别名猜测。
 ``deepseek-flash``（官方 context length 1,000,000、最大输出 384,000）是 Stage 4 历史端点；
 Stage 6（2026-09-13 拍板）生产端点为 owner 指定的 OpenAI 兼容端点（阿里云百炼
-compatible-mode），模型 ``qwen3.7-flash``（2026-09-13 官方文档只读核对：上下文
-1,000,000、最大输入 991,808、最大输出 131,072；见 :mod:`runtime.fees` 的费用依据）。
+compatible-mode），模型 ``qwen3.7-flash`` 与 ``qwen3.6-flash``（后者因 3.7
+403 insufficient_quota、3.6 直连 200 可用而于 owner 拍板入目录并设为默认；
+窗口／输出上限与 3.7 同族只读核对／保守沿用，见 :mod:`runtime.fees` 的费用依据）。
 框架已知模型名不含这些 id（框架只有 ``deepseek-v4-flash`` 等旧别名），依赖框架名推断会把
 生产配置静默落到别的模型上，因此这里显式覆盖 profile，不做别名猜测。
 
@@ -63,10 +64,21 @@ QWEN37_FLASH = ModelSpec(
     max_output_tokens=131_072,
 )
 
+QWEN36_FLASH = ModelSpec(
+    model_id="qwen3.6-flash",
+    provider="aliyun-bailian",
+    base_url=ALIYUN_BAILIAN_BASE_URL,
+    # 与 3.7 同族只读核对/保守沿用：官方「文本生成」页 2026-09 只读核对 qwen3.6-flash
+    # 上下文 1M；最大输出未单列，保守沿用 3.7 的 131_072。
+    context_window=1_000_000,
+    max_output_tokens=131_072,
+)
+
 #: 受支持模型目录：键即配置中允许出现的模型 id，其他一律拒绝启动。
 SUPPORTED_MODELS: Mapping[str, ModelSpec] = {
     DEEPSEEK_FLASH.model_id: DEEPSEEK_FLASH,
     QWEN37_FLASH.model_id: QWEN37_FLASH,
+    QWEN36_FLASH.model_id: QWEN36_FLASH,
 }
 
 
@@ -95,8 +107,8 @@ def resolve_model_profile(model_id: str) -> ModelProfile:
        非思考模式，写成 True 是不实的能力声明；生产策略（不提供按 Run 的思考开关、不传关闭参数）
        已足以让默认行为生效，不得靠把模型描述成“无法关闭思考”来实现策略。
 
-    两个模型都是混合思考模式、默认开启（``qwen3.7-flash`` 见官方「深度思考模型的用法」
-    2026-09-13 只读核对），隐藏推理经 ``reasoning_content`` 返回并由框架映射为
+    Qwen 两个型号都是混合思考模式、默认开启（``qwen3.7-flash`` 见官方「深度思考模型的用法」
+    2026-09-13 只读核对；``qwen3.6-flash`` 同族同口径），隐藏推理经 ``reasoning_content`` 返回并由框架映射为
     ``ThinkingPart``（不属于可见文本，产品/SSE 不外发）；本目录不设置该字段名，
     框架默认即识别 ``reasoning_content``。
     """

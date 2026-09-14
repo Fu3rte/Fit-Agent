@@ -1,6 +1,6 @@
 # 前端 Stage 6 开发计划：真实联调与交付验收
 
-> 状态：**§8 A–F 已于 2026-09-13 owner 拍板**；F6-00／F6-02 前端侧与 F6-01 后端已完成（2026-09-13；S4-09 后端任务按 owner 拍 A 判完成——浏览器／设置页 UI／Windows 豁免为 S4-09 阻塞）；**F6-03–F6-11 未开始/未完成**。拍板本身 ≠ 已开工或已验收。
+> 状态：**§8 A–F 已于 2026-09-13 owner 拍板**；F6-00／F6-02 前端侧与 F6-01 后端已完成（2026-09-13；S4-09 后端任务按 owner 拍 A 判完成——浏览器／设置页 UI／Windows 豁免为 S4-09 阻塞）；F6-03／F6-04 已完成（2026-09-14，含 owner 走查口述）；**F6-05／F6-06 协议探针+真实脚本+owner 走查完成（2026-09-14，走查口述确认无截图；各自剩余场景未做，整项未完成）**；**F6-07 协议探针+真实脚本+owner 走查完成（2026-09-14，走查口述确认无截图；s10 后续安排、正文质量走查与失败注入等剩余场景未做，整项未完成）**；**F6-08 协议/真实脚本完成（2026-09-14，A–D PASS、E SKIP、接回本批跳过；整项未完成）**；**F6-09 协议探针+重启恢复脚本完成（2026-09-14，探针 17 PASS/0 FAIL/1 SKIP、重启 10/10 PASS；浏览器文案/设置页走查、busy/pending/有数据恢复等未覆盖，整项未完成）**；**默认模型已改为 qwen3.6-flash（2026-09-14，见 §3.3）**；**F6-10–F6-11 未开始/未完成**。拍板本身 ≠ 已开工或已验收。
 > 依赖：Stage 0–5 前端 mock 闭环已结项（见 [stage5.md](stage5.md) / [stage5-evidence.md](stage5-evidence.md)）；后端 S4-01–08 离线实现（`pre-prj/stage/stage4.md`），S4-09 协议级联调与真实模型最小联调已执行（Subtask C／D，2026-09-13；见 S4-evidence §1／§3），**真实浏览器、设置页 UI 闭环与 Windows 仍未验**；**S4-09 后端任务已于 2026-09-13 按 owner 拍 A 判完成——浏览器／设置页 UI／Windows 豁免为 S4-09 阻塞，仍是本阶段未执行证据缺口（F6-03–F6-10 未完成）。**
 > 本文件细化 [business-roadmap.md](business-roadmap.md) 阶段 6「真实联调与交付验收」：Provider 配置 → 真实运行 → 逐条复验闭环 → Windows 人工验收。
 > **红线**：mock 通过不得声称为真实链路通过；本计划落盘 ≠ 开工或验收。
@@ -67,7 +67,7 @@
   - 凭据：环境变量 `MODEL_API_KEY` / `MODEL_BASE_URL` / `MODEL_NAME`（owner 已填入本地 env；**Key 不进入计划、日志、仓库、证据**）
   - 官方示例要点：OpenAI SDK + `stream=True`；思考经 `extra_body={"enable_thinking": True}`；流式 `delta.reasoning_content`（思考）与 `delta.content`（正文）分列——**隐藏推理仍不进产品页与 SSE**（沿用 08 章）
 - **Stage 6 真实联调额度**：累计 **USD 50**；请求前预留费用上界，完成后按真实 usage 结算，未知 usage 按预留额保守扣账，余额足够可继续；跨重启持久账本累计，换会话/重试不重置；包含正常请求、摘要、重试与纠错；**不含** 09 章正式测评。Stage 4 的 10 美元额度**不恢复、不累加**。
-- **模型窗口 / profile / 计费**：不得沿用 deepseek-flash 旧拍（窗口 1,000,000、DeepSeek 思考默认等）；联调前只读核对 `qwen3.7-flash`（或 env 实际模型）的窗口、计价与是否默认思考，再定 Harness 容量参数是否仍适用；不适用则停下列缺项等拍，不静默套用。
+- **模型窗口 / profile / 计费**：不得沿用 deepseek-flash 旧拍（窗口 1,000,000、DeepSeek 思考默认等）；联调前只读核对 `qwen3.7-flash`（或 env 实际模型）的窗口、计价与是否默认思考，再定 Harness 容量参数是否仍适用；不适用则停下列缺项等拍，不静默套用。**2026-09-14 更新**：`qwen3.7-flash` 执行前返回 403 `insufficient_quota`，owner 授权 **qwen3.6-flash 入产品目录并设默认**——后端 `runtime/models.py`/`fees.py`/`config.py`+4 测试；window 1M（官方核对）；max_output 131072 与价目按 3.7 保守沿用（注释标明）；默认 model_id → qwen3.6-flash；定向门 80 passed；Reviewer PASS_WITH_NOTES。
 - **本文不授权**「已发布」签字；Windows 成品验收按 §7/F6-10 清单执行并留证。
 - 09 章 Agent 正式测评（pass³、裁判校准、20 元预算）**已拍 C1：不并入本阶段**。
 
@@ -153,6 +153,7 @@
 - **依赖**：F6-04。
 - **验收标准**：生效范围清楚；换计划同事务取消旧版未来未锁定日程；安全阻断不输出可执行处方。
 - **验证方式**：探针 `f6-05` + 浏览器剧本。
+- **实现状态**：**协议探针+真实脚本+owner 走查已完成（2026-09-14）——整项未完成（剩余场景）**。探针 `f6-05` **11 PASS／0 FAIL**（[stage6-evidence-assets/f6-05-probe.txt](stage6-evidence-assets/f6-05-probe.txt)）；真实计划闭环核心验收 **PASS**（`backend/scripts/f605_plan_loop.py`，正本 `%TEMP%\fit-agent-stage6-f605-r3`）：空库 null→建档→propose_plan_draft→确认前 plan 仍 null→confirm→plan 非 null（PPL 各 4 项、schedule 12 条）→guidance usable=true→生效范围 starts_on/review_on/12 训练日；r3 spent≈USD 0.0163，批总 r1+r2+r3≈0.037；Reviewer: PASS_WITH_NOTES。**owner 浏览器走查通过（2026-09-14，口述确认，无截图）**：计划对话→确认启用→`/profile` 计划与日程可查。**未覆盖（不得写 PASS）**：可选 long_term_adjustment **SKIP**（model_request_failed，0 usage）；换计划同事务取消旧日程；红旗/限制阻断。证据正本：[stage6-evidence.md](stage6-evidence.md)。
 
 ### F6-06：训练、安排与更正闭环（真实）
 
@@ -160,6 +161,7 @@
 - **依赖**：F6-05；F6-01 作废终态。
 - **验收标准**：区分原计划／接受安排／实际记录；待补全、无安排、同日多练可走通；不新增训练身份；stale→recalc→子草稿再确认；作废终态 fail-closed。
 - **验证方式**：探针 `f6-06` + 浏览器剧本；覆盖失败注入（经业务错误路径或后端已有测试夹具，不新增未拍 dev 端点）。
+- **实现状态**：**协议探针+真实脚本+owner 走查已完成（2026-09-14）——整项未完成（剩余场景）**。探针 `f6-06` **15 PASS／0 FAIL**（[stage6-evidence-assets/f6-06-probe.txt](stage6-evidence-assets/f6-06-probe.txt)）；真实训练更正闭环 **7/7 PASS**（`backend/scripts/f606_record_loop.py`，正本 `%TEMP%\fit-agent-stage6-f606-run3`）：查看安排→安排调整 confirm（降级无 work_sets 差异）→新增打卡 records+PR→同身份更正 rev2→void rev3→作废后再更正 422 拒→四类 id 区分；**F6-01 作废终态 fail-closed 真实链路复验成立**（DB：1 身份 3 修订，作废后草稿 pending 不提交）；spent≈USD 0.0517；Reviewer: PASS_WITH_NOTES。**owner 浏览器走查通过（2026-09-14，口述确认，无截图）**：安排→打卡→更正→作废终态。**未覆盖（不得写 PASS）**：待补全；无安排训练独立场景；同日多练；stale→recalc；失败注入；completion 统计；真实 work_sets 差异调整。证据正本：[stage6-evidence.md](stage6-evidence.md)。
 
 ### F6-07：复盘与后续调整闭环（真实模型）
 
@@ -168,6 +170,7 @@
 - **验收标准**：正文数字来自冻结 basis；保存失败不落；SSE 复盘 Run 仅状态、正文经查询；无确认不改计划。
 - **验证方式**：探针（无模型路径）+ 真实模型最小剧本 + 浏览器走查；费用按预留结算记账。
 - **验证证据**：usage/费用汇总（无 Key）；正文质量仅作走查记录，不作 09 章测评替代。
+- **实现状态**：**协议探针+真实脚本+owner 走查已完成（2026-09-14）——整项未完成（剩余场景）**。探针 `f6-07` **13 PASS／0 FAIL**（[stage6-evidence-assets/f6-07-probe.txt](stage6-evidence-assets/f6-07-probe.txt)，UTC 头 2026-09-13）；真实复盘闭环核心 **9/9 PASS**（`backend/scripts/f607_review_loop.py`，正本 `%TEMP%\fit-agent-stage6-f607-run2`）：前置建档+计划+记录→POST /api/reviews completed→SSE 仅 status/heartbeat（对照对话 Run 有 draft/answer）→body 经 list+by_id 同内容（906 字符）→basis 含 per_week/prs→幂等→plan_version_id 不变→同身份更正后 stale=true→第二条追加；spent≈USD 0.0594；reviews=2、plan_versions=1、arrangement_revisions=0；Reviewer: PASS_WITH_NOTES（DB 复核通过）。**owner 浏览器走查通过（2026-09-14，口述确认，无截图）**：/review 页最新条与冻结数字→建议不自动生效→后续调整草稿确认。**未覆盖（不得写 PASS）**：可选 s10 复盘后 arrangement **SKIP**（qwen arrangement 路径 3 次 run=failed）；后续安排/新计划草稿确认；正文质量走查（不作 09 章替代）；真实模型路径失败注入（保存失败不落仅探针级）；F6-08 接回三档（渐进已在 F6-08 另验 PASS，接回本批 owner 拍跳过）。证据正本：[stage6-evidence.md](stage6-evidence.md)。
 
 ### F6-08：渐进、接回与长会话（真实，可选包）
 
@@ -175,6 +178,7 @@
 - **依赖**：F6-07；费用仍计入 USD 50 总账，不自动追加额度。
 - **验收标准**：无记录不猜重；红旗阻断；压缩有界面提示；长会话不崩溃。
 - **验证方式**：浏览器剧本 + 后端日志；**明确**：非 09 章 pass³。
+- **实现状态**：**真实脚本核心完成（2026-09-14）——整项未完成（E SKIP、接回跳过、浏览器未做）**。脚本 `backend/scripts/f608_progression_loop.py`，正本 `%TEMP%\fit-agent-stage6-f608-run3`；模型 **qwen3.6-flash**（见 §3.3）；spent≈**USD 0.1276**；Reviewer: PASS_WITH_NOTES。**核心结果**：A 无记录不猜重 **PASS**（8 external 全 needs_calibration，verified=0）；B 渐进 **PASS**（12 条 method+rule 非空）；C 红旗双路 **PASS**（档案「胸部异常不适」+ 消息「麻木」）；D 多轮纠错 **PASS**（同身份 rev 1→2→3，会话完整）；D8 **PASS**（20/20 Run terminal，跨 session）。**未覆盖（不得写 PASS）**：（1）**接回三档跳过**——owner 拍本批跳过（后端无 mode/return 生成器：缺工具 mode + 生成器 return 分支 + 中断检测）；（2）**压缩真实触发 E SKIP**——harness.toml 写了 32768 但服务端 lifespan 启动时已冻结配置，运行中写 toml 不生效，12 轮无 compression SSE（owner 曾允许降 effective_input_tokens 手法，实际未生效）；下次须启动前写 toml 或重启进程再验；（3）**压缩界面提示浏览器走查**未做（离线+ChatPage 代码在场）；（4）**浏览器长会话剧本**未做。证据正本：[stage6-evidence.md](stage6-evidence.md)。
 
 ### F6-09：安全、失败与重启恢复
 
@@ -186,6 +190,11 @@
 - **依赖**：F6-02–07 主路径可用。
 - **验收标准**：清单逐项 PASS 或记缺口；不把 Linux 探针冒充 Windows。
 - **验证方式**：协议探针 `f6-09` + Windows/本机人工步骤。
+- **实现状态**：**协议探针+重启恢复脚本完成（2026-09-14）——整项未完成（浏览器文案与剩余场景未覆盖）**。证据正本：[stage6-evidence.md](stage6-evidence.md)。
+  - **协议探针** `f6-09`：**17 PASS / 0 FAIL / 1 SKIP（B8 draft_modified）**（`frontend/scripts/f6-09-probe.mjs`，证据 `stage6-evidence-assets/f6-09-probe.txt`）；Reviewer: **PASS_WITH_NOTES**（已重跑复现）。覆盖：A 密钥不回显（假 Key PUT→true；GET/Run/日志无明文，**A4 warning 级 len=0 为弱信号**）；B 失败可理解（无 Key→`model_request_failed`；400/404→`invalid_request`+message；**B8 draft_modified SKIP**——离线 pytest 已覆盖，协议面未覆盖，不计 PASS）；C 回环（evil Host **403**；evil Origin **403**；localhost/127.0.0.1 **200**；bind **127.0.0.1**；Host 头须 raw http）；D14 最小重启（夹具插 running→kill→重启→`interrupted_by_restart` **PASS**）。
+  - **重启恢复完整版** `backend/scripts/f609_restart_recovery.py`：**10/10 PASS**。双 spawn 真实 uvicorn；夹具插 running Run；重启后 failed+`interrupted_by_restart`；会话查询恢复；SSE 仅 1 帧 status 无重放；run_events 1 条 failed；日志无 Key；账本/档案/草稿空库 **N/A 诚实标注**。无真实模型调用，不新增费用。
+  - **协议观察**：Run DTO **无 message 字段**，失败可读性以 `error_code` 为准。
+  - **未覆盖（不得写 PASS）**：① busy/timeout 稳定触发；② stale/draft_modified 协议面（仅离线 pytest）；③ interrupted 浏览器文案（failureReasonCopy）走查；④ pending 遗留 Run 重启（只测了 running）；⑤ 有数据后的消息/草稿/看板刷新恢复；⑥ 有 Key+错误路径下日志压测（A4 弱信号）；⑦ 设置页/SSE 浏览器走查；⑧ Windows 成品形态（归 F6-10）。
 
 ### F6-10：Windows 人工验收与发布形态
 
@@ -268,8 +277,9 @@ B 档改 Provider 范围已写入：`PLAN.md`（技术栈表 + 未拍索引）�
 - [x] owner 明示「按 stage6.md 开工」（F6-00–02 已实施，2026-09-13）
 - [x] F6-00 + F6-02 前端侧完成，传输对照表冻结且前端无 mock 私有生产调用（F3 后 mock 已删）（2026-09-13，复审 PASS_WITH_NOTES；F6-01 后端另判完成，见下行）
 - [x] F6-01 后端完成（2026-09-13 owner 拍 A，依据自动化＋协议级＋真实模型最小联调）：作废终态、Provider 路由、静态托管、Stage 6 Provider 运行时＋USD 50 费用账本**已实现**（2026-09-13；费用定向 19 passed／全量门 **952 passed**＝结算边界修复后当前字节）；协议级联调已验（Subtask C：`npm run build` 重建＋f6-02 探针 15 PASS＋窄回环 27 项＋定向协议 pytest 113 passed）；**真实模型最小联调已由 Subtask D 执行**（4 Runs／$0.01963：smoke＋草稿行落盘（即时顺序离线验证）＋会话恢复＋复盘查询；本批账本目录 `/tmp/fit-agent-stage6-d` 为唯一）；**豁免项（不阻塞 F6-01 后端完成；仍是本阶段未执行证据缺口，不得当 PASS）：真实浏览器打开五页走查与浏览器 SSE／断线恢复、设置页 UI 闭环（F6-03+）、完整业务剧本（F6-04–F6-08）、Windows（F6-10）**（后端侧证据见 `pre-prj/stage/evidence/S4-evidence.md` §1／§2 S4-09 行／§3「Subtask D」与新拍板小节）；2026-09-13 precommit 自动门（当前字节）：全量门 **953 passed**／ruff＋format＋pyright 全过／`npm run build` exit 0／f6-02 **15 PASS**／无 staged——可作 checkpoint 提交候选（未提交）
-- [ ] F6-03–F6-07 主闭环在真实后端通过（含 `qwen3.7-flash` 或 env 实际模型；费用计入 USD 50；授权批账本目录唯一——换新数据目录只另起一份账本、不构成新的调用授权）。**F6-03、F6-04 已完成（2026-09-14，见 stage6-evidence.md）；F6-05–07 未做，本行未勾**
-- [ ] F6-09 安全/失败/重启清单通过或缺口入证据
+- [ ] F6-03–F6-07 主闭环在真实后端通过（含 `qwen3.7-flash` 或 env 实际模型；费用计入 USD 50；授权批账本目录唯一——换新数据目录只另起一份账本、不构成新的调用授权）。**F6-03、F6-04 已完成（2026-09-14，见 stage6-evidence.md）；F6-05、F6-06 协议探针+真实脚本+owner 走查已完成（2026-09-14，走查口述通过；剩余场景未做，不勾整项）；F6-07 协议探针+真实脚本+owner 走查已完成（2026-09-14，走查口述通过；s10/正文质量/失败注入等剩余场景未做，不勾整项）；本行未勾**（模型说明：后续真实调用以 env 为准；2026-09-14 起默认已改 qwen3.6-flash，见 §3.3）
+- [ ] F6-08 渐进/接回/长会话整项完成（A–D+D8 已 PASS 于 2026-09-14；E 压缩真实触发 SKIP、接回三档跳过、浏览器压缩 UI 走查与长会话剧本未做，**不勾**）
+- [ ] F6-09 安全/失败/重启清单通过或缺口入证据——**协议探针 17/0/1SKIP + 重启恢复完整版 10/10 已完成（2026-09-14，Reviewer PASS_WITH_NOTES）；浏览器文案/设置页走查、busy/pending/有数据恢复等 8 项未覆盖入缺口，整项不勾**
 - [ ] F6-10 Windows 清单实测完成，版本一致
 - [ ] F6-11 `stage6-evidence.md` 归档；build/pytest/探针退出码齐全
 - [ ] 未把 mock 或 Linux 证据写成真实/Windows 通过；未含 Key；未越权改决策正本
@@ -289,4 +299,4 @@ B 档改 Provider 范围已写入：`PLAN.md`（技术栈表 + 未拍索引）�
 
 ---
 
-**下一步**：F6-00／F6-02 前端侧与 F6-01 后端已于 2026-09-13 完成（S4-09 后端任务按 owner 拍 A 判完成）；后续按 F6-03 → F6-11 顺序推进（Provider 设置页 UI 闭环、五条业务闭环真实复验、Windows 与发布验收、证据结项）。F6-03 起涉及真实模型调用，按已批 USD 50 额度与「授权批账本目录唯一」口径执行；本阶段结项前不得写「已交付」。
+**下一步**：F6-00／F6-02 前端侧与 F6-01 后端已于 2026-09-13 完成（S4-09 后端任务按 owner 拍 A 判完成）；F6-03／F6-04 已完成（2026-09-14）；F6-05／F6-06 协议探针+真实脚本+owner 走查已完成（2026-09-14，走查口述通过；剩余场景入缺口待补）；F6-07 协议探针+真实脚本+owner 走查已完成（2026-09-14，走查口述通过；s10 后续安排、正文质量走查与失败注入等剩余场景入缺口待补）；F6-08 真实脚本核心完成（2026-09-14，A–D+D8 PASS、E 压缩真实触发 SKIP、接回三档 owner 拍跳过；压缩界面浏览器走查与长会话剧本未做）；F6-09 协议探针+重启恢复脚本完成（2026-09-14，探针 17/0/1SKIP、重启 10/10；浏览器文案/设置页走查、busy/pending/有数据恢复等未覆盖，整项未完成）。默认模型已改 **qwen3.6-flash**（§3.3）。后续按 F6-05–F6-09 剩余场景与缺口补齐→F6-10–F6-11 顺序推进（压缩真实触发须启动前写 toml 或重启；接回三档待后端补 mode/return 生成器；F6-09 浏览器文案与剩余场景；Windows 与发布验收、证据结项）。真实模型调用按已批 USD 50 额度与「授权批账本目录唯一」口径执行；本阶段结项前不得写「已交付」。
