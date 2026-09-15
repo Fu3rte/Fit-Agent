@@ -2,11 +2,12 @@
 
 import os
 from pathlib import Path
-from zoneinfo import ZoneInfo
 
 import platformdirs
 import tzlocal
 from dotenv import load_dotenv
+
+from business_time import require_iana_timezone
 
 APP_NAME = "Fit-Agent"
 DATABASE_FILENAME = "fit_agent_langgraph.db"
@@ -41,9 +42,8 @@ def model_api_key_configured() -> bool:
 
 
 def local_timezone_name() -> str:
-    """读取并校验本机 IANA 时区；失败时不静默降级。"""
+    """读取并校验本机 IANA 时区；失败时不静默降级（校验语义见 business_time）。"""
     name = tzlocal.get_localzone_name()
     if not name:
         raise RuntimeError("本机时区采样失败：未返回 IANA 地区名")
-    ZoneInfo(name)
-    return name
+    return require_iana_timezone(name)

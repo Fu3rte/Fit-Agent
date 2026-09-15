@@ -1,4 +1,4 @@
-"""LangGraph 重构阶段 0 Gate。"""
+"""LangGraph 重构阶段 0/1 Gate。"""
 
 import logging
 import sqlite3
@@ -9,8 +9,19 @@ from fastapi.testclient import TestClient
 from api.app import create_app
 from config import DATABASE_FILENAME
 
+# Stage 1 子任务 01 的 7 张业务表；AUTOINCREMENT 会附建 sqlite_sequence。
+BUSINESS_TABLES = {
+    "athlete_profile",
+    "exercises",
+    "body_metrics",
+    "workout_sessions",
+    "workout_sets",
+    "plans",
+    "plan_sessions",
+}
 
-def test_startup_creates_empty_new_database_without_api_key(
+
+def test_startup_creates_new_database_with_business_schema(
     monkeypatch, tmp_path: Path
 ) -> None:
     monkeypatch.delenv("MODEL_API_KEY", raising=False)
@@ -29,9 +40,15 @@ def test_startup_creates_empty_new_database_without_api_key(
     assert legacy_database.read_bytes() == b"legacy database must remain untouched"
     assert path.is_file()
     with sqlite3.connect(path) as connection:
-        assert connection.execute(
-            "SELECT name FROM sqlite_master WHERE type = 'table'"
-        ).fetchall() == []
+        tables = {
+            row[0]
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            ).fetchall()
+        }
+        # 新版只建业务表；LangGraph Checkpoint 表不在业务迁移中创建。
+        assert tables == BUSINESS_TABLES | {"sqlite_sequence"}
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 1
 
 
 def test_api_key_never_appears_in_logs(

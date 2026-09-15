@@ -80,7 +80,8 @@ def create_app(
         app.state.db = db
         try:
             await db.open()
-            # 阶段 1 才用全新的 001_initial.sql 建立业务表；阶段 0 只创建隔离的新库。
+            # 启动即执行新版 001_initial.sql 建立业务表；迁移失败则启动失败（不对外开放）。
+            await db.migrate()
             app.state.business_timezone = local_timezone_name()
             app.state.provider_has_api_key = model_api_key_configured()
             yield
