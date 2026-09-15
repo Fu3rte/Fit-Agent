@@ -47,10 +47,9 @@ def test_explicit_override_wins_over_env(
     assert resolve_data_dir(tmp_path / "explicit") == tmp_path / "explicit"
 
 
-def test_database_file_is_app_db_directly_under_data_dir(tmp_path: Path) -> None:
-    """数据库文件是数据目录下的 app.db；Windows 上应为 %LOCALAPPDATA%\\Fit-Agent\\app.db。"""
+def test_database_file_is_langgraph_db_directly_under_data_dir(tmp_path: Path) -> None:
     assert database_path(resolve_data_dir(tmp_path)) == tmp_path / DATABASE_FILENAME
-    assert DATABASE_FILENAME == "app.db"
+    assert DATABASE_FILENAME == "fit_agent_langgraph.db"
 
 
 def test_local_timezone_source_detects_resolvable_iana_name() -> None:

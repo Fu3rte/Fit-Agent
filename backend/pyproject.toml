@@ -8,27 +8,20 @@ authors = [
 ]
 requires-python = ">=3.13"
 dependencies = [
-    # 以下均为 PLAN.md「技术栈」已拍依赖（Stage 0 授权加入）
     "fastapi>=0.115",
     "uvicorn>=0.30",
     "aiosqlite>=0.21",
     "platformdirs>=4.3",
-    # PydanticAI 核心（spike 实测版本 2.40.0）；消息契约 07 用 ModelMessagesTypeAdapter
-    "pydantic-ai-slim>=2.40,<3",
-    # 固定业务时区首次采样（S0-05，2026-09-09 拍板新增）：tzlocal 取本机 IANA 地区名；
-    # tzdata 提供 Windows（无系统 tz 数据库）下 ZoneInfo 解析地区规则所需的 IANA 数据
     "tzlocal>=5",
     "tzdata>=2024.1",
-    # Provider SDK（S4-01，2026-09-12 用户授权新增）：pydantic-ai 的 OpenAI 兼容 provider
-    # （含 DeepSeek）依赖它；缺它则无法构造 provider，也无法验证 SDK 层隐式重试。
-    # 生产接缝显式 max_retries=0（runtime/provider.py）：SDK 默认值 2 会静默重发请求。
-    "openai>=3.8,<4",
+    "python-dotenv>=1,<2",
+    "langchain>=1,<2",
+    "langchain-openai>=1,<2",
+    "langgraph>=1,<2",
+    "langgraph-checkpoint-sqlite>=3,<4",
 ]
 
-# Stage 0 不是可安装的 Python 包：源码以 backend/ 下的顶层包（config.py、main.py、
-# storage/、domain/ ... ）直接由 `uv run`/`.venv/bin/python` 导入，没有 src/<name> 布局。
-# 因此声明为非打包（virtual）项目，uv 只同步依赖、不构建本项目，`uv sync --group dev --locked`
-# 才能复制。Stage 5 做发布打包时补 build-system 与 `[project.scripts]` 入口并删掉本开关。
+# 源码以 backend/ 下的顶层模块直接导入，不构建 Python 包。
 [tool.uv]
 package = false
 
@@ -38,13 +31,8 @@ dev = [
     "ruff>=0.16",
 ]
 
-# pi-lens 配置发现依赖字面量 [tool.ruff] 表（S4-05a 工具修复）：缺少该表时 pi-lens 会注入自带
-# core.toml（无 target-version），把 Python 3.11+ 标准库 tomllib 当成第三方并自动改写 import。
-# 空表本身不改变规则集：lint 规则仍只由下方 [tool.ruff.lint] 与 requires-python >= 3.13 决定。
 [tool.ruff]
 
-# 显式钉死规则集：Ruff 0.16 的默认 select 已扩到 300+ 条规则，会把 agent_core 等
-# 既有代码刷出几十条与本阶段无关的告警。用显式最小集，保证 Linux/Windows 复现一致。
 [tool.ruff.lint]
 select = ["E4", "E7", "E9", "F", "I"]
 
