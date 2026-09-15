@@ -1,6 +1,0 @@
-{
-  "venvPath": ".",
-  "venv": ".venv",
-  "include": ["storage", "tests"],
-  "reportMissingImports": "error"
-}

@@ -1,236 +1,644 @@
-import { useNavigate } from "react-router-dom";
-import { useQuery } from "@tanstack/react-query";
-import { PenLine } from "lucide-react";
+import { useMemo, useState } from "react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { Plus, Trash2 } from "lucide-react";
+import { toast } from "sonner";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
   Card,
   CardContent,
   CardDescription,
   CardHeader,
+  CardTitle,
 } from "@/components/ui/card";
-import { Badge } from "@/components/ui/badge";
-import { getRecords } from "@/lib/api";
+import { Input } from "@/components/ui/input";
+import {
+  createBodyMetric,
+  createRecord,
+  deleteBodyMetric,
+  deleteRecord,
+  listBodyMetrics,
+  listExercises,
+  listPlanSessionCandidates,
+  listRecords,
+  updateBodyMetric,
+  updateRecord,
+} from "@/lib/api";
 import type {
-  RecordSet,
-  SetJudgement,
-  TrainingRecord,
-  TrainingRevision,
+  BodyMetricWire,
+  CatalogRecordType,
+  ExerciseWire,
+  LoadConvention,
+  RecordWire,
+  SetTypeWire,
+  WorkoutSetInputWire,
 } from "@/lib/contract";
-import { mapRecordList } from "@/lib/readModels";
 
-/** 归属徽章：新增 / 更正 */
-function KindBadge({ kind }: { kind: TrainingRecord["kind"] }) {
-  return kind === "correction" ? (
-    <Badge variant="default">更正</Badge>
-  ) : (
-    <Badge variant="secondary">新增</Badge>
-  );
+/** 组类型固定三态（与后端 workout_sets CHECK 同集合；没有「未申报」态） */
+const SET_TYPE_LABELS: Record<SetTypeWire, string> = {
+  work: "工作",
+  warmup: "热身",
+  assisted: "辅助",
+};
+
+const LOAD_CONVENTION_LABELS: Record<LoadConvention, string> = {
+  barbell_includes_bar_total: "杠铃含杠总重",
+  dumbbell_per_hand: "哑铃每手重量",
+  machine_pin_displayed_value: "器械插销显示值",
+  plate_loaded_total_excluding_empty: "挂片总重（不含空杆）",
+  unilateral_setting_per_side: "单侧设置重量",
+};
+
+const RECORD_TYPE_LABELS: Record<CatalogRecordType, string> = {
+  reps_weight: "负重次数",
+  reps_bodyweight: "自重次数",
+  time: "计时",
+};
+
+/** 表单控件样式：与 components/ui/input 同规格的原生 select */
+const selectClass =
+  "h-10 rounded-md border border-input bg-transparent px-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40";
+
+/** 客户端本地自然日（表单默认值；业务日期一律由服务端按业务时区判定） */
+function todayIso(): string {
+  const now = new Date();
+  const month = `${now.getMonth() + 1}`.padStart(2, "0");
+  const day = `${now.getDate()}`.padStart(2, "0");
+  return `${now.getFullYear()}-${month}-${day}`;
 }
 
-/** 状态徽章：valid / incomplete / voided（voided 整次退出统计但保留展示） */
-function StatusBadge({ status }: { status: TrainingRecord["status"] }) {
-  if (status === "voided")
-    return <Badge variant="destructive">已作废</Badge>;
-  if (status === "incomplete")
-    return (
-      <Badge variant="outline" className="border-dashed text-muted-foreground">
-        待补全
-      </Badge>
+interface SetRow {
+  exerciseId: string;
+  setType: SetTypeWire;
+  reps: string;
+  weight: string;
+}
+
+function emptySetRow(): SetRow {
+  return { exerciseId: "", setType: "work", reps: "", weight: "" };
+}
+
+/** 既有训练的组 → 表单行（负重按目录口径回填；自重／计时型重量留空） */
+function setRowsFromRecord(record: RecordWire): SetRow[] {
+  return record.sets.map((set) => ({
+    exerciseId: set.exercise_id,
+    setType: set.set_type,
+    reps: String(set.reps),
+    weight: set.weight_kg === null ? "" : String(set.weight_kg),
+  }));
+}
+
+/**
+ * 表单行 → 提交事实：负重口径按所选动作目录派生（外加负重型送目录口径 + 重量，
+ * 自重／计时型一律送 null）；与目录不符的口径在前端就不可选，后端仍会复验。
+ */
+function toSetInputs(
+  rows: SetRow[],
+  catalogue: Map<string, ExerciseWire>,
+): WorkoutSetInputWire[] {
+  if (rows.length === 0) throw new Error("至少需要一组");
+  return rows.map((row, index) => {
+    const position = index + 1;
+    const exercise = catalogue.get(row.exerciseId);
+    if (exercise === undefined) {
+      throw new Error(`第 ${position} 组：请先选择动作`);
+    }
+    const reps = Number(row.reps);
+    if (row.reps.trim() === "" || !Number.isInteger(reps)) {
+      throw new Error(`第 ${position} 组：次数必须是整数`);
+    }
+    if (exercise.load_convention === null) {
+      return {
+        exercise_id: exercise.id,
+        set_type: row.setType,
+        reps,
+        load_convention: null,
+        weight_kg: null,
+      };
+    }
+    const weight = Number.parseFloat(row.weight);
+    if (row.weight.trim() === "" || Number.isNaN(weight)) {
+      throw new Error(`第 ${position} 组：请填写重量`);
+    }
+    return {
+      exercise_id: exercise.id,
+      set_type: row.setType,
+      reps,
+      load_convention: exercise.load_convention,
+      weight_kg: weight,
+    };
+  });
+}
+
+/** 训练记录新增／编辑表单；record 为 null 即新增 */
+function RecordFormCard({
+  record,
+  exercises,
+  onDone,
+}: {
+  record: RecordWire | null;
+  exercises: ExerciseWire[];
+  onDone: () => void;
+}) {
+  const queryClient = useQueryClient();
+  const catalogue = useMemo(
+    () => new Map(exercises.map((exercise) => [exercise.id, exercise])),
+    [exercises],
+  );
+  const [performedOn, setPerformedOn] = useState(
+    record?.performed_on ?? todayIso(),
+  );
+  /* auto = 未手动选择（当天恰有一个候选时关联它）；extra = 明确额外训练；number = 显式日程 */
+  const [sessionChoice, setSessionChoice] = useState<"auto" | "extra" | number>(
+    record === null ? "auto" : (record.plan_session_id ?? "extra"),
+  );
+  const [rows, setRows] = useState<SetRow[]>(() =>
+    record === null ? [emptySetRow()] : setRowsFromRecord(record),
+  );
+
+  const candidates = useQuery({
+    queryKey: ["plan-session-candidates", performedOn],
+    queryFn: () => listPlanSessionCandidates(performedOn),
+    enabled: performedOn !== "",
+  });
+  const available = candidates.data?.sessions ?? [];
+
+  /* 编辑既有记录时它自己关联的日程已不在候选里（已被占用），但仍必须是可选值。 */
+  const options = useMemo(() => {
+    const items = available.map((session) => ({
+      id: session.id,
+      label: `计划 ${session.plan_id} · ${session.scheduled_on}`,
+    }));
+    const current = record?.plan_session_id ?? null;
+    if (current !== null && !items.some((item) => item.id === current)) {
+      items.push({ id: current, label: `#${current}（当前关联的日程）` });
+    }
+    return items;
+  }, [available, record?.plan_session_id]);
+
+  const selected: "extra" | number =
+    sessionChoice === "auto"
+      ? available.length === 1
+        ? available[0].id
+        : "extra"
+      : sessionChoice === "extra" ||
+          options.some((option) => option.id === sessionChoice)
+        ? sessionChoice
+        : "extra";
+
+  const save = useMutation({
+    mutationFn: () => {
+      const body = {
+        performed_on: performedOn,
+        plan_session_id: selected === "extra" ? null : selected,
+        sets: toSetInputs(rows, catalogue),
+      };
+      return record === null ? createRecord(body) : updateRecord(record.id, body);
+    },
+    onSuccess: async () => {
+      toast.success(record === null ? "训练记录已保存" : "训练记录已更新");
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["records"] }),
+        queryClient.invalidateQueries({ queryKey: ["plan-session-candidates"] }),
+      ]);
+      onDone();
+    },
+    onError: (error) =>
+      toast.error(error instanceof Error ? error.message : "训练记录保存失败"),
+  });
+
+  const updateRow = (index: number, patch: Partial<SetRow>) => {
+    setRows((current) =>
+      current.map((row, position) =>
+        position === index ? { ...row, ...patch } : row,
+      ),
     );
-  return <Badge variant="outline">有效</Badge>;
-}
+  };
 
-/** 组级三桶摘要徽章（有对照安排时展示现算结果，前端不重算） */
-function JudgementBuckets({ b }: { b: NonNullable<TrainingRecord["judgement"]> }) {
   return (
-    <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
-      <span>组级判定：</span>
-      <Badge variant="default">符合 {b.met}</Badge>
-      <Badge variant="destructive">未符合 {b.unmet}</Badge>
-      <Badge variant="outline" className="border-dashed">
-        待补全 {b.pending}
-      </Badge>
-    </div>
-  );
-}
-
-/** 组事实一行（只读摘要，共用 SetLine 逻辑但不展示判定徽章——旧修订无派生判定） */
-function RevSetLine({ set }: { set: RecordSet }) {
-  const parts: string[] = [];
-  if (set.weight_kg !== undefined) parts.push(`${set.weight_kg}kg`);
-  if (set.reps !== undefined) parts.push(`${set.reps} 次`);
-  return (
-    <span className="inline-flex items-center gap-2">
-      <span className="text-muted-foreground">
-        {set.set_type === "warmup" ? "热身" : "工作"}
-      </span>
-      <span className="tabular-nums">{parts.join(" · ") || "—"}</span>
-      {set.assisted && <Badge variant="outline">有辅助</Badge>}
-    </span>
-  );
-}
-
-/**
- * 旧修订只读追溯行：修订确认时间、当时状态、组事实摘要、修订说明。
- * 只读展示，不可编辑、不可再提交（05 5.3 / F4-01 契约 TrainingRevision）。
- */
-function RevisionRow({ rev }: { rev: TrainingRevision }) {
-  return (
-    <div className="flex flex-col gap-1 rounded-md border border-border/60 bg-muted/30 p-3 text-sm">
-      <div className="flex flex-wrap items-center gap-2">
-        <span className="text-xs tabular-nums text-muted-foreground">
-          {rev.confirmed_at.replace("T", " ").slice(0, 19)}
-        </span>
-        <StatusBadge status={rev.status} />
-      </div>
-      <p className="text-xs text-muted-foreground">
-        {rev.exercise} · {rev.variant}
-      </p>
-      <ul className="flex flex-col gap-0.5 text-xs">
-        {rev.sets.map((set, i) => (
-          <li key={i}>
-            <RevSetLine set={set} />
-          </li>
-        ))}
-      </ul>
-      {rev.revision_note && (
-        <p className="text-xs italic text-muted-foreground">
-          修订说明：{rev.revision_note}
-        </p>
-      )}
-    </div>
-  );
-}
-
-/** 组级判定徽章：符合 / 未符合 / 待补全（基准=当次安排、只看次数） */
-function SetJudgementBadge({ judgement }: { judgement: SetJudgement }) {
-  if (judgement === "met") return <Badge variant="default">符合</Badge>;
-  if (judgement === "unmet")
-    return <Badge variant="destructive">未符合</Badge>;
-  return (
-    <Badge variant="outline" className="border-dashed text-muted-foreground">
-      待补全
-    </Badge>
-  );
-}
-
-/**
- * 单组展示：重量 × 次数（主观余力字段已拍隐藏，不展示、不落库）；
- * 辅助标记异常申报制；有对照安排时带组级判定徽章。
- */
-function SetLine({ set }: { set: RecordSet }) {
-  const parts: string[] = [];
-  if (set.weight_kg !== undefined) parts.push(`${set.weight_kg}kg`);
-  if (set.reps !== undefined) parts.push(`${set.reps} 次`);
-  return (
-    <li className="flex items-center gap-2">
-      <span className="text-muted-foreground">
-        {set.set_type === "warmup" ? "热身" : "工作"}
-      </span>
-      <span className="tabular-nums">{parts.join(" · ")}</span>
-      {set.assisted && <Badge variant="outline">有辅助</Badge>}
-      {set.judgement && <SetJudgementBadge judgement={set.judgement} />}
-    </li>
-  );
-}
-
-/** 单条训练记录（只读；更正必须经对话草稿确认，不直接编辑） */
-function RecordCard({ record }: { record: TrainingRecord }) {
-  const navigate = useNavigate();
-  const workingSets = record.sets.filter((s) => s.set_type === "working");
-  // 旧修订：当前修订 id 即 record.id；其余为可只读追溯的历史修订
-  const history = (record.revisions ?? []).filter((r) => r.id !== record.id);
-  const isVoided = record.status === "voided";
-  return (
-    <Card className={isVoided ? "opacity-80" : undefined}>
+    <Card>
       <CardHeader>
-        <div className="flex flex-wrap items-center gap-2">
-          {/* 日期用正文 sans：font-display 会兜底到系统 serif，数字观感突兀 */}
-          <span className="text-lg leading-none tracking-tight tabular-nums">
-            {record.date}
-          </span>
-          <KindBadge kind={record.kind} />
-          <StatusBadge status={record.status} />
-        </div>
+        <CardTitle>{record === null ? "新增训练记录" : "编辑训练记录"}</CardTitle>
         <CardDescription>
-          {record.exercise} · {record.variant} ·{" "}
-          {record.comparison
-            ? `原计划 ${record.comparison.planned_sets ?? "?"} 组 · 当次安排 ${record.comparison.arranged_sets ?? "?"} 组 · 实际 ${workingSets.length} 组`
-            : workingSets.length > 0
-              ? `${workingSets.length} 个工作组 · 无对照安排`
-              : "无工作组 · 无对照安排"}
+          组序号由服务端按提交顺序分配；负重口径按所选动作目录派生。
         </CardDescription>
       </CardHeader>
-      <CardContent className="flex flex-col gap-3">
-        {record.warmup_summary && (
-          <p className="text-sm text-muted-foreground">
-            热身：{record.warmup_summary}
-          </p>
-        )}
-        <ul className="flex flex-col gap-1 text-sm">
-          {record.sets.map((set, i) => (
-            <SetLine key={i} set={set} />
-          ))}
-        </ul>
-        {/* 组级三桶摘要：现算结果，有对照安排时展示 */}
-        {record.judgement && (
-          <JudgementBuckets b={record.judgement} />
-        )}
-        {record.revision_note && (
-          <p className="text-xs text-muted-foreground italic">
-            修订说明：{record.revision_note}
-          </p>
-        )}
-        {isVoided && (
-          <p className="text-xs text-destructive">
-            该记录已整次作废，退出完成率／三桶／PR 统计；旧修订仍可查。
-          </p>
-        )}
-        {/* 旧修订只读追溯（时间与内容；不可编辑、不可再提交） */}
-        {history.length > 0 && (
-          <details className="rounded-md border border-border/60 p-3">
-            <summary className="cursor-pointer text-sm text-muted-foreground select-none">
-              历史修订（{history.length} 条 · 只读追溯）
-            </summary>
-            <div className="mt-3 flex flex-col gap-2">
-              {history.map((rev) => (
-                <RevisionRow key={rev.id} rev={rev} />
+      <CardContent className="flex flex-col gap-4">
+        <div className="flex flex-wrap items-end gap-3">
+          <label className="flex flex-col gap-1 text-sm">
+            日期
+            <Input
+              type="date"
+              value={performedOn}
+              onChange={(event) => setPerformedOn(event.target.value)}
+              className="w-44"
+            />
+          </label>
+          <label className="flex flex-col gap-1 text-sm">
+            计划日程
+            <select
+              className={selectClass}
+              value={String(selected)}
+              onChange={(event) => {
+                const value = event.target.value;
+                setSessionChoice(value === "extra" ? "extra" : Number(value));
+              }}
+            >
+              <option value="extra">额外训练（不关联计划日程）</option>
+              {options.map((option) => (
+                <option key={option.id} value={option.id}>
+                  {option.label}
+                </option>
               ))}
-            </div>
-          </details>
+            </select>
+          </label>
+        </div>
+
+        {candidates.isPending && (
+          <p className="text-xs text-muted-foreground">正在查询当天计划日程…</p>
         )}
-        {/* 已作废为终态：不再提供「发起更正」入口 */}
-        {!isVoided && (
-          <div className="flex justify-end">
+        {candidates.isError && (
+          <p className="text-xs text-destructive">
+            计划日程候选加载失败：{candidates.error.message}
+          </p>
+        )}
+        {candidates.isSuccess && available.length === 0 && (
+          <p className="text-xs text-muted-foreground">
+            当天没有可关联的计划日程；保存后按「额外训练」记录。
+          </p>
+        )}
+        {candidates.isSuccess && available.length === 1 && (
+          <p className="text-xs text-muted-foreground">
+            当天恰有一个计划日程，默认关联它；也可以改为额外训练。
+          </p>
+        )}
+        {candidates.isSuccess && available.length > 1 && (
+          <p className="text-xs text-muted-foreground">
+            当天有 {available.length} 个计划日程候选，请选择要完成的那个，或明确选择额外训练。
+          </p>
+        )}
+
+        <div className="flex flex-col gap-3">
+          {rows.map((row, index) => {
+            const exercise = catalogue.get(row.exerciseId);
+            const convention = exercise?.load_convention ?? null;
+            return (
+              <div
+                key={index}
+                className="flex flex-col gap-1 rounded-md border border-border/60 p-3"
+              >
+                <div className="flex flex-wrap items-end gap-2">
+                  <label className="flex flex-col gap-1 text-xs text-muted-foreground">
+                    动作
+                    <select
+                      className={selectClass}
+                      value={row.exerciseId}
+                      onChange={(event) =>
+                        updateRow(index, {
+                          exerciseId: event.target.value,
+                          weight: "",
+                        })
+                      }
+                    >
+                      <option value="">请选择动作</option>
+                      {exercises.map((item) => (
+                        <option key={item.id} value={item.id}>
+                          {item.standard_name_zh}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <label className="flex flex-col gap-1 text-xs text-muted-foreground">
+                    组类型
+                    <select
+                      className={selectClass}
+                      value={row.setType}
+                      onChange={(event) =>
+                        updateRow(index, {
+                          setType: event.target.value as SetTypeWire,
+                        })
+                      }
+                    >
+                      {(
+                        Object.keys(SET_TYPE_LABELS) as SetTypeWire[]
+                      ).map((value) => (
+                        <option key={value} value={value}>
+                          {SET_TYPE_LABELS[value]}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <label className="flex flex-col gap-1 text-xs text-muted-foreground">
+                    次数
+                    <Input
+                      type="number"
+                      min={1}
+                      max={100}
+                      value={row.reps}
+                      onChange={(event) =>
+                        updateRow(index, { reps: event.target.value })
+                      }
+                      className="w-24"
+                    />
+                  </label>
+                  {convention !== null && (
+                    <label className="flex flex-col gap-1 text-xs text-muted-foreground">
+                      重量（kg）
+                      <Input
+                        type="number"
+                        min={0}
+                        step={0.1}
+                        value={row.weight}
+                        onChange={(event) =>
+                          updateRow(index, { weight: event.target.value })
+                        }
+                        className="w-28"
+                      />
+                    </label>
+                  )}
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={() =>
+                      setRows((current) =>
+                        current.filter((_, position) => position !== index),
+                      )
+                    }
+                    disabled={rows.length === 1}
+                  >
+                    <Trash2 aria-hidden />
+                    删除组
+                  </Button>
+                </div>
+                {exercise !== undefined && (
+                  <p className="text-xs text-muted-foreground">
+                    {convention === null
+                      ? `${RECORD_TYPE_LABELS[exercise.record_type]}型动作：不记录负重口径与重量`
+                      : `负重口径：${LOAD_CONVENTION_LABELS[convention]}${
+                          exercise.min_load_increment_kg === null
+                            ? ""
+                            : ` · 最小加重 ${exercise.min_load_increment_kg}kg`
+                        }`}
+                  </p>
+                )}
+              </div>
+            );
+          })}
+          <div>
             <Button
-              className="cursor-pointer"
               variant="outline"
               size="sm"
-              onClick={() =>
-                navigate("/", {
-                  state: {
-                    prefill: `我想更正 ${record.date} 的训练记录：${record.exercise} 数据有误，需要更正。`,
-                  },
-                })
-              }
+              onClick={() => setRows((current) => [...current, emptySetRow()])}
             >
-              <PenLine className="size-3.5" aria-hidden />
-              发起更正
+              <Plus aria-hidden />
+              添加组
             </Button>
           </div>
-        )}
+        </div>
+
+        <div className="flex justify-end gap-2">
+          <Button variant="ghost" onClick={onDone} disabled={save.isPending}>
+            取消
+          </Button>
+          <Button onClick={() => save.mutate()} disabled={save.isPending}>
+            {record === null ? "保存训练记录" : "保存修改"}
+          </Button>
+        </div>
       </CardContent>
     </Card>
   );
 }
 
-/** /records 训练记录：存储契约 → 扁平展示映射（F6），日期倒序 */
+/** 身体指标新增／编辑表单；metric 为 null 即新增 */
+function BodyMetricFormCard({
+  metric,
+  onDone,
+}: {
+  metric: BodyMetricWire | null;
+  onDone: () => void;
+}) {
+  const queryClient = useQueryClient();
+  const [measuredOn, setMeasuredOn] = useState(
+    metric?.measured_on ?? todayIso(),
+  );
+  const [weight, setWeight] = useState(
+    metric === null ? "" : String(metric.weight_kg),
+  );
+  const [bodyFat, setBodyFat] = useState(
+    metric === null || metric.body_fat_pct === null
+      ? ""
+      : String(metric.body_fat_pct),
+  );
+
+  const save = useMutation({
+    mutationFn: () => {
+      const weightKg = Number.parseFloat(weight);
+      if (weight.trim() === "" || Number.isNaN(weightKg)) {
+        throw new Error("请填写体重");
+      }
+      const body = {
+        measured_on: measuredOn,
+        weight_kg: weightKg,
+        /* 留空即「不记录体脂」：显式送 null，不补 0。 */
+        body_fat_pct:
+          bodyFat.trim() === "" ? null : Number.parseFloat(bodyFat),
+      };
+      if (body.body_fat_pct !== null && Number.isNaN(body.body_fat_pct)) {
+        throw new Error("体脂必须是数值，留空即不记录");
+      }
+      return metric === null
+        ? createBodyMetric(body)
+        : updateBodyMetric(metric.id, body);
+    },
+    onSuccess: async () => {
+      toast.success(metric === null ? "身体指标已保存" : "身体指标已更新");
+      await queryClient.invalidateQueries({ queryKey: ["body-metrics"] });
+      onDone();
+    },
+    onError: (error) =>
+      toast.error(error instanceof Error ? error.message : "身体指标保存失败"),
+  });
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>
+          {metric === null ? "新增身体指标" : "编辑身体指标"}
+        </CardTitle>
+        <CardDescription>体重必填；体脂留空即不记录，不补 0。</CardDescription>
+      </CardHeader>
+      <CardContent className="flex flex-col gap-4">
+        <div className="flex flex-wrap items-end gap-3">
+          <label className="flex flex-col gap-1 text-sm">
+            日期
+            <Input
+              type="date"
+              value={measuredOn}
+              onChange={(event) => setMeasuredOn(event.target.value)}
+              className="w-44"
+            />
+          </label>
+          <label className="flex flex-col gap-1 text-sm">
+            体重（kg）
+            <Input
+              type="number"
+              min={20}
+              max={400}
+              step={0.1}
+              value={weight}
+              onChange={(event) => setWeight(event.target.value)}
+              className="w-32"
+            />
+          </label>
+          <label className="flex flex-col gap-1 text-sm">
+            体脂（%，可选）
+            <Input
+              type="number"
+              min={0}
+              max={100}
+              step={0.1}
+              value={bodyFat}
+              onChange={(event) => setBodyFat(event.target.value)}
+              placeholder="留空即不记录"
+              className="w-32"
+            />
+          </label>
+        </div>
+        <div className="flex justify-end gap-2">
+          <Button variant="ghost" onClick={onDone} disabled={save.isPending}>
+            取消
+          </Button>
+          <Button onClick={() => save.mutate()} disabled={save.isPending}>
+            {metric === null ? "保存身体指标" : "保存修改"}
+          </Button>
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
+/** 一次训练的可读摘要行 */
+function RecordCard({
+  record,
+  nameOf,
+  onEdit,
+  onDelete,
+}: {
+  record: RecordWire;
+  nameOf: (exerciseId: string) => string;
+  onEdit: () => void;
+  onDelete: () => Promise<void>;
+}) {
+  const [confirming, setConfirming] = useState(false);
+  return (
+    <Card>
+      <CardHeader>
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="text-lg leading-none tracking-tight tabular-nums">
+            {record.performed_on}
+          </span>
+          <Badge variant="secondary">
+            {record.plan_session_id === null
+              ? "额外训练"
+              : `计划日程 #${record.plan_session_id}`}
+          </Badge>
+          <span className="text-xs text-muted-foreground">
+            {record.sets.length} 组
+          </span>
+        </div>
+        <CardDescription>训练与组事实，可编辑或删除。</CardDescription>
+      </CardHeader>
+      <CardContent className="flex flex-col gap-3">
+        <ul className="flex flex-col gap-1 text-sm">
+          {record.sets.map((set) => (
+            <li key={`${set.exercise_id}-${set.set_no}`} className="flex gap-2">
+              <span className="text-muted-foreground">
+                {nameOf(set.exercise_id)} · 第 {set.set_no} 组 ·{" "}
+                {SET_TYPE_LABELS[set.set_type]}
+              </span>
+              <span className="tabular-nums">
+                {set.weight_kg === null ? "无负重" : `${set.weight_kg}kg`} ·{" "}
+                {set.reps} 次
+                {set.load_convention === null
+                  ? ""
+                  : ` · ${LOAD_CONVENTION_LABELS[set.load_convention]}`}
+              </span>
+            </li>
+          ))}
+        </ul>
+        <div className="flex justify-end gap-2">
+          <Button variant="outline" size="sm" onClick={onEdit}>
+            编辑
+          </Button>
+          <Button
+            variant={confirming ? "destructive" : "outline"}
+            size="sm"
+            onBlur={() => setConfirming(false)}
+            onClick={() => {
+              if (!confirming) {
+                setConfirming(true);
+                return;
+              }
+              void onDelete();
+            }}
+          >
+            {confirming ? "确认删除？" : "删除"}
+          </Button>
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
+/** /records 训练记录与身体指标：表单新增、修改和删除（05；无对话更正／修订链／RIR） */
 export default function RecordsPage() {
-  const wire = useQuery({ queryKey: ["records"], queryFn: getRecords });
-  const mapped = wire.data ? mapRecordList(wire.data.records) : null;
-  const sorted = mapped
-    ? [...mapped].sort((a, b) => b.date.localeCompare(a.date))
-    : [];
+  const queryClient = useQueryClient();
+  const exercises = useQuery({ queryKey: ["exercises"], queryFn: listExercises });
+  const records = useQuery({ queryKey: ["records"], queryFn: listRecords });
+  const metrics = useQuery({ queryKey: ["body-metrics"], queryFn: listBodyMetrics });
+
+  /* null = 表单未展开；"new" = 新增；number 已被下面的 recordForm 表达 */
+  const [recordForm, setRecordForm] = useState<"new" | number | null>(null);
+  const [metricForm, setMetricForm] = useState<"new" | number | null>(null);
+
+  const catalogue = exercises.data?.exercises ?? [];
+  const nameOf = (exerciseId: string) =>
+    catalogue.find((exercise) => exercise.id === exerciseId)?.standard_name_zh ??
+    exerciseId;
+
+  const removeRecord = useMutation({
+    mutationFn: (recordId: number) => deleteRecord(recordId),
+    onSuccess: async () => {
+      toast.success("训练记录已删除");
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["records"] }),
+        queryClient.invalidateQueries({ queryKey: ["plan-session-candidates"] }),
+      ]);
+    },
+    onError: (error) =>
+      toast.error(error instanceof Error ? error.message : "训练记录删除失败"),
+  });
+
+  const removeMetric = useMutation({
+    mutationFn: (metricId: number) => deleteBodyMetric(metricId),
+    onSuccess: async () => {
+      toast.success("身体指标已删除");
+      await queryClient.invalidateQueries({ queryKey: ["body-metrics"] });
+    },
+    onError: (error) =>
+      toast.error(error instanceof Error ? error.message : "身体指标删除失败"),
+  });
+
+  const editingRecord =
+    typeof recordForm === "number"
+      ? (records.data?.records.find((record) => record.id === recordForm) ??
+        null)
+      : null;
+  const editingMetric =
+    typeof metricForm === "number"
+      ? (metrics.data?.metrics.find((metric) => metric.id === metricForm) ??
+        null)
+      : null;
 
   return (
     <div className="mx-auto w-full max-w-3xl px-6 pb-10">
@@ -239,30 +647,155 @@ export default function RecordsPage() {
           训练记录
         </h2>
         <p className="mt-1 text-sm text-muted-foreground">
-          正式记录的只读查看；更正经对话草稿确认后生效并保留修订痕迹
+          表单直接写入训练与身体数据；改动后统计立即按有效记录重算。
         </p>
       </header>
 
-      {wire.isPending && (
-        <p className="mt-10 text-sm text-muted-foreground">正在加载记录…</p>
-      )}
-      {wire.isError && (
-        <p className="mt-10 text-sm text-destructive">
-          加载失败：{wire.error.message}，请刷新重试。
-        </p>
-      )}
+      <section className="flex flex-col gap-4">
+        <div className="flex items-center justify-between">
+          <h3 className="text-lg font-light tracking-tight">训练</h3>
+          <Button
+            size="sm"
+            onClick={() => setRecordForm("new")}
+            disabled={exercises.isPending || exercises.isError}
+          >
+            <Plus aria-hidden />
+            新增训练记录
+          </Button>
+        </div>
 
-      {wire.data && sorted.length === 0 && (
-        <p className="mt-10 text-sm text-muted-foreground">
-          暂无训练记录；到对话页用自然语言打卡，确认后即在此显示。
-        </p>
-      )}
+        {exercises.isError && (
+          <p className="text-sm text-destructive">
+            动作目录加载失败：{exercises.error.message}，无法录入训练数据。
+          </p>
+        )}
 
-      <div className="flex flex-col gap-4">
-        {sorted.map((record) => (
-          <RecordCard key={record.id} record={record} />
-        ))}
-      </div>
+        {recordForm !== null && (
+          <RecordFormCard
+            key={recordForm}
+            record={editingRecord}
+            exercises={catalogue}
+            onDone={() => setRecordForm(null)}
+          />
+        )}
+
+        {records.isPending && (
+          <p className="text-sm text-muted-foreground">正在加载训练记录…</p>
+        )}
+        {records.isError && (
+          <p className="text-sm text-destructive">
+            加载训练记录失败：{records.error.message}，请刷新重试。
+          </p>
+        )}
+        {records.data && records.data.records.length === 0 && (
+          <p className="text-sm text-muted-foreground">
+            暂无训练记录；用上面的表单新增一次训练。
+          </p>
+        )}
+
+        {[...(records.data?.records ?? [])]
+          .sort((a, b) => b.performed_on.localeCompare(a.performed_on))
+          .map((record) => (
+            <RecordCard
+              key={record.id}
+              record={record}
+              nameOf={nameOf}
+              onEdit={() => setRecordForm(record.id)}
+              onDelete={async () => {
+                await removeRecord.mutateAsync(record.id);
+              }}
+            />
+          ))}
+      </section>
+
+      <section className="mt-10 flex flex-col gap-4">
+        <div className="flex items-center justify-between">
+          <h3 className="text-lg font-light tracking-tight">身体指标</h3>
+          <Button size="sm" onClick={() => setMetricForm("new")}>
+            <Plus aria-hidden />
+            新增身体指标
+          </Button>
+        </div>
+
+        {metricForm !== null && (
+          <BodyMetricFormCard
+            key={metricForm}
+            metric={editingMetric}
+            onDone={() => setMetricForm(null)}
+          />
+        )}
+
+        {metrics.isPending && (
+          <p className="text-sm text-muted-foreground">正在加载身体指标…</p>
+        )}
+        {metrics.isError && (
+          <p className="text-sm text-destructive">
+            加载身体指标失败：{metrics.error.message}，请刷新重试。
+          </p>
+        )}
+        {metrics.data && metrics.data.metrics.length === 0 && (
+          <p className="text-sm text-muted-foreground">
+            暂无身体指标；记录体重与体脂后才能看到趋势。
+          </p>
+        )}
+
+        <div className="flex flex-col gap-2">
+          {[...(metrics.data?.metrics ?? [])]
+            .sort((a, b) => b.measured_on.localeCompare(a.measured_on))
+            .map((metric) => (
+              <MetricRow
+                key={metric.id}
+                metric={metric}
+                onEdit={() => setMetricForm(metric.id)}
+                onDelete={async () => {
+                  await removeMetric.mutateAsync(metric.id);
+                }}
+              />
+            ))}
+        </div>
+      </section>
+    </div>
+  );
+}
+
+/** 一条身体指标：体脂未记录显示「未记录」，不显示 0 */
+function MetricRow({
+  metric,
+  onEdit,
+  onDelete,
+}: {
+  metric: BodyMetricWire;
+  onEdit: () => void;
+  onDelete: () => Promise<void>;
+}) {
+  const [confirming, setConfirming] = useState(false);
+  return (
+    <div className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-border/60 px-3 py-2 text-sm">
+      <span className="tabular-nums">{metric.measured_on}</span>
+      <span className="tabular-nums">{metric.weight_kg} kg</span>
+      <span className="text-muted-foreground">
+        体脂：
+        {metric.body_fat_pct === null ? "未记录" : `${metric.body_fat_pct}%`}
+      </span>
+      <span className="flex gap-2">
+        <Button variant="outline" size="sm" onClick={onEdit}>
+          编辑
+        </Button>
+        <Button
+          variant={confirming ? "destructive" : "outline"}
+          size="sm"
+          onBlur={() => setConfirming(false)}
+          onClick={() => {
+            if (!confirming) {
+              setConfirming(true);
+              return;
+            }
+            void onDelete();
+          }}
+        >
+          {confirming ? "确认删除？" : "删除"}
+        </Button>
+      </span>
     </div>
   );
 }

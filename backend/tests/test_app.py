@@ -13,7 +13,6 @@ import pytest
 
 from api.app import create_app
 from config import DATABASE_FILENAME
-from storage.run_repo import RunRepo
 
 
 async def test_lifespan_opens_connection_and_closes_on_shutdown(tmp_path: Path) -> None:
@@ -32,18 +31,19 @@ async def test_lifespan_opens_connection_and_closes_on_shutdown(tmp_path: Path) 
     assert not db.is_open
 
 
-async def test_lifespan_restart_reuses_database_with_sentinel(tmp_path: Path) -> None:
-    """停服（close）后以同一数据目录重启：复用原库，哨兵记录保留。"""
+async def test_lifespan_restart_reuses_same_database_file(tmp_path: Path) -> None:
+    """停服（close）后以同一数据目录重启：复用原库文件，不重建。"""
     data_dir = tmp_path / "data"
     first = create_app(data_dir)
     async with first.router.lifespan_context(first):
-        await RunRepo(first.state.db).create_conversation("sentinel")
+        path = first.state.db.path
+        assert path.is_file()
+        version = await first.state.db.pragma_value("user_version")
 
     second = create_app(data_dir)
     async with second.router.lifespan_context(second):
-        sentinel = await RunRepo(second.state.db).get_conversation("sentinel")
-        assert sentinel is not None
-        assert sentinel["id"] == "sentinel"
+        assert second.state.db.path == path
+        assert await second.state.db.pragma_value("user_version") == version
 
 
 async def test_startup_failure_closes_connection_and_refuses_service(

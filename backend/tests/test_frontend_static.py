@@ -62,7 +62,7 @@ def test_missing_dist_keeps_api_working_and_non_api_404(tmp_path: Path) -> None:
         assert client.get("/").status_code == 404
         assert client.get("/profile").status_code == 404
         assert client.get("/healthz").status_code == 200
-        assert client.get("/api/provider").status_code == 200
+        assert client.get("/api/profile").status_code == 200
 
 
 def test_static_route_never_escapes_dist(tmp_path: Path) -> None:

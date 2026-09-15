@@ -8,6 +8,7 @@ from urllib.parse import urlsplit
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse
 
+from api import dto, routes_plans, routes_profile, routes_records
 from config import (
     database_path,
     frontend_dist_dir,
@@ -107,6 +108,11 @@ def create_app(
             "provider_has_api_key": request.app.state.provider_has_api_key,
         }
 
+    # 表单 API 路由必须先于 /{path:path} 静态兜底注册，否则会被前端宿主吞掉。
+    dto.install_error_handlers(app)
+    app.include_router(routes_profile.router)
+    app.include_router(routes_records.router)
+    app.include_router(routes_plans.router)
     _install_frontend_static(
         app,
         Path(frontend_dist) if frontend_dist is not None else frontend_dist_dir(),

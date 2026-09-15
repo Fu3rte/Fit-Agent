@@ -1,304 +1,178 @@
-"""records 确定性规则：负重换算键与可空事实校验，纯函数不碰 IO（正本 architecture/05 5.3、报告 §4.4）。
+"""records 确定性规则：训练日期、组事实与组数的校验（正本讨论总结 §9、001_initial.sql）。
 
-五条已定口径：
+纯函数、不碰 IO、不调 ``date.today()``。值域与 ``storage/migrations/001_initial.sql`` 的既有
+CHECK／UNIQUE／触发器同集合，不新增任何未拍阈值（例如「日期不得晚于今天」或「组序号必须从 1
+连续」都不在本层）：
 
-- **负重换算键唯一实现**（报告 §4.4）：lb 先按 ``1 lb = 0.45359237 kg`` 换算，再 ×1000 后按
-  ``ROUND_HALF_EVEN`` 取整；SQLite 整数上限（2⁶³−1）溢出、负数、非有限值与未知单位一律拒绝。
-  倍率或舍入规则变更须整体迁移重算，不得混用新旧尺度，故所有写入与查询入口都必须调用
-  :func:`load_kg_key`，禁止各自实现舍入。
-- **负重口径不混比**：:func:`comparison_key` 把 ``load_notation`` 绑进 :class:`LoadComparisonKey`；
-  单只哑铃与双只总重等不同口径的键结构上永不相等，不引入隐藏容差或模糊合并。
-- **可空事实不补造**：``rir`` 的 ``None``（未报告）原样保留，不读作 RIR 0（05 5.2）。
-- **记录草稿结构校验**（S3-10）：:func:`validate_record_draft` 只拒绝结构上不合法的事实
-  （词表／区间／类型／负重可解析／顺序连续），**不**要求必填事实完整——待补全载荷允许保存
-  并确认（05 5.2 转正门槛 B，D8 已拍 A）。
-- **修订状态派生**（05 5.2）：:func:`record_draft_status` 按事实完整性判定 ``incomplete``／
-  ``valid``，不另存第二份可失步的状态；
-  :func:`validate_record_draft_correction` 是纠错白名单：归属（``training_session_id``）与
-  安排关联（``arrangement_revision_id``）不可经纠错改写（05 5.2「目标不唯一必须询问」）。
+- 日期：必须是 ``datetime.date`` 对象——文本与 ``datetime`` 都拒绝（``datetime`` 是 ``date``
+  的子类，但它是绝对时刻，按业务时区解释成自然日归 ``business_time``，不在本层猜测）。
+- 组事实：次数 1–100 整数；重量 0–1000kg 且最多一位小数；组类型恰三态；动作身份非空文本；
+  组序号 1–50；重量与负重口径同现同隐。
+- 一次训练的总组数：1–50（上限由库内触发器兜底，下限「提交时保证」是 001 里的约定）。
+- 同一动作内组序号不得重复（与库内 ``UNIQUE (workout_session_id, exercise_id, set_no)`` 同
+  集合），使越界调用得到领域错误而不是裸 ``IntegrityError``。
+
+边界：**负重口径与目录是否一致不在这里**——那需要读目录（IO），由记录服务落库前经
+``domain.actions.service.ActionCatalogService.validate_record_write`` 复验；本层只保证口径取值
+落在五种内、且与重量同现同隐。
 """
 
 import math
+from collections.abc import Sequence
 from datetime import date, datetime
-from decimal import ROUND_HALF_EVEN, Decimal, InvalidOperation
+from typing import Any, cast
 
-from domain.actions.rules import LOAD_CONVENTIONS, RECORD_TYPES
-from domain.records.schema import (
-    ASSISTANCE_VALUES,
-    SET_TYPES,
-    TIME_PRECISIONS,
-    DraftExerciseLog,
-    LoadComparisonKey,
-    RawLoad,
-    RecordDraftPayload,
-    RecordRevisionStatus,
-    SetFacts,
-    parse_started_at,
-)
+from domain.actions.rules import LOAD_CONVENTIONS
+from domain.actions.schema import LoadConvention
+from domain.records.schema import SET_TYPES, SetType, WorkoutSetInput
 
-# 报告 §4.4 已定稿的换算尺度：与业务表设计报告一致，变更须整体迁移重算。
-LB_TO_KG = Decimal("0.45359237")
-LOAD_KEY_SCALE = Decimal(1000)
-MAX_LOAD_KG_KEY = 2**63 - 1  # SQLite 整数上限
+#: 单组次数范围（001_initial.sql workout_sets.reps CHECK）。
+REPS_MIN = 1
+REPS_MAX = 100
+
+#: 外加负重的重量范围与精度（001_initial.sql workout_sets.weight_kg CHECK）。
+WEIGHT_KG_MIN = 0.0
+WEIGHT_KG_MAX = 1000.0
+WEIGHT_KG_DECIMALS = 1
+#: 精度容差：与库内 CHECK 的 ``ABS(weight_kg - ROUND(weight_kg, 1)) < 1e-9`` 严格同集合
+#: （差值恰好等于 1e-9 时库内拒绝，本层也必须拒绝，否则会漏出裸 IntegrityError）。
+PRECISION_EPSILON = 1e-9
+
+#: 动作内组序号范围（001_initial.sql workout_sets.set_no CHECK）。
+SET_NO_MIN = 1
+SET_NO_MAX = 50
+
+#: 一次训练的总组数范围（001_initial.sql：上限由触发器兜底，下限由本层在提交时保证）。
+SETS_PER_SESSION_MIN = 1
+SETS_PER_SESSION_MAX = 50
 
 
 class InvalidRecordFact(ValueError):
-    """记录事实不合口径（负重无法换算／RIR 越界等）：不落库、不静默兜底。"""
+    """训练记录输入不合法（日期、动作身份、负重口径、重量、次数、组数或组类型）。"""
 
 
-def _scaled_kg_key(value_text: str, unit: str) -> int:
-    """十进制原文 + 单位 → 统一缩放整数键（kg×1000）；非法输入一律拒绝。"""
-    try:
-        value = Decimal(value_text)
-    except (InvalidOperation, ValueError) as exc:
-        raise InvalidRecordFact(f"负重数值无法解析：{value_text!r}") from exc
-    if not value.is_finite():
-        raise InvalidRecordFact(f"负重必须为有限数值：{value_text!r}")
-    if value < 0:
-        raise InvalidRecordFact(f"负重不能为负：{value_text!r}")
-    if unit == "lb":
-        value = value * LB_TO_KG
-    elif unit != "kg":
-        raise InvalidRecordFact(f"未知负重单位：{unit!r}")
-    # 量级检查先于 quantize：超长／超大原文在默认 decimal 上下文会因精度溢出抛
-    # decimal.InvalidOperation，这里先比上限，保证拒绝路径统一为 InvalidRecordFact。
-    scaled = value * LOAD_KEY_SCALE
-    if scaled > MAX_LOAD_KG_KEY:
-        raise InvalidRecordFact(f"负重超出可存储范围：{value_text!r}")
-    # 守卫已排除 NaN／Infinity 与超限值，量化与取整实际不会抛；仍显式翻译，
-    # 保证任何路径都以 InvalidRecordFact 拒绝（不向调用方漏出 Decimal／int 原生异常）。
-    try:
-        key = int(scaled.quantize(Decimal(1), rounding=ROUND_HALF_EVEN))
-    except (InvalidOperation, OverflowError, ValueError) as exc:
-        raise InvalidRecordFact(f"负重无法换算为整数键：{value_text!r}") from exc
-    return key
-
-
-def load_kg_key(load: RawLoad | None) -> int | None:
-    """原始负重 → 换算整数键；无负重（自重／计时／未记录）返回 ``None``。
-
-    原文按十进制解析（不经过二进制浮点），因此 ``45.359237kg`` 与 ``100lb`` 得到同一键。
-    """
-    if load is None:
-        return None
-    return _scaled_kg_key(load.value_text, load.unit)
-
-
-def comparison_key(
-    *, exercise_id: str, load_notation: str, load: RawLoad | None
-) -> LoadComparisonKey | None:
-    """负重比较键：``None`` 表示该组不参与按重量比较（自重／计时／未记录负重）。
-
-    口径必须落在目录已拍五种内；口径不同即不同键，调用方不得跨口径比较（报告 §4.4）。
-    """
-    if load is None:
-        return None
-    if load_notation not in LOAD_CONVENTIONS:
-        raise InvalidRecordFact(f"负重口径不在已拍五种内：{load_notation!r}")
-    return LoadComparisonKey(
-        exercise_id=exercise_id,
-        load_notation=load_notation,  # type: ignore[arg-type]
-        kg_key=_scaled_kg_key(load.value_text, load.unit),
-    )
-
-
-def optional_rir(rir: float | None) -> float | None:
-    """RIR 校验：``None`` 表示未报告，原样返回；非负有限值放行（SQLite CHECK 是补充防线）。"""
-    if rir is None:
-        return None
-    if isinstance(rir, bool) or not isinstance(rir, (int, float)):
-        raise InvalidRecordFact(f"RIR 必须为数值或空：{rir!r}")
-    if not math.isfinite(rir) or rir < 0:
-        raise InvalidRecordFact(f"RIR 必须为非负有限数值：{rir!r}")
-    # 上面的有限性检查已排除溢出输入，转换实际不会抛；仍显式翻译，保持拒绝路径统一。
-    try:
-        return float(rir)
-    except (OverflowError, ValueError) as exc:
-        raise InvalidRecordFact(f"RIR 无法换算为浮点：{rir!r}") from exc
-
-
-def validate_record_draft(payload: RecordDraftPayload) -> None:
-    """记录草稿结构校验：只拒绝结构上不合法的事实，不要求必填事实完整。
-
-    - 词汇与形态：``record_type`` 落在目录三类；``load_notation``／组级 ``load`` 只属于外加
-      负重次数型（同 009 的库内 CHECK 与 002 目录口径），其余类型为空；``set_type``／
-      ``assistance`` 落在已拍词表，未明确时为 ``None``（不静默认定热身组、无辅助）；
-    - 顺序连续：动作 ``position`` 与组 ``set_no`` 各自 1 起连续，修订内不重号（与
-      ``exercise_logs``／``training_sets`` 的唯一约束同口径，读回顺序稳定）；
-    - 数值：次数／时长／辅助次数 ≥ 1；RIR 非负有限或空；负重原文能换算（:func:`load_kg_key`）；
-    - 开始时刻与精度同现同隐：精度描述的是已知的开始时刻，没有时刻就没有精度。
-
-    必填事实是否完整不在此判定（D8：待补全载荷允许保存与确认），由
-    :func:`record_draft_status` 派生状态。调用方负责目录引用（动作身份）与安排绑定（IO）。
-    """
-    if not isinstance(payload, RecordDraftPayload):
-        raise InvalidRecordFact(f"需要记录草稿载荷结构：{type(payload).__name__}")
-    if isinstance(payload.occurred_on, datetime) or not isinstance(
-        payload.occurred_on, date
-    ):
-        raise InvalidRecordFact(f"实际发生日期必须是日期：{payload.occurred_on!r}")
-    if payload.training_session_id is not None:
-        _require_text("training_session_id", payload.training_session_id)
-    if payload.arrangement_revision_id is not None:
-        _require_text("arrangement_revision_id", payload.arrangement_revision_id)
-    if (payload.started_at is None) != (payload.time_precision is None):
-        raise InvalidRecordFact("开始时刻与时间精度必须同现同隐，不单独出现")
-    if payload.time_precision is not None:
-        if payload.time_precision not in TIME_PRECISIONS:
-            raise InvalidRecordFact(
-                f"时间精度不在已定词表内：{payload.time_precision!r}"
-            )
-        assert payload.started_at is not None
-        try:
-            parse_started_at("started_at", payload.started_at)
-        except ValueError as exc:
-            raise InvalidRecordFact(str(exc)) from exc
-    if payload.feedback is not None and not isinstance(payload.feedback, dict):
-        raise InvalidRecordFact(f"feedback 必须是 JSON 对象：{payload.feedback!r}")
-    expected_positions = list(range(1, len(payload.exercises) + 1))
-    if [item.position for item in payload.exercises] != expected_positions:
-        raise InvalidRecordFact("动作顺序 position 必须从 1 起连续且不重号")
-    for item in payload.exercises:
-        _validate_exercise(item)
-
-
-def _validate_exercise(item: DraftExerciseLog) -> None:
-    if not isinstance(item, DraftExerciseLog):
-        raise InvalidRecordFact(f"需要记录草稿动作结构：{type(item).__name__}")
-    facts = item.facts
-    if facts.record_type not in RECORD_TYPES:
-        raise InvalidRecordFact(f"记录类型不在目录三类内：{facts.record_type!r}")
-    if facts.record_type == "reps_weight":
-        if facts.load_notation not in LOAD_CONVENTIONS:
-            raise InvalidRecordFact(
-                f"外加负重次数型必须带已拍负重口径：{facts.load_notation!r}"
-            )
-    elif facts.load_notation is not None:
-        raise InvalidRecordFact(
-            f"非外加负重次数型不得携带负重口径：{facts.load_notation!r}"
-        )
-    _require_text("exercise_id", facts.exercise_id)
-    for label, value in (
-        ("target_item_key", facts.target_item_key),
-        ("warmup_summary_text", facts.warmup_summary_text),
-    ):
-        if value is not None:
-            _require_text(label, value)
-    expected_set_numbers = list(range(1, len(item.sets) + 1))
-    if [single.set_no for single in item.sets] != expected_set_numbers:
-        raise InvalidRecordFact("组序号 set_no 必须从 1 起连续且不重号")
-    for single in item.sets:
-        _validate_set(single, record_type=facts.record_type)
-
-
-def _validate_set(single: SetFacts, *, record_type: str) -> None:
-    if not isinstance(single, SetFacts):
-        raise InvalidRecordFact(f"需要记录草稿组结构：{type(single).__name__}")
-    if single.set_type is not None and single.set_type not in SET_TYPES:
-        raise InvalidRecordFact(f"组类型不在已拍集合内：{single.set_type!r}")
-    if single.assistance is not None and single.assistance not in ASSISTANCE_VALUES:
-        raise InvalidRecordFact(f"辅助标记不在已拍集合内：{single.assistance!r}")
-    for label, value in (
-        ("reps", single.reps),
-        ("duration_seconds", single.duration_seconds),
-        ("assisted_reps", single.assisted_reps),
-    ):
-        if value is not None and (isinstance(value, bool) or value < 1):
-            raise InvalidRecordFact(f"{label} 必须为 ≥1 的整数或空：{value!r}")
-    optional_rir(single.rir)
-    # assisted_reps 表示该组含实际发力帮助：必须显式标记 ``assistance='assisted'``（06 6.3
-    # 「排除人工辅助组」）。否则只按 ``assistance`` 过滤时这类组会被当独立完成计入 PR。
-    if single.assisted_reps is not None and single.assistance != "assisted":
-        raise InvalidRecordFact(
-            "携带 assisted_reps 的组必须显式标记 assistance='assisted'："
-            f"{single.assistance!r}"
-        )
-    if single.target_set_key is not None:
-        _require_text("target_set_key", single.target_set_key)
-    if single.quality_text is not None:
-        _require_text("quality_text", single.quality_text)
-    if single.load is not None:
-        if not isinstance(single.load, RawLoad):
-            raise InvalidRecordFact(f"负重必须是原始值结构：{single.load!r}")
-        # 负重只属于外加负重次数型：自重次数型与计时型不虚构 0kg、不带负重（05 5.2、009 CHECK）。
-        if record_type != "reps_weight":
-            raise InvalidRecordFact(f"非外加负重次数型不得携带负重：{record_type!r}")
-        load_kg_key(single.load)
-
-
-def _require_text(label: str, value: object) -> str:
-    if not isinstance(value, str) or not value.strip():
-        raise InvalidRecordFact(f"{label} 必须是非空文本：{value!r}")
+def validate_performed_on(value: Any) -> date:
+    """校验并返回训练日期；字符串、绝对时刻或非日期值一律拒绝。"""
+    if isinstance(value, datetime) or not isinstance(value, date):
+        raise InvalidRecordFact(f"训练日期必须是日期对象（不是时刻或文本）：{value!r}")
     return value
 
 
-def record_draft_status(payload: RecordDraftPayload) -> RecordRevisionStatus:
-    """按必填事实完整性派生修订状态（05 5.2 转正门槛 B；D8 已拍 A）。
+def validate_exercise_id(value: Any) -> str:
+    """校验并返回动作稳定身份：必须是非空文本（是否存在归目录复验）。"""
+    if not isinstance(value, str) or not value.strip():
+        raise InvalidRecordFact(f"动作身份必须是非空文本：{value!r}")
+    return value
 
-    ``valid`` 当且仅当：至少一个动作、每个动作至少一组、每组都有明确的组类型，且每组的
-    完成数据按记录类型明确（外加负重次数型：重量与次数；自重次数型：次数；计时型：时长）。
-    未明确的 RIR／质量／辅助／反馈不阻止 ``valid``（可选事实，不强迫编造）。
-    其余情况为 ``incomplete``：允许确认承载已明确事实，但整条不进 PR 与完成率分子（D8）。
+
+def validate_set_no(value: Any) -> int:
+    """校验并返回动作内组序号：整数且在 1–50 之间（``bool`` 不是序号）。"""
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise InvalidRecordFact(f"组序号必须是整数：{value!r}")
+    if not SET_NO_MIN <= value <= SET_NO_MAX:
+        raise InvalidRecordFact(
+            f"组序号必须在 {SET_NO_MIN}–{SET_NO_MAX} 之间：{value!r}"
+        )
+    return value
+
+
+def validate_reps(value: Any) -> int:
+    """校验并返回单组次数：整数且在 1–100 之间（``bool`` 不是次数）。"""
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise InvalidRecordFact(f"单组次数必须是整数：{value!r}")
+    if not REPS_MIN <= value <= REPS_MAX:
+        raise InvalidRecordFact(f"单组次数必须在 {REPS_MIN}–{REPS_MAX} 之间：{value!r}")
+    return value
+
+
+def validate_weight_kg(value: Any) -> float | None:
+    """校验并返回重量（kg）：``None`` 表示该组无负重（自重／计时型保持空值）。"""
+    if value is None:
+        return None
+    number = _require_finite_number("重量", value)
+    if not WEIGHT_KG_MIN <= number <= WEIGHT_KG_MAX:
+        raise InvalidRecordFact(
+            f"重量必须在 {WEIGHT_KG_MIN}–{WEIGHT_KG_MAX}kg 之间：{value!r}"
+        )
+    if abs(number - round(number, WEIGHT_KG_DECIMALS)) >= PRECISION_EPSILON:
+        raise InvalidRecordFact(f"重量最多一位小数：{value!r}")
+    return number
+
+
+def validate_set_type(value: Any) -> SetType:
+    """校验并返回组类型：必须是 work／warmup／assisted 之一，无「未申报」态。"""
+    if value not in SET_TYPES:
+        raise InvalidRecordFact(f"组类型必须是 {SET_TYPES} 之一：{value!r}")
+    return cast(SetType, value)
+
+
+def validate_load_convention(value: Any) -> LoadConvention | None:
+    """校验并返回负重口径：``None`` 表示无口径（自重／计时型）。"""
+    if value is None:
+        return None
+    if value not in LOAD_CONVENTIONS:
+        raise InvalidRecordFact(f"负重口径必须是五种之一：{value!r}")
+    return cast(LoadConvention, value)
+
+
+def validate_session_sets(
+    values: Sequence[WorkoutSetInput],
+) -> tuple[WorkoutSetInput, ...]:
+    """校验一次训练的全部组事实并返回归一化结果（不落库、不读目录）。
+
+    逐组校验动作身份、组序号、组类型、次数、重量与「重量／负重口径同现同隐」，并校验总组数
+    在 1–50 之间、同一动作内组序号不重复。
     """
-    if not payload.exercises:
-        return "incomplete"
-    for item in payload.exercises:
-        if not item.sets:
-            return "incomplete"
-        for single in item.sets:
-            if single.set_type is None:
-                return "incomplete"
-            if not _set_completion_known(item, single):
-                return "incomplete"
-    return "valid"
-
-
-def _set_completion_known(item: DraftExerciseLog, single: SetFacts) -> bool:
-    """该组的完成数据是否已明确（按记录类型取各自必填的执行结果）。"""
-    record_type = item.facts.record_type
-    if record_type == "reps_weight":
-        return single.load is not None and single.reps is not None
-    if record_type == "reps_bodyweight":
-        return single.reps is not None
-    return single.duration_seconds is not None
-
-
-def validate_record_draft_correction(
-    stored: RecordDraftPayload, submitted: RecordDraftPayload
-) -> None:
-    """纠错白名单：相对存储稿，只有已明确事实可整体替换，归属与来源不可改写。
-
-    不可变（05 5.2「归属：新增、补充或更正明确；目标不唯一必须询问」、5.1「关联可信的
-    当次安排快照」）：
-
-    - ``training_session_id``（训练身份归属）：同日多练时日期不唯一，改归属就是重新提问，
-      必须丢弃后重新准备，不能借纠错静默换目标；
-    - ``arrangement_revision_id``（安排关联快照）：记录绑定的是执行时依据的那份安排，
-      换关联等于换依据；
-    - ``schema_version``。
-
-    可变：日期、开始时刻与精度、完成申报、回归期标记、反馈、全部动作与组事实（用户看到的
-    最终草稿允许轻量纠错；完整事实复查由调用方在同一事务内做）。越界修改一律拒绝，不部分接受。
-    """
-    if not isinstance(stored, RecordDraftPayload) or not isinstance(
-        submitted, RecordDraftPayload
-    ):
+    if isinstance(values, (str, bytes)) or not isinstance(values, Sequence):
+        raise InvalidRecordFact(f"一次训练的组必须是序列：{values!r}")
+    if not SETS_PER_SESSION_MIN <= len(values) <= SETS_PER_SESSION_MAX:
         raise InvalidRecordFact(
-            f"纠错对比需要两份记录草稿载荷结构：{type(stored).__name__} / "
-            f"{type(submitted).__name__}"
+            f"一次训练总组数必须在 {SETS_PER_SESSION_MIN}–{SETS_PER_SESSION_MAX} 之间："
+            f"{len(values)}"
         )
-    if submitted.schema_version != stored.schema_version:
+    facts = tuple(_validate_set_fact(fact) for fact in values)
+    _require_unique_set_numbers(facts)
+    return facts
+
+
+def _validate_set_fact(fact: WorkoutSetInput) -> WorkoutSetInput:
+    if not isinstance(fact, WorkoutSetInput):
+        raise InvalidRecordFact(f"组事实必须是 WorkoutSetInput：{fact!r}")
+    load_convention = validate_load_convention(fact.load_convention)
+    weight_kg = validate_weight_kg(fact.weight_kg)
+    if (load_convention is None) != (weight_kg is None):
         raise InvalidRecordFact(
-            f"纠错不可改载荷 schema_version：{stored.schema_version} → "
-            f"{submitted.schema_version}"
+            f"重量与负重口径必须同现同隐：convention={load_convention!r} weight={weight_kg!r}"
         )
-    if submitted.training_session_id != stored.training_session_id:
-        raise InvalidRecordFact(
-            f"纠错不可改训练身份归属：{stored.training_session_id!r} → "
-            f"{submitted.training_session_id!r}"
-        )
-    if submitted.arrangement_revision_id != stored.arrangement_revision_id:
-        raise InvalidRecordFact(
-            f"纠错不可改安排关联快照：{stored.arrangement_revision_id!r} → "
-            f"{submitted.arrangement_revision_id!r}"
-        )
+    return WorkoutSetInput(
+        exercise_id=validate_exercise_id(fact.exercise_id),
+        set_no=validate_set_no(fact.set_no),
+        reps=validate_reps(fact.reps),
+        set_type=validate_set_type(fact.set_type),
+        load_convention=load_convention,
+        weight_kg=weight_kg,
+    )
+
+
+def _require_unique_set_numbers(facts: Sequence[WorkoutSetInput]) -> None:
+    """同一动作内组序号不重复：库内 UNIQUE 的领域侧同集合校验，避免裸 IntegrityError。"""
+    seen: set[tuple[str, int]] = set()
+    for fact in facts:
+        key = (fact.exercise_id, fact.set_no)
+        if key in seen:
+            raise InvalidRecordFact(f"同一动作的组序号重复：{key[0]} 第 {key[1]} 组")
+        seen.add(key)
+
+
+def _require_finite_number(label: str, value: Any) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise InvalidRecordFact(f"{label}必须是数值：{value!r}")
+    # 超大整数（如 10**400）转 float 会抛 OverflowError；它同样是「超出可表示范围」的
+    # 非法输入，必须与越界值一样以领域错误拒绝，不向调用方漏出原生异常（总结 49／255）。
+    try:
+        number = float(value)
+    except (OverflowError, ValueError) as exc:
+        raise InvalidRecordFact(f"{label}超出可表示范围：{value!r}") from exc
+    if not math.isfinite(number):
+        raise InvalidRecordFact(f"{label}必须是有限数值（JSON 无法表达 NaN／Infinity）：{value!r}")
+    return number

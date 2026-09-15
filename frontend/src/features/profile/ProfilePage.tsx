@@ -1,12 +1,15 @@
-import { useMemo } from "react";
-import { Link } from "react-router-dom";
-import { useQuery } from "@tanstack/react-query";
-import {
-  ArrowRight,
-  MessagesSquare,
-  ShieldAlert,
-  ShieldCheck,
-} from "lucide-react";
+/**
+ * /profile 用户画像：七字段三态事实的读取与整份覆盖更新（Stage 1 子任务 06）。
+ *
+ * 逐字对齐 ``/api/profile``：每字段三态（未填写 unknown／明确为空 denied／已知 known），
+ * 未填写与明确为空必须可分；known 才携带值。整份覆盖提交（PUT 语义）。无 RIR、
+ * 无 context_version、无对话更正入口（讨论总结 §7/§8/§13）。
+ */
+import { useEffect, useMemo, useState } from "react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { toast } from "sonner";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import {
   Card,
   CardContent,
@@ -14,582 +17,245 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
-import { Badge } from "@/components/ui/badge";
-import { buttonVariants } from "@/components/ui/button";
-import { getPlan, getPlanGuidance, getProfile } from "@/lib/api";
-import { cn } from "@/lib/utils";
-import type { ReactNode } from "react";
+import { Input } from "@/components/ui/input";
+import { getProfile, listExercises, putProfile } from "@/lib/api";
 import type {
-  FactDto,
-  NeedsCalibration,
-  PlanPayload,
-  PlanSafetyWire,
-  PlanScheduleEntry,
-  PlanVersion,
-  ProfileFactsDto,
-  Restriction,
+  FactState,
+  ProfileFactWire,
+  ProfileFactsWire,
 } from "@/lib/contract";
-import {
-  projectAcceptedArrangements,
-  projectedAsAccepted,
-  type ProjectedArrangement,
-} from "@/lib/arrangements";
-import {
-  arrangementStatusLabel,
-  classifyArrangementStatus,
-  derivePlanBlocks,
-  effortPlainLabel,
-  findWorkout,
-  prescriptionLabel,
-  progressionLabel,
-  weekdayLabel,
-  type DisplayBlock,
-} from "@/lib/planView";
-import { mapPlanView, mapProfileRestrictions } from "@/lib/readModels";
 
-function Loading({ text }: { text: string }) {
-  return <p className="mt-10 text-sm text-muted-foreground">{text}…</p>;
-}
+const FACT_STATE_LABELS: Record<FactState, string> = {
+  unknown: "未填写",
+  denied: "明确为空",
+  known: "已知",
+};
 
-function LoadError({ text }: { text: string }) {
-  return (
-    <p className="mt-10 text-sm text-destructive">
-      加载失败：{text}，请刷新重试。
-    </p>
+type FieldKey =
+  | "training_goal"
+  | "weekly_frequency"
+  | "available_equipment"
+  | "explicit_preferences"
+  | "current_level"
+  | "known_injuries"
+  | "forbidden_exercise_ids";
+
+const FIELDS: Array<{ key: FieldKey; label: string; hint: string }> = [
+  { key: "training_goal", label: "训练目标", hint: "例：增肌、力量、综合健康" },
+  { key: "weekly_frequency", label: "每周可训练次数", hint: "正整数" },
+  { key: "available_equipment", label: "可用器械", hint: "多项用逗号分隔" },
+  { key: "explicit_preferences", label: "明确偏好", hint: "多项用逗号分隔" },
+  { key: "current_level", label: "当前水平", hint: "例：新手、中级" },
+  { key: "known_injuries", label: "已知伤病", hint: "多项用逗号分隔" },
+  { key: "forbidden_exercise_ids", label: "禁用动作", hint: "从动作目录勾选" },
+];
+
+const LIST_KEYS: FieldKey[] = [
+  "available_equipment",
+  "explicit_preferences",
+  "known_injuries",
+];
+
+const selectClass =
+  "h-10 rounded-md border border-input bg-transparent px-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40";
+
+const splitList = (text: string) =>
+  text
+    .split(/[,，]/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+
+export default function ProfilePage() {
+  const queryClient = useQueryClient();
+  const profile = useQuery({ queryKey: ["profile"], queryFn: getProfile });
+  const exercises = useQuery({ queryKey: ["exercises"], queryFn: listExercises });
+
+  const [states, setStates] = useState<Record<FieldKey, FactState>>({
+    training_goal: "unknown",
+    weekly_frequency: "unknown",
+    available_equipment: "unknown",
+    explicit_preferences: "unknown",
+    current_level: "unknown",
+    known_injuries: "unknown",
+    forbidden_exercise_ids: "unknown",
+  });
+  const [texts, setTexts] = useState<Record<string, string>>({});
+  const [forbidden, setForbidden] = useState<string[]>([]);
+
+  const loaded = profile.data?.profile ?? null;
+  useEffect(() => {
+    setStates({
+      training_goal: loaded?.training_goal.state ?? "unknown",
+      weekly_frequency: loaded?.weekly_frequency.state ?? "unknown",
+      available_equipment: loaded?.available_equipment.state ?? "unknown",
+      explicit_preferences: loaded?.explicit_preferences.state ?? "unknown",
+      current_level: loaded?.current_level.state ?? "unknown",
+      known_injuries: loaded?.known_injuries.state ?? "unknown",
+      forbidden_exercise_ids: loaded?.forbidden_exercise_ids.state ?? "unknown",
+    });
+    setTexts({
+      training_goal: loaded?.training_goal.value ?? "",
+      weekly_frequency:
+        loaded?.weekly_frequency.value != null
+          ? String(loaded.weekly_frequency.value)
+          : "",
+      current_level: loaded?.current_level.value ?? "",
+      available_equipment: (loaded?.available_equipment.value ?? []).join("，"),
+      explicit_preferences: (loaded?.explicit_preferences.value ?? []).join("，"),
+      known_injuries: (loaded?.known_injuries.value ?? []).join("，"),
+    });
+    setForbidden(loaded?.forbidden_exercise_ids.value ?? []);
+  }, [loaded]);
+
+  const nameById = useMemo(
+    () => new Map((exercises.data?.exercises ?? []).map((e) => [e.id, e])),
+    [exercises.data],
   );
-}
 
-interface ProfileRow {
-  label: string;
-  value: ReactNode;
-}
+  const save = useMutation({
+    mutationFn: (body: ProfileFactsWire) => putProfile(body),
+    onSuccess: (data) => {
+      queryClient.setQueryData(["profile"], data);
+      toast.success("画像已保存");
+    },
+    onError: (error) =>
+      toast.error(error instanceof Error ? error.message : "画像保存失败"),
+  });
 
-/** 三态事实 → 展示文案（unknown=未收集；denied=无（用户确认）；不补造数值） */
-function factText<T>(
-  fact: FactDto<T> | undefined,
-  known: (value: T) => ReactNode,
-): ReactNode {
-  if (!fact || fact.state === "unknown") return "未收集";
-  if (fact.state === "denied") return "无（用户确认）";
-  return known(fact.value as T);
-}
-
-/** 档案卡：八项事实（S2-07 三态；PRD 5.2 只读） */
-function ProfileCard({ profile }: { profile: ProfileFactsDto }) {
-  const rows: ProfileRow[] = [
-    {
-      label: "训练目标",
-      value: factText(profile.training_goal, (v) => v),
-    },
-    {
-      label: "训练经验",
-      value: factText(profile.training_experience, (v) => v),
-    },
-    {
-      label: "每周频率",
-      value: factText(profile.weekly_frequency, (v) => `${v} 次 / 周`),
-    },
-    {
-      label: "单次时长",
-      value: factText(profile.session_duration_minutes, (v) => `${v} 分钟`),
-    },
-    {
-      label: "可用器械",
-      value: factText(profile.available_equipment, (v) =>
-        v.length > 0 ? v.join("、") : "无（用户确认）",
-      ),
-    },
-    {
-      label: "体重",
-      value: factText(profile.body_weight_kg, (v) => `${v} kg`),
-    },
-    {
-      label: "身体情况",
-      value: factText(profile.body_conditions, (v) =>
-        v.length > 0 ? (
-          <span className="flex flex-col items-end gap-0.5">
-            {v.map((c) => (
-              <span key={c}>{c}</span>
-            ))}
-          </span>
-        ) : (
-          "无（用户确认）"
-        ),
-      ),
-    },
-  ];
-  return (
-    <Card>
-      <CardHeader>
-        <CardTitle>档案</CardTitle>
-        <CardDescription>已确认的训练档案事实</CardDescription>
-      </CardHeader>
-      <CardContent className="flex flex-col gap-2.5 text-sm">
-        {rows.map((row) => (
-          <div
-            key={row.label}
-            className="flex items-baseline justify-between gap-4"
-          >
-            <span className="shrink-0 text-muted-foreground">{row.label}</span>
-            <span className="text-right font-medium">{row.value}</span>
-          </div>
-        ))}
-      </CardContent>
-    </Card>
-  );
-}
-
-/** 动作限制卡 */
-function RestrictionsCard({ restrictions }: { restrictions: Restriction[] }) {
-  return (
-    <Card>
-      <CardHeader>
-        <CardTitle>动作限制</CardTitle>
-        <CardDescription>
-          红色「暂禁」仅为展示文案；限制经确认长期保留，增删须在对话页经草稿确认
-        </CardDescription>
-      </CardHeader>
-      <CardContent>
-        {restrictions.length === 0 ? (
-          <p className="text-sm text-muted-foreground">暂无动作限制</p>
-        ) : (
-          <ul className="flex flex-wrap gap-2">
-            {restrictions.map((r) => (
-              <li key={r.name}>
-                <Badge
-                  variant="destructive"
-                  title={r.note}
-                  className="gap-1 py-1"
-                >
-                  <ShieldAlert className="size-3" aria-hidden />
-                  {r.name}
-                  {" · "}
-                  {r.scope === "specific_action" ? "具体动作" : "动作模式"}
-                  {" · 暂禁"}
-                </Badge>
-              </li>
-            ))}
-          </ul>
-        )}
-      </CardContent>
-    </Card>
-  );
-}
-
-/** 单个训练日的动作表（展示派生 DisplayBlock） */
-function BlockTable({ block }: { block: DisplayBlock }) {
-  return (
-    <div>
-      <div className="mb-2 flex items-baseline justify-between">
-        <h4 className="text-sm font-medium">{block.name}</h4>
-        <span className="text-xs text-muted-foreground">
-          {block.weekday !== undefined
-            ? `每周${weekdayLabel(block.weekday)}`
-            : "未排入循环"}
-        </span>
-      </div>
-      <table className="w-full table-fixed text-sm">
-        <thead>
-          <tr className="border-b text-left text-xs text-muted-foreground">
-            <th className="w-[36%] py-1.5 pr-3 font-normal">动作</th>
-            <th className="w-[18%] py-1.5 pr-3 font-normal">组 × 次</th>
-            <th className="w-[20%] py-1.5 pr-3 font-normal">目标用力</th>
-            <th className="w-[26%] py-1.5 font-normal">渐进方式</th>
-          </tr>
-        </thead>
-        <tbody>
-          {block.exercises.map((ex) => {
-            const effort =
-              ex.prescription.kind === "reps" && ex.prescription.target_rir
-                ? effortPlainLabel(ex.prescription.target_rir)
-                : "—";
-            return (
-              <tr
-                key={ex.item_key}
-                className="border-b last:border-0"
-              >
-                <td className="py-2 pr-3">
-                  {ex.display_snapshot.name}
-                  <span className="ml-1.5 text-xs text-muted-foreground">
-                    {ex.display_snapshot.equipment_variant}
-                  </span>
-                </td>
-                <td className="py-2 pr-3 tabular-nums">
-                  {prescriptionLabel(ex.prescription)}
-                </td>
-                <td className="py-2 pr-3 text-xs">{effort}</td>
-                <td className="py-2 text-xs text-muted-foreground">
-                  {progressionLabel(ex.progression.method)}
-                </td>
-              </tr>
-            );
-          })}
-        </tbody>
-      </table>
-    </div>
-  );
-}
-
-/** 使用前安全复核结果（04 4.5；传输形状 PlanSafetyWire） */
-function PlanSafetyNotice({ safety }: { safety: PlanSafetyWire }) {
-  if (safety.usable)
+  if (profile.isLoading) {
+    return <p className="mt-10 text-sm text-muted-foreground">加载画像…</p>;
+  }
+  if (profile.isError) {
     return (
-      <p className="flex items-start gap-1.5 rounded-lg border bg-muted/40 p-3 text-sm text-muted-foreground">
-        <ShieldCheck className="mt-0.5 size-4 shrink-0" aria-hidden />
-        <span>
-          已按最新身体情况与限制复核整份计划（业务版本 {safety.context_version}
-          ）：可给出基于该计划的训练指导。
-        </span>
+      <p className="mt-10 text-sm text-destructive">
+        加载失败：{profile.error.message}，请刷新重试。
       </p>
     );
-  return (
-    <div className="rounded-lg border border-destructive/40 bg-destructive/5 p-3 text-sm">
-      <p className="flex items-center gap-1.5 font-medium text-destructive">
-        <ShieldAlert className="size-4 shrink-0" aria-hidden />
-        整份计划指导已阻断
-      </p>
-      {safety.block_code === "plan_action_unavailable" && (
-        <p className="mt-1.5">
-          计划引用的动作目录身份缺失（plan_action_unavailable）：无法安全给出基于该计划的处方。
-        </p>
-      )}
-      {safety.red_flag_blocked && (
-        <p className="mt-1.5">
-          档案身体情况命中需线下评估的安全性症状：不给任何基于该计划的处方，请先完成线下专业评估。
-        </p>
-      )}
-      {safety.conflicts.length > 0 && (
-        <>
-          <p className="mt-1.5">
-            以下动作命中当前有效限制；任一冲突即整份阻断，不会只跳过冲突动作、继续给其余动作的处方。
-          </p>
-          <ul className="mt-1.5 flex list-disc flex-col gap-0.5 pl-5">
-            {safety.conflicts.map((c) => (
-              <li key={`${c.exercise_id}·${c.restriction.target}`}>
-                {c.exercise_name} · 命中限制「{c.restriction.target}」（
-                {c.restriction.scope === "specific_action"
-                  ? "具体动作"
-                  : "动作模式"}
-                ）
-              </li>
-            ))}
-          </ul>
-        </>
-      )}
-      <p className="mt-1.5 text-muted-foreground">
-        当前计划内容仍按原样展示；修改请从对话发起修订草稿，确认后生成新版本。
-      </p>
-    </div>
-  );
-}
+  }
 
-/** 校准说明（D3）：pass = 稳定完成处方次数下限；RIR 不作通过硬性条件 */
-function CalibrationSection({ calibration }: { calibration: NeedsCalibration }) {
-  return (
-    <section>
-      <div className="mb-2 flex items-center gap-2">
-        <h4 className="text-sm font-medium">负荷校准</h4>
-        <Badge variant="secondary" className="py-0.5">
-          需要校准
-        </Badge>
-      </div>
-      <p className="text-xs text-muted-foreground">
-        无可信训练记录：不给具体起始重量，也不按体重、估算 1RM 或默认杠重猜测。
-      </p>
-      <ol className="mt-2 flex list-decimal flex-col gap-1 pl-5 text-sm">
-        {calibration.steps.map((step) => (
-          <li key={step}>{step}</li>
-        ))}
-      </ol>
-      <p className="mt-2 text-sm">
-        <span className="text-muted-foreground">通过标准：</span>
-        {calibration.pass_criteria}
-      </p>
-      <p className="mt-2 text-sm">
-        <span className="text-muted-foreground">停止条件：</span>
-        {calibration.stop_criteria}
-      </p>
-    </section>
-  );
-}
-
-/**
- * 日程行徽章（锁定双态 + 安排状态联表，F3-03；F6-02c 起安排证据来自前端投影；
- * F6-02d：projectedAsAccepted 收敛到 src/lib/arrangements.ts 单点）：
- * - 锁定优先展示「已锁定（日期规则）」；stored cancelled 展示「已取消」；
- * - 安排状态：尚无安排 / 已接受安排（粗证据） / 已接受安排 · 已调整|目标更保守|未调整
- *   （有完整 target 时细分）；接受时间可得时附带，缺省不伪造。
- * 已知限制：真实后端无跨会话安排枚举，arranged 恒空 → 徽章生产假阴性「尚无安排」，
- * 不静默改语义（见 02d 报告 / f6-02-probe 注释）。
- */
-function ScheduleBadge({
-  entry,
-  plan,
-  projected,
-}: {
-  entry: PlanScheduleEntry;
-  plan: PlanPayload;
-  projected?: ProjectedArrangement;
-}) {
-  const cancelled = entry.stored_status === "cancelled";
-  const locked = entry.locked_effective && !cancelled;
-  const lockLabel = cancelled
-    ? "已取消"
-    : locked
-      ? entry.locked_by_date_rule
-        ? "已锁定（日期规则）"
-        : "已锁定"
-      : "应训练";
-  const accepted = projectedAsAccepted(projected);
-  const status = accepted
-    ? classifyArrangementStatus(
-        accepted,
-        findWorkout(plan, entry.plan_workout_key)?.exercises ?? [],
-      )
-    : null;
-  const acceptedAt = projected?.accepted_at
-    ? `${projected.accepted_at.slice(0, 10)} ${projected.accepted_at.slice(11, 16)}`
-    : "";
-  const arrangementLabel = status
-    ? `${arrangementStatusLabel(status)}${acceptedAt ? ` · ${acceptedAt}` : ""}`
-    : projected
-      ? `已接受安排${acceptedAt ? ` · ${acceptedAt}` : ""}`
-      : "尚无安排";
-  return (
-    <>
-      <Badge
-        variant={cancelled ? "secondary" : locked ? "outline" : "default"}
-        className={cn("py-1", cancelled && "line-through opacity-70")}
-      >
-        {lockLabel}
-      </Badge>
-      <Badge
-        variant={status || projected ? "secondary" : "outline"}
-        className="py-1"
-        title={acceptedAt || undefined}
-      >
-        {arrangementLabel}
-      </Badge>
-    </>
-  );
-}
-
-/** 具体日程（04 4.2/4.4）：当前版本条目；锁定用 locked_effective；安排只读联表（前端投影） */
-function ScheduleSection({
-  entries,
-  plan,
-  arranged,
-}: {
-  entries: PlanScheduleEntry[];
-  plan: PlanPayload;
-  arranged: Map<string, ProjectedArrangement>;
-}) {
-  // 联键优先 target.scheduled_session_id；target 自带 scheduled_on 仅作草稿证据的次级回退
-  // （安排快照声明的日程日期，不是从记录日期推断）
-  const byDate = new Map(
-    [...arranged.values()]
-      .filter((a) => a.target?.scheduled_on)
-      .map((a) => [a.target!.scheduled_on, a]),
-  );
-  return (
-    <section>
-      <h4 className="text-sm font-medium">具体日程</h4>
-      <p className="mt-1 text-xs text-muted-foreground">
-        仅列当前版本的应训练日（休息日不排）；到期即锁（存储标记 ∪
-        日期规则）；安排状态由前端从已接受安排证据投影联表（A2，不走
-        /api/arrangements）。
-      </p>
-      <ul className="mt-2 flex flex-wrap gap-1.5">
-        {entries.map((s) => (
-          <li
-            key={s.id}
-            className="inline-flex items-center gap-1.5 rounded-full border py-0.5 pr-1 pl-2 text-xs"
-          >
-            <span className="tabular-nums">
-              {s.date.slice(5)} {weekdayLabel(s.weekday)}
-            </span>
-            <ScheduleBadge
-              entry={s}
-              plan={plan}
-              projected={arranged.get(s.id) ?? byDate.get(s.date)}
-            />
-          </li>
-        ))}
-      </ul>
-    </section>
-  );
-}
-
-/**
- * 当前计划卡：状态／版本／日期、安全复核结果、按训练日分组的处方（展示经 derive）、
- * 校准说明与具体日程（effective 锁定）。
- */
-function PlanCard({
-  plan,
-  schedules,
-  safety,
-  arranged,
-}: {
-  plan: PlanVersion;
-  schedules: PlanScheduleEntry[];
-  safety?: PlanSafetyWire;
-  arranged: Map<string, ProjectedArrangement>;
-}) {
-  const blocks = derivePlanBlocks(plan.payload);
-  const calibration = plan.payload.plan_workouts
-    .flatMap((w) => w.exercises)
-    .find((e) => e.load?.kind === "needs_calibration")?.load;
-  const currentSchedules = schedules.filter(
-    (s) => s.plan_version === plan.version && s.stored_status !== "cancelled",
-  );
-  return (
-    <Card className="sm:col-span-2">
-      <CardHeader>
-        <div className="flex flex-wrap items-center gap-2">
-          <CardTitle>当前计划</CardTitle>
-          <Badge variant={plan.status === "active" ? "default" : "secondary"}>
-            {plan.status === "active" ? "生效中" : "已归档"}
-          </Badge>
-        </div>
-        <CardDescription>
-          {plan.version} · 开始 {plan.starts_on} · 复核 {plan.review_on}
-          ；处方修改须经对话草稿确认并生成新版本
-        </CardDescription>
-      </CardHeader>
-      <CardContent className="flex flex-col gap-6">
-        {safety && <PlanSafetyNotice safety={safety} />}
-        {blocks.map((block) => (
-          <BlockTable key={block.workout_key} block={block} />
-        ))}
-        {calibration && calibration.kind === "needs_calibration" && (
-          <CalibrationSection calibration={calibration} />
-        )}
-        {currentSchedules.length > 0 && (
-          <ScheduleSection
-            entries={currentSchedules}
-            plan={plan.payload}
-            arranged={arranged}
-          />
-        )}
-      </CardContent>
-    </Card>
-  );
-}
-
-/** /profile 档案与限制：只读看板；计划/安全改调 /api/plan + /api/plan/guidance（F1） */
-export default function ProfilePage() {
-  const profile = useQuery({ queryKey: ["profile"], queryFn: getProfile });
-  const hasProfile = profile.data?.profile != null;
-
-  /** 计划与安全复核独立端点；未建档不请求 */
-  const planQuery = useQuery({
-    queryKey: ["plan"],
-    queryFn: getPlan,
-    enabled: hasProfile,
-  });
-  const guidanceQuery = useQuery({
-    queryKey: ["plan-guidance"],
-    queryFn: () => getPlanGuidance(),
-    enabled: hasProfile,
+  const fact = <T,>(key: FieldKey, value: T): ProfileFactWire<T> => ({
+    state: states[key],
+    value: states[key] === "known" ? value : null,
   });
 
-  const mappedPlan =
-    planQuery.data?.plan != null ? mapPlanView(planQuery.data.plan) : null;
-  const safety = guidanceQuery.data?.guidance?.safety;
-  const restrictions = mapProfileRestrictions(profile.data?.profile ?? null);
-  /**
-   * 安排联表（F6-02c 已拍 A2）：不调用 GET /api/arrangements；由前端投影推导。
-   * 生产路径缺项（不静默补造，见 src/lib/arrangements.ts 与 02c 报告）：
-   * - 真实后端无会话列表端点 → 本页无法枚举跨会话已提交安排草稿（drafts 暂为空）；
-   * - 记录传输契约无 scheduled_session_id → 记录证据联不到具体日程条目。
-   * 因此徽章默认「尚无安排」；拿到已知会话草稿后经 projectAcceptedArrangements 联表。
-   */
-  const arranged = useMemo(
-    () => projectAcceptedArrangements({ drafts: [] }),
-    [],
-  );
+  const submit = () => {
+    const body: ProfileFactsWire = {
+      training_goal: fact("training_goal", texts.training_goal.trim()),
+      weekly_frequency: fact(
+        "weekly_frequency",
+        Number(texts.weekly_frequency),
+      ),
+      available_equipment: fact(
+        "available_equipment",
+        splitList(texts.available_equipment ?? ""),
+      ),
+      explicit_preferences: fact(
+        "explicit_preferences",
+        splitList(texts.explicit_preferences ?? ""),
+      ),
+      current_level: fact("current_level", texts.current_level.trim()),
+      known_injuries: fact(
+        "known_injuries",
+        splitList(texts.known_injuries ?? ""),
+      ),
+      forbidden_exercise_ids: fact("forbidden_exercise_ids", forbidden),
+    };
+    save.mutate(body);
+  };
+
+  const onFactState = (key: FieldKey, state: FactState) =>
+    setStates((prev) => ({ ...prev, [key]: state }));
 
   return (
-    <div className="mx-auto w-full max-w-3xl px-6 pb-10">
-      <header className="pt-10 pb-6">
-        <h2 className="font-display text-3xl font-light tracking-tight">
-          档案与限制
-        </h2>
-        <p className="mt-1 text-sm text-muted-foreground">
-          档案、动作限制与当前计划的只读查看
-        </p>
-      </header>
-
-      {profile.isPending && <Loading text="正在加载档案" />}
-      {profile.isError && <LoadError text={profile.error.message} />}
-
-      {profile.data && profile.data.profile === null && (
-        <Card className="mt-6">
-          <CardHeader>
-            <div className="flex items-center gap-2">
-              <MessagesSquare
-                className="size-5 shrink-0 text-muted-foreground"
-                aria-hidden
-              />
-              <CardTitle>尚未建档</CardTitle>
+    <div className="mx-auto max-w-3xl space-y-6 p-6">
+      <Card>
+        <CardHeader>
+          <CardTitle>用户画像</CardTitle>
+          <CardDescription>
+            七字段三态：未填写与明确为空必须区分，两者都不补造事实；整份覆盖保存。
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-5">
+          {FIELDS.map(({ key, label, hint }) => (
+            <div key={key} className="space-y-2">
+              <div className="flex items-center gap-3">
+                <span className="w-32 text-sm font-medium">{label}</span>
+                <select
+                  className={selectClass}
+                  value={states[key]}
+                  onChange={(event) =>
+                    onFactState(key, event.target.value as FactState)
+                  }
+                  aria-label={`${label}填写状态`}
+                >
+                  {(Object.keys(FACT_STATE_LABELS) as FactState[]).map((s) => (
+                    <option key={s} value={s}>
+                      {FACT_STATE_LABELS[s]}
+                    </option>
+                  ))}
+                </select>
+                {states[key] !== "known" && (
+                  <span className="text-xs text-muted-foreground">
+                    {states[key] === "unknown" ? "尚未填写" : "用户明确表示没有"}
+                  </span>
+                )}
+              </div>
+              {states[key] === "known" && key !== "forbidden_exercise_ids" && (
+                <Input
+                  value={texts[key] ?? ""}
+                  placeholder={hint}
+                  onChange={(event) =>
+                    setTexts((prev) => ({ ...prev, [key]: event.target.value }))
+                  }
+                />
+              )}
+              {states[key] === "known" && key === "forbidden_exercise_ids" && (
+                <div className="flex flex-wrap gap-2">
+                  {(exercises.data?.exercises ?? []).map((exercise) => (
+                    <label
+                      key={exercise.id}
+                      className="flex cursor-pointer items-center gap-1 text-xs"
+                    >
+                      <input
+                        type="checkbox"
+                        checked={forbidden.includes(exercise.id)}
+                        onChange={(event) =>
+                          setForbidden((prev) =>
+                            event.target.checked
+                              ? [...prev, exercise.id]
+                              : prev.filter((id) => id !== exercise.id),
+                          )
+                        }
+                      />
+                      {exercise.standard_name_zh}
+                    </label>
+                  ))}
+                </div>
+              )}
             </div>
-            <CardDescription>
-              建档只能通过对话完成，没有独立表单；信息齐备后生成档案草稿，确认后在此查看档案与限制。
-            </CardDescription>
-          </CardHeader>
-          <CardContent>
-            <Link to="/" className={buttonVariants({ size: "sm" })}>
-              前往对话开始建档
-              <ArrowRight aria-hidden />
-            </Link>
-          </CardContent>
-        </Card>
-      )}
+          ))}
 
-      {profile.data && profile.data.profile && (
-        <>
-          {planQuery.isPending && <Loading text="正在加载计划" />}
-          {planQuery.isError && (
-            <LoadError text={`计划：${planQuery.error.message}`} />
+          {forbidden.length > 0 && (
+            <div className="flex flex-wrap gap-2">
+              {forbidden.map((id) => (
+                <Badge key={id} variant="secondary">
+                  {nameById.get(id)?.standard_name_zh ?? id}
+                </Badge>
+              ))}
+            </div>
           )}
 
-          <div className="grid gap-4 sm:grid-cols-2">
-            <ProfileCard profile={profile.data.profile} />
-            <RestrictionsCard restrictions={restrictions} />
-            {mappedPlan ? (
-              <PlanCard
-                plan={mappedPlan.plan}
-                schedules={mappedPlan.schedules}
-                safety={safety}
-                arranged={arranged}
-              />
-            ) : (
-              <Card className="sm:col-span-2">
-                <CardHeader>
-                  <CardTitle>当前计划</CardTitle>
-                  <CardDescription>
-                    尚无计划；计划只能从对话生成，确认启用后才在此展示处方与日程
-                  </CardDescription>
-                </CardHeader>
-                <CardContent>
-                  <p className="text-sm text-muted-foreground">尚无计划</p>
-                </CardContent>
-              </Card>
-            )}
-          </div>
+          {LIST_KEYS.some((key) => states[key] === "known") && (
+            <p className="text-xs text-muted-foreground">
+              列表字段的「已知」不得留空：明确为空请选择「明确为空」。
+            </p>
+          )}
 
-          <footer className="mt-8 flex items-center justify-center gap-1.5 text-sm text-muted-foreground">
-            变更请到对话页发起
-            <Link
-              to="/"
-              className="inline-flex items-center gap-1 font-medium text-foreground underline-offset-4 hover:underline"
-            >
-              前往对话
-              <ArrowRight className="size-3.5" aria-hidden />
-            </Link>
-          </footer>
-        </>
-      )}
+          <Button onClick={submit} disabled={save.isPending}>
+            保存画像
+          </Button>
+        </CardContent>
+      </Card>
     </div>
   );
 }
