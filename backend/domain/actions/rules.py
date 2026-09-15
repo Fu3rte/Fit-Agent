@@ -1,20 +1,21 @@
-"""actions 确定性规则：动作模式词表、记录口径与负重口径校验（正本 architecture/03）。
+"""actions 确定性规则：13 项动作模式词表与写入记录前的口径校验（Stage 1 子任务 02 §4）。
 
-共享契约（S1-04 限制匹配、S1-05 模式限制判定复用本模块，不各自发明词表）：
+纯规则：不碰 IO、不读数据库、不依赖 Agent 框架（``domain/__init__`` 约束）。三条口径：
 
-- ``MODE_VOCABULARY``：13 项动作模式词表，逐字取自 stage1.md §5 S1-03
-  「已确认的动作模式映射」。
-- ``CATALOG_STANDARD_NAMES``：已拍首批 24 项中文标准名原词（目录清单，不是训练
-  计划，也不代表已通过可推荐检查；2026-09-09 拍定移除「哑铃分腿蹲」）。
-- ``EXERCISE_MODES``：标准名 → 动作模式集合；单一主模式归属，仅跨界高复合型
-  动作多归属（哑铃上斜卧推＝水平推＋垂直推；自重双杠臂屈伸＝垂直推＋肘伸）。
-- ``RECORD_TYPES`` / ``LOAD_CONVENTIONS``：三类记录口径与五种负重口径。
-
-本模块是纯规则：不碰 IO、不读数据库、不依赖 Agent 框架（domain/__init__ 约束）。
-限制判定口径为「动作的模式集合 ∩ 被限制模式集合 ≠ ∅ 即阻断」，判定函数归 S1-05。
+- ``MODE_VOCABULARY``：13 项动作模式词表原词，是 ``exercises.modes_json`` 的唯一取值域
+  （库内 CHECK 只保证 ``json_valid``，元素级校验只能在这里）。
+- ``RECORD_TYPES``／``LOAD_CONVENTIONS``：三类记录口径与五种负重口径，与库内 CHECK 同集合；
+  记录侧（``domain.records``）复用本词表，不另造第二套。
+- ``validate_record_against_exercise``：写入训练记录前的确定性校验（03 records 复用）——
+  动作存在（在 service 层查库）之外，记录口径必须与目录一致；外加负重型必须给出与目录
+  相同的负重口径，自重／计时型必须无口径（不虚构 0kg）。
 """
 
-# 13 项模式词表（stage1.md §5 S1-03「已确认的动作模式映射」）。
+from collections.abc import Sequence
+
+from domain.actions.schema import Exercise, LoadConvention, RecordType
+
+#: 13 项动作模式词表（pre-prj/stage/stage1.md §5 S1-03「已确认的动作模式映射」）。
 MODE_VOCABULARY: tuple[str, ...] = (
     "深蹲",
     "髋铰链",
@@ -31,67 +32,11 @@ MODE_VOCABULARY: tuple[str, ...] = (
     "核心",
 )
 
-# 已拍首批清单（2026-09-09 追加「保加利亚分腿蹲」、同日拍定移除「哑铃分腿蹲」，共 24 项）。
-CATALOG_STANDARD_NAMES: tuple[str, ...] = (
-    "杠铃背蹲",
-    "杠铃传统硬拉",
-    "杠铃罗马尼亚硬拉",
-    "45°腿举",
-    "保加利亚分腿蹲",
-    "杠铃平板卧推",
-    "哑铃平板卧推",
-    "哑铃上斜卧推",
-    "坐姿哑铃肩推",
-    "哑铃侧平举",
-    "哑铃反向飞鸟",
-    "杠铃俯身划船",
-    "坐姿绳索划船",
-    "单臂哑铃划船",
-    "高位下拉",
-    "自重引体向上",
-    "坐姿腿弯举",
-    "腿屈伸",
-    "器械站姿提踵",
-    "哑铃弯举",
-    "绳索下压",
-    "绳索过顶臂屈伸",
-    "自重双杠臂屈伸",
-    "悬垂举腿",
-)
+#: 三类记录口径（不新增辅助负重型、不建第四类）。
+RECORD_TYPES: tuple[RecordType, ...] = ("reps_weight", "reps_bodyweight", "time")
 
-# 标准名 → 模式集合；仅两处多归属（见模块 docstring）。
-EXERCISE_MODES: dict[str, tuple[str, ...]] = {
-    "杠铃背蹲": ("深蹲",),
-    "杠铃传统硬拉": ("髋铰链",),
-    "杠铃罗马尼亚硬拉": ("髋铰链",),
-    "45°腿举": ("深蹲",),
-    "保加利亚分腿蹲": ("深蹲",),
-    "杠铃平板卧推": ("水平推",),
-    "哑铃平板卧推": ("水平推",),
-    "哑铃上斜卧推": ("水平推", "垂直推"),
-    "坐姿哑铃肩推": ("垂直推",),
-    "哑铃侧平举": ("肩孤立",),
-    "哑铃反向飞鸟": ("肩孤立",),
-    "杠铃俯身划船": ("水平拉",),
-    "坐姿绳索划船": ("水平拉",),
-    "单臂哑铃划船": ("水平拉",),
-    "高位下拉": ("垂直拉",),
-    "自重引体向上": ("垂直拉",),
-    "坐姿腿弯举": ("膝屈",),
-    "腿屈伸": ("膝伸",),
-    "器械站姿提踵": ("小腿（踝跖屈）",),
-    "哑铃弯举": ("肘屈",),
-    "绳索下压": ("肘伸",),
-    "绳索过顶臂屈伸": ("肘伸",),
-    "自重双杠臂屈伸": ("垂直推", "肘伸"),
-    "悬垂举腿": ("核心",),
-}
-
-# 三类记录口径（03「本章已拍结论」）：不新增辅助负重型、不建第四类。
-RECORD_TYPES: tuple[str, ...] = ("reps_weight", "reps_bodyweight", "time")
-
-# 五种负重口径（stage1.md §5 S1-03「已确认的负重口径」）；仅负重次数型需要。
-LOAD_CONVENTIONS: tuple[str, ...] = (
+#: 五种负重口径（仅外加负重类型需要）。
+LOAD_CONVENTIONS: tuple[LoadConvention, ...] = (
     "barbell_includes_bar_total",
     "dumbbell_per_hand",
     "machine_pin_displayed_value",
@@ -100,25 +45,19 @@ LOAD_CONVENTIONS: tuple[str, ...] = (
 )
 
 
-class UnknownCatalogExercise(ValueError):
-    """标准名不在已拍 24 项清单内：拒绝凭相似名推断模式归属。"""
-
-
 class InvalidMode(ValueError):
-    """模式不在 13 项已拍词表内。"""
+    """模式集合为空或含有 13 项词表外的取值：目录数据损坏或调用方越界。"""
 
 
-def modes_for(standard_name: str) -> tuple[str, ...]:
-    """返回标准名的模式集合；不在清单内抛 UnknownCatalogExercise（不猜、不替换）。"""
-    try:
-        return EXERCISE_MODES[standard_name]
-    except KeyError as exc:
-        raise UnknownCatalogExercise(
-            f"标准名不在已拍首批清单内：{standard_name}"
-        ) from exc
+class UnknownExercise(ValueError):
+    """动作稳定身份不在目录内。"""
 
 
-def validate_modes(modes: tuple[str, ...] | list[str]) -> None:
+class RecordLoadMismatch(ValueError):
+    """记录口径或负重口径与目录动作不一致。"""
+
+
+def validate_modes(modes: Sequence[str]) -> None:
     """校验模式集合：至少一项且全部落在 13 项词表内。"""
     if not modes:
         raise InvalidMode("动作模式集合不能为空")
@@ -127,19 +66,33 @@ def validate_modes(modes: tuple[str, ...] | list[str]) -> None:
         raise InvalidMode(f"模式不在已拍 13 项词表内：{unknown}")
 
 
-# 按定义单侧（单腿／单臂）的清单动作：口径要求区分左右、次数按每侧记录。
-UNILATERAL_STANDARD_NAMES: tuple[str, ...] = (
-    "保加利亚分腿蹲",
-    "单臂哑铃划船",
-)
+def validate_record_against_exercise(
+    exercise: Exercise,
+    *,
+    record_type: RecordType,
+    load_convention: LoadConvention | None,
+) -> None:
+    """写入训练记录前的口径校验：记录口径必须与目录一致，负重口径按记录口径对齐。
 
-
-def is_unilateral(standard_name: str) -> bool:
-    """单侧动作（单腿／单臂类）：口径要求区分左右、次数按每侧记录。
-
-    仅覆盖已拍清单内按定义单侧的动作；「单侧设定值」负载口径适用于单侧器械
-    动作，本函数不推断某台器械是否为单侧配重。
+    - ``reps_weight``（外加负重）：记录必须给出负重口径，且与目录取值相同。
+    - ``reps_bodyweight``／``time``（自重／计时）：记录不得携带任何负重口径。
+    口径不符即拒绝，不静默改写成目录口径（不猜、不补默认值）。
     """
-    if standard_name not in EXERCISE_MODES:
-        raise UnknownCatalogExercise(f"标准名不在已拍首批清单内：{standard_name}")
-    return standard_name in UNILATERAL_STANDARD_NAMES
+    if record_type not in RECORD_TYPES:
+        raise RecordLoadMismatch(f"记录口径不在目录三类内：{record_type!r}")
+    if record_type != exercise.record_type:
+        raise RecordLoadMismatch(
+            f"记录口径 {record_type!r} 与目录动作 {exercise.id!r} 的"
+            f" {exercise.record_type!r} 不一致"
+        )
+    if exercise.record_type == "reps_weight":
+        if load_convention != exercise.load_convention:
+            raise RecordLoadMismatch(
+                f"负重口径 {load_convention!r} 与目录动作 {exercise.id!r} 的"
+                f" {exercise.load_convention!r} 不一致"
+            )
+        return
+    if load_convention is not None:
+        raise RecordLoadMismatch(
+            f"{exercise.record_type!r} 型动作 {exercise.id!r} 不得携带负重口径"
+        )
