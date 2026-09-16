@@ -1,9 +1,9 @@
 """Stage 2 Subtask 03 §B–§D（后端部分）：有效工作组与三类 PB 的确定性现算。
 
-依据：``refactor-log/stage2.md`` §6／§11.2、``refactor-log/stage2-subTasks/03-stats-and-personal-bests.md``、
+依据：``refactor-log/stage2.md`` §6／§11.2、
 ``LANGGRAPH_REFACTOR_PLAN.md`` §6.2、``Fit-Agent-LangGraph-重构讨论总结.md`` §7.1。
 
-覆盖：热身／辅助／不完整组不刷新 PB、三类 PB 各自的规则（重量不含次数、外加重量按同重量分组次数、
+覆盖：热身／辅助／不完整组不刷新 PB、三类 PB 各自的规则（重量不含次数、外加重量动作不出次数 PB、
 纯自重单组最大次数不累加、计时最长秒数）、哑铃沿用单手记录值不乘 2、纯自重引体与负重引体不混算、
 PB 来源训练／组序号／日期与并列来源排序、修改与删除后立即重算、PB 不落表（查询前后 Schema 不变、
 无 ``personal_bests`` 表与有效工作组 View）、输出只有三类 PB（无容量 PB 与估算 1RM）。
@@ -198,10 +198,8 @@ async def test_personal_bests_only_count_valid_work_sets(tmp_path: Path) -> None
         )
         pbs = await _pbs(db)
         assert [(pb.pb_type, pb.value, pb.weight_kg, pb.set_no) for pb in pbs] == [
+            # 外加重量动作只出重量 PB：80kg 组的 20 次不另算次数 PB。
             ("weight_pb", 120.0, 120.0, 4),
-            # 外加重量动作的次数按重量分别取：80kg 组 20 次、120kg 组 5 次。
-            ("reps_pb", 20, 80.0, 1),
-            ("reps_pb", 5, 120.0, 4),
         ]
         weight_pb = pbs[0]
         assert weight_pb.exercise_id == SQUAT
@@ -238,26 +236,29 @@ async def test_incomplete_sets_do_not_refresh_pb(tmp_path: Path) -> None:
 # ---------- §C 三类 PB ----------
 
 
-async def test_reps_pb_groups_external_added_weight_by_weight(tmp_path: Path) -> None:
-    """外加重量动作的次数 PB 按相同重量分组：每个重量各一条，多组次数不累加。"""
+async def test_weighted_action_does_not_get_a_reps_pb(tmp_path: Path) -> None:
+    """外加重量动作只出重量 PB：同重量的多组次数不生成次数 PB，纯自重动作才计次数。"""
     db = await _migrated(tmp_path / "x.db")
     try:
         records = WorkoutRecordsService(db)
         await records.create(date(2026, 6, 1), (_weighted_pull_up(1, 10.0, 6),))
-        await records.create(date(2026, 6, 5), (_weighted_pull_up(1, 10.0, 8),))
+        await records.create(
+            date(2026, 6, 5), (_weighted_pull_up(1, 10.0, 8), _pull_up(1, 9))
+        )
         await records.create(date(2026, 6, 7), (_weighted_pull_up(1, 15.0, 4),))
 
         pbs = await _pbs(db)
-        assert [(pb.pb_type, pb.value, pb.weight_kg) for pb in pbs] == [
-            # 重量 PB 只比外加重量（15kg 组 4 次不改变它）。
-            ("weight_pb", 15.0, 15.0),
-            # 10kg 的两组（6 次 + 8 次）取单组最大 8，不累加成 14。
-            ("reps_pb", 8, 10.0),
-            ("reps_pb", 4, 15.0),
+        assert [
+            (pb.exercise_id, pb.pb_type, pb.value, pb.weight_kg) for pb in pbs
+        ] == [
+            # 纯自重引体才有次数 PB：单组最大 9 次，不累加多组。
+            (PULL_UP, "reps_pb", 9, None),
+            # 负重引体只比外加重量（15kg 组 4 次不改变它），不产生次数 PB。
+            (WEIGHTED_PULL_UP, "weight_pb", 15.0, 15.0),
         ]
-        assert {pb.exercise_id for pb in pbs} == {WEIGHTED_PULL_UP}
-        assert {pb.load_convention for pb in pbs} == {EXTERNAL_CONVENTION}
-        assert _find(pbs, WEIGHTED_PULL_UP, "reps_pb", 10.0).performed_on == date(2026, 6, 5)
+        assert {
+            pb.load_convention for pb in pbs if pb.exercise_id == WEIGHTED_PULL_UP
+        } == {EXTERNAL_CONVENTION}
         assert _find(pbs, WEIGHTED_PULL_UP, "weight_pb", 15.0).set_no == 1
     finally:
         await db.close()
@@ -277,7 +278,6 @@ async def test_bodyweight_reps_pb_is_single_set_max_and_separate_from_weighted_p
         assert {(pb.exercise_id, pb.pb_type) for pb in pbs} == {
             (PULL_UP, "reps_pb"),
             (WEIGHTED_PULL_UP, "weight_pb"),
-            (WEIGHTED_PULL_UP, "reps_pb"),
         }
         bodyweight = _find(pbs, PULL_UP, "reps_pb")
         assert bodyweight.value == 12  # 8 + 12 不累加，取单组最大
@@ -302,7 +302,7 @@ async def test_dumbbell_pb_uses_recorded_per_hand_weight(tmp_path: Path) -> None
         weight_pb = _find(pbs, DUMBBELL_BENCH, "weight_pb", 20.0)
         assert weight_pb.value == 20.0
         assert weight_pb.load_convention == DUMBBELL_CONVENTION
-        assert _find(pbs, DUMBBELL_BENCH, "reps_pb", 20.0).value == 8
+        assert len(pbs) == 1  # 外加重量动作没有次数 PB
         assert 40.0 not in {pb.value for pb in pbs}
     finally:
         await db.close()
@@ -359,10 +359,10 @@ async def test_tied_values_prefer_the_earlier_session_on_the_same_date(
     db = await _migrated(tmp_path / "x.db")
     try:
         records = WorkoutRecordsService(db)
-        first = await records.create(DAY, (_weighted_pull_up(1, 10.0, 8),))
-        second = await records.create(DAY, (_weighted_pull_up(1, 10.0, 8),))
+        first = await records.create(DAY, (_pull_up(1, 8),))
+        second = await records.create(DAY, (_pull_up(1, 8),))
 
-        reps_pb = _find(await _pbs(db), WEIGHTED_PULL_UP, "reps_pb", 10.0)
+        reps_pb = _find(await _pbs(db), PULL_UP, "reps_pb")
         assert first.id < second.id
         assert reps_pb.workout_session_id == first.id
         assert reps_pb.performed_on == DAY
@@ -398,7 +398,6 @@ async def test_update_and_delete_recompute_personal_bests(tmp_path: Path) -> Non
             for pb in await _pbs(db)
         ] == [
             ("weight_pb", 70.0, 70.0, date(2026, 6, 9)),
-            ("reps_pb", 3, 70.0, date(2026, 6, 9)),
         ]
 
         await records.delete(session.id)

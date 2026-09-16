@@ -1,6 +1,6 @@
 """Stage 2 Subtask 04 §A：趋势与趋势摘要的确定性现算。
 
-依据：``refactor-log/stage2.md`` §7／§11.3、``refactor-log/stage2-subTasks/04-trends-calendar-and-stats-api.md``
+依据：``refactor-log/stage2.md`` §7／§11.3
 §A／§最小验证、``LANGGRAPH_REFACTOR_PLAN.md`` §6.4、``Fit-Agent-LangGraph-重构讨论总结.md`` §3.2／§3.3。
 
 覆盖：最近 30 天窗口两端与只返回真实原始点（体脂未记录的行不进曲线、不补 0）、力量趋势为截至各日期
@@ -235,7 +235,7 @@ async def test_strength_trend_is_cumulative_and_never_decreases(tmp_path: Path) 
 async def test_strength_trend_covers_weight_reps_and_duration_series(
     tmp_path: Path,
 ) -> None:
-    """三种记录口径各自的系列互不混算：外加重量重量／同重量次数、纯自重次数、计时秒数。"""
+    """三种记录口径各自的系列互不混算：外加重量的累计最大重量、纯自重的累计次数、计时累计秒数。"""
     db = await _migrated(tmp_path / "x.db")
     try:
         records = WorkoutRecordsService(db)
@@ -251,7 +251,6 @@ async def test_strength_trend_covers_weight_reps_and_duration_series(
             for trend in report.strength
         } == {
             (WEIGHTED_PULL_UP, "weight_pb", None),
-            (WEIGHTED_PULL_UP, "reps_pb", 10.0),
             (PULL_UP, "reps_pb", None),
             (PLANK, "duration_pb", None),
         }
@@ -259,16 +258,12 @@ async def test_strength_trend_covers_weight_reps_and_duration_series(
             (date(2026, 6, 2), 10.0),
             (date(2026, 6, 6), 10.0),
         ]
-        assert _points(_series(report, WEIGHTED_PULL_UP, "reps_pb", 10.0)) == [
-            (date(2026, 6, 2), 6),
-            (date(2026, 6, 6), 9),
-        ]
         assert _points(_series(report, PULL_UP, "reps_pb")) == [(date(2026, 6, 8), 8)]
         assert _points(_series(report, PLANK, "duration_pb")) == [
             (date(2026, 6, 6), 45),
             (date(2026, 6, 8), 60),
         ]
-        assert _series(report, WEIGHTED_PULL_UP, "reps_pb", 10.0).load_convention == (
+        assert _series(report, WEIGHTED_PULL_UP, "weight_pb").load_convention == (
             EXTERNAL_CONVENTION
         )
     finally:

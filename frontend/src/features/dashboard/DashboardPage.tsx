@@ -99,11 +99,7 @@ function monthGrid(month: string): { leading: number; daysInMonth: number } {
 
 function pbValueText(pb: PersonalBestWire): string {
   if (pb.pb_type === "weight_pb") return `${pb.value} kg`;
-  if (pb.pb_type === "reps_pb") {
-    return pb.weight_kg === null
-      ? `${pb.value} 次`
-      : `${pb.value} 次（${pb.weight_kg} kg 同重量）`;
-  }
+  if (pb.pb_type === "reps_pb") return `${pb.value} 次`;
   return `${pb.value} 秒`;
 }
 

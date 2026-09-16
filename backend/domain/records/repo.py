@@ -7,7 +7,7 @@
   ``create_in_transaction``／``replace_in_transaction`` 只接受 ``Database.transaction()`` 的连接
   （``storage.db.require_outer_transaction`` 守住契约），由领域服务在同一个事务里先解析关联日程
   再写，避免「解析与写入分两次取锁」之间的竞态与裸 ``IntegrityError``。
-- **只读公开出口**走 ``under_lock``：按身份读取、全量读取、当天未完成且未被占用的日程候选。
+- **只读公开出口**走 ``under_lock``：按身份读取、全量读取、有界的最近若干次读取、当天未完成且未被占用的日程候选。
 - **删除是物理删除**（Stage 1 已拍 1A）：组行由库内 ``ON DELETE CASCADE`` 一并删除，
   ``Database.open()`` 已开 ``PRAGMA foreign_keys=ON``。
 - **写入前校验归 rules／service**：本层不猜重量、不补口径；库内 CHECK、UNIQUE 与触发器是兜底，
@@ -34,6 +34,9 @@ _SELECT_SET = (
 
 #: plan_sessions 列清单：只取关联校验需要的字段，计划侧读取出口在 domain.plans。
 _SELECT_PLAN_SESSION = "SELECT ps.id, ps.plan_id, ps.scheduled_on, ps.cancelled_at FROM plan_sessions ps"
+
+#: 训练的「最近」排序口径（最新在前）：近期上下文的有界读取与组行归属共用同一份，不各写一套。
+_RECENT_SESSION_ORDER = "performed_on DESC, id DESC"
 
 
 def _plan_session(row: aiosqlite.Row) -> PlanSession:
@@ -79,6 +82,38 @@ async def _read_all_sessions(
         WorkoutSession.from_row(
             dict(row), grouped.get(int(row["id"]), [])
         )
+        for row in session_rows
+    )
+
+
+async def _read_recent_sessions(
+    conn: aiosqlite.Connection, limit: int
+) -> tuple[WorkoutSession, ...]:
+    """最近 ``limit`` 次训练及其全部组（最新在前）：同日训练各算一次（日期相同再按身份取大）。
+
+    有界读取：先按口径取至多 ``limit`` 条训练行，再只取这些训练的组行——不退化成「先读完整训练
+    历史再在调用方截断」。不足 ``limit`` 就返回实际存在的条数，空库返回空元组。
+    """
+    async with conn.execute(
+        _SELECT_SESSION + " ORDER BY " + _RECENT_SESSION_ORDER + " LIMIT ?", (limit,)
+    ) as cursor:
+        session_rows = await cursor.fetchall()
+    if not session_rows:
+        return ()
+    async with conn.execute(
+        _SELECT_SET
+        + " WHERE workout_session_id IN (SELECT id FROM workout_sessions ORDER BY "
+        + _RECENT_SESSION_ORDER
+        + " LIMIT ?) ORDER BY workout_session_id, exercise_id, set_no",
+        (limit,),
+    ) as cursor:
+        set_rows = await cursor.fetchall()
+    grouped: dict[int, list[WorkoutSet]] = {}
+    for set_row in set_rows:
+        fact = WorkoutSet.from_row(dict(set_row))
+        grouped.setdefault(fact.workout_session_id, []).append(fact)
+    return tuple(
+        WorkoutSession.from_row(dict(row), grouped.get(int(row["id"]), []))
         for row in session_rows
     )
 
@@ -221,6 +256,18 @@ class WorkoutRecordsRepo:
     async def list_all(self) -> tuple[WorkoutSession, ...]:
         """全部训练及其全部组（按发生日期、身份排序）。"""
         return await self._db.under_lock(_read_all_sessions)
+
+    async def list_recent(self, limit: int) -> tuple[WorkoutSession, ...]:
+        """最近 ``limit`` 次训练及其全部组（最新在前）；供有界的近期上下文读取。
+
+        ``limit`` 必须为正数：SQLite 的 ``LIMIT -1`` 表示不限量，非正数会静默退化成全量读取，
+        故在此直接失败。
+        """
+        if limit < 1:
+            raise ValueError(f"list_recent 的 limit 必须为正数：{limit!r}")
+        return await self._db.under_lock(
+            lambda conn: _read_recent_sessions(conn, limit)
+        )
 
     async def list_unfinished_plan_sessions(
         self, scheduled_on: date

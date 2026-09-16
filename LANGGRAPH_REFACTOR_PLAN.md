@@ -286,7 +286,7 @@ backend/
 
 ### 5.6 Checkpoint 表
 
-Checkpoint 表由采用的 LangGraph SQLite Checkpointer 管理，不在业务 `001_initial.sql` 中复制一套。`thread_id` 直接使用 conversation id。
+Checkpoint 表由采用的 LangGraph SQLite Checkpointer 管理，使用与业务数据库分开的独立 SQLite 文件（不与业务库同库、不写进任何业务迁移），也不在业务 `001_initial.sql` 中复制一套；路径独立配置，测试用临时文件。`thread_id` 直接使用 conversation id。
 
 确认恢复只有一个提交入口：
 
@@ -333,7 +333,7 @@ Checkpoint 表由采用的 LangGraph SQLite Checkpointer 管理，不在业务 `
 | 类型 | 计算口径 |
 | --- | --- |
 | `weight_pb` | 同动作、同负重口径至少完成 1 次的单组最大实际重量，次数不参与 PB 数值计算 |
-| `reps_pb` | 外加重量动作同重量下的单组最大次数，或纯自重动作的单组最大次数 |
+| `reps_pb` | 仅用于纯自重动作，取单组最大次数；外加重量动作不记录次数 PB |
 | `duration_pb` | 计时动作的单组最长持续秒数 |
 
 每个结果返回来源训练、来源组序号和 `performed_on`；数值并列时来源固定取最早达成者（用户拍板口径 A）——依次比较 `performed_on`、来源训练身份和来源组序号，取更小者，使并列来源排序确定且可测试；重复完成一个等值结果不刷新 PB 的来源与日期。外加重量、纯自重和计时动作不混算。PB 不建结果表，不计算训练容量 PB 或估算 1RM。
@@ -354,7 +354,7 @@ Checkpoint 表由采用的 LangGraph SQLite Checkpointer 管理，不在业务 `
 
 `trend_summary` 不包含训练容量或计划完成率，也不评价进步、退步或停滞。趋势图默认展示最近 30 天；数据不足时返回 `no_data` 或 `insufficient_data` 等明确状态，不补 0、不伪造变化值。
 
-力量趋势不属于 `trend_summary`：按动作返回截至各日期的累计 PB（历史最好成绩，因此曲线不下降），默认窗口沿用趋势图最近 30 天口径；外部负重取截至该日期的最大重量、同重量次数取单组最大次数、纯自重取单组最大次数、计时动作取单组最长秒数。后端计算并通过 Stats API 暴露，Stage 2 前端不展示该曲线。
+力量趋势不属于 `trend_summary`：按动作返回截至各日期的累计 PB（历史最好成绩，因此曲线不下降），默认窗口沿用趋势图最近 30 天口径；外部负重只取截至该日期的最大重量，不生成次数 PB 趋势；纯自重取单组最大次数，计时动作取单组最长秒数。后端计算并通过 Stats API 暴露，Stage 2 前端不展示该曲线。
 
 同一底层查询同时服务看板和 MemoryAssembler。每个指标用固定数据库样本测试可复算，不让模型估算。
 
@@ -442,7 +442,7 @@ State 不复制完整数据库历史，不保存 API Key，不把 PB 或趋势�
 用户长期画像
 当前 active 计划
 最近 4 次训练
-相关动作最新 PB
+相关动作最新 PB（生成新计划时读取全部已有动作 PB；调整计划时只读取当前 active 计划涉及动作的 PB）
 确定性 trend_summary
 当前请求
 ```
@@ -656,7 +656,7 @@ Gate：未确认不写库；解析歧义不自动关联计划；后端测试、�
 最小必测：
 
 - 工作组、热身组、辅助组和不完整组的 PB 过滤；
-- 最大重量、最大次数、最长时长三类 PB 的数值、分组、来源与日期；
+- 最大重量、纯自重最大次数、最长时长三类 PB 的数值、适用动作、来源与日期；
 - 累计 PB 力量趋势按日期单调不下降，且可由固定数据库输入复算；
 - 纯自重引体与独立负重引体不混算，负重引体只把外加重量计为重量 PB；
 - 记录修改/删除后的 PB 与趋势重算；
@@ -741,7 +741,7 @@ cd frontend && npm run build
 
 - [ ] 使用 LangGraph State 与 SQLite Checkpointer；
 - [ ] Planner / Evaluator 是两个独立节点和提示词职责；
-- [ ] 固定输入下，MemoryAssembler 只输出用户画像、当前 active 计划、最近 4 次训练、相关动作最新 PB、确定性 `trend_summary` 和当前请求；
+- [ ] 固定输入下，MemoryAssembler 只输出用户画像、当前 active 计划、最近 4 次训练、相关动作最新 PB、确定性 `trend_summary` 和当前请求；生成新计划时读取全部已有动作 PB，调整计划时只读取当前 active 计划涉及动作的 PB；
 - [ ] `trend_summary` 的最近两条体重/体脂记录变化和距上次训练天数均可由固定数据库输入复算；数据不足时返回明确状态，且不包含训练容量或完成率；
 - [ ] 启动时只注入 Skill 的 `name` 和 `description`，任务命中后才加载正文；
 - [ ] PB、趋势和单次计划日程状态全部由确定性代码计算，LLM 只解释结果；

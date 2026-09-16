@@ -125,14 +125,11 @@ class StatsService:
 def compute_personal_bests(facts: Sequence[ValidWorkSet]) -> tuple[PersonalBest, ...]:
     """把有效工作组归约成三类 PB（同一份事实必得同一份结果：无模型、无缓存、无「今天」）。
 
-    分组口径：``weight_pb`` 按（动作、负重口径）；外加重量动作的 ``reps_pb`` 按（动作、负重口径、
-    重量），纯自重动作的 ``reps_pb`` 只按动作；``duration_pb`` 只按动作。故三类动作互不混算，
-    且同一动作的每个重量各自有一条次数 PB。多组次数只比大小、不累加。
+    分组口径：``weight_pb`` 按（动作、负重口径）；``reps_pb`` 只由纯自重动作产生、按动作；
+    ``duration_pb`` 只按动作。故三类动作互不混算：外加重量动作只出重量 PB，不按同重量再算次数 PB
+    （讨论总结 §7.1）；多组次数只比大小、不累加。
     """
     weighted: dict[tuple[str, LoadConvention | None], list[ValidWorkSet]] = {}
-    weighted_reps: dict[
-        tuple[str, LoadConvention | None, float], list[ValidWorkSet]
-    ] = {}
     bodyweight_reps: dict[str, list[ValidWorkSet]] = {}
     timed: dict[str, list[ValidWorkSet]] = {}
 
@@ -141,9 +138,6 @@ def compute_personal_bests(facts: Sequence[ValidWorkSet]) -> tuple[PersonalBest,
             weighted.setdefault((fact.exercise_id, fact.load_convention), []).append(
                 fact
             )
-            weighted_reps.setdefault(
-                (fact.exercise_id, fact.load_convention, _weight_of(fact)), []
-            ).append(fact)
         elif fact.record_type == "reps_bodyweight":
             bodyweight_reps.setdefault(fact.exercise_id, []).append(fact)
         else:
@@ -154,11 +148,7 @@ def compute_personal_bests(facts: Sequence[ValidWorkSet]) -> tuple[PersonalBest,
     for group in weighted.values():
         source, weight = _best_source(group, _weight_of)
         bests.append(_personal_best("weight_pb", source, weight, weight))
-    # 最大次数：外加重量动作按相同重量分别取（哑铃是单手指记录值，不做换算）。
-    for (_, _, weight), group in weighted_reps.items():
-        source, reps = _best_source(group, _reps_of)
-        bests.append(_personal_best("reps_pb", source, reps, weight))
-    # 最大次数：纯自重动作直接取单组最大次数（无重量、无口径）。
+    # 最大次数：只有纯自重动作有次数 PB，直接取单组最大次数（无重量、无口径）。
     for group in bodyweight_reps.values():
         source, reps = _best_source(group, _reps_of)
         bests.append(_personal_best("reps_pb", source, reps, None))
@@ -329,13 +319,12 @@ def _workout_gap(last_workout_on: date | None, business_day: date) -> WorkoutGap
 
 @dataclass(frozen=True, slots=True)
 class _SeriesKey:
-    """一个力量趋势系列的身份：动作身份 + PB 类型 + 负重口径 + 次数 PB 的分组重量。"""
+    """一个力量趋势系列的身份：动作身份 + PB 类型 + 负重口径。"""
 
     exercise_id: str
     exercise_name: str
     pb_type: PersonalBestType
     load_convention: LoadConvention | None
-    weight_kg: float | None
 
 
 def compute_strength_trends(
@@ -343,19 +332,19 @@ def compute_strength_trends(
 ) -> tuple[StrengthTrend, ...]:
     """把有效工作组归约成「截至各日期的累计 PB」系列（历史最好成绩，曲线不下降）。
 
-    系列口径与三类 PB 的分组一致（同一个有效工作组事实，不另写一套过滤）：外加重量动作同时
-    进入「累计最大重量」与「按同重量的累计单组最大次数」两个系列；纯自重动作进入累计单组最大
-    次数系列；计时动作进入累计单组最长秒数系列。累计值包含窗口之前的全部历史，故窗口内每个
-    有该系列有效组的日期都给一个点，没有有效组的日期不补点（不补 0）。
+    系列口径与三类 PB 的分组一致（同一个有效工作组事实，不另写一套过滤）：外加重量动作只进入
+    「累计最大重量」系列，不生成次数 PB 曲线（讨论总结 §7.1）；纯自重动作进入累计单组最大次数
+    系列；计时动作进入累计单组最长秒数系列。累计值包含窗口之前的全部历史，故窗口内每个有该系列
+    有效组的日期都给一个点，没有有效组的日期不补点（不补 0）。
     """
     daily: dict[_SeriesKey, dict[date, int | float]] = {}
     for fact in facts:
-        for key, measure in _measures(fact):
-            by_date = daily.setdefault(key, {})
-            known = by_date.get(fact.performed_on)
-            by_date[fact.performed_on] = (
-                measure if known is None else max(known, measure)
-            )
+        key, measure = _measures(fact)
+        by_date = daily.setdefault(key, {})
+        known = by_date.get(fact.performed_on)
+        by_date[fact.performed_on] = (
+            measure if known is None else max(known, measure)
+        )
 
     trends: list[StrengthTrend] = []
     for key, by_date in daily.items():
@@ -371,28 +360,21 @@ def compute_strength_trends(
     return tuple(sorted(trends, key=_series_order))
 
 
-def _measures(fact: ValidWorkSet) -> tuple[tuple[_SeriesKey, int | float], ...]:
-    """一个有效工作组贡献的趋势系列与度量（三种记录口径互不混算）。"""
+def _measures(fact: ValidWorkSet) -> tuple[_SeriesKey, int | float]:
+    """一个有效工作组贡献的趋势系列与度量（三种记录口径互不混算，各自只有一个系列）。"""
     if fact.record_type == "reps_weight":
-        weight = _weight_of(fact)
-        return (
-            (_series_key(fact, "weight_pb", None), weight),
-            (_series_key(fact, "reps_pb", weight), _reps_of(fact)),
-        )
+        return _series_key(fact, "weight_pb"), _weight_of(fact)
     if fact.record_type == "reps_bodyweight":
-        return ((_series_key(fact, "reps_pb", None), _reps_of(fact)),)
-    return ((_series_key(fact, "duration_pb", None), _duration_of(fact)),)
+        return _series_key(fact, "reps_pb"), _reps_of(fact)
+    return _series_key(fact, "duration_pb"), _duration_of(fact)
 
 
-def _series_key(
-    fact: ValidWorkSet, pb_type: PersonalBestType, weight_kg: float | None
-) -> _SeriesKey:
+def _series_key(fact: ValidWorkSet, pb_type: PersonalBestType) -> _SeriesKey:
     return _SeriesKey(
         exercise_id=fact.exercise_id,
         exercise_name=fact.exercise_name,
         pb_type=pb_type,
         load_convention=fact.load_convention,
-        weight_kg=weight_kg,
     )
 
 
@@ -404,7 +386,7 @@ def _strength_trend(
         exercise_name=key.exercise_name,
         pb_type=key.pb_type,
         load_convention=key.load_convention,
-        weight_kg=key.weight_kg,
+        weight_kg=None,
         points=points,
     )
 

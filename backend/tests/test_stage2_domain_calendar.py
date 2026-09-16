@@ -1,6 +1,6 @@
 """Stage 2 Subtask 04 §B：月历与单次日程状态的确定性现算。
 
-依据：``refactor-log/stage2.md`` §8／§11.4、``refactor-log/stage2-subTasks/04-trends-calendar-and-stats-api.md``
+依据：``refactor-log/stage2.md`` §8／§11.4
 §B／§最小验证、``LANGGRAPH_REFACTOR_PLAN.md`` §6.3、``Fit-Agent-LangGraph-重构讨论总结.md`` §9。
 
 覆盖：只读取当前 active 计划的日程（draft／archived 不进入月历）、取消／未完成／已完成三种状态、

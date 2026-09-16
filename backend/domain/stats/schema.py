@@ -116,10 +116,10 @@ class StrengthPoint:
 class StrengthTrend:
     """一个力量趋势系列：截至各日期的累计 PB，因此曲线按日期不下降。
 
-    系列口径与 PB 分组一致（stage2.md §6.2）：``weight_pb`` 为动作＋负重口径的累计最大重量
-    （``weight_kg`` 为 ``None``，累积值本身就是重量）；``reps_pb`` 为外加重量动作按同重量
-    （``weight_kg`` 即该分组重量）或纯自重动作的累计单组最大次数；``duration_pb`` 为计时动作的
-    累计单组最长秒数。累计包含窗口之前的全部历史，故 ``points`` 只覆盖窗口内有有效组的日期。
+    系列口径与 PB 分组一致（stage2.md §6.2）：``weight_pb`` 为动作＋负重口径的累计最大重量；
+    ``reps_pb`` 只有纯自重动作的累计单组最大次数；``duration_pb`` 为计时动作的累计单组最长秒数。
+    外加重量动作不生成次数 PB 曲线（讨论总结 §7.1）。累计包含窗口之前的全部历史，故 ``points``
+    只覆盖窗口内有有效组的日期；口径修正后三类系列都无分组重量，``weight_kg`` 恒为 ``None``。
     """
 
     exercise_id: str
@@ -237,9 +237,9 @@ class PersonalBest:
     """一条现算 PB：数值 + 来源组事实（来源训练、组序号、``performed_on``）与适用的重量／口径。
 
     ``value`` 的单位随 ``pb_type``：``weight_pb`` 为 kg、``reps_pb`` 为次数、``duration_pb`` 为秒数。
-    ``weight_kg`` 是该 PB 来源组的适用重量：``weight_pb`` 与 ``value`` 同值，``reps_pb`` 为同重量
-    分组的那一重量（哑铃沿用记录的单手值，不乘 2），纯自重与计时 PB 为 ``None``；
-    ``load_convention`` 同理只在外加重量动作上出现。
+    ``weight_kg`` 是该 PB 来源组的适用重量：``weight_pb`` 与 ``value`` 同值，只有纯自重动作才有
+    ``reps_pb``（无重量），故 ``reps_pb`` 与 ``duration_pb`` 恒为 ``None``；``load_convention``
+    同理只在外加重量动作上出现。
     """
 
     exercise_id: str

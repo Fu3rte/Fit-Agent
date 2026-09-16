@@ -1,7 +1,6 @@
 """Stage 2 Subtask 04 §C：Stats API（三类 PB、趋势、月历）与路由注册顺序。
 
-依据：``refactor-log/stage2.md`` §9／§11.4、``refactor-log/stage2-subTasks/04-trends-calendar-and-stats-api.md``
-§C／§最小验证、``LANGGRAPH_REFACTOR_PLAN.md`` §4。
+依据：``refactor-log/stage2.md`` §9／§11.4、``LANGGRAPH_REFACTOR_PLAN.md`` §4。
 
 覆盖：三个端点的对象包裹响应与 snake_case 契约、业务日期经 ``dependency_overrides[current_business_date]``
 注入（不取系统时钟）、``no_data`` 状态经 API 可读、月历跨日／额外训练事实、非法与缺失月份返回统一 4xx
@@ -111,7 +110,7 @@ def _post_metric(
 # ---------- 三类 PB ----------
 
 
-def test_personal_bests_endpoint_returns_three_types_with_sources(
+def test_personal_bests_endpoint_returns_pb_types_with_sources(
     client: TestClient,
 ) -> None:
     """``GET /api/stats/personal-bests``：对象包裹 + snake_case 契约 + 来源训练／组序号／日期。"""
@@ -129,9 +128,9 @@ def test_personal_bests_endpoint_returns_three_types_with_sources(
     record_id = created.json()["record"]["id"]
 
     body = client.get("/api/stats/personal-bests").json()
+    # 外加重量动作只出重量 PB，纯自重引体出次数 PB。
     assert [pb["pb_type"] for pb in body["personal_bests"]] == [
         "weight_pb",
-        "reps_pb",
         "reps_pb",
     ]
     squat_pb = body["personal_bests"][0]
@@ -146,7 +145,7 @@ def test_personal_bests_endpoint_returns_three_types_with_sources(
         "set_no": 1,
         "performed_on": BUSINESS_DAY.isoformat(),
     }
-    assert body["personal_bests"][2]["exercise_id"] == PULL_UP
+    assert body["personal_bests"][1]["exercise_id"] == PULL_UP
 
 
 def test_three_record_types_flow_from_the_form_api_into_three_pb_types(
@@ -155,7 +154,7 @@ def test_three_record_types_flow_from_the_form_api_into_three_pb_types(
     """Gate B：外加重量／纯自重／计时三种记录经表单 API 写入后，Stats API 给出三类 PB 且互不混算。
 
     跨层链路：``POST /api/records`` → 领域写入 → 共享有效工作组 SQL → Stats API。纯自重引体与
-    负重引体是两个动作，各自的次数／重量分别成 PB，不互相顶替。
+    负重引体是两个动作，各自的次数／重量分别成 PB，不互相顶替；外加重量动作不出次数 PB。
     """
     weighted_reps = client.post(
         "/api/records",
@@ -201,23 +200,12 @@ def test_three_record_types_flow_from_the_form_api_into_three_pb_types(
         for pb in bests
     ] == [
         (SQUAT, "weight_pb", 100.0, 100.0, SQUAT_CONVENTION, first_id, 1, "2026-06-02"),
-        (SQUAT, "reps_pb", 5, 100.0, SQUAT_CONVENTION, first_id, 1, "2026-06-02"),
         (PLANK, "duration_pb", 120, None, None, second_id, 1, "2026-06-10"),
         (PULL_UP, "reps_pb", 9, None, None, first_id, 1, "2026-06-02"),
         (
             WEIGHTED_PULL_UP,
             "weight_pb",
             20.0,
-            20.0,
-            EXTERNAL_ADDED_WEIGHT,
-            second_id,
-            1,
-            "2026-06-10",
-        ),
-        (
-            WEIGHTED_PULL_UP,
-            "reps_pb",
-            6,
             20.0,
             EXTERNAL_ADDED_WEIGHT,
             second_id,
@@ -237,11 +225,9 @@ def test_three_record_types_flow_from_the_form_api_into_three_pb_types(
         for trend in strength
     ] == [
         (SQUAT, "weight_pb", None, [("2026-06-02", 100.0)]),
-        (SQUAT, "reps_pb", 100.0, [("2026-06-02", 5)]),
         (PLANK, "duration_pb", None, [("2026-06-10", 120)]),
         (PULL_UP, "reps_pb", None, [("2026-06-02", 9)]),
         (WEIGHTED_PULL_UP, "weight_pb", None, [("2026-06-10", 20.0)]),
-        (WEIGHTED_PULL_UP, "reps_pb", 20.0, [("2026-06-10", 6)]),
     ]
 
 
@@ -287,10 +273,9 @@ def test_pb_and_trends_recompute_after_edit_through_the_form_api(
     assert [
         (pb["pb_type"], pb["value"], pb["workout_session_id"])
         for pb in client.get("/api/stats/personal-bests").json()["personal_bests"]
-    ] == [("weight_pb", 100.0, first_id), ("reps_pb", 5, first_id)]
+    ] == [("weight_pb", 100.0, first_id)]
     assert strengths() == [
         (SQUAT, "weight_pb", None, [("2026-06-02", 100.0), ("2026-06-25", 100.0)]),
-        (SQUAT, "reps_pb", 100.0, [("2026-06-02", 5), ("2026-06-25", 5)]),
     ]
     summary = client.get("/api/stats/trends").json()["trends"]["trend_summary"]
     assert summary["weight_change"]["change"] == -0.5
@@ -312,13 +297,9 @@ def test_pb_and_trends_recompute_after_edit_through_the_form_api(
         for pb in client.get("/api/stats/personal-bests").json()["personal_bests"]
     ] == [
         ("weight_pb", 100.0, 100.0, later_id, "2026-06-25"),
-        ("reps_pb", 4, 90.0, first_id, "2026-06-02"),
-        ("reps_pb", 3, 100.0, later_id, "2026-06-25"),
     ]
     assert strengths() == [
         (SQUAT, "weight_pb", None, [("2026-06-02", 90.0), ("2026-06-25", 100.0)]),
-        (SQUAT, "reps_pb", 90.0, [("2026-06-02", 4)]),
-        (SQUAT, "reps_pb", 100.0, [("2026-06-25", 3)]),
     ]
 
     # 覆盖最近一条体重记录：趋势摘要按新的事实重算，不沿用旧变化值。
@@ -408,7 +389,7 @@ def test_trends_endpoint_uses_the_injected_business_date(client: TestClient) -> 
     ]
     # 6/20 未记录体脂：不进体脂曲线，也不补 0。
     assert trends["body_fat"] == [{"measured_on": "2026-06-01", "value": 21.0}]
-    # 外加重量动作同时进入「累计最大重量」与「按同重量的累计单组最大次数」两个系列。
+    # 外加重量动作只出一条「累计最大重量」系列：不按同重量再生成次数曲线。
     assert trends["strength"] == [
         {
             "exercise_id": SQUAT,
@@ -420,22 +401,6 @@ def test_trends_endpoint_uses_the_injected_business_date(client: TestClient) -> 
                 {"performed_on": "2026-06-02", "value": 90.0},
                 {"performed_on": "2026-06-25", "value": 110.0},
             ],
-        },
-        {
-            "exercise_id": SQUAT,
-            "exercise_name": "杠铃背蹲",
-            "pb_type": "reps_pb",
-            "load_convention": SQUAT_CONVENTION,
-            "weight_kg": 90.0,
-            "points": [{"performed_on": "2026-06-02", "value": 5}],
-        },
-        {
-            "exercise_id": SQUAT,
-            "exercise_name": "杠铃背蹲",
-            "pb_type": "reps_pb",
-            "load_convention": SQUAT_CONVENTION,
-            "weight_kg": 110.0,
-            "points": [{"performed_on": "2026-06-25", "value": 5}],
         },
     ]
     assert trends["trend_summary"]["weight_change"] == {

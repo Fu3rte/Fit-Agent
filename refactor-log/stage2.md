@@ -1,9 +1,9 @@
 # Stage 2：PB、单次日程状态、趋势与看板计划清单
 
-> 状态：已完成——Subtask 01（口径冻结与契约）、02（`002` 迁移与训练记录链路）、03（Stats 基础与三类 PB）、04（趋势／月历／Stats API）、05（前端看板与缓存失效）、06（集成验证与 Stage 2 Gate）全部完成；Stage 2 Gate 通过（`cd backend && uv run pytest` 196 passed、`cd backend && uv run ruff check .` All checks passed!、`cd frontend && npm run build` 通过、`git diff --check` 无输出）  
+> 状态：已完成——Subtask 01（口径冻结与契约）、02（`002` 迁移与训练记录链路）、03（Stats 基础与三类 PB）、04（趋势／月历／Stats API）、05（前端看板与缓存失效）、06（集成验证与 Stage 2 Gate）全部完成；原 Stage 2 Gate 曾通过（`cd backend && uv run pytest` 196 passed、`cd backend && uv run ruff check .` All checks passed!、`cd frontend && npm run build` 通过、`git diff --check` 无输出）；其后用户明确取消外加重量动作的同重量次数 PB，本文件“Stage 3 前置修正”（§14）已按最小范围实施并重跑全量 Gate（`cd backend && uv run pytest` 211 passed、`cd backend && uv run ruff check .` All checks passed!、`cd frontend && npm run build` 通过、`git diff --check` 无输出），Stage 2 恢复“已完成”状态。
 > 前置阶段：Stage 1 Gate 已通过（134 passed、Ruff 通过、前端构建通过）  
 > 权威顺序：`Fit-Agent-LangGraph-重构讨论总结.md` > `LANGGRAPH_REFACTOR_PLAN.md` > 已合入源码  
-> 本清单已纳入本轮确认：PB 只保留最大重量、最大次数、最长时长；完全删除训练容量与估算 1RM；新增平板支撑、前水平和独立负重引体。
+> 最新确认：外加重量动作只记录最大重量 PB，不记录同重量次数 PB；纯自重动作记录最大次数 PB；计时动作记录最长时长 PB。完全删除训练容量与估算 1RM；新增平板支撑、前水平和独立负重引体。
 
 ## 0. 已确认口径
 
@@ -37,7 +37,7 @@
 ## 1. 已冻结的剩余两项口径（用户确认）
 
 - [x] `duration_seconds` 的允许范围：不小于 1 的整数（秒），不设业务上限。该范围只由 Domain 唯一校验规则实施，DTO 复用同一规则，`002` 迁移不加时长范围 CHECK。
-- [x] “力量趋势”的曲线口径：截至各日期的累计 PB（历史最好成绩，曲线不下降）；按动作计算——外部负重取截至该日期的最大重量、同重量次数取单组最大次数、纯自重取单组最大次数、计时动作取单组最长秒数。
+- [x] “力量趋势”的最新曲线口径：截至各日期的累计 PB（历史最好成绩，曲线不下降）；外部负重只取截至该日期的最大重量，不生成次数 PB 趋势；纯自重取单组最大次数；计时动作取单组最长秒数。→ 已按 §14 实施：`domain/stats/service.py::compute_strength_trends`／`_measures`；`test_stage2_domain_stats_trend.py::test_strength_trend_covers_weight_reps_and_duration_series`、`test_stage2_api_stats.py::test_three_record_types_flow_from_the_form_api_into_three_pb_types`。
 - [x] 前后端边界：后端计算并通过 Stats API 暴露力量趋势；Stage 2 前端看板不展示力量趋势，也不新增动作选择 UI。
 
 本节口径已全部冻结，无剩余待猜测项。
@@ -146,7 +146,7 @@ backend/domain/stats/
 
 #### `reps_pb`
 
-- [x] 外加重量动作按相同重量分别取单组最大次数。
+- [x] 删除外加重量动作按相同重量计算的次数 PB。→ `domain/stats/service.py::compute_personal_bests` 不再按（动作、负重口径、重量）分组，外加重量动作只出 `weight_pb`；`test_stage2_domain_stats_pb.py::test_weighted_action_does_not_get_a_reps_pb`、`test_stage3_memory_assembler.py::test_personal_bests_cover_all_exercises_and_filter_by_the_caller_ids`（装配结果的（动作，PB 类型）组成）。
 - [x] 纯自重动作直接取单组最大次数。
 - [x] 多组次数不得累加为次数 PB。
 
@@ -167,7 +167,7 @@ backend/domain/stats/
 
 - [x] 体重趋势默认查询最近 30 天原始点。
 - [x] 体脂趋势默认查询最近 30 天非空原始点。
-- [x] 力量趋势实现为截至各日期的累计 PB（曲线不下降）：外部负重取截至该日期的最大重量、同重量次数取单组最大次数、纯自重取单组最大次数、计时动作取单组最长秒数；默认窗口沿用最近 30 天。
+- [x] 力量趋势按最新口径修正为截至各日期的累计 PB（曲线不下降）：外部负重只取最大重量，不生成次数 PB 趋势；纯自重取单组最大次数；计时动作取单组最长秒数；默认窗口沿用最近 30 天。→ `domain/stats/service.py::compute_strength_trends`／`_measures`（外加重量动作只贡献 `weight_pb` 一个系列）；`test_stage2_domain_stats_trend.py::test_strength_trend_covers_weight_reps_and_duration_series`。
 - [x] 体重变化取最近两条有效体重记录之差。
 - [x] 体脂变化取最近两条非空体脂记录之差。
 - [x] 距上次训练天数使用注入的业务日期和最近 `performed_on`。
@@ -224,7 +224,7 @@ backend/domain/stats/
 - [x] 前端不重算 PB、趋势或日程状态。
 - [x] 不展示训练容量、估算 1RM 或完成率。
 
-实现与验证索引：`refactor-log/stage2-subTasks/05-frontend-dashboard.md`（契约字段映射、Query key、写入后全量失效与验证记录）。
+实现索引：`frontend/src/lib/contract.ts`、`frontend/src/lib/api.ts`、`frontend/src/features/dashboard/DashboardPage.tsx`、`frontend/src/app/App.tsx`；验证索引：`backend/tests/test_stage2_api_stats.py`、本文件 §12。
 
 ## 11. 测试清单
 
@@ -253,7 +253,7 @@ backend/tests/test_stage2_api_stats.py
 - [x] `work` 组可刷新 PB。
 - [x] `warmup`、`assisted` 和不完整组不能刷新 PB。
 - [x] 最大重量只比较重量，不使用次数计算。
-- [x] 外加重量动作按同重量计算最大次数。
+- [x] 外加重量动作不返回同重量次数 PB，相关旧断言删除或改写。→ `test_stage2_domain_stats_pb.py`（`test_weighted_action_does_not_get_a_reps_pb` 取代原按重量分组的次数 PB 断言；`test_personal_bests_only_count_valid_work_sets`／`test_dumbbell_pb_uses_recorded_per_hand_weight`／`test_update_and_delete_recompute_personal_bests` 与 `test_stage2_api_stats.py` 断言同步收窄为重量 PB）。
 - [x] 纯自重动作计算单组最大次数。
 - [x] 平板支撑和前水平计算最长秒数。
 - [x] 纯自重引体与负重引体不混算。
@@ -287,15 +287,15 @@ backend/tests/test_stage2_api_stats.py
 
 - [x] `002` 迁移安全升级并保留 Stage 1 数据。→ `test_stage2_migration.py::test_upgrade_from_001_keeps_stage1_data_and_sets_user_version_two`／`::test_upgrade_is_repeatable_and_does_not_overwrite_data`／`::test_rebuilt_table_keeps_constraints_indexes_and_trigger`
 - [x] 表单可记录外加重量、纯自重和计时动作。→ `test_stage2_records_duration.py`（领域 CRUD、传输 CRUD、三类字段互斥、时长边界）
-- [x] 最大重量、最大次数、最长时长三类 PB 可演示。→ `test_stage2_domain_stats_pb.py`、`test_stage2_api_stats.py`、`06-stage2-gate.md` 端到端 DOM 核对
+- [x] 最大重量、最大次数、最长时长三类 PB 可演示。→ `test_stage2_domain_stats_pb.py`、`test_stage2_api_stats.py`、`frontend/src/features/dashboard/DashboardPage.tsx`
 - [x] 修改或删除记录后 PB 与趋势立即一致。→ `test_stage2_api_stats.py::test_pb_and_trends_recompute_after_edit_through_the_form_api`／`::test_personal_bests_and_trends_recompute_after_record_deletion`
 - [x] 热身组、辅助组和不完整组不得刷新 PB。→ `test_stage2_domain_stats_pb.py::test_personal_bests_only_count_valid_work_sets`／`::test_incomplete_sets_do_not_refresh_pb`、`test_stage2_domain_stats_trend.py::test_strength_trend_excludes_warmup_assisted_and_incomplete_sets`
 - [x] 纯自重引体和负重引体不混算。→ `test_stage2_domain_stats_pb.py::test_bodyweight_reps_pb_is_single_set_max_and_separate_from_weighted_pull_up`、`test_stage2_api_stats.py::test_three_record_types_flow_from_the_form_api_into_three_pb_types`
-- [x] 最近 30 天体重与体脂趋势可演示；力量趋势由后端按累计 PB 计算并经 Stats API 暴露（Stage 2 前端不展示）。→ `test_stage2_domain_stats_trend.py::test_strength_trend_*`、`test_stage2_api_stats.py::test_trends_endpoint_uses_the_injected_business_date`；前端禁显核对（DOM 中 `力量趋势` 命中 0）见 `06-stage2-gate.md`
+- [x] 最近 30 天体重与体脂趋势可演示；力量趋势由后端按累计 PB 计算并经 Stats API 暴露（Stage 2 前端不展示）。→ `test_stage2_domain_stats_trend.py::test_strength_trend_*`、`test_stage2_api_stats.py::test_trends_endpoint_uses_the_injected_business_date`、`frontend/src/features/dashboard/DashboardPage.tsx`
 - [x] `trend_summary` 的体重变化、体脂变化和停训天数可由固定输入复算。→ `test_stage2_domain_stats_trend.py::test_trend_summary_uses_the_latest_two_weight_and_body_fat_records`／`::test_trend_summary_reports_no_data_and_insufficient_data`／`::test_trend_summary_days_since_last_workout_uses_injected_business_date`
-- [x] 月历正确区分计划日、完成状态、实际训练日和额外训练。→ `test_stage2_domain_calendar.py`、`test_stage2_api_stats.py::test_calendar_endpoint_returns_month_facts`、`06-stage2-gate.md` 端到端 DOM 核对
+- [x] 月历正确区分计划日、完成状态、实际训练日和额外训练。→ `test_stage2_domain_calendar.py`、`test_stage2_api_stats.py::test_calendar_endpoint_returns_month_facts`、`frontend/src/features/dashboard/DashboardPage.tsx`
 - [x] 系统不计算或展示训练容量、估算 1RM 或完成率。→ `test_stage2_migration.py::test_schema_has_no_volume_or_estimated_1rm_columns`、`test_stage2_domain_stats_pb.py::test_personal_best_output_has_only_three_types_and_source_facts`、`test_stage2_domain_stats_trend.py::test_trend_output_has_no_volume_completion_rate_or_evaluation`、`test_stage2_domain_calendar.py::test_calendar_output_has_no_completion_rate_or_rest_day_fields`
-- [x] `cd backend && uv run pytest` 通过。→ 196 passed
+- [x] `cd backend && uv run pytest` 通过。→ 211 passed（原 Gate 196 passed；§14 修正后重跑）
 - [x] `cd backend && uv run ruff check .` 通过。→ All checks passed!
 - [x] `cd frontend && npm run build` 通过。→ 通过（`tsc -b` + `vite build`）
 
@@ -311,7 +311,17 @@ backend/tests/test_stage2_api_stats.py
 - 前水平难度变式、最快时间、距离和功率 PB。
 - Stage 3 MemoryAssembler、Checkpoint 和 Skill Loader。
 
-## 14. 建议实施顺序
+## 14. Stage 3 前置修正
+
+该口径变更晚于原 Stage 2 Gate，必须先完成最小回归修正，不得让 Stage 3 MemoryAssembler 继续消费旧结果：
+
+- [x] Stats PB 删除外加重量动作的 `reps_pb`；保留其 `weight_pb`。→ `domain/stats/service.py::compute_personal_bests`；`test_stage2_domain_stats_pb.py::test_weighted_action_does_not_get_a_reps_pb`、`test_stage3_memory_assembler.py::test_personal_bests_cover_all_exercises_and_filter_by_the_caller_ids`。
+- [x] 力量趋势删除外加重量动作的次数 PB 曲线；保留重量曲线。→ `domain/stats/service.py::_measures`；`test_stage2_domain_stats_trend.py::test_strength_trend_covers_weight_reps_and_duration_series`、`test_stage2_api_stats.py::test_trends_endpoint_uses_the_injected_business_date`。
+- [x] API 与前端自然随结果减少，不新增替代字段或兼容层。→ `domain/stats/schema.py`／`api/dto.py` 字段集合未变，只少掉外加重量的次数 PB 结果与次数系列；前端 `frontend/src/lib/contract.ts`（`weight_kg` 注释改为只有重量 PB 有适用重量）与 `frontend/src/features/dashboard/DashboardPage.tsx::pbValueText`（删除“同重量”分支）。
+- [x] 更新 PB、趋势、API 测试：负重动作只断言重量 PB，纯自重动作仍断言次数 PB，计时动作仍断言时长 PB。→ `test_stage2_domain_stats_pb.py`、`test_stage2_domain_stats_trend.py`、`test_stage2_api_stats.py`（见本文件 §6.2／§7／§11.2／§12）与 `test_stage3_memory_assembler.py`。
+- [x] 重跑后端测试、Ruff、前端构建与 `git diff --check`，将实际结果写回本文件后恢复 Stage 2 完成状态。→ `cd backend && uv run pytest` 211 passed、`cd backend && uv run ruff check .` All checks passed!、`cd frontend && npm run build` 通过、`git diff --check` 无输出；已写回 §1／§6.2／§7／§11.2／§12 与本文件头部状态。
+
+## 15. 建议实施顺序
 
 ```text
 确认剩余两项口径
@@ -328,4 +338,4 @@ backend/tests/test_stage2_api_stats.py
 → 全量 Gate
 ```
 
-Stage 2 收尾（Subtask 06）：§12 Gate 全部通过；`uv run pytest` 196 passed、`uv run ruff check .` All checks passed、`npm run build` 通过、`git diff --check` 无输出；跨层回归新增 3 项（`test_stage2_api_stats.py` 11→13、`test_stage2_migration.py` 5→6），看板闭环以真实后端 + 无头 Chromium DOM 核对留档（`06-stage2-gate.md`）。Stage 3 MemoryAssembler／Checkpoint／Skill Loader 与 Stage 5 计划写入口仍未实施。
+Stage 2 收尾（Subtask 06）：§12 Gate 全部通过；`uv run pytest` 196 passed、`uv run ruff check .` All checks passed、`npm run build` 通过、`git diff --check` 无输出；跨层回归新增 3 项（`test_stage2_api_stats.py` 11→13、`test_stage2_migration.py` 5→6），看板实现与验证索引见 §10、§12。口径修正（§14）后重跑为 211 passed。Stage 3 MemoryAssembler／Checkpoint／Skill Loader 与 Stage 5 计划写入口仍未实施。

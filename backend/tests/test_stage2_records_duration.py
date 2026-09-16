@@ -1,7 +1,7 @@
 """Stage 2 Subtask 02 §B／§C（后端部分）：三种记录口径的训练组 CRUD 与字段校验。
 
-依据：``refactor-log/stage2.md`` §4／§11.1、``refactor-log/stage2-subTasks/02-migration-and-records.md``
-§B、``LANGGRAPH_REFACTOR_PLAN.md`` §5.4／§6.1、``Fit-Agent-LangGraph-重构讨论总结.md`` §3.1／§9。
+依据：``refactor-log/stage2.md`` §4／§11.1、``LANGGRAPH_REFACTOR_PLAN.md`` §5.4／§6.1、
+``Fit-Agent-LangGraph-重构讨论总结.md`` §3.1／§9。
 
 覆盖：外加重量／纯自重／计时三类动作的必填与互斥字段（唯一规则实现）、``duration_seconds``
 为 0／负数／非整数时被拒、无业务上限（超大整数仍可写入并被读回）、计时组的新增／读取／整条覆盖

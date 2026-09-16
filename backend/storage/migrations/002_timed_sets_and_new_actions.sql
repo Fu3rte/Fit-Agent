@@ -3,7 +3,7 @@
 --       §7.1（有效工作组：计时动作时长完整且大于 0）、§9（动作目录承载记录类型与负重口径）；
 --       LANGGRAPH_REFACTOR_PLAN.md §5.4（workout_sets 记录计时时长；时长范围只由 Domain 唯一校验规则实施）、
 --       §11 阶段 2（002 增加计时组字段与三个动作）；
---       refactor-log/stage2.md §3、refactor-log/stage2-subTasks/02-migration-and-records.md §A。
+--       refactor-log/stage2.md §3／§11.1。
 -- 已拍口径（Subtask 01 冻结）：duration_seconds 为不小于 1 的整数（秒），无业务上限；
 --       范围只由 Domain 唯一规则实施、DTO 复用该规则，**本迁移不加时长范围 CHECK**。
 -- 重建范围与原因：SQLite 无法 ALTER 既有 CHECK，`load_convention` 取值域新增 `external_added_weight`

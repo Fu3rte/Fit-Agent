@@ -92,6 +92,15 @@ class WorkoutRecordsService:
         """查询全部训练及其全部组（按发生日期排序）。"""
         return await self._repo.list_all()
 
+    async def list_recent(self, limit: int) -> tuple[WorkoutSession, ...]:
+        """最近 ``limit`` 次训练及其全部组（最新在前，同日训练各算一次）。
+
+        供 MemoryAssembler 做有界近期读取（讨论总结 §5.2「最近 4 次训练」）：不先取完整训练历史
+        再在调用方截断，不足 ``limit`` 返回实际条数，空库返回空元组；``limit`` 为非正数时直接
+        失败（``ValueError``），不退化成全量读取。
+        """
+        return await self._repo.list_recent(limit)
+
     async def update(
         self,
         session_id: int,

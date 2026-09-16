@@ -11,6 +11,8 @@ from business_time import require_iana_timezone
 
 APP_NAME = "Fit-Agent"
 DATABASE_FILENAME = "fit_agent_langgraph.db"
+# LangGraph Checkpointer 存档：独立文件名，绝不与业务库同库（讨论总结 §9）。
+CHECKPOINT_DATABASE_FILENAME = "langgraph_checkpoints.db"
 DATA_DIR_OVERRIDE_ENV = "FIT_AGENT_DATA_DIR"
 MODEL_API_KEY_ENV = "MODEL_API_KEY"
 MODEL_BASE_URL_ENV = "MODEL_BASE_URL"
@@ -30,6 +32,15 @@ def resolve_data_dir(override: str | os.PathLike[str] | None = None) -> Path:
 
 def database_path(data_dir: Path) -> Path:
     return data_dir / DATABASE_FILENAME
+
+
+def checkpoint_database_path(data_dir: Path) -> Path:
+    """Checkpoint 存档的独立路径入口（讨论总结 §9、REFACTOR_PLAN §5.6）。
+
+    单独一个函数与文件名常量：存档路径独立配置，不复用业务库路径；测试把临时目录传进来，
+    也可以直接给 ``open_checkpointer`` 传任意路径。
+    """
+    return data_dir / CHECKPOINT_DATABASE_FILENAME
 
 
 def frontend_dist_dir() -> Path:

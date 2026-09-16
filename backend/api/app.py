@@ -10,12 +10,14 @@ from fastapi.responses import FileResponse
 
 from api import dto, routes_plans, routes_profile, routes_records, routes_stats
 from config import (
+    checkpoint_database_path,
     database_path,
     frontend_dist_dir,
     local_timezone_name,
     model_api_key_configured,
     resolve_data_dir,
 )
+from graph.checkpointer import open_checkpointer
 from storage.db import Database
 
 _LOOPBACK_HOSTNAMES = frozenset({"localhost", "127.0.0.1", "::1"})
@@ -83,9 +85,14 @@ def create_app(
             await db.open()
             # 启动即执行新版 001_initial.sql 建立业务表；迁移失败则启动失败（不对外开放）。
             await db.migrate()
-            app.state.business_timezone = local_timezone_name()
-            app.state.provider_has_api_key = model_api_key_configured()
-            yield
+            # Checkpoint 存档独立于业务库：独立文件、独立连接，随生命周期开闭（REFACTOR_PLAN §5.6）。
+            async with open_checkpointer(
+                checkpoint_database_path(resolved)
+            ) as checkpointer:
+                app.state.checkpointer = checkpointer
+                app.state.business_timezone = local_timezone_name()
+                app.state.provider_has_api_key = model_api_key_configured()
+                yield
         finally:
             await db.close()
 

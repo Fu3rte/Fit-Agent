@@ -220,7 +220,7 @@ export interface PersonalBestWire {
   /** 单位随 pb_type：weight_pb 为 kg、reps_pb 为次数、duration_pb 为秒数 */
   value: number;
   load_convention: LoadConvention | null;
-  /** weight_pb 时等于 value；reps_pb 时为同重量分组重量；纯自重与计时 PB 为 null */
+  /** weight_pb 时等于 value；纯自重次数 PB 与计时 PB 为 null */
   weight_kg: number | null;
   workout_session_id: number;
   set_no: number;
@@ -265,6 +265,7 @@ export interface StrengthTrendWire {
   exercise_name: string;
   pb_type: PersonalBestTypeWire;
   load_convention: LoadConvention | null;
+  /** 三类系列都不带分组重量：weight_pb 的累计值本身就是重量，此处恒为 null */
   weight_kg: number | null;
   points: StrengthPointWire[];
 }

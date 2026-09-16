@@ -1,6 +1,6 @@
 """Stage 2 Subtask 02 §A：002 迁移（计时组字段 + 三个新动作种子）安全升级。
 
-依据：``refactor-log/stage2.md`` §3、``refactor-log/stage2-subTasks/02-migration-and-records.md`` §A、
+依据：``refactor-log/stage2.md`` §3／§11.1、
 ``LANGGRAPH_REFACTOR_PLAN.md`` §11 阶段 2、``Fit-Agent-LangGraph-重构讨论总结.md`` §3.1／§7.1／§9。
 
 覆盖：001 → 002 首次升级完整保留 Stage 1 训练组与既有 24 项种子、迁移后 ``user_version=2``、
