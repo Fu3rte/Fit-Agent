@@ -26,10 +26,10 @@ from storage.db import Database, require_outer_transaction
 #: workout_sessions 列清单：本模块所有读取共用同一份（列顺序即 from_row 读取的键）。
 _SELECT_SESSION = "SELECT id, performed_on, plan_session_id FROM workout_sessions"
 
-#: workout_sets 列清单：同上，与 001_initial.sql 的列一一对应（无 RIR／辅助次数／时长列）。
+#: workout_sets 列清单：同上，与 001／002 迁移后的列一一对应（无 RIR／辅助次数列）。
 _SELECT_SET = (
     "SELECT id, workout_session_id, exercise_id, set_no, set_type, load_convention,"
-    " weight_kg, reps FROM workout_sets"
+    " weight_kg, reps, duration_seconds FROM workout_sets"
 )
 
 #: plan_sessions 列清单：只取关联校验需要的字段，计划侧读取出口在 domain.plans。
@@ -106,7 +106,8 @@ async def _insert_sets(
     for fact in facts:
         await conn.execute(
             "INSERT INTO workout_sets (workout_session_id, exercise_id, set_no, set_type,"
-            " load_convention, weight_kg, reps) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            " load_convention, weight_kg, reps, duration_seconds)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 session_id,
                 fact.exercise_id,
@@ -115,6 +116,7 @@ async def _insert_sets(
                 fact.load_convention,
                 fact.weight_kg,
                 fact.reps,
+                fact.duration_seconds,
             ),
         )
 

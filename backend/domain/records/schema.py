@@ -3,16 +3,20 @@
 正本：``Fit-Agent-LangGraph-重构讨论总结.md`` §9（关键关系：``workout_sets.set_type`` 区分
 work／warmup／assisted；``workout_sessions.plan_session_id`` 可空外键，NULL 表示额外训练；
 同一日程最多完成一次）、``LANGGRAPH_REFACTOR_PLAN.md`` §5.4（组类型固定三态、RIR 不出现在
-任何列或 DTO）；列与约束以 ``storage/migrations/001_initial.sql`` 的既有定义为准。
+任何列或 DTO）；列与约束以 ``storage/migrations/001_initial.sql`` 与 ``002_timed_sets_and_new_actions.sql``
+（重建 ``workout_sets``：``reps`` 可空、新增 ``duration_seconds``）的既有定义为准。
 
 三条硬边界：
 
 - **日期是日期对象**：``performed_on`` 用 ``datetime.date``，由调用方按业务时区算好后注入；
   repo 与领域服务不得自行取「今天」（REFACTOR_PLAN §5.5：禁止 ``date.today()``）。
 - **组类型恰三态**：``work / warmup / assisted``；没有旧模型的「未申报保留为空」语义，
-  也没有 RIR、辅助次数、时长或修订状态字段——它们不在这两张表的任何列里。
+  也没有 RIR、辅助次数或修订状态字段——它们不在这两张表的任何列里。
 - **负重口径与重量同现同隐**：外加负重型两者齐备（重量可为 0kg），自重／计时型两者均为
   ``None``（库内 CHECK 同集合），不虚构 0kg。
+
+三种记录口径的必填／互斥字段（外加重量：重量与次数、禁时长；纯自重：次数、禁重量与时长；
+计时：时长、禁重量与次数）由 ``domain.records.rules`` 按目录动作的记录口径统一校验。
 
 ``WorkoutSetInput`` 是写入侧的组事实：组身份（``id``）与所属训练（``workout_session_id``）由
 落库分配，调用方只给事实本身；``WorkoutSet`` 是库内行，两者字段互不兼容。
@@ -41,18 +45,21 @@ class InvalidRecordRow(ValueError):
 
 @dataclass(frozen=True, slots=True)
 class WorkoutSetInput:
-    """一组待写入的事实：动作身份、动作内组序号、组类型、次数与（外加负重的）重量。
+    """一组待写入的事实：动作身份、动作内组序号、组类型、次数、持续秒数与（外加负重的）重量。
 
     不携带组身份与所属训练：``id``／``workout_session_id`` 由落库分配（见 :class:`WorkoutSet`）。
     ``set_type`` 必须由调用方明确给出，不给默认值——组类型没有「未申报」态。
+    ``reps`` 与 ``duration_seconds`` 都可为 ``None``：哪一项必填由目录动作的记录口径决定
+    （计时组填 ``duration_seconds``，其余两类填 ``reps``），不在这里替调用方猜。
     """
 
     exercise_id: str
     set_no: int
-    reps: int
+    reps: int | None
     set_type: SetType
     load_convention: LoadConvention | None = None
     weight_kg: float | None = None
+    duration_seconds: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -66,7 +73,8 @@ class WorkoutSet:
     set_type: SetType
     load_convention: LoadConvention | None
     weight_kg: float | None
-    reps: int
+    reps: int | None
+    duration_seconds: int | None
 
     @classmethod
     def from_row(cls, row: Mapping[str, Any]) -> "WorkoutSet":
@@ -79,7 +87,7 @@ class WorkoutSet:
         if raw_convention is not None:
             text = str(raw_convention)
             if text not in LOAD_CONVENTIONS:
-                raise InvalidRecordRow(f"负重口径不在五种内：{text!r}")
+                raise InvalidRecordRow(f"负重口径不在六种内：{text!r}")
             convention = cast(LoadConvention, text)
         raw_weight = row["weight_kg"]
         weight_kg = None if raw_weight is None else float(raw_weight)
@@ -87,6 +95,8 @@ class WorkoutSet:
             raise InvalidRecordRow(
                 f"负重口径与重量必须同现同隐：convention={convention!r} weight={weight_kg!r}"
             )
+        raw_reps = row["reps"]
+        raw_duration = row["duration_seconds"]
         return cls(
             id=int(row["id"]),
             workout_session_id=int(row["workout_session_id"]),
@@ -95,7 +105,8 @@ class WorkoutSet:
             set_type=cast(SetType, set_type),
             load_convention=convention,
             weight_kg=weight_kg,
-            reps=int(row["reps"]),
+            reps=None if raw_reps is None else int(raw_reps),
+            duration_seconds=None if raw_duration is None else int(raw_duration),
         )
 
 

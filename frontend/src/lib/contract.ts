@@ -1,9 +1,9 @@
 /**
- * Fit-Agent 前端契约（Stage 1 表单写入）。
+ * Fit-Agent 前端契约（Stage 1 表单写入 + Stage 2 统计只读）。
  *
  * 本文件是前端唯一的数据形状来源：UI 组件与 API 封装（src/lib/api.ts）一律从此处
  * 引用类型，不得另写第三份形状。对齐 ``backend/api/dto.py`` 与 routes_profile /
- * routes_records / routes_plans 的传输形状。
+ * routes_records / routes_plans / routes_stats 的传输形状。
  *
  * 冻结口径（讨论总结 §7、§9；REFACTOR_PLAN §5/§6）：无 RIR、无 context_version、
  * 无通用草稿/修订链、无 Run/Provider 传输形状。
@@ -25,13 +25,15 @@ export interface ApiError {
 /** 目录记录口径恰三类（与 001_initial.sql exercises CHECK 同集合） */
 export type CatalogRecordType = "reps_weight" | "reps_bodyweight" | "time";
 
-/** 负重口径五种（自重／计时型为 null，不虚构口径） */
+/** 负重口径六种（自重／计时型为 null，不虚构口径）；
+ *  external_added_weight = 外加重量（不含体重），用于独立负重引体 */
 export type LoadConvention =
   | "barbell_includes_bar_total"
   | "dumbbell_per_hand"
   | "machine_pin_displayed_value"
   | "plate_loaded_total_excluding_empty"
-  | "unilateral_setting_per_side";
+  | "unilateral_setting_per_side"
+  | "external_added_weight";
 
 /** 动作目录一行（exercise_dto）：表单动作选择与负重口径来源 */
 export interface ExerciseWire {
@@ -85,14 +87,17 @@ export type ProfileWriteBody = ProfileFactsWire;
 /** 组类型固定三态（与 workout_sets CHECK 同集合；没有「未申报」态） */
 export type SetTypeWire = "work" | "warmup" | "assisted";
 
-/** 提交的一组训练事实；set_no 由后端按提交顺序对同一动作分配 1,2,3…（前端不送） */
+/** 提交的一组训练事实；set_no 由后端按提交顺序对同一动作分配 1,2,3…（前端不送）
+ *  reps 与 duration_seconds 按所选动作的记录口径二选一：外加重量／自重回填 reps，计时回填秒数 */
 export interface WorkoutSetInputWire {
   exercise_id: string;
   set_type: SetTypeWire;
-  reps: number;
+  reps: number | null;
   /** 目录 load_convention：自重／计时型必须为 null（与目录不符后端拒绝） */
   load_convention: LoadConvention | null;
   weight_kg: number | null;
+  /** 计时动作的单组秒数（不小于 1、无业务上限）；非计时动作为 null */
+  duration_seconds: number | null;
 }
 
 /** POST／PUT /api/records 请求体；plan_session_id 为 null 即额外训练 */
@@ -114,7 +119,10 @@ export interface RecordWire {
     set_type: SetTypeWire;
     load_convention: LoadConvention | null;
     weight_kg: number | null;
-    reps: number;
+    /** 计时组为 null（不补 0） */
+    reps: number | null;
+    /** 非计时组为 null（不补 0） */
+    duration_seconds: number | null;
   }>;
 }
 
@@ -197,4 +205,134 @@ export interface PlanSessionWire {
 
 export interface PlanSessionListWire {
   sessions: PlanSessionWire[];
+}
+
+/* ------------------------------ 统计（只读现算） ------------------------------ */
+
+/** 三类 PB（与 dto.personal_best_dto 同集合）；没有容量 PB，也没有估算 1RM */
+export type PersonalBestTypeWire = "weight_pb" | "reps_pb" | "duration_pb";
+
+/** 一条现算 PB：数值、适用重量／负重口径，加来源训练、组序号与来源日期 */
+export interface PersonalBestWire {
+  exercise_id: string;
+  exercise_name: string;
+  pb_type: PersonalBestTypeWire;
+  /** 单位随 pb_type：weight_pb 为 kg、reps_pb 为次数、duration_pb 为秒数 */
+  value: number;
+  load_convention: LoadConvention | null;
+  /** weight_pb 时等于 value；reps_pb 时为同重量分组重量；纯自重与计时 PB 为 null */
+  weight_kg: number | null;
+  workout_session_id: number;
+  set_no: number;
+  performed_on: string;
+}
+
+/** 数据是否足够给出变化值：ok 有最近两条记录，insufficient_data 只有一条，no_data 无记录 */
+export type TrendStatusWire = "ok" | "no_data" | "insufficient_data";
+
+/** 最近两条记录的变化；status 不是 ok 时取值字段全为 null（不补 0，也不把单条记录当变化） */
+export interface MetricChangeWire {
+  status: TrendStatusWire;
+  current: number | null;
+  current_on: string | null;
+  previous: number | null;
+  previous_on: string | null;
+  change: number | null;
+}
+
+/** 距上次训练天数；无训练历史时 status 为 no_data 且 days 为 null */
+export interface WorkoutGapWire {
+  status: TrendStatusWire;
+  days: number | null;
+  last_performed_on: string | null;
+}
+
+/** 趋势折线上的一个原始点：只在真实存在记录（体脂为非空）的日期出点，不按日补 0 */
+export interface MetricPointWire {
+  measured_on: string;
+  value: number;
+}
+
+/** 力量趋势上的一点：value 为截至该日期的累计 PB（历史最好成绩，曲线不下降） */
+export interface StrengthPointWire {
+  performed_on: string;
+  value: number;
+}
+
+/** 一个力量趋势系列；Stage 2 看板只透传不渲染该曲线，也不提供动作选择 UI */
+export interface StrengthTrendWire {
+  exercise_id: string;
+  exercise_name: string;
+  pb_type: PersonalBestTypeWire;
+  load_convention: LoadConvention | null;
+  weight_kg: number | null;
+  points: StrengthPointWire[];
+}
+
+/** 确定性趋势摘要：只含体重变化、体脂变化与停训天数，不含容量／完成率／效果评价 */
+export interface TrendSummaryWire {
+  weight_change: MetricChangeWire;
+  body_fat_change: MetricChangeWire;
+  days_since_last_workout: WorkoutGapWire;
+}
+
+/** GET /api/stats/trends 的 trends 载荷：窗口、两类原始点、力量系列与摘要 */
+export interface TrendsWire {
+  window_days: number;
+  from: string;
+  to: string;
+  weight: MetricPointWire[];
+  /** 体脂未记录的日期不出点，不用 0 补线 */
+  body_fat: MetricPointWire[];
+  /** 后端按截至各日期的累计 PB 计算；看板不展示该字段 */
+  strength: StrengthTrendWire[];
+  trend_summary: TrendSummaryWire;
+}
+
+/** 单次日程状态（与后端 CalendarSessionStatus 同集合） */
+export type CalendarSessionStatusWire = "cancelled" | "incomplete" | "complete";
+
+/** 月历上的一条计划日程事实；落在 scheduled_on 当天，完成状态由关联训练现算 */
+export interface CalendarPlanSessionWire {
+  id: number;
+  scheduled_on: string;
+  status: CalendarSessionStatusWire;
+  /** 非空即已完成该日程 */
+  workout_session_id: number | null;
+  /** 完成该日程的真实训练日期，跨月时仍返回 */
+  actual_performed_on: string | null;
+}
+
+/** 月历上的一次实际训练事实；plan_session_id 为 null 即额外训练 */
+export interface CalendarWorkoutWire {
+  id: number;
+  performed_on: string;
+  plan_session_id: number | null;
+}
+
+/** 月历上的一天：只含当天真实发生的日程与训练，空白日期不出条目（不生成「休息日」） */
+export interface CalendarDayWire {
+  date: string;
+  plan_sessions: CalendarPlanSessionWire[];
+  workouts: CalendarWorkoutWire[];
+}
+
+/** GET /api/stats/calendar 的 calendar 载荷：只读当前 active 计划的日程 */
+export interface CalendarMonthWire {
+  month: string;
+  from: string;
+  to: string;
+  days: CalendarDayWire[];
+}
+
+export interface PersonalBestListWire {
+  personal_bests: PersonalBestWire[];
+}
+
+export interface TrendsResponseWire {
+  trends: TrendsWire;
+}
+
+export interface CalendarResponseWire {
+  calendar: CalendarMonthWire;
 }

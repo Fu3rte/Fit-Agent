@@ -1,9 +1,10 @@
 import { useState } from "react";
 import { NavLink, Route, Routes } from "react-router-dom";
 import { Toaster } from "sonner";
-import { Dumbbell, Moon, Sun, UserRound } from "lucide-react";
+import { Dumbbell, LayoutDashboard, Moon, Sun, UserRound } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { getTheme, setTheme, type Theme } from "@/lib/theme";
+import { TooltipProvider } from "@/components/ui/tooltip";
 import {
   Sidebar,
   SidebarContent,
@@ -21,9 +22,11 @@ import {
 } from "@/components/ui/sidebar";
 import ProfilePage from "@/features/profile/ProfilePage";
 import RecordsPage from "@/features/records/RecordsPage";
+import DashboardPage from "@/features/dashboard/DashboardPage";
 
-/** Stage 1 保留页面：画像与训练记录（讨论总结 §7；旧对话/复盘/设置页已随旧路径删除）。 */
+/** 保留页面：数据看板、画像与训练记录（讨论总结 §7；旧对话/复盘/设置页已随旧路径删除）。 */
 const nav = [
+  { to: "/dashboard", label: "数据看板", icon: LayoutDashboard, end: false },
   { to: "/profile", label: "用户画像", icon: UserRound, end: false },
   { to: "/records", label: "训练记录", icon: Dumbbell, end: false },
 ];
@@ -65,7 +68,7 @@ function SidebarToggle() {
 
 export default function App() {
   return (
-    <>
+    <TooltipProvider>
       {/* 全局反馈 toast（A5），全应用仅此一处 */}
       <Toaster position="top-center" richColors />
 
@@ -116,6 +119,7 @@ export default function App() {
           <div className="h-full">
             <Routes>
               <Route path="/" element={<RecordsPage />} />
+              <Route path="/dashboard" element={<DashboardPage />} />
               <Route path="/profile" element={<ProfilePage />} />
               <Route path="/records" element={<RecordsPage />} />
             </Routes>
@@ -124,6 +128,6 @@ export default function App() {
 
         <SidebarToggle />
       </SidebarProvider>
-    </>
+    </TooltipProvider>
   );
 }

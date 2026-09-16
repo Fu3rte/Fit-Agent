@@ -51,12 +51,13 @@ REMOVED_SCHEMA_NAMES = (
 )
 
 #: 旧模型里承载 RIR／辅助／质量的列名：新版两张表都不许有。
+# 旧模型删掉且 Stage 2 不恢复的列。`duration_seconds` 不在其中：002（Stage 2 §3）按已拍口径
+# 重新新增该列（计时动作的单组秒数），与旧模型的同名旧列不是同一语义。
 REMOVED_COLUMN_NAMES = {
     "rir",
     "assistance",
     "assisted_reps",
     "quality_text",
-    "duration_seconds",
     "raw_load",
     "load_kg_key",
     "revision_id",
@@ -630,6 +631,7 @@ async def test_update_and_delete_reject_unknown_identity(tmp_path: Path) -> None
 
 
 async def test_workout_tables_have_no_rir_or_assistance_columns(tmp_path: Path) -> None:
+    """列清单：旧模型字段不得残留；002 追加的 duration_seconds 是唯一新增列。"""
     db = await _migrated(tmp_path / "x.db")
     try:
         assert await _table_columns(db, "workout_sets") == [
@@ -641,6 +643,7 @@ async def test_workout_tables_have_no_rir_or_assistance_columns(tmp_path: Path) 
             "load_convention",
             "weight_kg",
             "reps",
+            "duration_seconds",
         ]
         assert await _table_columns(db, "workout_sessions") == [
             "id",

@@ -8,7 +8,7 @@ from urllib.parse import urlsplit
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse
 
-from api import dto, routes_plans, routes_profile, routes_records
+from api import dto, routes_plans, routes_profile, routes_records, routes_stats
 from config import (
     database_path,
     frontend_dist_dir,
@@ -113,6 +113,7 @@ def create_app(
     app.include_router(routes_profile.router)
     app.include_router(routes_records.router)
     app.include_router(routes_plans.router)
+    app.include_router(routes_stats.router)
     _install_frontend_static(
         app,
         Path(frontend_dist) if frontend_dist is not None else frontend_dist_dir(),

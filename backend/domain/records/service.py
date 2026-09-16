@@ -5,7 +5,9 @@
 
 1. **rules 校验事实**：日期、动作身份、负重口径、重量、次数、组数、组类型（``domain.records.rules``）；
 2. **目录复验**：逐个动作查 ``domain.actions.service.ActionCatalogService.validate_record_write``，
-   确认动作存在且负重口径与目录一致（外加负重型必须带口径，自重／计时型不得带口径与重量）。
+   确认动作存在且负重口径与目录一致（外加负重型必须带口径，自重／计时型不得带口径与重量），
+   再按目录动作自身的记录口径调 ``domain.records.rules.validate_set_fields_for_record_type``
+   校验必填／互斥字段（外加重量与纯自重要求次数，计时要求时长）。
    ``workout_sets`` 不存记录口径，故按目录动作自身派生后复验——记录侧只声明负重口径这一件事。
    这一步必须在写事务之前（``under_lock`` 与写事务共用同一把不可重入的锁）；
 3. **关联日程**：在写事务内解析，避免「先查候选、再写库」之间的竞态与裸 ``IntegrityError``。
@@ -35,7 +37,11 @@ from domain.actions.rules import UnknownExercise
 from domain.actions.service import ActionCatalogService
 from domain.plans.schema import PlanSession
 from domain.records.repo import WorkoutRecordsRepo
-from domain.records.rules import validate_performed_on, validate_session_sets
+from domain.records.rules import (
+    validate_performed_on,
+    validate_session_sets,
+    validate_set_fields_for_record_type,
+)
 from domain.records.schema import WorkoutSession, WorkoutSetInput
 from storage.db import Database
 
@@ -132,11 +138,12 @@ class WorkoutRecordsService:
     async def _validate_sets_against_catalog(
         self, facts: Sequence[WorkoutSetInput]
     ) -> None:
-        """逐个动作复验目录：动作存在，且负重口径与目录一致。
+        """逐个动作复验目录：动作存在，负重口径与目录一致，且字段符合该动作的记录口径。
 
         ``workout_sets`` 没有记录口径列，故取目录动作自身的 ``record_type`` 后调用
-        ``validate_record_write``：真正被复验的是负重口径（外加负重型必须给出与目录相同的口径，
-        自重／计时型不得给出任何口径）。
+        ``validate_record_write``（复验负重口径：外加负重型必须给出与目录相同的口径，
+        自重／计时型不得给出任何口径），再按同一 ``record_type`` 校验必填／互斥字段
+        （外加重量与纯自重要求次数，计时要求时长且禁次数）。
         """
         for fact in facts:
             exercise = await self._catalog.get_by_id(fact.exercise_id)
@@ -146,6 +153,11 @@ class WorkoutRecordsService:
                 fact.exercise_id,
                 record_type=exercise.record_type,
                 load_convention=fact.load_convention,
+            )
+            validate_set_fields_for_record_type(
+                exercise.record_type,
+                reps=fact.reps,
+                duration_seconds=fact.duration_seconds,
             )
 
     async def _resolve_link_in_transaction(

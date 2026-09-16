@@ -1,5 +1,10 @@
 import { useMemo, useState } from "react";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import {
+  useMutation,
+  useQuery,
+  useQueryClient,
+  type QueryClient,
+} from "@tanstack/react-query";
 import { Plus, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 import { Badge } from "@/components/ui/badge";
@@ -47,6 +52,7 @@ const LOAD_CONVENTION_LABELS: Record<LoadConvention, string> = {
   machine_pin_displayed_value: "器械插销显示值",
   plate_loaded_total_excluding_empty: "挂片总重（不含空杆）",
   unilateral_setting_per_side: "单侧设置重量",
+  external_added_weight: "外加重量（不含体重）",
 };
 
 const RECORD_TYPE_LABELS: Record<CatalogRecordType, string> = {
@@ -72,25 +78,35 @@ interface SetRow {
   setType: SetTypeWire;
   reps: string;
   weight: string;
+  /** 计时动作的秒数；非计时动作必须为空（提交时送 null，不送 0） */
+  duration: string;
 }
 
 function emptySetRow(): SetRow {
-  return { exerciseId: "", setType: "work", reps: "", weight: "" };
+  return {
+    exerciseId: "",
+    setType: "work",
+    reps: "",
+    weight: "",
+    duration: "",
+  };
 }
 
-/** 既有训练的组 → 表单行（负重按目录口径回填；自重／计时型重量留空） */
+/** 既有训练的组 → 表单行：按目录记录口径只回填适用字段，其余字段留空（不保留不适用的旧值） */
 function setRowsFromRecord(record: RecordWire): SetRow[] {
   return record.sets.map((set) => ({
     exerciseId: set.exercise_id,
     setType: set.set_type,
-    reps: String(set.reps),
+    reps: set.reps === null ? "" : String(set.reps),
     weight: set.weight_kg === null ? "" : String(set.weight_kg),
+    duration: set.duration_seconds === null ? "" : String(set.duration_seconds),
   }));
 }
 
 /**
- * 表单行 → 提交事实：负重口径按所选动作目录派生（外加负重型送目录口径 + 重量，
- * 自重／计时型一律送 null）；与目录不符的口径在前端就不可选，后端仍会复验。
+ * 表单行 → 提交事实：按所选动作的目录记录口径只送适用字段（外加重量：口径 + 重量 + 次数；
+ * 纯自重：次数；计时：秒数）；不适用的字段一律送 null，与目录不符的口径在前端不可选，
+ * 后端仍会复验（含时长不小于 1 秒的领域唯一规则）。
  */
 function toSetInputs(
   rows: SetRow[],
@@ -103,6 +119,20 @@ function toSetInputs(
     if (exercise === undefined) {
       throw new Error(`第 ${position} 组：请先选择动作`);
     }
+    if (exercise.record_type === "time") {
+      const duration = Number(row.duration);
+      if (row.duration.trim() === "" || !Number.isInteger(duration) || duration < 1) {
+        throw new Error(`第 ${position} 组：计时动作请填写不小于 1 秒的整数秒数`);
+      }
+      return {
+        exercise_id: exercise.id,
+        set_type: row.setType,
+        reps: null,
+        load_convention: null,
+        weight_kg: null,
+        duration_seconds: duration,
+      };
+    }
     const reps = Number(row.reps);
     if (row.reps.trim() === "" || !Number.isInteger(reps)) {
       throw new Error(`第 ${position} 组：次数必须是整数`);
@@ -114,6 +144,7 @@ function toSetInputs(
         reps,
         load_convention: null,
         weight_kg: null,
+        duration_seconds: null,
       };
     }
     const weight = Number.parseFloat(row.weight);
@@ -126,8 +157,18 @@ function toSetInputs(
       reps,
       load_convention: exercise.load_convention,
       weight_kg: weight,
+      duration_seconds: null,
     };
   });
+}
+
+/**
+ * 训练或身体数据写入后失效记录派生 Query（训练记录、PB、趋势、月历、计划日程状态）。
+ * 看板的统计 key（``personal-bests``／``trends``／``calendar``，见 DashboardPage）同样被全量失效覆盖，
+ * 因此这里不逐条枚举 key：枚举会在看板命名变化时静默失效，而全量失效对单用户本地库无成本问题。
+ */
+function invalidateRecordDerivedQueries(queryClient: QueryClient): Promise<void> {
+  return queryClient.invalidateQueries();
 }
 
 /** 训练记录新增／编辑表单；record 为 null 即新增 */
@@ -197,10 +238,7 @@ function RecordFormCard({
     },
     onSuccess: async () => {
       toast.success(record === null ? "训练记录已保存" : "训练记录已更新");
-      await Promise.all([
-        queryClient.invalidateQueries({ queryKey: ["records"] }),
-        queryClient.invalidateQueries({ queryKey: ["plan-session-candidates"] }),
-      ]);
+      await invalidateRecordDerivedQueries(queryClient);
       onDone();
     },
     onError: (error) =>
@@ -282,6 +320,7 @@ function RecordFormCard({
           {rows.map((row, index) => {
             const exercise = catalogue.get(row.exerciseId);
             const convention = exercise?.load_convention ?? null;
+            const recordType = exercise?.record_type ?? null;
             return (
               <div
                 key={index}
@@ -296,7 +335,10 @@ function RecordFormCard({
                       onChange={(event) =>
                         updateRow(index, {
                           exerciseId: event.target.value,
+                          /* 切换动作后清除不再适用的旧值：重量、次数与秒数都不跨动作保留 */
+                          reps: "",
                           weight: "",
+                          duration: "",
                         })
                       }
                     >
@@ -328,19 +370,35 @@ function RecordFormCard({
                       ))}
                     </select>
                   </label>
-                  <label className="flex flex-col gap-1 text-xs text-muted-foreground">
-                    次数
-                    <Input
-                      type="number"
-                      min={1}
-                      max={100}
-                      value={row.reps}
-                      onChange={(event) =>
-                        updateRow(index, { reps: event.target.value })
-                      }
-                      className="w-24"
-                    />
-                  </label>
+                  {recordType === "time" ? (
+                    <label className="flex flex-col gap-1 text-xs text-muted-foreground">
+                      秒数
+                      <Input
+                        type="number"
+                        min={1}
+                        step={1}
+                        value={row.duration}
+                        onChange={(event) =>
+                          updateRow(index, { duration: event.target.value })
+                        }
+                        className="w-28"
+                      />
+                    </label>
+                  ) : (
+                    <label className="flex flex-col gap-1 text-xs text-muted-foreground">
+                      次数
+                      <Input
+                        type="number"
+                        min={1}
+                        max={100}
+                        value={row.reps}
+                        onChange={(event) =>
+                          updateRow(index, { reps: event.target.value })
+                        }
+                        className="w-24"
+                      />
+                    </label>
+                  )}
                   {convention !== null && (
                     <label className="flex flex-col gap-1 text-xs text-muted-foreground">
                       重量（kg）
@@ -372,13 +430,15 @@ function RecordFormCard({
                 </div>
                 {exercise !== undefined && (
                   <p className="text-xs text-muted-foreground">
-                    {convention === null
-                      ? `${RECORD_TYPE_LABELS[exercise.record_type]}型动作：不记录负重口径与重量`
-                      : `负重口径：${LOAD_CONVENTION_LABELS[convention]}${
-                          exercise.min_load_increment_kg === null
-                            ? ""
-                            : ` · 最小加重 ${exercise.min_load_increment_kg}kg`
-                        }`}
+                    {recordType === "time"
+                      ? `${RECORD_TYPE_LABELS.time}型动作：只记录秒数，不记录负重口径、重量与次数`
+                      : convention === null
+                        ? `${RECORD_TYPE_LABELS[exercise.record_type]}型动作：只记录次数，不记录负重口径与重量`
+                        : `负重口径：${LOAD_CONVENTION_LABELS[convention]}${
+                            exercise.min_load_increment_kg === null
+                              ? ""
+                              : ` · 最小加重 ${exercise.min_load_increment_kg}kg`
+                          }`}
                   </p>
                 )}
               </div>
@@ -452,7 +512,7 @@ function BodyMetricFormCard({
     },
     onSuccess: async () => {
       toast.success(metric === null ? "身体指标已保存" : "身体指标已更新");
-      await queryClient.invalidateQueries({ queryKey: ["body-metrics"] });
+      await invalidateRecordDerivedQueries(queryClient);
       onDone();
     },
     onError: (error) =>
@@ -557,8 +617,9 @@ function RecordCard({
                 {SET_TYPE_LABELS[set.set_type]}
               </span>
               <span className="tabular-nums">
-                {set.weight_kg === null ? "无负重" : `${set.weight_kg}kg`} ·{" "}
-                {set.reps} 次
+                {set.duration_seconds === null
+                  ? `${set.weight_kg === null ? "无负重" : `${set.weight_kg}kg`} · ${set.reps} 次`
+                  : `${set.duration_seconds} 秒`}
                 {set.load_convention === null
                   ? ""
                   : ` · ${LOAD_CONVENTION_LABELS[set.load_convention]}`}
@@ -610,10 +671,7 @@ export default function RecordsPage() {
     mutationFn: (recordId: number) => deleteRecord(recordId),
     onSuccess: async () => {
       toast.success("训练记录已删除");
-      await Promise.all([
-        queryClient.invalidateQueries({ queryKey: ["records"] }),
-        queryClient.invalidateQueries({ queryKey: ["plan-session-candidates"] }),
-      ]);
+      await invalidateRecordDerivedQueries(queryClient);
     },
     onError: (error) =>
       toast.error(error instanceof Error ? error.message : "训练记录删除失败"),
@@ -623,7 +681,7 @@ export default function RecordsPage() {
     mutationFn: (metricId: number) => deleteBodyMetric(metricId),
     onSuccess: async () => {
       toast.success("身体指标已删除");
-      await queryClient.invalidateQueries({ queryKey: ["body-metrics"] });
+      await invalidateRecordDerivedQueries(queryClient);
     },
     onError: (error) =>
       toast.error(error instanceof Error ? error.message : "身体指标删除失败"),

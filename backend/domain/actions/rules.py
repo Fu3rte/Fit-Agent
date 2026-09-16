@@ -4,7 +4,7 @@
 
 - ``MODE_VOCABULARY``：13 项动作模式词表原词，是 ``exercises.modes_json`` 的唯一取值域
   （库内 CHECK 只保证 ``json_valid``，元素级校验只能在这里）。
-- ``RECORD_TYPES``／``LOAD_CONVENTIONS``：三类记录口径与五种负重口径，与库内 CHECK 同集合；
+- ``RECORD_TYPES``／``LOAD_CONVENTIONS``：三类记录口径与六种负重口径，与库内 CHECK 同集合；
   记录侧（``domain.records``）复用本词表，不另造第二套。
 - ``validate_record_against_exercise``：写入训练记录前的确定性校验（03 records 复用）——
   动作存在（在 service 层查库）之外，记录口径必须与目录一致；外加负重型必须给出与目录
@@ -35,13 +35,14 @@ MODE_VOCABULARY: tuple[str, ...] = (
 #: 三类记录口径（不新增辅助负重型、不建第四类）。
 RECORD_TYPES: tuple[RecordType, ...] = ("reps_weight", "reps_bodyweight", "time")
 
-#: 五种负重口径（仅外加负重类型需要）。
+#: 六种负重口径（仅外加负重类型需要）；``external_added_weight`` 用于独立负重引体（外加重量，不含体重）。
 LOAD_CONVENTIONS: tuple[LoadConvention, ...] = (
     "barbell_includes_bar_total",
     "dumbbell_per_hand",
     "machine_pin_displayed_value",
     "plate_loaded_total_excluding_empty",
     "unilateral_setting_per_side",
+    "external_added_weight",
 )
 
 

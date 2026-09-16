@@ -6,15 +6,19 @@ CHECK／UNIQUE／触发器同集合，不新增任何未拍阈值（例如「日
 
 - 日期：必须是 ``datetime.date`` 对象——文本与 ``datetime`` 都拒绝（``datetime`` 是 ``date``
   的子类，但它是绝对时刻，按业务时区解释成自然日归 ``business_time``，不在本层猜测）。
-- 组事实：次数 1–100 整数；重量 0–1000kg 且最多一位小数；组类型恰三态；动作身份非空文本；
-  组序号 1–50；重量与负重口径同现同隐。
+- 组事实：次数 1–100 整数或空（计时组为空）；持续秒数为不小于 1 的整数（无业务上限）；
+  重量 0–1000kg 且最多一位小数；组类型恰三态；动作身份非空文本；组序号 1–50；
+  重量与负重口径同现同隐。
+- 记录口径对应的必填／互斥字段（:func:`validate_set_fields_for_record_type`）：外加重量要求次数、
+  禁止时长；纯自重要求次数、禁止时长；计时要求时长、禁止次数。
 - 一次训练的总组数：1–50（上限由库内触发器兜底，下限「提交时保证」是 001 里的约定）。
 - 同一动作内组序号不得重复（与库内 ``UNIQUE (workout_session_id, exercise_id, set_no)`` 同
   集合），使越界调用得到领域错误而不是裸 ``IntegrityError``。
 
 边界：**负重口径与目录是否一致不在这里**——那需要读目录（IO），由记录服务落库前经
 ``domain.actions.service.ActionCatalogService.validate_record_write`` 复验；本层只保证口径取值
-落在五种内、且与重量同现同隐。
+落词表内、且与重量同现同隐。**按记录口径的必填／互斥字段也不看目录**：调用方把目录动作的
+``record_type`` 传进来，规则本体（:func:`validate_set_fields_for_record_type`）仍是纯函数。
 """
 
 import math
@@ -22,13 +26,17 @@ from collections.abc import Sequence
 from datetime import date, datetime
 from typing import Any, cast
 
-from domain.actions.rules import LOAD_CONVENTIONS
-from domain.actions.schema import LoadConvention
+from domain.actions.rules import LOAD_CONVENTIONS, RECORD_TYPES
+from domain.actions.schema import LoadConvention, RecordType
 from domain.records.schema import SET_TYPES, SetType, WorkoutSetInput
 
-#: 单组次数范围（001_initial.sql workout_sets.reps CHECK）。
+#: 单组次数范围（002 起 reps 可为空——计时组无次数；有值时仍是 001 的 1–100）。
 REPS_MIN = 1
 REPS_MAX = 100
+
+#: 计时动作的单组时长下限（秒）：不小于 1 的整数，**不设业务上限**。
+#: 这是时长范围的唯一校验规则（讨论总结 §3.1：只由 Domain 实施、DTO 复用同一规则、库内不加 CHECK）。
+DURATION_SECONDS_MIN = 1
 
 #: 外加负重的重量范围与精度（001_initial.sql workout_sets.weight_kg CHECK）。
 WEIGHT_KG_MIN = 0.0
@@ -76,13 +84,65 @@ def validate_set_no(value: Any) -> int:
     return value
 
 
-def validate_reps(value: Any) -> int:
-    """校验并返回单组次数：整数且在 1–100 之间（``bool`` 不是次数）。"""
+def validate_reps(value: Any) -> int | None:
+    """校验并返回单组次数：``None`` 表示该组不记录次数（计时组）。
+
+    有值时必须是 1–100 的整数（``bool`` 不是次数）；是否必填由目录动作的记录口径决定
+    （:func:`validate_set_fields_for_record_type`）。
+    """
+    if value is None:
+        return None
     if isinstance(value, bool) or not isinstance(value, int):
         raise InvalidRecordFact(f"单组次数必须是整数：{value!r}")
     if not REPS_MIN <= value <= REPS_MAX:
         raise InvalidRecordFact(f"单组次数必须在 {REPS_MIN}–{REPS_MAX} 之间：{value!r}")
     return value
+
+
+def validate_duration_seconds(value: Any) -> int | None:
+    """校验并返回单组持续秒数：``None`` 表示该组不记录时长（外加重量／自重组）。
+
+    有值时必须是不小于 1 的整数（``bool`` 不是秒数），**没有业务上限**；该范围只在本函数实施，
+    DTO／API 复用同一规则，库内不加时长 CHECK（Subtask 01 冻结口径）。
+    """
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise InvalidRecordFact(f"持续秒数必须是整数：{value!r}")
+    if value < DURATION_SECONDS_MIN:
+        raise InvalidRecordFact(
+            f"持续秒数必须不小于 {DURATION_SECONDS_MIN} 秒：{value!r}"
+        )
+    return value
+
+
+def validate_set_fields_for_record_type(
+    record_type: RecordType,
+    *,
+    reps: int | None,
+    duration_seconds: int | None,
+) -> None:
+    """按目录动作的记录口径校验组的必填／互斥字段（三种动作的唯一实现，讨论总结 §9）。
+
+    - ``reps_weight``（外加重量）：要求次数，禁止时长（重量与负重口径由口径规则保证同现）。
+    - ``reps_bodyweight``（纯自重）：要求次数，禁止时长（重量／口径由口径规则禁止）。
+    - ``time``（计时）：要求时长，禁止次数。
+
+    数值范围本身归 :func:`validate_reps`／:func:`validate_duration_seconds`（调用方先做），
+    本函数只看「该填的有没有填、不该有的有没有给」。
+    """
+    if record_type not in RECORD_TYPES:
+        raise InvalidRecordFact(f"记录口径不在目录三类内：{record_type!r}")
+    if record_type == "time":
+        if duration_seconds is None:
+            raise InvalidRecordFact("计时动作必须记录持续秒数")
+        if reps is not None:
+            raise InvalidRecordFact("计时动作不得记录次数")
+        return
+    if reps is None:
+        raise InvalidRecordFact(f"{record_type} 型动作必须记录次数")
+    if duration_seconds is not None:
+        raise InvalidRecordFact(f"{record_type} 型动作不得记录持续秒数")
 
 
 def validate_weight_kg(value: Any) -> float | None:
@@ -111,7 +171,7 @@ def validate_load_convention(value: Any) -> LoadConvention | None:
     if value is None:
         return None
     if value not in LOAD_CONVENTIONS:
-        raise InvalidRecordFact(f"负重口径必须是五种之一：{value!r}")
+        raise InvalidRecordFact(f"负重口径必须是六种之一：{value!r}")
     return cast(LoadConvention, value)
 
 
@@ -120,8 +180,8 @@ def validate_session_sets(
 ) -> tuple[WorkoutSetInput, ...]:
     """校验一次训练的全部组事实并返回归一化结果（不落库、不读目录）。
 
-    逐组校验动作身份、组序号、组类型、次数、重量与「重量／负重口径同现同隐」，并校验总组数
-    在 1–50 之间、同一动作内组序号不重复。
+    逐组校验动作身份、组序号、组类型、次数、计时时长、重量与「重量／负重口径同现同隐」，并校验
+    总组数在 1–50 之间、同一动作内组序号不重复。
     """
     if isinstance(values, (str, bytes)) or not isinstance(values, Sequence):
         raise InvalidRecordFact(f"一次训练的组必须是序列：{values!r}")
@@ -151,6 +211,7 @@ def _validate_set_fact(fact: WorkoutSetInput) -> WorkoutSetInput:
         set_type=validate_set_type(fact.set_type),
         load_convention=load_convention,
         weight_kg=weight_kg,
+        duration_seconds=validate_duration_seconds(fact.duration_seconds),
     )
 
 

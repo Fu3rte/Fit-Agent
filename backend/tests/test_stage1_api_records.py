@@ -138,6 +138,8 @@ def test_create_read_update_delete_roundtrip(client: TestClient) -> None:
             "load_convention": None,
             "weight_kg": None,
             "reps": 6,
+            # 非计时组不记录秒数，保持 null 不补 0。
+            "duration_seconds": None,
         }
     ]
 
@@ -342,10 +344,11 @@ def test_rejects_illegal_values(client: TestClient) -> None:
         (_body(sets=[]), 422),
         # 缺字段：没有 sets。
         ({"performed_on": DAY.isoformat()}, 400),
-        # 缺字段：组里没有 reps。
+        # 缺字段：组里没有 reps。reps 自 002 起可为空（计时组无次数），因此不再是 JSON 形状必填，
+        # 改由领域按目录动作的记录口径拒绝（本动作是自重型，必须给次数）。
         (
             _body(sets=[{"exercise_id": BODYWEIGHT, "set_type": "work"}]),
-            400,
+            422,
         ),
         # 未知字段。
         (_body(extra_field=1), 400),

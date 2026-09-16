@@ -1,8 +1,9 @@
 """Stage 1 子任务 01：新版 001_initial.sql —— 7 张业务表、约束、外键与动作种子。
 
-覆盖迁移首次执行、重复启动不覆盖数据、user_version=1、业务表／索引／外键／CHECK 约束、
-「最多一条 active 计划」与「同一计划日程最多一条有效训练」，以及动作种子的负重口径与
-最小加重单位。LangGraph Checkpoint 表不在业务迁移中创建（总结 §5.6）。
+覆盖迁移首次执行、重复启动不覆盖数据、user_version=2（最新迁移编号，002 由 Stage 2 追加）、
+业务表／索引／外键／CHECK 约束、「最多一条 active 计划」与「同一计划日程最多一条有效训练」，
+以及动作种子的负重口径与最小加重单位（002 追加三项种子后共 27 项）。
+LangGraph Checkpoint 表不在业务迁移中创建（总结 §5.6）。
 """
 
 import json
@@ -28,9 +29,11 @@ LOAD_CONVENTIONS = {
     "machine_pin_displayed_value",
     "plate_loaded_total_excluding_empty",
     "unilateral_setting_per_side",
+    # 002 追加：独立负重引体的外加重量口径（不含体重）。
+    "external_added_weight",
 }
-# 24 项已核验动作种子的逐项映射：id -> (load_convention, min_load_increment_kg,
-# source_ref, recommendable)。recommendable 全为 True（reviewer P1-1 用户拍板 A）。
+# 全部动作种子的逐项映射（Stage 1 的 24 项 + 002 追加的 3 项）：
+# id -> (load_convention, min_load_increment_kg, source_ref, recommendable)。
 EXPECTED_EXERCISE_SEED = {
     "barbell-back-squat": ("barbell_includes_bar_total", 2.5, "exercises-dataset:0043", True),
     "barbell-deadlift": ("barbell_includes_bar_total", 2.5, "exercises-dataset:0032", True),
@@ -56,6 +59,11 @@ EXPECTED_EXERCISE_SEED = {
     "cable-overhead-triceps-extension": ("machine_pin_displayed_value", 5.0, "exercises-dataset:0194", True),
     "parallel-bar-dip": (None, None, "exercises-dataset:0251", True),
     "hanging-leg-raise": (None, None, "exercises-dataset:0472", True),
+    # 002 追加（Stage 2 §3）：外加重量口径的独立负重引体、两项计时动作。
+    # 平板支撑在 exercises-dataset 无同名条目，按 Stage 2 口径记为自建条目（不引用数据集 ID）。
+    "weighted-pull-up": ("external_added_weight", 5.0, "exercises-dataset:0841", True),
+    "plank": (None, None, "refactor-log/stage2.md:§3", True),
+    "front-lever": (None, None, "exercises-dataset:3296", True),
 }
 # LangGraph SQLite Checkpointer 自管这些表，业务迁移不得复制一套。
 CHECKPOINT_TABLES = {
@@ -101,12 +109,12 @@ async def _count(db: Database, table: str) -> int:
     return await db.under_lock(op)
 
 
-async def test_first_run_creates_business_tables_and_user_version_one(
+async def test_first_run_creates_business_tables_and_user_version_two(
     tmp_path: Path,
 ) -> None:
     db = await _migrated(tmp_path / "x.db")
     try:
-        assert await db.pragma_value("user_version") == 1
+        assert await db.pragma_value("user_version") == 2
         # AUTOINCREMENT 会附建 sqlite_sequence；除它之外恰是 7 张业务表。
         assert await _table_names(db) == BUSINESS_TABLES | {"sqlite_sequence"}
         assert "idx_plans_single_active" in await _index_names(db)
@@ -136,9 +144,9 @@ async def test_repeated_start_keeps_schema_and_does_not_overwrite_data(
 
     reopened = await _migrated(path)  # 再次启动：无新迁移可执行，不重建表、不清数据
     try:
-        assert await reopened.pragma_value("user_version") == 1
+        assert await reopened.pragma_value("user_version") == 2
         assert await _count(reopened, "body_metrics") == 1
-        assert await _count(reopened, "exercises") == 24
+        assert await _count(reopened, "exercises") == 27
     finally:
         await reopened.close()
 
@@ -360,7 +368,7 @@ async def test_range_and_enum_constraints_reject_invalid_values(
 
 
 async def test_exercise_seed_validates_load_and_increment(tmp_path: Path) -> None:
-    """动作种子：24 项稳定 ID；外加负重带口径与最小加重单位，自重动作均为 NULL。"""
+    """动作种子：27 项稳定 ID；外加负重带口径与最小加重单位，自重／计时动作均为 NULL。"""
     db = await _migrated(tmp_path / "x.db")
     try:
 
@@ -372,8 +380,8 @@ async def test_exercise_seed_validates_load_and_increment(tmp_path: Path) -> Non
                 return [dict(row) for row in await cursor.fetchall()]
 
         rows = await db.under_lock(op)
-        assert len(rows) == 24
-        assert len({row["id"] for row in rows}) == 24
+        assert len(rows) == 27
+        assert len({row["id"] for row in rows}) == 27
         for row in rows:
             modes = json.loads(row["modes_json"])
             assert isinstance(modes, list) and modes, row
@@ -390,7 +398,7 @@ async def test_exercise_seed_validates_load_and_increment(tmp_path: Path) -> Non
 
 
 async def test_exercise_seed_matches_verified_mapping(tmp_path: Path) -> None:
-    """逐项锁定 24 项已核验动作的负重口径、最小加重单位、来源与可推荐标记（reviewer P2-1）。"""
+    """逐项锁定全部动作种子的负重口径、最小加重单位、来源与可推荐标记（reviewer P2-1）。"""
     db = await _migrated(tmp_path / "x.db")
     try:
 

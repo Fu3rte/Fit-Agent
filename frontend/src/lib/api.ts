@@ -3,7 +3,8 @@
  * 错误统一解析为 ApiError 形状抛出（后端固定
  * ``{http_status, error_code:"invalid_request", message}``）。
  *
- * 覆盖 Stage 1 交付端点：画像、训练记录与组、身体指标、动作目录、计划只读。
+ * 覆盖 Stage 1 交付端点：画像、训练记录与组、身体指标、动作目录、计划只读；
+ * 以及 Stage 2 的 Stats 只读端点（三类 PB、趋势、月历）。
  * 表单写入直连业务端点，不经 Run／草稿。
  */
 import type {
@@ -11,7 +12,9 @@ import type {
   BodyMetricItemWire,
   BodyMetricListWire,
   BodyMetricWriteBody,
+  CalendarResponseWire,
   ExerciseListWire,
+  PersonalBestListWire,
   PlanItemWire,
   PlanListWire,
   PlanSessionCandidatesWire,
@@ -21,6 +24,7 @@ import type {
   RecordItemWire,
   RecordListWire,
   RecordWriteBody,
+  TrendsResponseWire,
 } from "@/lib/contract";
 
 export type { ApiError };
@@ -126,3 +130,18 @@ export const getPlanById = (planId: number) =>
 
 export const listPlanSessions = (planId: number) =>
   request<PlanSessionListWire>(`/api/plans/${planId}/sessions`);
+
+/* ------------------------------ 统计（只读现算） ------------------------------ */
+
+/** 三类 PB（最大重量、最大次数、最长时长）及来源训练、组序号与日期 */
+export const listPersonalBests = () =>
+  request<PersonalBestListWire>("/api/stats/personal-bests");
+
+/** 最近 30 天体重／体脂原始点与趋势摘要；力量系列由后端计算，看板不渲染 */
+export const getTrends = () => request<TrendsResponseWire>("/api/stats/trends");
+
+/** 一个自然月的计划日程状态与实际训练事实；month 为严格的 ``YYYY-MM`` */
+export const getCalendarMonth = (month: string) =>
+  request<CalendarResponseWire>(
+    `/api/stats/calendar?month=${encodeURIComponent(month)}`,
+  );

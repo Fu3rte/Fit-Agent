@@ -18,12 +18,14 @@ from typing import Any, Literal, cast
 RecordType = Literal["reps_weight", "reps_bodyweight", "time"]
 
 #: 负重口径（仅外加负重类型需要；库内 CHECK 同集合）。
+#: ``external_added_weight`` 是独立负重引体的「外加重量（不含体重）」口径。
 LoadConvention = Literal[
     "barbell_includes_bar_total",
     "dumbbell_per_hand",
     "machine_pin_displayed_value",
     "plate_loaded_total_excluding_empty",
     "unilateral_setting_per_side",
+    "external_added_weight",
 ]
 
 
@@ -70,7 +72,7 @@ class Exercise:
             id=str(row["id"]),
             standard_name_zh=str(row["standard_name_zh"]),
             equipment_variant=str(row["equipment_variant"]),
-            # 库内 CHECK 已保证取值属于三类记录口径与五种负重口径；此处按列语义收敛类型。
+            # 库内 CHECK 已保证取值属于三类记录口径与六种负重口径；此处按列语义收敛类型。
             record_type=cast(RecordType, row["record_type"]),
             load_convention=(
                 None

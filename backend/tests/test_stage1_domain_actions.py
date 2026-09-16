@@ -53,13 +53,13 @@ async def _migrated(path: Path) -> Database:
 async def test_directory_lists_seed_exercises_aligned_to_new_columns(
     tmp_path: Path,
 ) -> None:
-    """目录全量：24 项种子按新列读取，稳定 ID 与负重口径原样保留。"""
+    """目录全量：27 项种子（002 追加三项）按新列读取，稳定 ID 与负重口径原样保留。"""
     db = await _migrated(tmp_path / "x.db")
     try:
         exercises = await ActionCatalogService(db).list_all()
-        assert len(exercises) == 24
+        assert len(exercises) == 27
         by_id = {exercise.id: exercise for exercise in exercises}
-        assert len(by_id) == 24
+        assert len(by_id) == 27
         barbell_squat = by_id["barbell-back-squat"]
         assert barbell_squat.standard_name_zh == "杠铃背蹲"
         assert barbell_squat.equipment_variant == "barbell"
@@ -103,7 +103,8 @@ async def test_all_seed_modes_are_inside_the_thirteen_item_vocabulary(
     """13 项词表是 modes_json 的唯一取值域：种子逐项非空且全部落在词表内。"""
     assert len(MODE_VOCABULARY) == 13
     assert RECORD_TYPES == ("reps_weight", "reps_bodyweight", "time")
-    assert len(LOAD_CONVENTIONS) == 5
+    # 002 追加 external_added_weight（独立负重引体的外加重量口径）：五种 → 六种。
+    assert len(LOAD_CONVENTIONS) == 6
     db = await _migrated(tmp_path / "x.db")
     try:
         for exercise in await ExerciseRepo(db).list_all():

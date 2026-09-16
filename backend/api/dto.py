@@ -1,5 +1,8 @@
 """表单 API 传输层：请求体模型 ↔ 领域对象映射、领域对象 → 响应 DTO、统一错误形状。
 
+响应侧同时是只读统计（PB、趋势、月历）的唯一边界映射：``personal_best_dto``／``trends_dto``／
+``calendar_dto`` 也是 Subtask 05 前端契约的后端侧正本。
+
 正本：``LANGGRAPH_REFACTOR_PLAN.md`` §4（目标代码结构）、§6.1（校验责任划分）与 Stage 1
 子任务 04（表单 API）。三条硬边界：
 
@@ -17,9 +20,9 @@
 import sqlite3
 from collections.abc import Callable
 from datetime import date
-from typing import Any, cast
+from typing import Annotated, Any, cast
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Query, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict
@@ -45,6 +48,14 @@ from domain.records.service import (
     PlanSessionLinkUnavailable,
     WorkoutRecordNotFound,
 )
+from domain.stats.schema import (
+    CalendarMonth,
+    MetricChange,
+    PersonalBest,
+    TrendReport,
+    WorkoutFact,
+    WorkoutGap,
+)
 
 #: 统一错误码：本层只表达「请求或输入不合法」，不新增业务语义错误码。
 ERROR_CODE_INVALID_REQUEST = "invalid_request"
@@ -63,19 +74,44 @@ class UnknownResource(ValueError):
     """
 
 
+# ---------- 查询参数 ----------
+
+#: 月历月份参数：严格的 ``YYYY-MM``（不接受 ``2026-6`` 这类非补零写法，也不接受多个月份集合）。
+_MONTH_PATTERN = r"^[0-9]{4}-(0[1-9]|1[0-2])$"
+
+MonthQuery = Annotated[str, Query(pattern=_MONTH_PATTERN)]
+
+
+def decode_year_month(month: str) -> tuple[int, int]:
+    """``YYYY-MM`` → ``(年, 月)``；形状已由 :data:`MonthQuery` 正则保证，这里只拒绝不存在的年份。
+
+    年份 0 不是合法自然年，不靠数据库或领域层兜底（那会变成 500），在传输层直接归为 400。
+    """
+    year_text, _, month_text = month.partition("-")
+    year = int(year_text)
+    if year < 1:
+        raise InvalidRequestShape(f"月份年份非法：{month}")
+    return year, int(month_text)
+
+
 # ---------- 请求体模型（Pydantic 只管形状、必填与基础类型） ----------
 
 
 class SetIn(BaseModel):
-    """提交的一组训练事实；组序号由 API 按提交顺序分配（05 不要求输入组序号）。"""
+    """提交的一组训练事实；组序号由 API 按提交顺序分配（05 不要求输入组序号）。
+
+    ``reps``／``duration_seconds`` 都可省略：哪一项必填由目录动作的记录口径决定，
+    本层不重复实现该规则（与值域、负重口径同口径：一律由 ``domain`` 拒绝）。
+    """
 
     model_config = ConfigDict(extra="forbid")
 
     exercise_id: str
     set_type: str
-    reps: int
+    reps: int | None = None
     load_convention: str | None = None
     weight_kg: float | None = None
+    duration_seconds: int | None = None
 
 
 class RecordBody(BaseModel):
@@ -158,8 +194,9 @@ def _fact_from_in(name: str, raw: ProfileFactIn) -> Fact[Any]:
 def workout_facts_from_dto(body: RecordBody) -> tuple[WorkoutSetInput, ...]:
     """训练记录请求体的组列表 → 组事实；``set_no`` 按提交顺序对同一动作依次分配 1,2,3…
 
-    组的取值域（组类型、负重口径、重量、次数、总组数）一律由 ``domain.records.rules``
-    校验，本层不猜、不补默认值。
+    组的取值域（组类型、负重口径、重量、次数、时长、总组数与按记录口径的必填字段）一律由
+    ``domain.records`` 校验，本层不猜、不补默认值。计时时长的不小于 1 秒也是同一条领域规则
+    （``domain.records.rules.validate_duration_seconds``），本层不另写一遍。
     """
     counters: dict[str, int] = {}
     facts: list[WorkoutSetInput] = []
@@ -174,6 +211,7 @@ def workout_facts_from_dto(body: RecordBody) -> tuple[WorkoutSetInput, ...]:
                 set_type=cast(SetType, item.set_type),
                 load_convention=cast(LoadConvention | None, item.load_convention),
                 weight_kg=item.weight_kg,
+                duration_seconds=item.duration_seconds,
             )
         )
     return tuple(facts)
@@ -209,6 +247,7 @@ def record_dto(session: WorkoutSession) -> dict[str, Any]:
                 "load_convention": fact.load_convention,
                 "weight_kg": fact.weight_kg,
                 "reps": fact.reps,
+                "duration_seconds": fact.duration_seconds,
             }
             for fact in session.sets
         ],
@@ -273,6 +312,132 @@ def plan_session_dto(session: PlanSession) -> dict[str, Any]:
         "scheduled_on": session.scheduled_on.isoformat(),
         "cancelled_at": session.cancelled_at,
     }
+
+
+def personal_best_dto(pb: PersonalBest) -> dict[str, Any]:
+    """一条现算 PB → 传输对象：数值、适用负重口径与重量，加来源训练／组序号／日期。"""
+    return {
+        "exercise_id": pb.exercise_id,
+        "exercise_name": pb.exercise_name,
+        "pb_type": pb.pb_type,
+        "value": pb.value,
+        "load_convention": pb.load_convention,
+        "weight_kg": pb.weight_kg,
+        "workout_session_id": pb.workout_session_id,
+        "set_no": pb.set_no,
+        "performed_on": pb.performed_on.isoformat(),
+    }
+
+
+def metric_change_dto(change: MetricChange) -> dict[str, Any]:
+    """体重／体脂最近两条记录的变化；状态不是 ``ok`` 时取值字段全为 null（不补 0）。"""
+    return {
+        "status": change.status,
+        "current": change.current,
+        "current_on": _optional_iso(change.current_on),
+        "previous": change.previous,
+        "previous_on": _optional_iso(change.previous_on),
+        "change": change.change,
+    }
+
+
+def workout_gap_dto(gap: WorkoutGap) -> dict[str, Any]:
+    """距上次训练天数；没有训练历史时状态为 ``no_data`` 且天数为 null。"""
+    return {
+        "status": gap.status,
+        "days": gap.days,
+        "last_performed_on": _optional_iso(gap.last_performed_on),
+    }
+
+
+def trends_dto(report: TrendReport) -> dict[str, Any]:
+    """趋势报告 → 传输对象：窗口、体重／体脂原始点、力量累计 PB 系列与趋势摘要。
+
+    ``strength`` 由后端按截至各日期的累计 PB 算出（Stage 2 前端不展示该曲线）；
+    所有点数、状态与差值都是后端事实，前端不得重算。
+    """
+    return {
+        "window_days": report.window_days,
+        "from": report.from_on.isoformat(),
+        "to": report.to_on.isoformat(),
+        "weight": [
+            {"measured_on": point.measured_on.isoformat(), "value": point.value}
+            for point in report.weight
+        ],
+        "body_fat": [
+            {"measured_on": point.measured_on.isoformat(), "value": point.value}
+            for point in report.body_fat
+        ],
+        "strength": [
+            {
+                "exercise_id": trend.exercise_id,
+                "exercise_name": trend.exercise_name,
+                "pb_type": trend.pb_type,
+                "load_convention": trend.load_convention,
+                "weight_kg": trend.weight_kg,
+                "points": [
+                    {
+                        "performed_on": point.performed_on.isoformat(),
+                        "value": point.value,
+                    }
+                    for point in trend.points
+                ],
+            }
+            for trend in report.strength
+        ],
+        "trend_summary": {
+            "weight_change": metric_change_dto(report.trend_summary.weight_change),
+            "body_fat_change": metric_change_dto(report.trend_summary.body_fat_change),
+            "days_since_last_workout": workout_gap_dto(
+                report.trend_summary.days_since_last_workout
+            ),
+        },
+    }
+
+
+def calendar_dto(month: CalendarMonth) -> dict[str, Any]:
+    """月历 → 传输对象：只含有事实的日期；计划状态落在 ``scheduled_on``，训练落在 ``performed_on``。
+
+    空白日期不出条目（不生成「休息日」文案）；计划条目的 ``workout_session_id`` 非空即已完成该日程，
+    ``actual_performed_on`` 在跨日、跨月时仍给出真实训练日期；``workout.plan_session_id`` 为 null 即额外训练。
+    """
+    return {
+        "month": month.month,
+        "from": month.from_on.isoformat(),
+        "to": month.to_on.isoformat(),
+        "days": [
+            {
+                "date": day.date.isoformat(),
+                "plan_sessions": [
+                    {
+                        "id": session.plan_session_id,
+                        "scheduled_on": session.scheduled_on.isoformat(),
+                        "status": session.status,
+                        "workout_session_id": session.workout_session_id,
+                        "actual_performed_on": _optional_iso(
+                            session.actual_performed_on
+                        ),
+                    }
+                    for session in day.plan_sessions
+                ],
+                "workouts": [workout_fact_dto(fact) for fact in day.workouts],
+            }
+            for day in month.days
+        ],
+    }
+
+
+def workout_fact_dto(fact: WorkoutFact) -> dict[str, Any]:
+    """一次实际训练事实 → 传输对象；``plan_session_id`` 为 null 即额外训练。"""
+    return {
+        "id": fact.workout_session_id,
+        "performed_on": fact.performed_on.isoformat(),
+        "plan_session_id": fact.plan_session_id,
+    }
+
+
+def _optional_iso(value: date | None) -> str | None:
+    return None if value is None else value.isoformat()
 
 
 # ---------- 异常 → 统一错误形状 ----------
