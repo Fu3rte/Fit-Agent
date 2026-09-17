@@ -18,6 +18,15 @@ MODEL_API_KEY_ENV = "MODEL_API_KEY"
 MODEL_BASE_URL_ENV = "MODEL_BASE_URL"
 MODEL_MODEL_ENV = "MODEL_MODEL"
 
+# 模型与 Run 的固定上限（讨论总结 §10、stage4.md §3.7 决策 8B）：非敏感常量，可进日志与响应。
+# 请求预算按每次 workflow invocation 的运行上下文持有（不新增 WorkflowState 字段）。
+#: 单次模型请求超时（秒）。
+MODEL_REQUEST_TIMEOUT_SECONDS = 60
+#: 单次 Graph Run 的模型请求总时限（秒）。
+GRAPH_RUN_TIMEOUT_SECONDS = 180
+#: 单次 Run 的模型请求次数上限；当前无 Router 的计划链路拓扑最多实际调用 4 次。
+MAX_MODEL_REQUESTS_PER_RUN = 5
+
 # 本地开发读取仓库根目录 .env；已存在的进程环境变量优先。
 load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 

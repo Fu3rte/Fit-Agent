@@ -176,7 +176,7 @@ export interface BodyMetricItemWire {
 export interface PlanWire {
   id: number;
   version: number;
-  status: "draft" | "active" | "archived";
+  status: "draft" | "active" | "archived" | "rejected";
   source_plan_id: number | null;
   /** 结构化计划内容：后端只保证是合法 JSON，形状不在此层解释 */
   structured_content: unknown;

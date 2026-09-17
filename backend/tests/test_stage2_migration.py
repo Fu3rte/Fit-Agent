@@ -9,7 +9,8 @@
 三个新动作种子逐字段正确、计时时长范围**不在库内**（只由 Domain 唯一规则实施）。
 
 测试只使用 pytest ``tmp_path`` 下的独立临时库：先用只含 ``001_initial.sql`` 的临时迁移目录造出
-Stage 1 旧库，再用仓库默认迁移目录（含 002）升级，避免伪造「旧版程序」。
+Stage 1 旧库，再用只含 001／002 的临时迁移目录升级，避免伪造「旧版程序」；本文件只验证 001 → 002
+ 这一步，003（Stage 4）由 ``tests/test_stage4_migration.py`` 覆盖。
 """
 
 import shutil
@@ -99,10 +100,19 @@ STAGE1_SETS = (
 def _stage1_only_migrations_dir(tmp_path: Path) -> Path:
     """只含 ``001_initial.sql`` 的临时迁移目录：用来造出真正的 Stage 1（user_version=1）旧库。"""
     directory = tmp_path / "migrations_001"
-    directory.mkdir()
+    directory.mkdir(exist_ok=True)
     shutil.copy(
         DEFAULT_MIGRATIONS_DIR / "001_initial.sql", directory / "001_initial.sql"
     )
+    return directory
+
+
+def _migrations_dir_through_002(tmp_path: Path) -> Path:
+    """只含 001／002 的临时迁移目录：本文件只验证 001 → 002 这一步，不跑到 003。"""
+    directory = tmp_path / "migrations_002"
+    directory.mkdir(exist_ok=True)
+    for name in ("001_initial.sql", "002_timed_sets_and_new_actions.sql"):
+        shutil.copy(DEFAULT_MIGRATIONS_DIR / name, directory / name)
     return directory
 
 
@@ -176,7 +186,7 @@ async def _upgraded_stage1_db(tmp_path: Path) -> tuple[Database, list[dict]]:
         )
     finally:
         await db.close()
-    upgraded = await _open(path)
+    upgraded = await _open(path, _migrations_dir_through_002(tmp_path))
     return upgraded, exercises_before
 
 
@@ -245,7 +255,7 @@ async def test_upgrade_is_repeatable_and_does_not_overwrite_data(tmp_path: Path)
         )
         await db.close()
 
-        reopened = await _open(db.path)
+        reopened = await _open(db.path, _migrations_dir_through_002(tmp_path))
         try:
             assert await reopened.pragma_value("user_version") == 2
             assert await _count(reopened, "exercises") == 27

@@ -1,6 +1,6 @@
 """Stage 1 子任务 01：新版 001_initial.sql —— 7 张业务表、约束、外键与动作种子。
 
-覆盖迁移首次执行、重复启动不覆盖数据、user_version=2（最新迁移编号，002 由 Stage 2 追加）、
+覆盖迁移首次执行、重复启动不覆盖数据、user_version=3（当前最新迁移编号：002 由 Stage 2 追加、003 由 Stage 4 追加）、
 业务表／索引／外键／CHECK 约束、「最多一条 active 计划」与「同一计划日程最多一条有效训练」，
 以及动作种子的负重口径与最小加重单位（002 追加三项种子后共 27 项）。
 LangGraph Checkpoint 表不在业务迁移中创建（总结 §5.6）。
@@ -114,7 +114,7 @@ async def test_first_run_creates_business_tables_and_user_version_two(
 ) -> None:
     db = await _migrated(tmp_path / "x.db")
     try:
-        assert await db.pragma_value("user_version") == 2
+        assert await db.pragma_value("user_version") == 3
         # AUTOINCREMENT 会附建 sqlite_sequence；除它之外恰是 7 张业务表。
         assert await _table_names(db) == BUSINESS_TABLES | {"sqlite_sequence"}
         assert "idx_plans_single_active" in await _index_names(db)
@@ -144,7 +144,7 @@ async def test_repeated_start_keeps_schema_and_does_not_overwrite_data(
 
     reopened = await _migrated(path)  # 再次启动：无新迁移可执行，不重建表、不清数据
     try:
-        assert await reopened.pragma_value("user_version") == 2
+        assert await reopened.pragma_value("user_version") == 3
         assert await _count(reopened, "body_metrics") == 1
         assert await _count(reopened, "exercises") == 27
     finally:

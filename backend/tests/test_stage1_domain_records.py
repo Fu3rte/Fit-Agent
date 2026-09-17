@@ -80,11 +80,16 @@ async def _seed_plan_session(
     version: int = 1,
     cancelled_at: str | None = None,
 ) -> int:
-    """直接 SQL 写入一个 draft 计划与一条日程，返回 plan_session 身份。"""
+    """直接 SQL 写入一个计划与一条日程，返回 plan_session 身份。
+
+    计划状态用 archived：003 起 draft 是部分唯一索引（任意时刻最多一条 draft），而本 fixture 会被
+    同一测试调用多次；日程关联读取只查 plan_sessions（``domain/records/repo`` 的候选 SQL 不 JOIN
+    plans），与计划状态无关。
+    """
     async with db.transaction() as conn:
         cursor = await conn.execute(
             "INSERT INTO plans (version, status, structured_content, created_at)"
-            " VALUES (?, 'draft', '{}', ?)",
+            " VALUES (?, 'archived', '{}', ?)",
             (version, "2026-06-01T08:00:00+08:00"),
         )
         try:

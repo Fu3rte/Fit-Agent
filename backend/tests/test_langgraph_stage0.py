@@ -48,8 +48,8 @@ def test_startup_creates_new_database_with_business_schema(
         }
         # 新版只建业务表；LangGraph Checkpoint 表不在业务迁移中创建。
         assert tables == BUSINESS_TABLES | {"sqlite_sequence"}
-        # 002 之后的最新迁移编号（迁移由编号累加，不回退）。
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 2
+        # 003 之后的当前迁移编号（迁移由编号累加，不回退；Stage 4 追加 003）。
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 3
 
 
 def test_api_key_never_appears_in_logs(

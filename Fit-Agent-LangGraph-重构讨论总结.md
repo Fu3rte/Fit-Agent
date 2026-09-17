@@ -77,7 +77,10 @@ Fit-Agent 不再沿用 PydanticAI，也不继续建设复杂的通用 Agent Harn
 
 ```text
 draft → active → archived
+draft候选 → rejected
 ```
+
+`rejected` 只表示 Evaluator 二次阻断失败；用户拒绝仍在阶段 5 走 `archive_draft`（原计划不变），不进入 `rejected`。
 
 只有 Agent 生成或调整的训练计划需要用户确认；普通打卡和身体数据不进入草稿系统。
 
@@ -87,6 +90,9 @@ draft → active → archived
 - Evaluator 检查计划是否符合目标、时间、训练频率、已知动作限制和明确的渐进规则。
 - 评估不通过时只允许 Planner 修订一次，避免无限 Reflection。
 - 二次评估仍不通过时结束流程并说明原因，不产生可激活计划，原 active 计划保持不变。
+- 二次阻断失败的候选以 `rejected` 记录收尾，它是终态：不可激活，也不得改回 draft。
+- `rejected` 不新增 `rejected_at`，也不复用 `archived_at`：`confirmed_at` 与 `archived_at` 保持 `NULL`，终态由 `status='rejected'` 和失败的 evaluator 结果表达。
+- `rejected` 进入计划版本列表与按 ID 查询，但不进入 draft 列表、active 查询或日历 active 计划。
 - 用户拒绝时将 draft 归档，原 active 计划不变；用户确认后，新版本变为 active，旧版本转为 archived。
 - 后续调整必须读取当前计划和最新训练数据，不能脱离旧计划重新生成。
 
@@ -285,7 +291,7 @@ langgraph_checkpoints
 - `plan_sessions` 保留计划日程日期、取消状态和单次完成状态；存在关联的有效训练记录即为完成，同一日程最多完成一次。首版不计算完成率，不建立完成率分子、分母或百分比查询。
 - 激活新计划时取消旧计划尚未到期的日程，已到期历史保留。
 - PB 使用查询或数据库 View 从有效 `workout_sets` 现算，不建 `personal_bests` 表。
-- `plans` 保存 `draft / active / archived` 和版本号，并用 SQLite 部分唯一索引保证任意时刻最多一个 active 计划。
+- `plans` 保存 `draft / active / archived / rejected` 和版本号，并用 SQLite 部分唯一索引保证任意时刻最多一个 active 计划；`rejected` 只由二次评估失败产生，是终态且不带时间字段。
 - LangGraph Checkpointer 自己管理 checkpoint 表，且使用与业务数据库分开的独立 SQLite 文件（`langgraph_checkpoints` 不在业务库、不进业务迁移）；`thread_id` 直接使用 conversation id。重启后确认操作只从 checkpoint 恢复，若 checkpoint 不存在则重新读取 `plans.status='draft'`，禁止两条路径同时提交。
 
 不新增通用事件总线、记忆向量表、审计平台或多租户权限表。
@@ -350,7 +356,7 @@ MCP 首版可以不做。后续只有在接入 Strava、Apple Health、Garmin �
 | 自研历史压缩 | LangGraph 摘要节点 |
 | PydanticAI 工具 | LangChain `@tool` |
 | 单 Agent 计划与复盘 | Planner / Evaluator 子图 |
-| 通用草稿确认 | 仅计划 `draft / active / archived` |
+| 通用草稿确认 | 仅计划 `draft / active / archived / rejected` |
 | PydanticAI 流式事件 | LangGraph stream → SSE |
 
 ### 12.3 全新增加

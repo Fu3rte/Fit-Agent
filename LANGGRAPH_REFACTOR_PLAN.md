@@ -266,7 +266,7 @@ backend/
 
 `plans` 必须包含：
 
-- `draft / active / archived` 状态；
+- `draft / active / archived / rejected` 状态；其中 `rejected` 是 Evaluator 二次评估失败后的终态，不可激活、不得改回 draft，且不新增 rejected 时间字段，`confirmed_at` 与 `archived_at` 保持 `NULL`；
 - 单调版本号；
 - 可追溯的来源计划，用于调整而不是脱离旧计划重生成；
 - 结构化计划内容；
@@ -505,7 +505,7 @@ State 不复制完整数据库历史，不保存 API Key，不把 PB 或趋势�
 | `wait_for_confirmation` | 保存 draft 并 checkpoint，等待用户确认/拒绝 | 不自动激活 |
 | `activate_plan` | 调用唯一计划激活事务 | 不在 Graph 节点内散写多张表 |
 | `archive_draft` | 用户拒绝时归档 draft | 不修改原 active |
-| `reject_draft` | 二次评估失败，记录原因并结束 | 不产生可激活 draft |
+| `reject_draft` | 二次评估失败，写入 `rejected` 终态记录并结束 | 不产生可激活计划；用户拒绝仍走 `archive_draft` |
 | `safety_stop` | 返回停止计划生成及专业咨询提示 | 不输出训练计划 |
 
 Evaluator 分两层：
@@ -611,7 +611,7 @@ Gate：固定数据库输入下，MemoryAssembler 只输出总结规定的六类
 - 实现 §6.6 已确认的 10 项急性关键词精确子串检查；
 - 实现负荷来源和渐进规则校验；
 - 完成 Planner、Evaluator、一次修订与失败终止；
-- 保存 draft 与评估结果。
+- 保存 draft、`rejected` 终态与评估结果（`rejected` 不新增时间字段）。
 
 Gate：急性伤病命中不进入 Planner；禁用动作不出现；无历史不生成具体重量；二次评估失败没有可激活计划。
 

@@ -283,7 +283,8 @@ async def test_checkpointed_threads_do_not_share_state(tmp_path: Path) -> None:
     async with _serving(app):
         db = app.state.db
         first_draft_id = await _insert_plan(db, version=1, status="draft")
-        second_draft_id = await _insert_plan(db, version=2, status="draft")
+        # 第二条 fixture 计划只需要一个不同的身份：003 起 draft 受部分唯一索引限制（最多一条）。
+        second_draft_id = await _insert_plan(db, version=2, status="rejected")
         graph = _pausing_graph(app.state.checkpointer)
 
         for conversation_id, draft_plan_id in (

@@ -31,13 +31,18 @@ BODYWEIGHT = "pull-up"
 
 
 async def _seed_plan_sessions(db: Database, days: Sequence[date]) -> list[int]:
-    """直接 SQL 写入 draft 计划与日程，返回日程身份（每个日期一个独立计划）。"""
+    """直接 SQL 写入计划与日程，返回日程身份（每个日期一个独立计划）。
+
+    计划状态用 archived：003 起 draft 是部分唯一索引（任意时刻最多一条 draft），而本 fixture 每个
+    日期各建一条计划；日程关联读取只查 plan_sessions（``domain/records/repo`` 的候选 SQL 不 JOIN
+    plans），与计划状态无关。
+    """
     session_ids: list[int] = []
     async with db.transaction() as conn:
         for version, day in enumerate(days, start=1):
             cursor = await conn.execute(
                 "INSERT INTO plans (version, status, structured_content, created_at)"
-                " VALUES (?, 'draft', '{}', ?)",
+                " VALUES (?, 'archived', '{}', ?)",
                 (version, CREATED_AT),
             )
             try:
