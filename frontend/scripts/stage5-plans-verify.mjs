@@ -333,41 +333,12 @@ assert.match(
   /filter\(\(plan\) => plan\.status === "archived" \|\| plan\.status === "rejected"\)/,
   "历史列表必须同时包含 archived 与 rejected",
 );
-// STATIC 确认／拒绝后失效 plans 与日历相关 Query
-assert.match(
-  plansPage,
-  /invalidateQueries\(\{ queryKey: \["plans"\] \}\)/,
-  "缺少 plans Query 失效",
-);
-assert.match(
-  plansPage,
-  /invalidateQueries\(\{ queryKey: \["calendar"\] \}\)/,
-  "缺少 calendar Query 失效",
-);
-assert.ok(
-  (plansPage.match(/await invalidatePlanAndCalendarQueries\(queryClient\)/g) ?? [])
-    .length >= 2,
-  "确认与拒绝都必须调用失效入口",
-);
-// STATIC confirm／reject 复用产出或首次复用该 draft 的那次运行的 conversation_id（waiting／done 的 draft_plan_id）
-assert.match(
-  plansPage,
-  /function draftPlanIdOf\(event: AgentEventWire\): number \| null \{/,
-  "缺少从 waiting／done 读 draft_plan_id 的入口",
-);
-assert.match(
-  plansPage,
-  /current\[draftPlanId\] === undefined[\s\S]{0,120}?payload\.conversationId/,
-  "首次见到某 draft 时必须记下该次运行的 conversation_id",
-);
-assert.match(
-  plansPage,
-  /runConversations\[plan\.id\] \?\? crypto\.randomUUID\(\)/,
-  "confirm／reject 必须优先取该 draft 对应的 conversation_id",
-);
-// STATIC 三端点封装都被页面使用
-for (const name of ["runAgentStream", "confirmPlan", "rejectPlan"]) {
-  assert.ok(plansPage.includes(name), `页面未使用 ${name}`);
+// STATIC 计划页不再有任何写入入口（生成／调整与确认／拒绝都已移至对话页：stage6.md §2.5.4，本轮裁决）
+for (const forbidden of ["confirmPlan", "rejectPlan", "runAgentStream", "Textarea"]) {
+  assert.ok(
+    !plansPage.includes(forbidden),
+    `计划页不得再有写入入口：${forbidden}`,
+  );
 }
 // STATIC 无 Stage 6 打卡入口：页面不得触碰任何训练记录／身体指标写入
 for (const forbidden of [
@@ -393,7 +364,7 @@ assert.match(
   /versions\.find\(\(plan\) => plan\.status === "draft"\)/,
   "计划页必须从计划版本列表按 draft 状态取唯一 draft",
 );
-pass("STATIC 历史含 rejected、plans／calendar 失效、draft→conversation_id 复用、三端点使用、无 Stage 6 打卡入口、路由注册");
+pass("STATIC 历史含 rejected、计划页无任何写入入口、无 Stage 6 打卡入口、路由注册");
 
 /* --- STATIC 8：契约与后端字段一致（五类事件名与 data 键） --- */
 

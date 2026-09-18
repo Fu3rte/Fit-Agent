@@ -66,6 +66,20 @@ class WorkoutRecordsService:
         self._repo = WorkoutRecordsRepo(db)
         self._catalog = ActionCatalogService(db)
 
+    async def validate_record_facts(
+        self, performed_on: date, sets: Sequence[WorkoutSetInput]
+    ) -> tuple[date, tuple[WorkoutSetInput, ...]]:
+        """写入前的完整事实校验（日期 ＋ 组规则 ＋ 目录口径），不写库、不碰关联日程。
+
+        ``create``／``update`` 与本方法共用同一实现，因此自然语言打卡确认前的校验与表单写入
+        完全同源（stage6.md §2.2「与表单路径同一套规则」）；确认载荷不合规时在写事务之前即拒绝。
+        返回归一化后的业务日期与组事实。
+        """
+        day = validate_performed_on(performed_on)
+        facts = validate_session_sets(sets)
+        await self._validate_sets_against_catalog(facts)
+        return day, facts
+
     async def create(
         self,
         performed_on: date,
@@ -75,9 +89,7 @@ class WorkoutRecordsService:
         auto_link: bool = False,
     ) -> WorkoutSession:
         """新增一次训练（连同全部组，原子写入）；``plan_session_id`` 为 None 即额外训练。"""
-        day = validate_performed_on(performed_on)
-        facts = validate_session_sets(sets)
-        await self._validate_sets_against_catalog(facts)
+        day, facts = await self.validate_record_facts(performed_on, sets)
         async with self._db.transaction() as conn:
             link = await self._resolve_link_in_transaction(
                 conn, day, plan_session_id, auto_link, exclude_session_id=None
@@ -111,9 +123,7 @@ class WorkoutRecordsService:
         auto_link: bool = False,
     ) -> WorkoutSession:
         """整条覆盖一次训练（日期、关联日程与全部组行一起替换）；身份不存在抛领域错误。"""
-        day = validate_performed_on(performed_on)
-        facts = validate_session_sets(sets)
-        await self._validate_sets_against_catalog(facts)
+        day, facts = await self.validate_record_facts(performed_on, sets)
         async with self._db.transaction() as conn:
             link = await self._resolve_link_in_transaction(
                 conn, day, plan_session_id, auto_link, exclude_session_id=session_id

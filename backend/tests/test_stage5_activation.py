@@ -1,20 +1,20 @@
-"""Stage 5：§3.1 激活事务与 §3.2 幂等矩阵的代码前断言（子任务 01）与激活／拒绝事务的领域行为（子任务 02）。
+"""Stage 5：§2.1 激活事务与 §2.2 幂等矩阵的代码前断言与激活／拒绝事务的领域行为。
 
-依据：``refactor-log/stage5.md`` §3.1／§3.2／§3.4／§6 Subtask 01／§6 Subtask 02／§7.2／§7.3／§8／§10；
+依据：``refactor-log/stage5.md`` §2.1／§2.2／§2.4／§4.2／§4.3／§5.1／§7；
 ``LANGGRAPH_REFACTOR_PLAN.md`` §9.3／§5.6；``Fit-Agent-LangGraph-重构讨论总结.md`` §7.3／§9。
 
-上半部分（子任务 01）只冻结契约：激活事务的七步顺序、日期新鲜度、日程取消口径、全或无回滚与四态
+上半部分只冻结契约：激活事务的七步顺序、日期新鲜度、日程取消口径、全或无回滚与四态
 幂等矩阵都在这里定死，生产或文档任一漂移即失败。已合入源码侧的交叉断言只读 Stage 5 明令不得改动的
 事实：计划四态词表（``domain/plans/schema.py::PLAN_STATUSES``）、``plans``／``plan_sessions`` 的既有
 时间与日程字段、确认状态与终止原因的既有词汇表（``graph/state.py``）。
 
-下半部分（子任务 02）用 ``tmp_path`` 下的真实迁移库驱动 ``domain.plans.service.PlanActivationService``
+下半部分用 ``tmp_path`` 下的真实迁移库驱动 ``domain.plans.service.PlanActivationService``
 与 ``domain.plans.rules.validate_plan_adjustment``：首次激活（归档旧 active、取消未到期日程、建立新
 日程）、无旧 active、日期不新鲜、再校验失败、事务中途失败回滚、重复确认、archived／rejected 冲突、
 调整来源计划不匹配、取消与新鲜度的业务日边界、画像缺少频率，以及生成规则与调整渐进规则的分工。
 业务事实只用直接 SQL 预置（计划版本行、日程、训练与组），写路径全部经被测服务。
 
-全部断言不调模型、不需要任何 ``MODEL_*`` 环境变量（子任务 01 的契约断言也不读库）。
+全部断言不调模型、不需要任何 ``MODEL_*`` 环境变量（契约断言也不读库）。
 """
 
 import json
@@ -60,71 +60,59 @@ from graph.state import ConfirmationStatus, TerminationReason
 from storage.db import Database
 from tests.conftest import Stage5Plan
 
-#: §3.1 激活事务的七步：顺序固定，任一步失败整体回滚（总计划 §9.3）。
+#: §2.1 激活事务的七步：顺序固定，任一步失败整体回滚。
 ACTIVATION_STEPS = (
-    "1. 读取请求 `plan_id` 对应的计划，确认仍为 `status='draft'`；",
-    "2. 解析统一 `PlanDraft`，若 `starts_on < 本次注入业务日` 则拒绝激活；",
-    "3. **再跑一次**确定性计划校验（当前目录、画像、有效工作组；调整 draft 的 `source_plan_id` 必须等于当前 active.id，并按该 active 的关联训练事实校验渐进/回退；**不**调模型 Rubric）；",
-    "4. 将当前 `active` 计划置为 `archived`，写 `archived_at`；",
-    "5. 取消旧 active 计划中 **`scheduled_on >= 本次注入业务日`** 的 `plan_sessions`（写 `cancelled_at`）；",
-    "6. 将 draft 置为 `active`，写 `confirmed_at`；按 `PlanDraft.training_days` 创建新计划的 `plan_sessions`（`scheduled_on` 各一条）；",
+    "1. 读取 `plan_id`，要求仍为 `draft`；",
+    "2. 解析 `PlanDraft`，若 `starts_on < business_day` 则拒绝；",
+    "3. 再跑确定性校验；调整 draft 还要求 `source_plan_id == 当前 active.id` 并按 active 关联训练事实校验 progression；",
+    "4. 当前 active → `archived`，写 `archived_at`；",
+    "5. 取消旧 active 中 `scheduled_on >= business_day` 的 `plan_sessions`；",
+    "6. draft → `active`，写 `confirmed_at`，按 `training_days` 创建新 sessions；",
     "7. 提交。",
 )
 
-#: §3.1 收尾：全或无、唯一索引兜底、模型不在事务内、日期或再校验失败保持 draft 可确认。
+#: §2.1 收尾：全或无、模型不在事务内、日期或再校验失败保持 draft 可确认。
 ACTIVATION_ROLLBACK_RULE = (
-    "任一步失败整体回滚；`idx_plans_single_active`／`idx_plans_single_draft` 为最后防线。"
-    "模型调用不在本事务内。再校验或日期新鲜度失败时不归档、不改 draft 状态，返回明确错误；"
-    "draft 保持可确认。"
+    "任一步失败整体回滚。模型调用不进入事务。日期新鲜度或再校验失败时 draft 保持可确认，原 active 不变。"
 )
 
-#: §3.2 幂等矩阵整表（状态 token，首列原文，confirm，reject）；状态集合即计划四态。
+#: §2.2 幂等矩阵整表（状态 token，首列原文，confirm，reject）；状态集合即计划四态。
 IDEMPOTENCY_MATRIX = (
-    (
-        "draft",
-        "`draft`",
-        "执行激活事务",
-        "执行 `archive_draft`：`draft→archived`＋`archived_at`；原 active 不变",
-    ),
-    (
-        "active",
-        "已是 `active` 的**同一** id",
-        "返回既有结果（幂等成功）",
-        "明确冲突/已确认，不改状态",
-    ),
-    ("archived", "`archived`", "拒绝重新激活", "返回当前行，不重复写（幂等成功）"),
-    ("rejected", "`rejected`", "拒绝重新激活", "明确冲突；它不是用户拒绝产生的状态"),
+    ("draft", "`draft`", "执行激活事务", "`draft → archived`，写 `archived_at`"),
+    ("active", "同一 id 已 `active`", "返回既有结果", "冲突，不写"),
+    ("archived", "`archived`", "拒绝重新激活", "返回既有结果"),
+    ("rejected", "`rejected`", "拒绝重新激活", "冲突"),
 )
 
-#: §3.2 收尾：``rejected`` 只表示 Evaluator 二次阻断失败，用户拒绝永不写该状态。
-ACTIVATION_REJECTION_RULE = "`rejected` 仍只表示 Evaluator 二次阻断失败；用户拒绝永不写 `rejected`。"
+#: §2.2 收尾：``rejected`` 只表示 Evaluator 二次阻断失败，用户拒绝永不写该状态。
+ACTIVATION_REJECTION_RULE = "`rejected` 仅表示 Evaluator 二次阻断失败；用户拒绝永不写 `rejected`。"
 
 #: 激活事务的编号步骤行（用于「步骤集合未被增删或改写」的整段相等断言）。
 _NUMBERED_STEP = re.compile(r"\d+\. ")
 
 
 def test_activation_transaction_steps_are_frozen_and_ordered(stage5_plan: Stage5Plan) -> None:
-    """§3.1 七步顺序冻结：先确认仍为 draft、再日期新鲜度、再确定性再校验、换代、取消日程、建新日程、提交。"""
-    section = stage5_plan.section("3.1 激活事务")
+    """§2.1 七步顺序冻结：先确认仍为 draft、再日期新鲜度、再确定性再校验、换代、取消日程、建新日程、提交。"""
+    section = stage5_plan.section("2.1 激活事务")
 
     steps = tuple(line for line in section.splitlines() if _NUMBERED_STEP.match(line))
     assert steps == ACTIVATION_STEPS
 
 
 def test_activation_rejects_a_stale_starts_on_and_keeps_the_draft(stage5_plan: Stage5Plan) -> None:
-    """§3.1：``starts_on < 本次注入业务日`` 即拒绝激活；日期新鲜度失败不归档、不改状态、draft 仍可确认。"""
-    section = stage5_plan.section("3.1 激活事务")
+    """§2.1：``starts_on < business_day`` 即拒绝激活；日期新鲜度失败不归档、不改状态、draft 仍可确认。"""
+    section = stage5_plan.section("2.1 激活事务")
 
     assert ACTIVATION_STEPS[1] in section
     assert "starts_on" in PlanDraft.model_fields
-    assert "再校验或日期新鲜度失败时不归档、不改 draft 状态，返回明确错误；draft 保持可确认。" in section
+    assert "日期新鲜度或再校验失败时 draft 保持可确认，原 active 不变。" in section
 
 
 def test_activation_cancels_sessions_scheduled_on_or_after_the_business_day(
     stage5_plan: Stage5Plan,
 ) -> None:
-    """§3.1：只取消 ``scheduled_on >= 本次注入业务日`` 的旧日程（写 ``cancelled_at``），历史日程保留。"""
-    section = stage5_plan.section("3.1 激活事务")
+    """§2.1：只取消 ``scheduled_on >= business_day`` 的旧日程，历史日程保留。"""
+    section = stage5_plan.section("2.1 激活事务")
 
     assert ACTIVATION_STEPS[4] in section
     assert tuple(field.name for field in fields(PlanSession)) == (
@@ -138,27 +126,31 @@ def test_activation_cancels_sessions_scheduled_on_or_after_the_business_day(
 def test_activation_rolls_back_completely_and_keeps_the_draft_confirmable(
     stage5_plan: Stage5Plan,
 ) -> None:
-    """§3.1：任一步失败整体回滚，唯一索引兜底，模型不在事务内；只写既有 ``confirmed_at``／``archived_at``。"""
-    section = stage5_plan.section("3.1 激活事务")
+    """§2.1：任一步失败整体回滚，模型不在事务内；只写既有 ``confirmed_at``／``archived_at``。
+
+    两个部分唯一索引作为最后防线已由 ``tests/test_stage4_migration.py`` 与
+    ``tests/test_stage1_data_base.py`` 断言（本用例只看日志明文与计划字段集合）。
+    """
+    section = stage5_plan.section("2.1 激活事务")
 
     assert ACTIVATION_ROLLBACK_RULE in section
     assert {"confirmed_at", "archived_at"} <= {field.name for field in fields(Plan)}
 
 
 def test_idempotency_matrix_is_frozen_for_the_four_plan_states(stage5_plan: Stage5Plan) -> None:
-    """§3.2 幂等矩阵整表冻结：draft 执行、同一 active 幂等成功、archived 重新激活被拒、rejected 被拒。
+    """§2.2 幂等矩阵整表冻结：draft 执行、同一 active 幂等成功、archived 重新激活被拒、rejected 被拒。
 
     行键恰好是计划四态（§2.2：Stage 5 不新增计划状态）。
     """
     assert PLAN_STATUSES == tuple(state for state, *_ in IDEMPOTENCY_MATRIX)
-    assert stage5_plan.table("3.2 幂等确认与拒绝", "confirm") == tuple(
+    assert stage5_plan.table("2.2 confirm / reject 幂等", "confirm") == tuple(
         row[1:] for row in IDEMPOTENCY_MATRIX
     )
 
 
 def test_user_rejection_never_writes_the_rejected_plan_status(stage5_plan: Stage5Plan) -> None:
-    """§3.2：用户拒绝走 ``archive_draft``（确认状态才是 ``rejected``），计划状态永不写 ``rejected``。"""
-    section = stage5_plan.section("3.2 幂等确认与拒绝")
+    """§2.2：用户拒绝走 ``archive_draft``（确认状态才是 ``rejected``），计划状态永不写 ``rejected``。"""
+    section = stage5_plan.section("2.2 confirm / reject 幂等")
 
     assert ACTIVATION_REJECTION_RULE in section
     assert "archive_draft" in get_args(TerminationReason)
@@ -167,10 +159,10 @@ def test_user_rejection_never_writes_the_rejected_plan_status(stage5_plan: Stage
 
 
 # ==========================================================================================
-# 子任务 02：激活／拒绝事务的领域行为（真实临时库，无模型、无 Graph、无 HTTP）
+# 激活／拒绝事务的领域行为（真实临时库，无模型、无 Graph、无 HTTP）
 # ==========================================================================================
 
-#: 本次注入的业务日与固定业务记录时间：服务不读系统时钟，日期与时间都由调用方注入（§3.1）。
+#: 本次注入的业务日与固定业务记录时间：服务不读系统时钟，日期与时间都由调用方注入（§2.1）。
 BUSINESS_DAY = date(2026, 6, 1)
 CREATED_AT = "2026-05-01T09:00:00+08:00"
 OLD_CONFIRMED_AT = "2026-05-01T10:00:00+08:00"
@@ -183,7 +175,7 @@ BODYWEIGHT = "pull-up"
 SQUAT_INCREMENT_KG = 2.5
 #: current active 的固定训练日（同一动作两天，目标处方取第一处）。
 ACTIVE_DAYS = (date(2026, 5, 1), date(2026, 5, 4))
-#: 激活成功时只允许变化的两个字段之外的原 active 字段：其余逐字段不变（§8 原 active 保护）。
+#: 激活成功时只允许变化的两个字段之外的原 active 字段：其余逐字段不变（§2.1 原 active 不变）。
 _OLD_ACTIVE_KEPT_FIELDS = (
     "id",
     "version",
@@ -523,7 +515,7 @@ def _activated_keys(row: dict[str, object]) -> dict[str, object]:
 async def _adjustment_fixture(db: Database, *, load_kg: float) -> tuple[int, int]:
     """预置「active 目标 50kg ＋ 两次达到次数上限的关联训练」与一个调整 draft，返回两个身份。
 
-    §3.4 的渐进决策在这是加重：两次关联训练都在目标负荷上完整做到次数上限，下一档是 50+2.5=52.5kg。
+    §2.4 的渐进决策在这是加重：两次关联训练都在目标负荷上完整做到次数上限，下一档是 50+2.5=52.5kg。
     """
     await _write_profile(db, weekly_frequency=len(ACTIVE_DAYS))
     active_id = await _insert_plan(
@@ -557,7 +549,7 @@ async def _adjustment_fixture(db: Database, *, load_kg: float) -> tuple[int, int
     return active_id, draft_id
 
 
-# ---------- §3.1 激活事务 ----------
+# ---------- §2.1 激活事务 ----------
 
 
 async def test_activation_archives_the_old_active_and_creates_the_new_sessions(
@@ -935,7 +927,7 @@ async def test_repeated_activation_of_the_same_plan_is_idempotent(tmp_path: Path
 async def test_archived_and_rejected_plans_refuse_activation_and_report_conflicts(
     tmp_path: Path,
 ) -> None:
-    """§3.2 矩阵：archived 拒绝重新激活、reject 幂等返回当前行；rejected 两种动作都是明确冲突；
+    """§2.2 矩阵：archived 拒绝重新激活、reject 幂等返回当前行；rejected 两种动作都是明确冲突；
     不存在的 id 是明确错误（不猜目标、不写任何行）。"""
     db = await _migrated(tmp_path / "x.db")
     try:
@@ -1104,7 +1096,7 @@ async def test_activation_requires_a_known_profile_weekly_frequency(tmp_path: Pa
         await db.close()
 
 
-# ---------- §3.2 reject／archive_draft ----------
+# ---------- §2.2 reject／archive_draft ----------
 
 
 async def test_refusal_archives_the_draft_and_never_touches_the_original_active(
@@ -1186,7 +1178,7 @@ async def test_repeated_refusal_is_idempotent_and_never_writes_the_rejected_stat
 async def test_persisting_an_adjustment_draft_records_its_source_plan_id(
     tmp_path: Path,
 ) -> None:
-    """§4.2：写入调整 draft 时落下来源计划 id；生成 draft 仍为 NULL（Stage 4 口径不变）。"""
+    """§2.4：写入调整 draft 时落下来源计划 id；生成 draft 仍为 NULL（Stage 4 口径不变）。"""
     db = await _migrated(tmp_path / "x.db")
     try:
         active_id = await _insert_plan(
@@ -1221,7 +1213,7 @@ async def test_persisting_an_adjustment_draft_records_its_source_plan_id(
         await db.close()
 
 
-# ---------- §3.4 调整计划的负荷校验与生成规则的分工 ----------
+# ---------- §2.4 调整计划的负荷校验与生成规则的分工 ----------
 
 
 #: 两次关联日程训练都在目标负荷 50kg 上做到次数上限（决策：加重一档）。

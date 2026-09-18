@@ -18,6 +18,8 @@ import type {
   BodyMetricListWire,
   BodyMetricWriteBody,
   CalendarResponseWire,
+  ConfirmWorkoutBody,
+  ConfirmWorkoutResponseWire,
   ExerciseListWire,
   PersonalBestListWire,
   PlanItemWire,
@@ -301,3 +303,12 @@ export const confirmPlan = (body: AgentPlanBody) =>
 /** 用户拒绝：把 draft 归档（原 active 不变，永不写 rejected），返回落库后的计划行 */
 export const rejectPlan = (body: AgentPlanBody) =>
   post<AgentPlanResponseWire>("/api/agent/reject", body);
+
+/**
+ * 自然语言打卡确认写入：提交 `waiting` 载荷（含用户修改后的完整值），返回落库训练事实与重新现算的 PB。
+ *
+ * 服务端重新执行 DTO／领域／目录／日程关联校验，并复用表单的同一写入服务；错误仍是既有 JSON
+ * 错误形状（400／409／422）。
+ */
+export const confirmWorkout = (body: ConfirmWorkoutBody) =>
+  post<ConfirmWorkoutResponseWire>("/api/agent/confirm-workout", body);

@@ -1,22 +1,21 @@
-"""Stage 5：§3.3／§3.4 的代码前断言（子任务 01）、调整计划的图行为（子任务 03）与确认 resume／
-唯一 draft 兜底（子任务 04）。
+"""Stage 5：§2.3／§2.4 的代码前断言、调整计划的图行为与确认 resume／
+唯一 draft 兜底。
 
-依据：``refactor-log/stage5.md`` §3.1–§3.4／§3.9／§6 Subtask 01／§6 Subtask 03／§6 Subtask 04／
-§7.2–§7.4；
+依据：``refactor-log/stage5.md`` §2.1–§2.4／§2.9／§4.2–§4.4／§5.1／§7；
 ``LANGGRAPH_REFACTOR_PLAN.md`` §5.6／§7.2／§9.2；``Fit-Agent-LangGraph-重构讨论总结.md`` §3.3／§3.4。
 
-上半部分（子任务 01）只冻结契约：确认 resume／唯一 draft 兜底的两条路径、请求 ``plan_id`` 与
+上半部分只冻结契约：确认 resume／唯一 draft 兜底的两条路径、请求 ``plan_id`` 与
 interrupt／draft 身份必须相等、调整计划的 active 前置、``source_plan_id`` 来源、同类 regenerate 规则、
-progression-aware 校验由 Subtask 02–04 落地。已合入源码侧的交叉断言只读 Stage 5 不得改动的既有事实：
+progression-aware 校验在领域层与图行为落地。已合入源码侧的交叉断言只读 Stage 5 不得改动的既有事实：
 ``resolve_progression`` 的输入面与四类决策、``PlanDraft``／``Plan`` 的既有字段、
 ``backend/skills/plan-adjustment`` 已存在、``WorkflowState`` 仍是 11 字段。
 
-中间部分（子任务 03）用固定替身驱动 ``graph/workflow.py::invoke_agent_run`` 的调整分支：无 active 在
+中间部分用固定替身驱动 ``graph/workflow.py::invoke_agent_run`` 的调整分支：无 active 在
 Planner 前失败、预读并解析 active、PB 只装配 active 涉及动作、加载 ``plan-adjustment``、注入确定性
 渐进决策、``source_plan_id`` 等于当前 active、未受证据影响的训练日／动作／处方原样保留、一次修订上限
 与安全优先仍然成立。
 
-末尾部分（子任务 04）用同一套替身驱动 ``graph/workflow.py::invoke_confirmation``：图停在确认 interrupt
+末尾部分用同一套替身驱动 ``graph/workflow.py::invoke_confirmation``：图停在确认 interrupt
 且 interrupt ID 等于请求 ``plan_id`` 时按 ``Command(resume=...)`` 进入确认分支，重启（重开同一存档文件）
 后仍能恢复；没有 checkpoint／无法恢复／已完成时按业务库唯一 draft 兜底；两条路径都经同一个
 ``PlanActivationService``（计数替身取证），重复请求到达领域幂等矩阵；身份不一致明确冲突且不写任何行。
@@ -55,6 +54,7 @@ from domain.plans.service import (
 )
 from domain.profile.schema import Fact, Profile
 from domain.profile.service import ProfileService
+from domain.records.service import WorkoutRecordsService
 from domain.stats.repo import StatsRepo
 from domain.stats.service import StatsService
 from graph.checkpointer import open_checkpointer, thread_config
@@ -85,34 +85,51 @@ from tests.conftest import Stage5Plan
 
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
 
-#: §3.3 确认恢复协议四步：checkpoint 优先、唯一 draft 兜底、同一服务、服务内幂等（总计划 §5.6）。
+#: §2.3 确认恢复六步：thread_id、checkpoint 优先、唯一 draft 兜底、同一服务、服务内幂等、resume 载荷。
 CONFIRMATION_STEPS = (
-    "1. **优先**用 `conversation_id` 作 `thread_id` 读取 checkpoint；仅当图确实停在确认 interrupt，且 interrupt 中的 `draft_plan_id` 与请求 `plan_id` 相等时，才用 `Command(resume=...)` 进入确认分支；不相等则明确冲突；",
-    "2. checkpoint 不存在、无法恢复或已无等待任务时，读取业务库唯一 `plans.status='draft'`；它也必须与请求 `plan_id` 相等，否则明确冲突；",
-    "3. 两条路径最终调用**同一个** `PlanActivationService` 的 confirm/reject 方法；重复请求不能只返回旧 checkpoint State 而绕过领域幂等服务；",
-    "4. 服务内按 §3.2 幂等，禁止双路径同时提交。",
+    "1. `conversation_id` 作为 Checkpointer `thread_id`。",
+    "2. 优先读取 checkpoint；只有图停在确认 interrupt 且 `draft_plan_id == 请求 plan_id` 时才 resume。",
+    "3. checkpoint 不存在、无法恢复或已无等待任务时，读取业务库唯一 draft；其 id 仍必须等于请求 `plan_id`。",
+    "4. resume 与兜底均调用同一 `PlanActivationService`。",
+    "5. 重复请求必须进入领域幂等逻辑，不能仅返回 checkpoint 旧 State。",
+    "6. resume 载荷只允许 `{ action, plan_id }`。",
 )
 
-#: §3.3 收尾：resume 载荷只有动作与身份，不复制计划／评估／业务事实。
-CONFIRMATION_RESUME_PAYLOAD_RULE = (
-    "resume 载荷只携带动作与 `plan_id`，不复制完整计划、评估或业务事实。请求 `plan_id` 是唯一操作目标。"
-)
+#: §2.3 收尾：resume 载荷只有动作与身份，不复制计划／评估／业务事实。
+CONFIRMATION_RESUME_PAYLOAD_RULE = "resume 载荷只允许 `{ action, plan_id }`。"
 
-#: §3.4 调整计划六条：active 前置、上下文与 Skill、progression-aware 校验、source 与不变量、
-#: 已有 draft 的普通请求规则、同类 regenerate 规则。
+#: §2.4 调整计划的八条顶层条目：active 前置、上下文与 Skill、子图复用、progression-aware 校验、
+#: source 与不变量、已有 draft 的普通请求规则、同类 regenerate 规则。
 ADJUST_BULLETS = (
-    "- 无 active：`require_active_plan` 在 Planner 前明确失败；不调 Planner、不写 draft/rejected。",
-    "- 有 active：先按统一 `PlanDraft` 解析其 `structured_content`，提取去重且顺序稳定的 `exercise_id`，再调用 `load_context(..., exercise_ids=...)`；`load_skill` 加载 `plan-adjustment`。其余 safety/planner/evaluator/一次修订/wait 与生成共用，不建第二套 Planner Agent。",
-    "- 调整候选必须以 active 的目标组数、次数区间、目标负荷和关联日程训练为输入调用 `resolve_progression`；确定性校验按该决策验证加重、保持、回退或待校准，不能再用“必须等于最近工作组重量”的生成规则拒绝合法调整。",
-    "- 新调整 draft 的 `source_plan_id` 必须等于本次读取的 active 计划 id；未被调整证据推翻的训练日、动作和处方保持不变，并由固定案例行为测试验证。",
-    "- 已有 draft 且 `regenerate` 缺省/false：generate 仅在该 draft 的 `source_plan_id IS NULL` 时返回既有 draft；adjust 一律明确失败；跨类型请求明确冲突。以上路径均不调模型、不写第二条 draft。",
-    "- `regenerate=true` 只允许同类替换：generate 只能替换 `source_plan_id IS NULL` 的 generate draft；adjust 只能在 draft 的 `source_plan_id == 当前 active.id` 时替换同一 id/version，并保持该 `source_plan_id`。跨类型或来源 active 已变化时明确冲突；没有 draft 时按本次 intent 正常生成。",
+    "- 无 active：Planner 前失败；不调 Planner；不写 draft/rejected。",
+    "- 有 active：解析 active `PlanDraft`，稳定去重提取 `exercise_id`，用 `exercise_ids` 过滤上下文，加载 `plan-adjustment`。",
+    "- Planner/Evaluator/一次修订/持久化/等待确认继续复用同一计划子图。",
+    "- 调整校验用 active 的目标组数、次数区间、目标负荷与关联训练调用 `resolve_progression`，支持 `increase`／`keep`／`regress`／`needs_calibration`。",
+    "- 新 adjustment draft：`source_plan_id = 当前 active.id`。",
+    "- 未被调整证据推翻的训练日、动作和处方保持不变。",
+    "- `regenerate=false`：",
+    "- `regenerate=true`：",
 )
 
-#: §3.9：调整／regenerate 信号不进冻结 State，而进 ``GeneratePlanRun`` 运行上下文。
-STATE_BOUNDARY_RULE = "保持 `WorkflowState` 11 字段；adjust/regenerate 信号和预读 active 身份放 `GeneratePlanRun` 运行上下文，不复制业务事实到 State。"
+#: §2.4 已有 draft 时的嵌套规则（``regenerate=false`` 与 ``regenerate=true`` 各一组）。
+REGENERATE_BULLETS = (
+    "- generate 只可复用 `source_plan_id IS NULL` 的 generate draft；",
+    "- adjust 遇已有 draft直接冲突；",
+    "- 跨类型冲突；",
+    "- 不调模型、不写第二条 draft。",
+    "- generate 只替换 generate draft；",
+    "- adjust 只替换 `source_plan_id == 当前 active.id` 的 adjustment draft；",
+    "- 替换保持同 id/version/source；",
+    "- 来源 active 已变化或跨类型均冲突。",
+)
 
-#: ``resolve_progression`` 的输入面：目标组数、次数区间、目标负荷与关联日程训练（§3.4 第 3 条）。
+#: §2.9：调整／regenerate 信号不进冻结 State，而进 ``GeneratePlanRun`` 运行上下文。
+STATE_BOUNDARY_RULE = (
+    "`WorkflowState` 保持 11 字段不变。",
+    "adjust/regenerate 与预读 active 身份放运行上下文，不复制到 State。",
+)
+
+#: ``resolve_progression`` 的输入面：目标组数、次数区间、目标负荷与关联日程训练（§2.4 第 4 条）。
 _PROGRESSION_INPUTS = (
     "target_sets",
     "reps_min",
@@ -129,8 +146,8 @@ _NUMBERED_STEP = re.compile(r"\d+\. ")
 
 
 def test_confirmation_protocol_steps_are_frozen_and_ordered(stage5_plan: Stage5Plan) -> None:
-    """§3.3 四步顺序冻结：checkpoint 优先、唯一 draft 兜底、同一服务、禁止双路径同时提交。"""
-    section = stage5_plan.section("3.3 确认恢复协议")
+    """§2.3 六步顺序冻结：thread_id、checkpoint 优先、唯一 draft 兜底、同一服务、服务内幂等、resume 载荷。"""
+    section = stage5_plan.section("2.3 确认恢复")
 
     steps = tuple(line for line in section.splitlines() if _NUMBERED_STEP.match(line))
     assert steps == CONFIRMATION_STEPS
@@ -139,12 +156,12 @@ def test_confirmation_protocol_steps_are_frozen_and_ordered(stage5_plan: Stage5P
 def test_confirmation_requires_request_plan_id_to_equal_the_interrupt_or_draft_id(
     stage5_plan: Stage5Plan,
 ) -> None:
-    """§3.3：请求 ``plan_id`` 必须等于 interrupt 的 ``draft_plan_id``，或兜底读到的唯一 draft id。"""
-    section = stage5_plan.section("3.3 确认恢复协议")
+    """§2.3：请求 ``plan_id`` 必须等于 interrupt 的 ``draft_plan_id``，或兜底读到的唯一 draft id。"""
+    section = stage5_plan.section("2.3 确认恢复")
 
-    assert CONFIRMATION_STEPS[0] in section
     assert CONFIRMATION_STEPS[1] in section
-    assert "请求 `plan_id` 是唯一操作目标" in section
+    assert CONFIRMATION_STEPS[2] in section
+    assert "其 id 仍必须等于请求 `plan_id`" in section
     # ``conversation_id`` 就是 Checkpointer 的 ``thread_id``（Stage 3 冻结，Stage 5 不另建映射）。
     assert thread_config("stage5-confirmation") == {
         "configurable": {"thread_id": "stage5-confirmation"}
@@ -154,37 +171,37 @@ def test_confirmation_requires_request_plan_id_to_equal_the_interrupt_or_draft_i
 def test_confirmation_paths_share_one_activation_service_and_never_bypass_idempotency(
     stage5_plan: Stage5Plan,
 ) -> None:
-    """§3.3：两条读取路径调用同一个 ``PlanActivationService``，重复请求不得绕过领域幂等服务。"""
-    section = stage5_plan.section("3.3 确认恢复协议")
+    """§2.3：两条读取路径调用同一个 ``PlanActivationService``，重复请求不得绕过领域幂等服务。"""
+    section = stage5_plan.section("2.3 确认恢复")
 
-    assert CONFIRMATION_STEPS[2] in section
     assert CONFIRMATION_STEPS[3] in section
+    assert CONFIRMATION_STEPS[4] in section
     assert CONFIRMATION_RESUME_PAYLOAD_RULE in section
 
 
 def test_adjust_plan_bullets_are_frozen_and_counted(stage5_plan: Stage5Plan) -> None:
-    """§3.4 六条整段相等：无 active 前置、active 解析与上下文过滤、progression 校验、来源与不变量、两条 draft 规则。"""
-    section = stage5_plan.section("3.4 调整计划")
+    """§2.4 八条顶层条目整段相等：active 前置、上下文过滤、子图复用、progression 校验、来源与不变量、两条 draft 规则。"""
+    section = stage5_plan.section("2.4 调整计划")
 
     bullets = tuple(line for line in section.splitlines() if line.startswith("- "))
     assert bullets == ADJUST_BULLETS
 
 
 def test_adjust_requires_an_active_plan_before_the_planner(stage5_plan: Stage5Plan) -> None:
-    """§3.4：无 active 时在 Planner 前明确失败，不调 Planner、不写 draft／rejected。"""
-    assert ADJUST_BULLETS[0] in stage5_plan.section("3.4 调整计划")
+    """§2.4：无 active 时在 Planner 前明确失败，不调 Planner、不写 draft／rejected。"""
+    assert ADJUST_BULLETS[0] in stage5_plan.section("2.4 调整计划")
 
 
 def test_adjust_reuses_the_active_plan_and_the_plan_adjustment_skill(stage5_plan: Stage5Plan) -> None:
-    """§3.4：先解析 active 的 ``PlanDraft`` 取稳定 ``exercise_id`` 过滤上下文，Skill 加载 ``plan-adjustment``。"""
-    assert ADJUST_BULLETS[1] in stage5_plan.section("3.4 调整计划")
+    """§2.4：先解析 active 的 ``PlanDraft`` 取稳定 ``exercise_id`` 过滤上下文，Skill 加载 ``plan-adjustment``。"""
+    assert ADJUST_BULLETS[1] in stage5_plan.section("2.4 调整计划")
     assert (BACKEND_ROOT / "skills" / "plan-adjustment" / "SKILL.md").is_file()
 
 
 def test_adjust_validation_is_progression_aware(stage5_plan: Stage5Plan) -> None:
-    """§3.4：以 active 的目标组数／次数区间／目标负荷与关联日程训练调用 ``resolve_progression``，
+    """§2.4：以 active 的目标组数／次数区间／目标负荷与关联日程训练调用 ``resolve_progression``，
     确定性校验按加重／保持／回退／待校准四类决策判断，不再用生成计划的最近工作组规则拒绝合法调整。"""
-    assert ADJUST_BULLETS[2] in stage5_plan.section("3.4 调整计划")
+    assert ADJUST_BULLETS[3] in stage5_plan.section("2.4 调整计划")
     assert set(_PROGRESSION_INPUTS) <= set(inspect.signature(resolve_progression).parameters)
     assert set(get_args(ProgressionDecision.__annotations__["action"])) == _PROGRESSION_DECISIONS
 
@@ -192,27 +209,33 @@ def test_adjust_validation_is_progression_aware(stage5_plan: Stage5Plan) -> None
 def test_adjust_draft_points_at_the_active_plan_and_keeps_untouched_content(
     stage5_plan: Stage5Plan,
 ) -> None:
-    """§3.4：新调整 draft 的 ``source_plan_id`` 等于本次读取的 active id，未受证据影响的训练日／
+    """§2.4：新调整 draft 的 ``source_plan_id`` 等于本次读取的 active id，未受证据影响的训练日／
     动作／处方保持不变。"""
-    assert ADJUST_BULLETS[3] in stage5_plan.section("3.4 调整计划")
+    section = stage5_plan.section("2.4 调整计划")
+
+    assert ADJUST_BULLETS[4] in section
+    assert ADJUST_BULLETS[5] in section
     assert "source_plan_id" in {field.name for field in fields(Plan)}
 
 
 def test_existing_draft_and_regenerate_rules_are_same_kind_only(stage5_plan: Stage5Plan) -> None:
-    """§3.4：已有 draft 时普通请求不调模型、不写第二条 draft；``regenerate=true`` 只允许同类替换。"""
-    section = stage5_plan.section("3.4 调整计划")
+    """§2.4：已有 draft 时普通请求不调模型、不写第二条 draft；``regenerate=true`` 只允许同类替换。"""
+    section = stage5_plan.section("2.4 调整计划")
 
-    assert ADJUST_BULLETS[4] in section
-    assert ADJUST_BULLETS[5] in section
+    assert ADJUST_BULLETS[6] in section
+    assert ADJUST_BULLETS[7] in section
+    assert [line for line in REGENERATE_BULLETS if line not in section] == []
 
 
 def test_adjust_and_regenerate_signals_stay_out_of_the_frozen_state(stage5_plan: Stage5Plan) -> None:
-    """§3.9：``WorkflowState`` 仍是 11 字段；adjust／regenerate 信号进运行上下文，不进 State。"""
-    assert STATE_BOUNDARY_RULE in stage5_plan.section("3.9 模型与 State 边界")
+    """§2.9：``WorkflowState`` 仍是 11 字段；adjust／regenerate 信号进运行上下文，不进 State。"""
+    section = stage5_plan.section("2.9 State 与模型边界")
+
+    assert [line for line in STATE_BOUNDARY_RULE if line not in section] == []
     assert len(WorkflowState.__annotations__) == 11
 
 
-# ---------- §3.4 调整分支的图行为（Subtask 03） ----------
+# ---------- §2.4 调整分支的图行为 ----------
 
 BUSINESS_DAY = date(2026, 6, 1)
 FIXED_NOW = datetime(2026, 6, 1, 9, 0, tzinfo=UTC)
@@ -231,7 +254,7 @@ ACTIVE_STARTS_ON = date(2026, 5, 1)
 ACTIVE_DAYS = (date(2026, 5, 2), date(2026, 5, 5))
 EXPLANATION = "固定案例：按当前 active 与关联训练调整"
 ADJUST_REQUEST = "调整计划"
-#: 确认场景的训练日窗口：``starts_on`` 不早于业务日，否则激活会被 ``PlanDraftStale`` 拒绝（§3.1）。
+#: 确认场景的训练日窗口：``starts_on`` 不早于业务日，否则激活会被 ``PlanDraftStale`` 拒绝（§2.1）。
 CONFIRM_STARTS_ON = date(2026, 6, 2)
 CONFIRM_DAYS = (date(2026, 6, 2), date(2026, 6, 5))
 #: 激活／归档写入的时间戳：节点与确认入口都取注入时钟 ``FIXED_NOW``（节点不读系统时钟）。
@@ -281,7 +304,7 @@ def _content(
     """一份结构合法的统一计划内容：训练日数量恰等于每周训练次数。
 
     默认日期就是预置 active 的日期（均为业务日之前的历史）；激活用例必须传 ``starts_on`` 不早于业务日
-    的窗口，否则 draft 会被 §3.1 的日期新鲜度拒绝。
+    的窗口，否则 draft 会被 §2.1 的日期新鲜度拒绝。
     """
     return {
         "goal": "增肌",
@@ -429,7 +452,7 @@ class CountingPersistence(PlanPersistenceService):
 
 
 class CountingActivation(PlanActivationService):
-    """激活服务计数替身：确认／拒绝的两条读取路径必须都经过同一个领域服务（§3.3 第 3 条）。"""
+    """激活服务计数替身：确认／拒绝的两条读取路径必须都经过同一个领域服务（§2.3 第 4 条）。"""
 
     def __init__(self, db: Database) -> None:
         super().__init__(db)
@@ -487,7 +510,7 @@ async def _insert_plan(
 ) -> int:
     """直接 SQL 预置一个计划版本行（正式写入入口是被测服务），返回计划身份。
 
-    ``source_plan_id`` 非空即一条调整 draft：激活再校验按该 active 的渐进决策判定负荷（§3.1）。
+    ``source_plan_id`` 非空即一条调整 draft：激活再校验按该 active 的渐进决策判定负荷（§2.1）。
     """
     async with db.transaction() as conn:
         cursor = await conn.execute(
@@ -593,7 +616,7 @@ class _Assembly:
     """一次测试的替身、子图依赖与编译入口（与存档连接无关）。
 
     重启用例需要在同一业务库上按**新**存档连接重新编译一份图：内存里的图与 State 都不参与恢复，
-    只能重读 checkpoint 与业务库（stage5.md §6 Subtask 04「含重启」）。
+    只能重读 checkpoint 与业务库（stage5.md §2.3「确认恢复」）。
     """
 
     def __init__(
@@ -695,6 +718,8 @@ class _Harness:
                 stats=StatsService(self.db),
                 plans=self.deps.plans,
                 persistence=self.deps.persistence,
+                catalog=ActionCatalogService(self.db),
+                records=WorkoutRecordsService(self.db),
             ),
         )
 
@@ -712,7 +737,7 @@ class _Harness:
         )
 
     async def assert_active_unchanged(self) -> None:
-        """§8：调整 Run 在用户确认前不得改动原 active：快照逐字段相等且 active 行数至多 1。"""
+        """§7：调整 Run 在用户确认前不得改动原 active：快照逐字段相等且 active 行数至多 1。"""
         after = await _active_rows(self.db)
         assert after == self.active_before
         assert len(after) <= 1
@@ -780,7 +805,7 @@ async def _harness(
 async def test_adjust_without_an_active_plan_fails_before_the_planner(
     tmp_path: Path,
 ) -> None:
-    """§3.4：没有 active 计划时在 Planner 前明确失败：0 模型调用、0 装配、0 draft／rejected。"""
+    """§2.4：没有 active 计划时在 Planner 前明确失败：0 模型调用、0 装配、0 draft／rejected。"""
     async with _harness(tmp_path, active=False) as h:
         with pytest.raises(RequiredActivePlanMissing):
             await h.invoke(ADJUST_REQUEST)
@@ -795,7 +820,7 @@ async def test_adjust_without_an_active_plan_fails_before_the_planner(
 async def test_adjust_preloads_the_active_plan_and_filters_personal_bests(
     tmp_path: Path,
 ) -> None:
-    """§3.4：预读并解析当前 active；PB 只装配 active 涉及动作；只加载 ``plan-adjustment``；
+    """§2.4：预读并解析当前 active；PB 只装配 active 涉及动作；只加载 ``plan-adjustment``；
     新 draft 的 ``source_plan_id`` 等于该 active。"""
     scripts = {
         ADJUSTMENT_PLANNER_SYSTEM_PROMPT: [_plan_text(_content(TARGET_LOAD_KG))],
@@ -845,7 +870,7 @@ async def test_adjust_preloads_the_active_plan_and_filters_personal_bests(
 async def test_adjust_records_the_source_plan_id_and_preserves_untouched_content(
     tmp_path: Path,
 ) -> None:
-    """§3.4：新 draft 的 ``source_plan_id`` 等于本次 active；未被调整证据推翻的训练日、动作与处方
+    """§2.4：新 draft 的 ``source_plan_id`` 等于本次 active；未被调整证据推翻的训练日、动作与处方
     原样保留（只有证据支持的 squat 负荷变化）。"""
     scripts = {
         ADJUSTMENT_PLANNER_SYSTEM_PROMPT: [_plan_text(_content(INCREASE_LOAD_KG))],
@@ -885,7 +910,7 @@ async def test_adjust_records_the_source_plan_id_and_preserves_untouched_content
 
 
 async def test_adjust_validation_follows_the_progression_decision(tmp_path: Path) -> None:
-    """§3.4：调整候选负荷必须等于渐进决策——沿用旧负荷的候选被确定性层阻断并修订一次。"""
+    """§2.4：调整候选负荷必须等于渐进决策——沿用旧负荷的候选被确定性层阻断并修订一次。"""
     scripts = {
         ADJUSTMENT_PLANNER_SYSTEM_PROMPT: [
             _plan_text(_content(TARGET_LOAD_KG)),
@@ -921,7 +946,7 @@ async def test_adjust_validation_follows_the_progression_decision(tmp_path: Path
 async def test_adjust_second_blocking_failure_rejects_within_one_revision(
     tmp_path: Path,
 ) -> None:
-    """§3.4＋一次修订上限：阻断失败只允许修订一次，二次仍失败即 ``rejected``，不产生可激活 draft。"""
+    """§2.4＋一次修订上限：阻断失败只允许修订一次，二次仍失败即 ``rejected``，不产生可激活 draft。"""
     scripts = {
         ADJUSTMENT_PLANNER_SYSTEM_PROMPT: [
             _plan_text(_content(TARGET_LOAD_KG)),
@@ -944,7 +969,7 @@ async def test_adjust_second_blocking_failure_rejects_within_one_revision(
 async def test_zero_hit_request_routes_into_the_adjust_branch_on_the_shared_budget(
     tmp_path: Path,
 ) -> None:
-    """§3.6／§3.9：零命中请求经一次模型分类进入 adjust 分支，分类与计划链路共享同一份 Run 预算。"""
+    """§2.6／§2.9：零命中请求经一次模型分类进入 adjust 分支，分类与计划链路共享同一份 Run 预算。"""
     budget = ModelRequestBudget()
     scripts = {
         ROUTER_SYSTEM_PROMPT: [_intent_text("adjust_plan")],
@@ -972,7 +997,7 @@ async def test_zero_hit_request_routes_into_the_adjust_branch_on_the_shared_budg
 async def test_adjust_red_flag_request_stops_before_any_model_call_or_write(
     tmp_path: Path,
 ) -> None:
-    """§3.5／A1：安全优先不变——急性关键词在 Router 之前就终止，不调分类或计划模型、不写任何行。
+    """§2.5／A1：安全优先不变——急性关键词在 Router 之前就终止，不调分类或计划模型、不写任何行。
 
     ``done.intent`` 为 ``None``：本次 Run 没有 Router 结论（修复前是确定性命中的 ``adjust_plan``）。
     """
@@ -989,7 +1014,7 @@ async def test_adjust_red_flag_request_stops_before_any_model_call_or_write(
         assert await _plan_status_counts(h.db) == {"active": 1}
 
 
-# ---------- §3.1／§3.2／§3.3 确认 resume 与唯一 draft 兜底（Subtask 04） ----------
+# ---------- §2.1／§2.2／§2.3 确认 resume 与唯一 draft 兜底 ----------
 
 
 def _confirmation_scripts(
@@ -1023,14 +1048,14 @@ async def _plans_by_id(db: Database) -> dict[int, Plan]:
 async def test_confirmation_resumes_the_waiting_checkpoint_and_activates_the_draft(
     tmp_path: Path,
 ) -> None:
-    """§3.3 第 1 条 ＋ §3.1：interrupt 的 ``draft_plan_id`` 等于请求 ``plan_id`` 时按 ``Command(resume)``
+    """§2.3 第 2 条 ＋ §2.1：interrupt 的 ``draft_plan_id`` 等于请求 ``plan_id`` 时按 ``Command(resume)``
     进入确认分支；新计划激活、原 active 归档、旧未到期日程取消、历史日程保留、新计划逐训练日建日程。"""
     async with _harness(
         tmp_path, scripts=_confirmation_scripts(), active_guard=False
     ) as h:
         active = await PlanReadService(h.db).get_active()
         assert active is not None
-        # 原 active 再加一条尚未到期（>= 业务日）的日程：激活只取消它，历史日程保留（§3.1 第 5 步）。
+        # 原 active 再加一条尚未到期（>= 业务日）的日程：激活只取消它，历史日程保留（§2.1 第 5 步）。
         upcoming_session = await _insert_session(
             h.db, plan_id=active.id, scheduled_on=CONFIRM_DAYS[0]
         )
@@ -1081,7 +1106,7 @@ async def test_confirmation_resumes_the_waiting_checkpoint_and_activates_the_dra
 async def test_confirmation_with_a_mismatched_plan_id_conflicts_without_writing(
     tmp_path: Path,
 ) -> None:
-    """§3.3 第 1 条：请求 ``plan_id`` 与 interrupt 的 ``draft_plan_id`` 不相等即明确冲突：不写任何行，
+    """§2.3 第 2 条：请求 ``plan_id`` 与 interrupt 的 ``draft_plan_id`` 不相等即明确冲突：不写任何行，
     图仍停在确认 interrupt（等待位置与载荷都不变）。"""
     async with _harness(tmp_path, scripts=_confirmation_scripts()) as h:
         draft_id = await _draft_via_graph(h)
@@ -1097,7 +1122,7 @@ async def test_confirmation_with_a_mismatched_plan_id_conflicts_without_writing(
         assert snapshot.interrupts[0].value == {"draft_plan_id": draft_id}
 
 
-#: §3.3 resume 载荷的三种非法形状：身份不等、额外字段、非 ``confirm``／``reject`` 动作。
+#: §2.3 resume 载荷的三种非法形状：身份不等、额外字段、非 ``confirm``／``reject`` 动作。
 MALFORMED_RESUME_CASES: tuple[str, ...] = (
     "plan-id-mismatch",
     "extra-field",
@@ -1106,7 +1131,7 @@ MALFORMED_RESUME_CASES: tuple[str, ...] = (
 
 
 def test_confirmation_edge_never_defaults_to_confirm() -> None:
-    """§3.3：确认边只认 ``wait_for_confirmation`` 写下的两个动作；其它取值明确冲突，不默认放行激活。"""
+    """§2.3：确认边只认 ``wait_for_confirmation`` 写下的两个动作；其它取值明确冲突，不默认放行激活。"""
     assert _route_after_confirmation({"confirmation": "confirmed"}) == "confirm"
     assert _route_after_confirmation({"confirmation": "rejected"}) == "reject"
     for unexpected in ("pending", None):
@@ -1120,7 +1145,7 @@ def test_confirmation_edge_never_defaults_to_confirm() -> None:
 async def test_resume_payload_outside_action_and_plan_id_is_a_conflict(
     tmp_path: Path, case: str, anyio_backend: str
 ) -> None:
-    """§3.3：resume 载荷只允许动作与 ``plan_id``，且身份必须等于 interrupt 的 ``draft_plan_id``；
+    """§2.3：resume 载荷只允许动作与 ``plan_id``，且身份必须等于 interrupt 的 ``draft_plan_id``；
     不合法的载荷明确冲突，且根本走不到确认节点（领域服务零调用）。"""
     async with _harness(tmp_path, scripts=_confirmation_scripts()) as h:
         draft_id = await _draft_via_graph(h)
@@ -1143,7 +1168,7 @@ async def test_resume_payload_outside_action_and_plan_id_is_a_conflict(
 async def test_rejection_resumes_the_waiting_checkpoint_and_archives_the_draft(
     tmp_path: Path,
 ) -> None:
-    """§3.2／§3.3：resume 动作为拒绝时进入 ``archive_draft``：draft 归档、原 active 逐字段不变、
+    """§2.2／§2.3：resume 动作为拒绝时进入 ``archive_draft``：draft 归档、原 active 逐字段不变、
     全程不出现 ``rejected``；checkpoint 完成后重复拒绝仍调用领域服务并幂等返回同一归档行。"""
     async with _harness(tmp_path, scripts=_confirmation_scripts()) as h:
         active = await PlanReadService(h.db).get_active()
@@ -1174,7 +1199,7 @@ async def test_rejection_resumes_the_waiting_checkpoint_and_archives_the_draft(
 async def test_confirmation_without_a_checkpoint_falls_back_to_the_unique_draft(
     tmp_path: Path,
 ) -> None:
-    """§3.3 第 2 条：该 thread 没有 checkpoint（没有等待任务）时读业务库唯一 draft，ID 相等则按同一个
+    """§2.3 第 3 条：该 thread 没有 checkpoint（没有等待任务）时读业务库唯一 draft，ID 相等则按同一个
     领域服务提交；兜底路径完全不碰 checkpoint。"""
     async with _harness(tmp_path, active_guard=False) as h:
         active = await PlanReadService(h.db).get_active()
@@ -1211,7 +1236,7 @@ async def test_confirmation_without_a_checkpoint_falls_back_to_the_unique_draft(
 async def test_confirmation_fallback_conflicts_when_the_unique_draft_is_a_different_plan(
     tmp_path: Path,
 ) -> None:
-    """§3.3 第 2 条：兜底读到的唯一 draft 与请求 ``plan_id`` 不相等即明确冲突，不写任何行。"""
+    """§2.3 第 3 条：兜底读到的唯一 draft 与请求 ``plan_id`` 不相等即明确冲突，不写任何行。"""
     async with _harness(tmp_path) as h:
         active = await PlanReadService(h.db).get_active()
         assert active is not None
@@ -1236,7 +1261,7 @@ async def test_confirmation_fallback_conflicts_when_the_unique_draft_is_a_differ
 async def test_a_completed_checkpoint_still_reaches_domain_idempotency(
     tmp_path: Path,
 ) -> None:
-    """§3.3 第 2–3 条 ＋ §3.2：确认完成后已无等待任务，重复 confirm 仍调用领域服务并按幂等矩阵返回
+    """§2.3 第 3–4 条 ＋ §2.2：确认完成后已无等待任务，重复 confirm 仍调用领域服务并按幂等矩阵返回
     既有 active 行（不重复建日程、不产生第二条 active）。"""
     async with _harness(
         tmp_path, scripts=_confirmation_scripts(), active_guard=False
@@ -1263,7 +1288,7 @@ async def test_a_completed_checkpoint_still_reaches_domain_idempotency(
 async def test_confirmation_resumes_from_a_reopened_checkpoint_after_a_restart(
     tmp_path: Path,
 ) -> None:
-    """§3.3／§7.4「含重启」：关掉存档连接后重开同一 SQLite 文件（内存里的图与 State 都不参与恢复），
+    """§2.3／§4.3「含重启」：关掉存档连接后重开同一 SQLite 文件（内存里的图与 State 都不参与恢复），
     同一 ``conversation_id`` 仍按等待中的 interrupt 恢复并把 draft 激活。"""
     db = await _migrated(tmp_path / "fit_agent.db")
     checkpoint_path = tmp_path / "checkpoints.db"
@@ -1288,6 +1313,8 @@ async def test_confirmation_resumes_from_a_reopened_checkpoint_after_a_restart(
                     stats=StatsService(db),
                     plans=first_process.deps.plans,
                     persistence=first_process.deps.persistence,
+                    catalog=ActionCatalogService(db),
+                    records=WorkoutRecordsService(db),
                 ),
             )
         draft_id = result.draft_plan_id
@@ -1324,7 +1351,7 @@ async def test_confirmation_resumes_from_a_reopened_checkpoint_after_a_restart(
 async def test_confirming_a_rejected_plan_conflicts_and_never_activates(
     tmp_path: Path,
 ) -> None:
-    """§3.2／§3.3：二次阻断失败的 ``rejected`` 是终态且没有 draft 可激活：confirm 明确冲突、无写入，
+    """§2.2／§2.3：二次阻断失败的 ``rejected`` 是终态且没有 draft 可激活：confirm 明确冲突、无写入，
     且该请求仍到达领域服务（不是只回旧 checkpoint State）。"""
     scripts = {
         ADJUSTMENT_PLANNER_SYSTEM_PROMPT: [

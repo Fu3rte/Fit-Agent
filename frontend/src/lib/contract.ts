@@ -359,6 +359,26 @@ export interface AgentPlanResponseWire {
   plan: PlanWire;
 }
 
+/**
+ * POST /api/agent/confirm-workout 请求体（stage6.md §2.4.2）：用户修改后的完整确认载荷。
+ *
+ * 只提交 `waiting` 结构化字段，不从 `message.text` 反解（§2.5.2）；本端点不要求服务端证明该
+ * conversation_id 此前完成过一次自然语言解析。
+ */
+export interface ConfirmWorkoutBody {
+  conversation_id: string;
+  performed_on: string;
+  sets: WorkoutSetConfirmWire[];
+  plan_session_id: number | null;
+  auto_link: boolean;
+}
+
+/** confirm-workout 响应：落库训练事实 ＋ 重新现算的 PB（与表单写入的传输对象同一形状） */
+export interface ConfirmWorkoutResponseWire {
+  workout_session: RecordWire;
+  personal_bests: PersonalBestWire[];
+}
+
 /** 五类 SSE 产品事件名（与后端 AgentEventName 同一封闭集合，不发送别的名字） */
 export type AgentEventNameWire = "node" | "message" | "waiting" | "done" | "error";
 
@@ -374,10 +394,53 @@ export interface AgentMessageEventWire {
   data: { text: string };
 }
 
-/** 已持久化 draft，等待确认；只带 draft 身份 */
+/** 计划确认路径的 `waiting`（Stage 5 契约）：已持久化 draft，只带 draft 身份 */
 export interface AgentWaitingEventWire {
   event: "waiting";
   data: { draft_plan_id: number };
+}
+
+/**
+ * 自然语言打卡的一条组事实（stage6.md §2.2 的 `WorkoutSetBody`）：`waiting.workout.sets` 与
+ * confirm-workout 请求体共用同一形状。
+ *
+ * 与表单 `WorkoutSetInputWire` 的差别只有 `set_no`：自然语言提取结果已给出组序号，确认 UI 提交的
+ * 是用户修改后的完整值（表单路径的组序号由后端按提交顺序分配，前端不送）。
+ */
+export interface WorkoutSetConfirmWire {
+  exercise_id: string;
+  set_no: number;
+  set_type: SetTypeWire;
+  reps: number | null;
+  load_convention: LoadConvention | null;
+  weight_kg: number | null;
+  duration_seconds: number | null;
+}
+
+/**
+ * 自然语言打卡确认 UI 的编辑数据源 `waiting.workout`（stage6.md §2.4.3；后端 `_workout_payload`）：
+ * 日期、组事实与日程关联默认值。
+ */
+export interface ConfirmWorkoutDraftWire {
+  performed_on: string;
+  sets: WorkoutSetConfirmWire[];
+  /** 初始 null：用户可在确认 UI 改选具体日程；服务端不替用户选择候选 */
+  plan_session_id: number | null;
+  /**
+   * 初始 true：恰一个未完成日程时由既有服务自动关联；零候选或多候选且未显式选择时由既有领域规则
+   * 产生日程歧义错误，不写库
+   */
+  auto_link: boolean;
+}
+
+/** 自然语言打卡路径的 `waiting`（stage6.md §2.4.3）：结构化训练结果 ＋ 数据库候选日程 */
+export interface AgentWaitingWorkoutEventWire {
+  event: "waiting";
+  data: {
+    workout: ConfirmWorkoutDraftWire;
+    /** 数据库查询结果；模型不得重新生成候选 ID 或候选集合 */
+    candidate_plan_sessions: PlanSessionCandidateWire[];
+  };
 }
 
 /** Run 正常结束；安全命中先于 Router 时没有分类结论，intent 因此可为 null */
@@ -402,5 +465,6 @@ export type AgentEventWire =
   | AgentNodeEventWire
   | AgentMessageEventWire
   | AgentWaitingEventWire
+  | AgentWaitingWorkoutEventWire
   | AgentDoneEventWire
   | AgentErrorEventWire;

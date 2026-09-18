@@ -46,7 +46,7 @@ safety_check
 
 import asyncio
 import json
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator, Mapping, Sequence
 from dataclasses import asdict, dataclass
 from datetime import date
 from typing import Any, Literal
@@ -56,8 +56,12 @@ from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 from langgraph.types import Command, Interrupt, StateSnapshot
+from pydantic import BaseModel, ConfigDict
 
-from domain.plans.schema import EvaluationResult, Plan
+from domain.actions.rules import RecordLoadMismatch, UnknownExercise
+from domain.actions.schema import Exercise, LoadConvention
+from domain.actions.service import ActionCatalogService
+from domain.plans.schema import EvaluationResult, Plan, PlanSession
 from domain.plans.service import (
     PlanDraftConflict,
     PlanNotFound,
@@ -65,9 +69,12 @@ from domain.plans.service import (
     PlanReadService,
 )
 from domain.profile.safety import message_red_flag_hits
+from domain.records.rules import InvalidRecordFact
+from domain.records.schema import SetType, WorkoutSetInput
+from domain.records.service import WorkoutRecordsService
 from domain.stats.service import StatsService
 from graph.checkpointer import thread_config
-from graph.model import ModelCall
+from graph.model import ModelCall, parse_model_json
 from graph.nodes import (
     ADJUST_PLAN_INTENT,
     ConfirmationConflict,
@@ -316,10 +323,72 @@ FORM_RECORD_GUIDE = (
     "由既有记录接口写入；本流程不代写训练数据。"
 )
 
-#: ``natural_language_record`` 的可见说明：Stage 6 才实现自然语言打卡，本次不解析、不写库（§3.6）。
-NATURAL_LANGUAGE_RECORD_UNIMPLEMENTED = (
-    "自然语言打卡尚未实现（Stage 6）：本次请求不解析、不写库；请改用打卡表单记录训练。"
+#: ``natural_language_record`` 的结构化提取 Schema（模型输出）：只含 ``performed_on`` 与 ``sets``。
+#: 字段名与形状由这里唯一定义；模型把自然语言动作匹配为稳定 ``exercise_id``，负重口径与记录
+#: 口径的确认与字段必填／互斥仍由既有领域规则复验（stage6.md §2.2）。
+class ExtractedWorkoutSet(BaseModel):
+    """一组训练事实（模型提取结果）：组序号、组类型、次数、负重口径、重量与计时秒数。
+
+    未声明字段一律拒绝（与计划 Schema／Router Schema 同口径）；取值范围、负重口径与动作目录
+    是否一致都不在这里判定，由既有 ``domain.records`` 规则与目录复验拒绝。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    exercise_id: str
+    set_no: int
+    set_type: SetType
+    reps: int | None = None
+    load_convention: LoadConvention | None = None
+    weight_kg: float | None = None
+    duration_seconds: int | None = None
+
+
+class ExtractedWorkout(BaseModel):
+    """一次自然语言打卡的结构化提取结果：业务自然日 ＋ 全部组。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    performed_on: date
+    sets: list[ExtractedWorkoutSet]
+
+
+_EXTRACTED_WORKOUT_SCHEMA_TEXT = json.dumps(
+    ExtractedWorkout.model_json_schema(), ensure_ascii=False, sort_keys=True
 )
+
+#: 自然语言打卡提取的系统提示词：只做结构化提取，不写库、不选日程、不算统计（stage6.md §2.1／§3.1）。
+NATURAL_LANGUAGE_RECORD_EXTRACTION_PROMPT = (
+    "你是 Fit-Agent 的自然语言打卡提取器。只把用户这次训练描述提取为结构化事实，不写库、"
+    "不计算任何统计、不决定候选计划日程。硬要求：\n"
+    "1. 只使用 payload.actions 里给出的稳定 exercise_id；匹配不到的动作不要编造，也不要改写 id。\n"
+    "2. performed_on 是训练发生的业务自然日（YYYY-MM-DD）；用户说“今天”／“昨天”时按 "
+    "payload.business_day 折算。\n"
+    "3. 每条组给出 set_no（同一动作内从 1 开始）、set_type（work／warmup／assisted）；外加重量"
+    "动作给 weight_kg ＋ reps ＋ 与目录一致的 load_convention；纯自重动作只给 reps；计时动作"
+    "只给 duration_seconds。\n"
+    "4. 只输出一个 JSON 对象，字段与下方 Schema 完全一致，不输出任何解释文字或额外字段。\n"
+    "提取 Schema：" + _EXTRACTED_WORKOUT_SCHEMA_TEXT
+)
+
+#: 自然语言打卡摘要的系统提示词：把确定性提取结果与数据库候选日程写成可读文本（stage6.md §2.4.3）。
+#: 零候选与多候选未选择同口径：都只提示用户显式选择，不承诺任何自动写入（stage6.md §2.1「零候选」行）。
+NATURAL_LANGUAGE_RECORD_MESSAGE_PROMPT = (
+    "你是 Fit-Agent 的打卡摘要生成器。把 payload.workout（后端已校验的结构化提取结果）写成一段"
+    "面向用户的中文摘要，让用户确认日期、动作、组数、次数、重量与时长是否与本次训练一致。"
+    "payload.candidate_plan_sessions 是数据库给出的当天未完成计划日程：恰一个时提示将自动关联；"
+    "零个时不得许诺任何自动写入，必须提示用户显式选择「额外训练」才写为额外训练；"
+    "多于一个时必须提示用户选择某个日程或标记为额外训练，"
+    "不得替用户选择，也不得编造日程 ID。只输出这一段中文文本：不输出 JSON、不输出额外字段、"
+    "不重算任何数值、不提 RIR／完成率／估算 1RM。"
+)
+
+#: 提取结果未通过 Pydantic／领域／目录校验时的可见失败原因（不写库，stage6.md §2.2）。
+def invalid_natural_language_record_message(error: Exception) -> str:
+    """确认前校验失败的可见文本：照原样给出本项目自己的领域错误，并明确本次不写库。"""
+    return (
+        f"自然语言打卡未通过校验：{error}。本次不写库；请修正训练描述后重试，或改用打卡表单。"
+    )
 
 #: ``safety_stop`` 的可见提示：停止计划生成并建议专业咨询，不诊断、不输出训练计划（讨论总结 §9.2）。
 SAFETY_STOP_MESSAGE = (
@@ -343,7 +412,8 @@ VIEW_PROGRESS_SYSTEM_PROMPT = (
 #: SSE 的五类产品事件名（stage5.md §3.8）：事件集合封闭，不发别的名字。
 AgentEventName = Literal["node", "message", "waiting", "done", "error"]
 
-#: 不进入计划子图、不写业务库的三类分支（§3.6 行为表）：只产出阶段名、可见文本与正常结束。
+#: 不进入计划子图、不写业务库的三类分支（§3.6 行为表）：只产出阶段名、可见文本与正常结束；
+#: ``natural_language_record`` 额外产出一个 ``waiting``（stage6.md §2.4.3），其余两类不发 ``waiting``。
 NON_PLAN_INTENTS: tuple[Intent, ...] = (
     "form_record",
     "natural_language_record",
@@ -356,10 +426,11 @@ INTERRUPT_EVENT_KEY = "__interrupt__"
 
 @dataclass(frozen=True, slots=True)
 class AgentEvent:
-    """一条产品事件：``event`` 是 §3.8 的五类之一，``data`` 只含该事件表格给出的键。
+    """一条产品事件：``event`` 是五类之一，``data`` 只含该事件表格给出的键。
 
     不携带原始 LangGraph 块、原始模型事件、系统提示词或 Provider 配置；``node`` 的 ``name`` 是 Graph
-    节点／阶段名（不是隐藏推理），``waiting`` 只带 ``draft_plan_id``。
+    节点／阶段名（不是隐藏推理）；``waiting`` 按路径带载荷：计划路径是 ``draft_plan_id``，自然语言打卡
+    路径是 ``workout`` ＋ ``candidate_plan_sessions``（stage6.md §2.4.3）。
     """
 
     event: AgentEventName
@@ -387,13 +458,16 @@ class AgentRunDeps:
     ``model`` 必须与计划子图 ``GeneratePlanDeps.model`` 是同一个入口（唯一模型入口，stage5.md §4.3）；
     ``stats`` 是既有 ``StatsService``，只供 ``view_progress`` 现算确定性统计（不写库、不重算）；
     ``plans``／``persistence`` 是计划只读与 draft 读写的既有服务，只用于判断本次请求是复用还是同类替换
-    既有 draft（本运行入口不自己写 draft）。
+    既有 draft（本运行入口不自己写 draft）；``catalog`` 与 ``records`` 供自然语言打卡分支读取
+    可读动作目录、按 ``performed_on`` 查候选日程并在确认前复用既有领域校验（都不写库）。
     """
 
     model: ModelCall
     stats: StatsService
     plans: PlanReadService
     persistence: PlanPersistenceService
+    catalog: ActionCatalogService
+    records: WorkoutRecordsService
 
 
 @dataclass(frozen=True, slots=True)
@@ -432,11 +506,15 @@ async def stream_agent_run(
     - ``generate_plan``／``adjust_plan``（未命中封闭词表）：按 §3.4 第 5–6 条判定已有唯一 draft 的处置，再把
       Router 结论写进冻结 State 字段 ``intent`` 后调用计划子图（调整计划的 active 预读在子图的
       ``require_active_plan`` 节点，早于 Planner）；
-    - ``form_record``／``view_progress``／``natural_language_record``：不进入计划子图、不写业务库，
-      只产出阶段名、可见文本与 ``done``（行为表见 stage5.md §3.6）。
+    - ``form_record``／``view_progress``：不进入计划子图、不写业务库，只产出阶段名、可见文本与
+      ``done``（行为表见 stage5.md §3.6）；``natural_language_record``：模型提取 ``performed_on``＋
+      ``sets``、通过既有领域校验后按 ``performed_on`` 查数据库候选日程，事件顺序恰为 ``node`` →
+      ``message`` → ``waiting``（``workout`` ＋ ``candidate_plan_sessions``）→ ``done``，确认前不写库
+      （stage6.md §2.1／§2.4.3）。
 
     事件在 Run 时限内逐个产出（前端要看到进度，不能等整次 Run 结束再发）：计划分支的 ``node`` 来自
-    ``graph.astream`` 的节点更新，``waiting`` 来自 ``wait_for_confirmation`` 的 interrupt 块。运行错误
+    ``graph.astream`` 的节点更新，``waiting`` 来自 ``wait_for_confirmation`` 的 interrupt 块；自然语言
+    打卡分支的 ``waiting`` 由 :func:`_natural_language_record` 直接产出。运行错误
     （模型配置、超时、Router 非法输出、无 active、draft 冲突等）一律向上抛：SSE 层按 §3.7 发一个
     ``error`` 事件后关闭，不在这里吞掉或改成业务结果。客户端断开不触发任何写入，也不回滚已完成的
     draft 持久化（断线不是取消、确认或拒绝信号）。
@@ -457,6 +535,17 @@ async def stream_agent_run(
                 run.adjustment = None
             if intent in NON_PLAN_INTENTS:
                 yield AgentEvent("node", {"name": intent})
+                if intent == "natural_language_record":
+                    # 自然语言打卡（stage6.md §2.1／§2.4.3）：提取 → 校验 → 候选日程 → 可读摘要，
+                    # 事件顺序恰为 node → message → waiting → done；成功与失败都不写业务库。
+                    outcome = await _natural_language_record(
+                        state["request"], run=run, deps=deps
+                    )
+                    yield AgentEvent("message", {"text": outcome.message})
+                    if outcome.waiting is not None:
+                        yield AgentEvent("waiting", outcome.waiting)
+                    yield _done_event(intent, termination_reason=None, draft_plan_id=None)
+                    return
                 yield AgentEvent(
                     "message",
                     {
@@ -613,10 +702,11 @@ async def _existing_draft_target(
 async def _non_plan_text(
     intent: Intent, request: str, *, run: GeneratePlanRun, deps: AgentRunDeps
 ) -> str:
-    """三类非计划分支各自的可见文本：表单引导、Stage 6 说明，或 ``view_progress`` 的统计解释。
+    """两类非计划分支的可见文本：表单引导，或 ``view_progress`` 的统计解释。
 
-    三个分支都不进入计划子图、不写业务库；模型只在 ``view_progress`` 里解释既有 ``StatsService`` 的
-    现算结果，不重算数值（§3.6 行为表）。
+    两个分支都不进入计划子图、不写业务库；模型只在 ``view_progress`` 里解释既有 ``StatsService`` 的
+    现算结果，不重算数值（§3.6 行为表）。``natural_language_record`` 不走这里：它有专用的提取与
+    ``waiting`` 载荷（:func:`_natural_language_record`）。
     """
     if intent == "view_progress":
         return await _progress_explanation(
@@ -625,9 +715,159 @@ async def _non_plan_text(
             budget=run.budget,
             deps=deps,
         )
-    if intent == "form_record":
-        return FORM_RECORD_GUIDE
-    return NATURAL_LANGUAGE_RECORD_UNIMPLEMENTED
+    return FORM_RECORD_GUIDE
+
+
+@dataclass(frozen=True, slots=True)
+class NaturalLanguageRecordOutcome:
+    """自然语言打卡分支的一次结果：可见摘要 ＋ ``waiting`` 载荷（校验失败时为 ``None``）。
+
+    ``waiting`` 非空即提取与领域校验通过，载荷恰含 ``workout`` 与 ``candidate_plan_sessions`` 两个键
+    （stage6.md §2.4.3）；为 ``None`` 表示确认前校验未通过：只发可见失败文本，不发 ``waiting``、不写库。
+    """
+
+    message: str
+    waiting: dict[str, Any] | None
+
+
+async def _natural_language_record(
+    request: str, *, run: GeneratePlanRun, deps: AgentRunDeps
+) -> NaturalLanguageRecordOutcome:
+    """自然语言打卡的唯一实现（stage6.md §2.1／§2.4.3）：提取 → 校验 → 候选日程 → 可读摘要。
+
+    - 模型只做结构化提取与可读摘要两个动作，与 Router／计划链路共享同一份 Run 预算；
+    - Pydantic 结构校验失败（缺字段、非法枚举、非 JSON、非对象等）是**运行错误**，与 Router／计划
+      链路同口径（stage6.md §3.1「非法输出为 Run error」）；
+    - 领域规则／目录口径校验失败以可读失败文本返回，不发 ``waiting``、不写库；
+    - ``candidate_plan_sessions`` 直接来自数据库按 ``performed_on`` 的查询结果，模型不得生成候选 ID；
+    - 本函数全程不写业务库：只有 ``POST /api/agent/confirm-workout`` 成功才落行。
+    """
+    catalog = await deps.catalog.list_all()
+    extraction = parse_model_json(
+        await _request_model(
+            deps.model,
+            NATURAL_LANGUAGE_RECORD_EXTRACTION_PROMPT,
+            {
+                "request": request,
+                "business_day": run.business_day.isoformat(),
+                "actions": [_action_payload(exercise) for exercise in catalog],
+            },
+            run.budget,
+        ),
+        ExtractedWorkout,
+    )
+    try:
+        day, facts = await deps.records.validate_record_facts(
+            extraction.performed_on,
+            tuple(_workout_set_input(item) for item in extraction.sets),
+        )
+    except (InvalidRecordFact, UnknownExercise, RecordLoadMismatch) as error:
+        return NaturalLanguageRecordOutcome(
+            message=invalid_natural_language_record_message(error), waiting=None
+        )
+    candidates = await deps.records.list_unfinished_plan_sessions(day)
+    workout = _workout_payload(day, facts)
+    candidate_payloads = [
+        _candidate_plan_session_payload(session) for session in candidates
+    ]
+    message = (
+        await _request_model(
+            deps.model,
+            NATURAL_LANGUAGE_RECORD_MESSAGE_PROMPT,
+            {
+                "request": request,
+                "workout": workout,
+                "candidate_plan_sessions": candidate_payloads,
+            },
+            run.budget,
+        )
+    ).strip()
+    return NaturalLanguageRecordOutcome(
+        message=message,
+        waiting={
+            "workout": workout,
+            "candidate_plan_sessions": candidate_payloads,
+        },
+    )
+
+
+def _workout_set_input(item: ExtractedWorkoutSet) -> WorkoutSetInput:
+    """提取结果的一条组 → 写入侧的组事实；取值范围、负重口径与必填／互斥字段由既有规则复验。"""
+    return WorkoutSetInput(
+        exercise_id=item.exercise_id,
+        set_no=item.set_no,
+        reps=item.reps,
+        set_type=item.set_type,
+        load_convention=item.load_convention,
+        weight_kg=item.weight_kg,
+        duration_seconds=item.duration_seconds,
+    )
+
+
+def _action_payload(exercise: Exercise) -> dict[str, Any]:
+    """可读动作目录的一行：模型据此把自然语言动作匹配为稳定 ``exercise_id``。"""
+    return {
+        "exercise_id": exercise.id,
+        "standard_name_zh": exercise.standard_name_zh,
+        "record_type": exercise.record_type,
+        "load_convention": exercise.load_convention,
+    }
+
+
+def _workout_payload(
+    day: date, facts: Sequence[WorkoutSetInput]
+) -> dict[str, Any]:
+    """``waiting.workout``（前端确认 UI 的编辑数据源）：日期、组事实与关联日程默认值（§2.4.3）。
+
+    初始 ``plan_session_id`` 为 ``None`` 且 ``auto_link`` 为 ``true``：用户可在确认 UI 改选具体日程或
+    显式标记为额外训练；多候选不在这里替用户选择。
+    """
+    return {
+        "performed_on": day.isoformat(),
+        "sets": [
+            {
+                "exercise_id": fact.exercise_id,
+                "set_no": fact.set_no,
+                "set_type": fact.set_type,
+                "load_convention": fact.load_convention,
+                "weight_kg": fact.weight_kg,
+                "reps": fact.reps,
+                "duration_seconds": fact.duration_seconds,
+            }
+            for fact in facts
+        ],
+        "plan_session_id": None,
+        "auto_link": True,
+    }
+
+
+def _candidate_plan_session_payload(session: PlanSession) -> dict[str, Any]:
+    """``waiting.candidate_plan_sessions`` 的一行：数据库候选日程的业务事实，模型不生成。"""
+    return {
+        "id": session.id,
+        "plan_id": session.plan_id,
+        "scheduled_on": session.scheduled_on.isoformat(),
+    }
+
+
+async def _request_model(
+    model: ModelCall,
+    system_prompt: str,
+    payload: Mapping[str, Any],
+    budget: ModelRequestBudget,
+) -> str:
+    """一次模型请求：先扣本次 Run 的请求预算，再在剩余时限内调用注入的 callable。
+
+    模型调用不包在任何数据库事务里；超时或调用失败都向上抛，作为运行错误终止本次 Run。
+    """
+    timeout = budget.begin_request()
+    async with asyncio.timeout(timeout):
+        return await model(system_prompt, _dump_payload(payload))
+
+
+def _dump_payload(payload: Mapping[str, Any]) -> str:
+    """载荷 → 模型输入文本：日期等非 JSON 原生值按文本写出，排序固定便于复现。"""
+    return json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)
 
 
 async def _progress_explanation(
@@ -647,10 +887,7 @@ async def _progress_explanation(
         "personal_bests": [asdict(best) for best in await deps.stats.list_personal_bests()],
         "trend_summary": asdict(await deps.stats.trend_summary(business_day)),
     }
-    timeout = budget.begin_request()
-    async with asyncio.timeout(timeout):
-        text = await deps.model(
-            VIEW_PROGRESS_SYSTEM_PROMPT,
-            json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str),
-        )
+    text = await _request_model(
+        deps.model, VIEW_PROGRESS_SYSTEM_PROMPT, payload, budget
+    )
     return text.strip()

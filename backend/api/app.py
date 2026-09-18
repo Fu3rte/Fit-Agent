@@ -33,6 +33,7 @@ from domain.plans.service import (
     PlanReadService,
 )
 from domain.profile.service import ProfileService
+from domain.records.service import WorkoutRecordsService
 from domain.stats.repo import StatsRepo
 from domain.stats.service import StatsService
 from graph.checkpointer import open_checkpointer
@@ -190,6 +191,8 @@ def build_agent_runtime(
             stats=StatsService(db),
             plans=deps.plans,
             persistence=deps.persistence,
+            catalog=deps.catalog,
+            records=WorkoutRecordsService(db),
         ),
     )
 

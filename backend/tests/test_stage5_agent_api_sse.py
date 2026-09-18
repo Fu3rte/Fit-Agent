@@ -1,18 +1,18 @@
-"""Stage 5：§3.7 HTTP／错误边界与 §3.8 SSE 事件契约的代码前断言（子任务 01），以及 Agent 三端点
-的 §7.4–§7.6 行为测试（子任务 05）。
+"""Stage 5：§2.7 HTTP／错误边界与 §2.8 SSE 事件契约的代码前断言，以及 Agent 三端点
+的 §4.5–§4.6 行为测试。
 
-依据：``refactor-log/stage5.md`` §3.4／§3.7／§3.8／§6 Subtask 01／§6 Subtask 05／§7.4–§7.6；
+依据：``refactor-log/stage5.md`` §2.4／§2.7／§2.8／§4.5／§4.6／§5.1；
 ``LANGGRAPH_REFACTOR_PLAN.md`` §9.4；``Fit-Agent-LangGraph-重构讨论总结.md`` §9／§10。
 
-上半部分（子任务 01）只冻结契约：三个端点的请求／响应形状、流前 JSON 与流内 SSE 错误边界、五类产品
+上半部分只冻结契约：三个端点的请求／响应形状、流前 JSON 与流内 SSE 错误边界、五类产品
 事件与禁止项。已合入源码侧的交叉断言只读 Stage 5 要复用的既有事实：统一 JSON 错误形状与错误码
 （``api/dto.py``）、``conversation_id`` 即 ``thread_id``（``graph/checkpointer.py``）、页面恢复用的
 既有 ``GET /api/plans``（``api/routes_plans.py``）与三个模型环境变量名（``config.py``）。
 
-下半部分（子任务 05）用真实 ``create_app`` ＋ 真实 lifespan ＋ 固定替身模型驱动三个端点：事件的
-事件名集合与载荷键逐项等于 §3.8 契约（``waiting`` 只含 ``draft_plan_id``）、成功路径的 draft 落库与
+下半部分用真实 ``create_app`` ＋ 真实 lifespan ＋ 固定替身模型驱动三个端点：事件的
+事件名集合与载荷键逐项等于 §2.8 契约（``waiting`` 只含 ``draft_plan_id``）、成功路径的 draft 落库与
 ``done`` 数据、同类 reuse／regenerate 的 id／version／source 与失败不改原 draft、跨类型与普通 adjust 的
-明确失败、安全命中先于 Router 与已有 draft 的复用／冲突／regenerate、active 与 draft 读取（§3.5；A1：命中时 ``done.intent`` 为 ``null``）、流前 JSON 与流内单条
+明确失败、安全命中先于 Router 与已有 draft 的复用／冲突／regenerate、active 与 draft 读取（§2.5；A1：命中时 ``done.intent`` 为 ``null``）、流前 JSON 与流内单条
 ``error`` 的边界、响应与存档字节不含密钥／端点／模型名、确认／拒绝与领域幂等结果一致，以及客户端断开
 不触发任何写入也不回滚已持久化 draft。
 
@@ -58,6 +58,7 @@ from domain.plans.service import (
 )
 from domain.profile.schema import Fact, Profile
 from domain.profile.service import ProfileService
+from domain.records.service import WorkoutRecordsService
 from domain.stats.repo import StatsRepo
 from domain.stats.service import StatsService
 from graph.checkpointer import open_checkpointer, thread_config
@@ -87,61 +88,59 @@ from graph.workflow import (
 from storage.db import Database
 from tests.conftest import Stage5Plan
 
-#: §3.7 三个端点的请求与响应形状（代码块原样冻结）。
+#: §2.7 三个端点的请求与响应形状（代码块原样冻结）。
 AGENT_ENDPOINT_LINES = (
     "POST /api/agent/run",
-    "  body: { conversation_id: string, request: string, regenerate?: boolean }",
-    "  → text/event-stream（五类产品事件）",
+    "body: { conversation_id: string, request: string, regenerate?: boolean }",
+    "→ text/event-stream",
     "POST /api/agent/confirm",
-    "  body: { conversation_id: string, plan_id: number }",
-    "  → 200 { plan: PlanWire }（激活成功或幂等已 active）",
+    "body: { conversation_id: string, plan_id: number }",
+    "→ 200 { plan: PlanWire }",
     "POST /api/agent/reject",
-    "  body: { conversation_id: string, plan_id: number }",
-    "  → 200 { plan: PlanWire }（draft 已 archived）",
+    "body: { conversation_id: string, plan_id: number }",
+    "→ 200 { plan: PlanWire }",
 )
 
-#: §3.7 六条正文：UUID 校验、regenerate 同类替换、流前 JSON、流内 SSE error、confirm/reject 错误、秘密不回流。
+#: §2.7 五条规则：UUID 校验、流前 JSON、流内 SSE error、confirm/reject 错误、秘密不回流。
 AGENT_ERROR_BOUNDARY_LINES = (
-    "- `conversation_id`：请求体按 UUID 校验；前端每次新一轮生成/调整生成一个值，确认/拒绝必须沿用同一值。",
-    "- `regenerate` 按 §3.4 的同类替换规则处理；缺省/false 且已有 draft 时不调模型。",
-    "- 请求 JSON 形状、字段类型或 UUID 非法：流建立前返回既有 JSON 错误形状。",
-    "- `/api/agent/run` 流建立后的模型配置、超时、Router、无 active、draft 冲突等运行错误：发送一个 SSE `error` 后关闭，不再混用 JSON。",
-    "- `/api/agent/confirm`／`reject` 的不存在、ID 不匹配、状态冲突、日期过期和再校验失败：使用既有 JSON 错误形状与明确 HTTP 状态。",
-    "- 任何错误均不回显 API Key、Base URL、模型名、SQL、文件路径或堆栈。",
+    "- `conversation_id` 必须为 UUID。",
+    "- 请求 JSON/类型/UUID 非法：SSE 建立前使用既有 JSON 错误形状。",
+    "- `/run` 建流后的 Router、模型、超时、无 active、draft 冲突等错误：只发一个 SSE `error` 后关闭。",
+    "- confirm/reject 的不存在、ID 不匹配、状态冲突、过期、再校验失败：既有 JSON 错误形状 + 明确 HTTP 状态。",
+    "- 不回显 API Key、Base URL、模型名、SQL、文件路径或堆栈。",
 )
 
-#: §3.8 五类产品事件整表（event，data，含义）；事件集合是封闭的五种。
+#: §2.8 五类产品事件整表（event，data，含义）；事件集合是封闭的五种。
+#: 日志表格只有 event 与 data 两列，对比时取前两列；含义列仅作测试内注释。
 SSE_EVENT_TABLE = (
     ("`node`", '`{ "name": string }`', "当前 Graph 节点/阶段名"),
     ("`message`", '`{ "text": string }`', "面向用户的可见文本（安全提示、引导、简要结果）"),
     ("`waiting`", '`{ "draft_plan_id": number }`', "已持久化 draft，等待确认"),
     (
         "`done`",
-        '`{ "ok": true, "intent": string, "termination_reason": string \\| null, "draft_plan_id": number \\| null }`',
+        '`{ "ok": true, "intent": string/null, "termination_reason": string/null, "draft_plan_id": number/null }`',
         "Run 正常结束",
     ),
     ("`error`", '`{ "message": string }`', "运行错误（无密钥、无原始模型事件）"),
 )
 
-#: §3.8 收尾：不发隐藏推理／系统提示词／Provider 配置／原始事件；断线不是提交信号；恢复用既有只读端点。
+#: §2.8 收尾：不发隐藏推理／系统提示词／Provider 配置／原始事件；断线不是提交信号；恢复用既有只读端点。
 SSE_PROHIBITION_RULE = (
-    "禁止：隐藏推理、完整系统提示词、Provider 配置、原始 LangChain 事件。SSE 断线本身不触发额外业务写入，"
-    "也不回滚已完成的 draft 持久化；它不是取消、确认或拒绝信号。页面恢复时用既有 `GET /api/plans` "
-    "定位唯一 draft，不新增 checkpoint 查询端点。"
+    "禁止暴露隐藏推理、完整系统提示词、Provider 配置、原始 LangChain 事件。客户端断线不会确认、拒绝、取消或回滚已持久化 draft。页面恢复通过既有 `GET /api/plans` 定位 draft。"
 )
 
 
 def test_agent_http_contract_lines_are_frozen(stage5_plan: Stage5Plan) -> None:
-    """§3.7：三个端点的方法、路径、请求体字段与响应形状整段冻结（含 ``regenerate`` 可选标志）。"""
-    section = stage5_plan.section("3.7 HTTP 与错误契约")
+    """§2.7：三个端点的方法、路径、请求体字段与响应形状整段冻结（含 ``regenerate`` 可选标志）。"""
+    section = stage5_plan.section("2.7 HTTP")
 
     assert [line for line in AGENT_ENDPOINT_LINES if line not in section] == []
     assert [line for line in AGENT_ERROR_BOUNDARY_LINES if line not in section] == []
 
 
 def test_conversation_id_is_the_uuid_thread_id(stage5_plan: Stage5Plan) -> None:
-    """§3.7：``conversation_id`` 按 UUID 校验，且就是 Checkpointer 的 ``thread_id``（不另建映射）。"""
-    section = stage5_plan.section("3.7 HTTP 与错误契约")
+    """§2.7：``conversation_id`` 按 UUID 校验，且就是 Checkpointer 的 ``thread_id``（不另建映射）。"""
+    section = stage5_plan.section("2.7 HTTP")
 
     assert AGENT_ERROR_BOUNDARY_LINES[0] in section
     assert "conversation_id: string" in section
@@ -149,28 +148,35 @@ def test_conversation_id_is_the_uuid_thread_id(stage5_plan: Stage5Plan) -> None:
 
 
 def test_agent_regenerate_follows_the_same_kind_replacement_rule(stage5_plan: Stage5Plan) -> None:
-    """§3.7：``regenerate`` 按 §3.4 同类替换处理；缺省/false 且已有 draft 时不调模型。"""
-    assert AGENT_ERROR_BOUNDARY_LINES[1] in stage5_plan.section("3.7 HTTP 与错误契约")
+    """§2.7：``regenerate`` 仍是请求可选标志；同类替换规则由 §2.4 冻结。"""
+    assert (
+        "body: { conversation_id: string, request: string, regenerate?: boolean }"
+        in stage5_plan.section("2.7 HTTP")
+    )
+    adjust = stage5_plan.section("2.4 调整计划")
+    assert "- `regenerate=true`：" in adjust
+    assert "- 替换保持同 id/version/source；" in adjust
+    assert "- `regenerate=false`：" in adjust
 
 
 def test_agent_error_boundary_is_json_before_the_stream_and_sse_inside_it(
     stage5_plan: Stage5Plan,
 ) -> None:
-    """§3.7：请求形状／类型／UUID 错误在流建立前返回既有 JSON 错误形状；流内运行错误只发一个 SSE
+    """§2.7：请求形状／类型／UUID 错误在流建立前返回既有 JSON 错误形状；流内运行错误只发一个 SSE
     ``error`` 后关闭，confirm／reject 错误也复用同一 JSON 形状与明确 HTTP 状态。"""
-    section = stage5_plan.section("3.7 HTTP 与错误契约")
+    section = stage5_plan.section("2.7 HTTP")
 
+    assert AGENT_ERROR_BOUNDARY_LINES[1] in section
     assert AGENT_ERROR_BOUNDARY_LINES[2] in section
     assert AGENT_ERROR_BOUNDARY_LINES[3] in section
-    assert AGENT_ERROR_BOUNDARY_LINES[4] in section
     # 既有 JSON 错误形状的唯一出处：统一错误码 + 统一异常处理器（不在 Agent 层另造形状）。
     assert dto.ERROR_CODE_INVALID_REQUEST == "invalid_request"
     assert callable(dto.install_error_handlers)
 
 
 def test_agent_errors_never_echo_secrets_or_provider_configuration(stage5_plan: Stage5Plan) -> None:
-    """§3.7／§3.8：任何错误都不回显 API Key、Base URL、模型名、SQL、文件路径或堆栈。"""
-    assert AGENT_ERROR_BOUNDARY_LINES[5] in stage5_plan.section("3.7 HTTP 与错误契约")
+    """§2.7／§2.8：任何错误都不回显 API Key、Base URL、模型名、SQL、文件路径或堆栈。"""
+    assert AGENT_ERROR_BOUNDARY_LINES[4] in stage5_plan.section("2.7 HTTP")
     assert SSE_EVENT_TABLE[4][2] == "运行错误（无密钥、无原始模型事件）"
     assert (MODEL_API_KEY_ENV, MODEL_BASE_URL_ENV, MODEL_MODEL_ENV) == (
         "MODEL_API_KEY",
@@ -180,17 +186,18 @@ def test_agent_errors_never_echo_secrets_or_provider_configuration(stage5_plan: 
 
 
 def test_sse_event_contract_is_exactly_five_product_events(stage5_plan: Stage5Plan) -> None:
-    """§3.8 五类事件整表冻结：``node``／``message``／``waiting``／``done``／``error`` 的载荷键不得增减。"""
-    assert stage5_plan.table("3.8 SSE 事件契约", "data（JSON）") == SSE_EVENT_TABLE
+    """§2.8 五类事件整表冻结：``node``／``message``／``waiting``／``done``／``error`` 的载荷键不得增减。"""
+    documented = stage5_plan.table("2.8 SSE", "data")
+    assert documented == tuple((event, data) for event, data, _ in SSE_EVENT_TABLE)
 
 
 def test_sse_forbids_raw_events_and_disconnect_is_not_a_signal(stage5_plan: Stage5Plan) -> None:
-    """§3.8：不发隐藏推理／系统提示词／Provider 配置／原始事件；断线不触发写入，恢复用既有 ``GET /api/plans``。"""
-    assert SSE_PROHIBITION_RULE in stage5_plan.section("3.8 SSE 事件契约")
+    """§2.8：不发隐藏推理／系统提示词／Provider 配置／原始事件；断线不触发写入，恢复用既有 ``GET /api/plans``。"""
+    assert SSE_PROHIBITION_RULE in stage5_plan.section("2.8 SSE")
     assert "/api/plans" in {route.path for route in routes_plans.router.routes}
 
 
-# ---------- §7.4–§7.6 行为测试：真实三端点 ＋ 固定替身模型（无 API Key） ----------
+# ---------- §4.3–§4.5 行为测试：真实三端点 ＋ 固定替身模型（无 API Key） ----------
 
 #: 本次 Run 注入的业务日（确认／激活的日期新鲜度都按它判定）。
 BUSINESS_DAY = date(2026, 6, 1)
@@ -209,7 +216,7 @@ RED_FLAG_ADJUST_REQUEST = "调整计划，但最近晕厥"
 PULL_UP = "pull-up"
 WEEKLY_FREQUENCY = 1
 
-#: §3.8 五类事件的 ``data`` 键集合：与冻结的契约表逐项相等，事件名集合也是封闭的五种。
+#: §2.8 五类事件的 ``data`` 键集合：与冻结的契约表逐项相等，事件名集合也是封闭的五种。
 SSE_EVENT_KEYS: dict[str, frozenset[str]] = {
     "node": frozenset({"name"}),
     "message": frozenset({"text"}),
@@ -280,7 +287,7 @@ class FailingModel:
         raise self._error
 
 
-#: 超时用例注入的 Run 时限（秒）：只调小本次 Run 的预算，冻结的 60／180／5 上限不动（§3.9 不新增配置）。
+#: 超时用例注入的 Run 时限（秒）：只调小本次 Run 的预算，冻结的 60／180／5 上限不动（§2.9 不新增配置）。
 TIMEOUT_RUN_SECONDS = 1.0
 #: 超时用例里模型替身的阻塞时长（秒）：远大于 Run 时限，保证是被时限取消而不是自己返回。
 TIMEOUT_BLOCK_SECONDS = 20.0
@@ -431,12 +438,14 @@ def _scripted_runtime(db: Database, checkpointer: Any, model: Any) -> AgentRunti
             stats=StatsService(db),
             plans=deps.plans,
             persistence=deps.persistence,
+            catalog=ActionCatalogService(db),
+            records=WorkoutRecordsService(db),
         ),
     )
 
 
 def _parse_frames(text: str) -> list[tuple[str, dict[str, Any]]]:
-    """SSE 文本 → ``(事件名, data)`` 列表，并逐帧校验 §3.8 的事件名与载荷键集合。"""
+    """SSE 文本 → ``(事件名, data)`` 列表，并逐帧校验 §2.8 的事件名与载荷键集合。"""
     frames: list[tuple[str, dict[str, Any]]] = []
     for block in text.split("\n\n"):
         if not block.strip():
@@ -550,13 +559,13 @@ def _scripted_app(
         yield _AgentApp(client=client, model=model, db=db)
 
 
-# ---------- §4.4／§4.3 生产装配 ----------
+# ---------- §3.3／§3.2 生产装配 ----------
 
 
 def test_production_runtime_assembles_the_plan_subgraph_and_one_model_entry(
     tmp_path: Path,
 ) -> None:
-    """§4.3／§4.4：lifespan 装配一份 Planner／Evaluator 子图与唯一模型入口，不需要模型环境变量。"""
+    """§3.2／§3.3：lifespan 装配一份 Planner／Evaluator 子图与唯一模型入口，不需要模型环境变量。"""
     with _app_client(tmp_path) as client:
         runtime: AgentRuntime = client.app.state.agent_runtime
 
@@ -572,11 +581,11 @@ def test_production_runtime_assembles_the_plan_subgraph_and_one_model_entry(
         assert isinstance(runtime.deps.activation, PlanActivationService)
 
 
-# ---------- §7.6 SSE／HTTP ----------
+# ---------- §4.5 SSE／HTTP ----------
 
 
 def test_run_stream_emits_exactly_the_frozen_five_product_events(tmp_path: Path) -> None:
-    """§7.6：事件仅五种；``waiting`` 只含 ``draft_plan_id``；成功路径的 draft 落库且 ``done`` 与之一致。"""
+    """§4.5：事件仅五种；``waiting`` 只含 ``draft_plan_id``；成功路径的 draft 落库且 ``done`` 与之一致。"""
     scripts = {
         PLANNER_SYSTEM_PROMPT: [_plan_text()],
         EVALUATOR_SYSTEM_PROMPT: [_rubric_text()],
@@ -611,7 +620,7 @@ def test_run_stream_emits_exactly_the_frozen_five_product_events(tmp_path: Path)
 
 
 def test_run_safety_stop_sends_one_message_and_writes_no_plan(tmp_path: Path) -> None:
-    """§3.6／§3.8／A1：安全词命中先于 Router——不分类、不装配、不调模型，只发安全提示，不写任何计划行。
+    """§2.6／§2.8／A1：安全词命中先于 Router——不分类、不装配、不调模型，只发安全提示，不写任何计划行。
 
     ``done.intent`` 为 ``null``：本次 Run 没有 Router 结论（修复前是确定性命中的 ``generate_plan``）。
     """
@@ -634,7 +643,7 @@ def test_run_safety_stop_sends_one_message_and_writes_no_plan(tmp_path: Path) ->
 
 
 def test_run_red_flag_precedes_reusing_an_existing_generate_draft(tmp_path: Path) -> None:
-    """§3.5／§3.4 第 5–6 条／A1：安全命中先于「已有生成 draft 的复用」与「同类 regenerate 替换」。
+    """§2.5／§2.4「已有 draft 时」／A1：安全命中先于「已有生成 draft 的复用」与「同类 regenerate 替换」。
 
     普通请求（``regenerate`` 缺省）在修复前直接复用既有 draft 并发 ``waiting``，安全词根本不参与；
     ``regenerate=true`` 在修复前已经由子图的入口节点 ``safety_check`` 终止，这里一并断言显式重新生成
@@ -667,7 +676,7 @@ def test_run_red_flag_precedes_reusing_an_existing_generate_draft(tmp_path: Path
 def test_run_red_flag_precedes_existing_draft_conflicts_and_the_active_read(
     tmp_path: Path,
 ) -> None:
-    """§3.5／§3.4 第 5–6 条／A1：安全命中先于 draft 冲突、同类 regenerate 与 adjust 的 active 预读。
+    """§2.5／§2.4「已有 draft 时」／A1：安全命中先于 draft 冲突、同类 regenerate 与 adjust 的 active 预读。
 
     修复前这些组合得到的都不是安全终止：普通 adjust 遇既有调整 draft 直接报「不覆盖既有 draft」冲突；
     来源已不是当前 active 的 regenerate 会先读一次 active 再冲突；跨类型（既有生成 draft ＋ 调整请求）
@@ -742,7 +751,7 @@ def _intent_text(intent: str) -> str:
 
 
 def test_run_red_flag_precedes_every_non_plan_branch(tmp_path: Path) -> None:
-    """A1／§3.5：三类非计划分支同样先过封闭词表——不发分支引导文本、零模型调用、零业务写入。
+    """A1／§2.5：三类非计划分支同样先过封闭词表——不发分支引导文本、零模型调用、零业务写入。
 
     修复前这三个请求分别确定为 ``form_record``／``natural_language_record``／``view_progress``：前两者直接
     发引导文本，``view_progress`` 还要调一次模型解释统计（未脚本化即失败）。命中急性关键词后三者都只发
@@ -768,7 +777,7 @@ def test_run_red_flag_precedes_every_non_plan_branch(tmp_path: Path) -> None:
 
 
 def test_run_red_flag_never_calls_the_router_fallback_model(tmp_path: Path) -> None:
-    """A1／§3.5：零命中／多命中（正常路径恰调一次分类模型）时也先判定封闭词表——模型调用序列为空。
+    """A1／§2.5：零命中／多命中（正常路径恰调一次分类模型）时也先判定封闭词表——模型调用序列为空。
 
     替身给 Router 备好了脚本；``model.calls`` 为空即证明短路发生在 ``classify_intent`` 之前，而不是先分类
     再覆盖结论（修复前每个请求都会消费一次脚本，``done.intent`` 也是分类结论）。
@@ -795,7 +804,7 @@ def test_run_red_flag_never_calls_the_router_fallback_model(tmp_path: Path) -> N
 
 
 def test_run_reuses_a_same_kind_draft_without_a_model_call(tmp_path: Path) -> None:
-    """§3.4 第 5 条：已有同类 draft 且 ``regenerate`` 缺省时直接复用，不调模型、不写第二条 draft。"""
+    """§2.4「已有 draft 时」：已有同类 draft 且 ``regenerate`` 缺省时直接复用，不调模型、不写第二条 draft。"""
     scripts = {
         PLANNER_SYSTEM_PROMPT: [_plan_text()],
         EVALUATOR_SYSTEM_PROMPT: [_rubric_text()],
@@ -817,7 +826,7 @@ def test_run_reuses_a_same_kind_draft_without_a_model_call(tmp_path: Path) -> No
 
 
 def test_run_regenerate_replaces_the_same_id_version_and_source(tmp_path: Path) -> None:
-    """§7.6：同类 regenerate 替换同 id／version／source；生成 draft 的来源仍为 NULL。"""
+    """§4.5：同类 regenerate 替换同 id／version／source；生成 draft 的来源仍为 NULL。"""
     scripts = {
         PLANNER_SYSTEM_PROMPT: [_plan_text(explanation="重新生成")],
         EVALUATOR_SYSTEM_PROMPT: [_rubric_text()],
@@ -849,7 +858,7 @@ def test_run_regenerate_replaces_the_same_id_version_and_source(tmp_path: Path) 
 def test_adjust_regenerate_replaces_the_same_adjust_draft_and_keeps_its_source(
     tmp_path: Path,
 ) -> None:
-    """§7.5／§7.6：adjust 的同类 regenerate 只在来源仍是当前 active 时替换同一 id／version 并保持来源。"""
+    """§4.4／§4.5：adjust 的同类 regenerate 只在来源仍是当前 active 时替换同一 id／version 并保持来源。"""
     scripts = {
         ADJUSTMENT_PLANNER_SYSTEM_PROMPT: [_plan_text(explanation="调整后")],
         EVALUATOR_SYSTEM_PROMPT: [_rubric_text()],
@@ -889,7 +898,7 @@ def test_adjust_regenerate_replaces_the_same_adjust_draft_and_keeps_its_source(
 
 
 def test_regenerate_failure_keeps_the_original_draft(tmp_path: Path) -> None:
-    """§7.6：同类 regenerate 二次阻断失败时不改原 draft，也不写 rejected（失败候选只留 State）。"""
+    """§4.5：同类 regenerate 二次阻断失败时不改原 draft，也不写 rejected（失败候选只留 State）。"""
     scripts = {
         PLANNER_SYSTEM_PROMPT: [
             _plan_text(explanation="失败候选"),
@@ -927,7 +936,7 @@ def test_regenerate_failure_keeps_the_original_draft(tmp_path: Path) -> None:
 
 
 def test_existing_draft_conflicts_never_write(tmp_path: Path) -> None:
-    """§3.4 第 5–6 条／§7.5：跨类型替换、普通 adjust 遇既有 draft、来源 active 已变化都是明确失败。"""
+    """§2.4「已有 draft 时」／§4.4：跨类型替换、普通 adjust 遇既有 draft、来源 active 已变化都是明确失败。"""
     cases = (
         # 已有调整 draft ＋ 生成请求：跨类型，两种 regenerate 取值都冲突。
         ("adjust_draft", REQUEST, False),
@@ -967,7 +976,7 @@ def test_existing_draft_conflicts_never_write(tmp_path: Path) -> None:
 def test_adjust_regenerate_conflicts_when_the_source_is_no_longer_active(
     tmp_path: Path,
 ) -> None:
-    """§3.4 第 6 条：既有调整 draft 的来源计划已不是当前 active 时明确冲突，不调模型、不写入。"""
+    """§2.4「已有 draft 时」：既有调整 draft 的来源计划已不是当前 active 时明确冲突，不调模型、不写入。"""
     with _scripted_app(tmp_path) as agent:
         agent.seed_profile()
         agent.seed_plan(
@@ -999,7 +1008,7 @@ def test_adjust_regenerate_conflicts_when_the_source_is_no_longer_active(
 def test_run_request_shape_and_uuid_errors_are_json_before_the_stream(
     tmp_path: Path,
 ) -> None:
-    """§3.7：请求 JSON 形状、字段类型或 UUID 非法在流建立前返回既有 JSON 错误形状。"""
+    """§2.7：请求 JSON 形状、字段类型或 UUID 非法在流建立前返回既有 JSON 错误形状。"""
     invalid_bodies: tuple[dict[str, Any], ...] = (
         {"conversation_id": "not-a-uuid", "request": REQUEST},
         {"conversation_id": CONVERSATION_ID},
@@ -1026,7 +1035,7 @@ def test_run_request_shape_and_uuid_errors_are_json_before_the_stream(
 def test_run_errors_are_one_sse_error_and_never_mix_json(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """§3.7：流建立后的运行错误只发一个 SSE ``error`` 后关闭，不混用 JSON。"""
+    """§2.7：流建立后的运行错误只发一个 SSE ``error`` 后关闭，不混用 JSON。"""
     # 缺少画像：Planner 前明确失败，错误文本是本项目的产品文本。
     with _app_client(tmp_path / "no-profile") as client:
         frames = _sse_frames(
@@ -1061,9 +1070,9 @@ def test_run_errors_are_one_sse_error_and_never_mix_json(
 
 
 async def test_run_timeout_is_one_sse_error_without_secrets(tmp_path: Path) -> None:
-    """§3.7／§7.6：Run 时限用尽（超时）同样只发一条 SSE ``error``，文本固定且不回显异常原文。
+    """§2.7／§4.5：Run 时限用尽（超时）同样只发一条 SSE ``error``，文本固定且不回显异常原文。
 
-    生产装配不给 Run 时限留注入点（60／180／5 是冻结上限，§3.9 不新增配置），故只把本次 Run 的预算
+    生产装配不给 Run 时限留注入点（60／180／5 是冻结上限，§2.9 不新增配置），故只把本次 Run 的预算
     调小；其余全走真实实现——真实计划子图、真实 ``stream_agent_run``（Run 时限包住整次调用）与真实
     ``api/routes_agent.py::_sse_frames``（HTTP 报文形态由 ``test_run_errors_are_one_sse_error_and_never_mix_json``
     取证）。
@@ -1094,6 +1103,8 @@ async def test_run_timeout_is_one_sse_error_without_secrets(tmp_path: Path) -> N
                     stats=StatsService(db),
                     plans=deps.plans,
                     persistence=deps.persistence,
+                    catalog=ActionCatalogService(db),
+                    records=WorkoutRecordsService(db),
                 ),
             )
             body = "".join([frame async for frame in route_sse_frames(events)])
@@ -1111,7 +1122,7 @@ async def test_run_timeout_is_one_sse_error_without_secrets(tmp_path: Path) -> N
 def test_run_error_coverage_maps_provider_errors_to_a_fixed_message(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """§3.7 收尾条：Provider 异常（可能带端点／模型名／密钥）只回固定文本，不透传 ``str(exc)``。
+    """§2.7 收尾条：Provider 异常（可能带端点／模型名／密钥）只回固定文本，不透传 ``str(exc)``。
 
     走生产装配：``api/app.py::_lazy_model_call`` 把 Provider／SDK 异常换成
     ``graph.model.ModelCallFailed``，响应与存档都不出现异常原文。
@@ -1139,7 +1150,7 @@ def test_run_error_coverage_maps_provider_errors_to_a_fixed_message(
 def test_run_stream_and_archive_carry_no_secrets_or_provider_configuration(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """§3.7／§3.8：响应字节与 checkpoint 存档都不含密钥、端点、模型名或环境变量名。
+    """§2.7／§2.8：响应字节与 checkpoint 存档都不含密钥、端点、模型名或环境变量名。
 
     Provider 失败（可能带 Base URL／模型名）是唯一会写进存档的错误文本来源：生产模型入口已把
     异常换成固定文本，因此存档里只剩固定文本。
@@ -1194,7 +1205,7 @@ def test_run_stream_and_archive_carry_no_secrets_or_provider_configuration(
         assert forbidden.encode() not in archive
 
 
-# ---------- §7.4 兜底：确认／拒绝的 HTTP 行为 ----------
+# ---------- §4.3 兜底：确认／拒绝的 HTTP 行为 ----------
 
 
 def _waiting_draft(agent: _AgentApp) -> int:
@@ -1206,7 +1217,7 @@ def _waiting_draft(agent: _AgentApp) -> int:
 
 
 def test_confirm_over_http_activates_the_draft_and_stays_idempotent(tmp_path: Path) -> None:
-    """§7.4：等待中的 checkpoint ＋ ID 相等时 resume 成功；重复确认走领域幂等，不产生第二条 active。"""
+    """§4.3：等待中的 checkpoint ＋ ID 相等时 resume 成功；重复确认走领域幂等，不产生第二条 active。"""
     scripts = {
         PLANNER_SYSTEM_PROMPT: [_plan_text()],
         EVALUATOR_SYSTEM_PROMPT: [_rubric_text()],
@@ -1235,7 +1246,7 @@ def test_confirm_over_http_activates_the_draft_and_stays_idempotent(tmp_path: Pa
 
 
 def test_confirmation_with_a_mismatched_plan_id_is_409_without_writes(tmp_path: Path) -> None:
-    """§7.4／§3.7：interrupt 的 draft ID 与请求 ``plan_id`` 不等时 409，且不写任何行。"""
+    """§4.3／§2.7：interrupt 的 draft ID 与请求 ``plan_id`` 不等时 409，且不写任何行。"""
     scripts = {
         PLANNER_SYSTEM_PROMPT: [_plan_text()],
         EVALUATOR_SYSTEM_PROMPT: [_rubric_text()],
@@ -1258,7 +1269,7 @@ def test_confirmation_with_a_mismatched_plan_id_is_409_without_writes(tmp_path: 
 
 
 def test_confirmation_of_a_missing_plan_is_404_without_writes(tmp_path: Path) -> None:
-    """§3.7：``confirm``／``reject`` 的计划不存在时是 404，且不写任何行。"""
+    """§2.7：``confirm``／``reject`` 的计划不存在时是 404，且不写任何行。"""
     with _scripted_app(tmp_path) as agent:
         agent.seed_profile()
         for action in ("confirm", "reject"):
@@ -1275,7 +1286,7 @@ def test_confirmation_of_a_missing_plan_is_404_without_writes(tmp_path: Path) ->
 def test_reject_over_http_archives_the_draft_and_never_writes_rejected(
     tmp_path: Path,
 ) -> None:
-    """§7.3／§7.4：拒绝把 draft 归档，原 active 不变，库内不出现 ``rejected`` 状态。"""
+    """§4.2／§4.3：拒绝把 draft 归档，原 active 不变，库内不出现 ``rejected`` 状态。"""
     scripts = {
         ADJUSTMENT_PLANNER_SYSTEM_PROMPT: [_plan_text(explanation="调整后")],
         EVALUATOR_SYSTEM_PROMPT: [_rubric_text()],
@@ -1315,13 +1326,13 @@ def test_reject_over_http_archives_the_draft_and_never_writes_rejected(
         assert agent.plans() == rows
 
 
-# ---------- §7.6 断线：不是取消、确认或拒绝信号 ----------
+# ---------- §4.5 断线：不是取消、确认或拒绝信号 ----------
 
 
 async def test_closing_the_event_stream_writes_nothing_and_keeps_the_draft(
     tmp_path: Path,
 ) -> None:
-    """§3.8／§7.6：客户端在 ``waiting`` 后断开时不触发确认／拒绝或额外写入，也不回滚已持久化 draft。"""
+    """§2.8／§4.5：客户端在 ``waiting`` 后断开时不触发确认／拒绝或额外写入，也不回滚已持久化 draft。"""
     db = await _migrated(tmp_path / "fit_agent.db")
     try:
         await ProfileService(db).update(_profile())
@@ -1337,6 +1348,8 @@ async def test_closing_the_event_stream_writes_nothing_and_keeps_the_draft(
             stats=StatsService(db),
             plans=deps.plans,
             persistence=deps.persistence,
+            catalog=ActionCatalogService(db),
+            records=WorkoutRecordsService(db),
         )
         async with open_checkpointer(tmp_path / "checkpoints.db") as saver:
             graph = build_generate_plan_graph(deps, checkpointer=saver)
@@ -1367,11 +1380,11 @@ async def test_closing_the_event_stream_writes_nothing_and_keeps_the_draft(
         await db.close()
 
 
-# ---------- §3.5 安全优先：不读 active、不读 draft ----------
+# ---------- §2.5 安全优先：不读 active、不读 draft ----------
 
 
 class _CountingPlanReads(PlanReadService):
-    """只读计划入口计数替身：取证「安全命中时整次 Run 都没有读 active」（§3.5 优先于 §3.4 预读）。"""
+    """只读计划入口计数替身：取证「安全命中时整次 Run 都没有读 active」（§2.5 优先于 §2.4 预读）。"""
 
     def __init__(self, db: Database) -> None:
         super().__init__(db)
@@ -1383,7 +1396,7 @@ class _CountingPlanReads(PlanReadService):
 
 
 class _CountingDraftReads(PlanPersistenceService):
-    """draft 只读入口计数替身：取证「安全命中时整次 Run 都没有读唯一 draft」（§3.5 优先于 §3.4 第 5–6 条）。"""
+    """draft 只读入口计数替身：取证「安全命中时整次 Run 都没有读唯一 draft」（§2.5 优先于 §2.4「已有 draft 时」）。"""
 
     def __init__(self, db: Database) -> None:
         super().__init__(db)
@@ -1395,7 +1408,7 @@ class _CountingDraftReads(PlanPersistenceService):
 
 
 async def test_run_red_flag_never_reads_the_active_plan(tmp_path: Path) -> None:
-    """§3.5／A1：安全命中先于 adjust 的 active 预读——既有调整 draft ＋ regenerate 也不读 active、不写入。"""
+    """§2.5／A1：安全命中先于 adjust 的 active 预读——既有调整 draft ＋ regenerate 也不读 active、不写入。"""
     db = await _migrated(tmp_path / "fit_agent.db")
     try:
         await ProfileService(db).update(_profile())
@@ -1433,6 +1446,8 @@ async def test_run_red_flag_never_reads_the_active_plan(tmp_path: Path) -> None:
                     stats=StatsService(db),
                     plans=reading,
                     persistence=deps.persistence,
+                    catalog=ActionCatalogService(db),
+                    records=WorkoutRecordsService(db),
                 ),
             )
             seen = [event async for event in events]
@@ -1459,7 +1474,7 @@ async def test_run_red_flag_never_reads_the_active_plan(tmp_path: Path) -> None:
 
 
 async def test_run_red_flag_never_reads_the_existing_draft(tmp_path: Path) -> None:
-    """A1／§3.5：安全命中先于 §3.4 第 5–6 条的已有 draft 判定——有同类既有 draft 也不读它、不写入。
+    """A1／§2.5：安全命中先于 §2.4「已有 draft 时」的已有 draft 判定——有同类既有 draft 也不读它、不写入。
 
     修复前普通生成请求会先调 ``get_unique_draft`` 再决定复用（或同类 regenerate 替换）；预检提前到
     Router 之前后一次 draft 读都不发生，替身计数取证 ``draft_reads == 0``。
@@ -1490,6 +1505,8 @@ async def test_run_red_flag_never_reads_the_existing_draft(tmp_path: Path) -> No
                     stats=StatsService(db),
                     plans=deps.plans,
                     persistence=drafts,
+                    catalog=ActionCatalogService(db),
+                    records=WorkoutRecordsService(db),
                 ),
             )
             seen = [event async for event in events]

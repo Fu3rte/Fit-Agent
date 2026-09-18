@@ -1,7 +1,9 @@
-"""Agent 三端点：``POST /api/agent/run``（SSE）、``/api/agent/confirm``、``/api/agent/reject``。
+"""Agent 端点：``POST /api/agent/run``（SSE）、``/api/agent/confirm``、``/api/agent/reject``
+与 ``POST /api/agent/confirm-workout``。
 
 正本：``refactor-log/stage5.md`` §3.7（HTTP 与错误契约）／§3.8（SSE 事件契约）／§4.4；
-``LANGGRAPH_REFACTOR_PLAN.md`` §9.4；``Fit-Agent-LangGraph-重构讨论总结.md`` §9／§10。
+``refactor-log/stage6.md`` §2.4.2（confirm-workout）；``LANGGRAPH_REFACTOR_PLAN.md`` §9.4／§10；
+``Fit-Agent-LangGraph-重构讨论总结.md`` §9／§10。
 
 传输边界（本模块只做传输与事件序列化，不做领域规则、不写 SQL、不自己写计划行）：
 
@@ -29,7 +31,15 @@ from fastapi.responses import StreamingResponse
 from langgraph.graph.state import CompiledStateGraph
 
 from api.deps import current_business_date
-from api.dto import AgentPlanBody, AgentRunBody, plan_dto
+from api.dto import (
+    AgentPlanBody,
+    AgentRunBody,
+    ConfirmWorkoutBody,
+    personal_best_dto,
+    plan_dto,
+    record_dto,
+    workout_set_inputs_from_dto,
+)
 from domain.plans.schema import Plan
 from domain.plans.service import (
     PlanActivationConflict,
@@ -38,6 +48,8 @@ from domain.plans.service import (
     PlanNotFound,
     PlanRevalidationFailed,
 )
+from domain.records.service import WorkoutRecordsService
+from domain.stats.service import StatsService
 from graph.checkpointer import thread_config
 from graph.model import InvalidModelResponse, ModelCallFailed, ModelConfigurationError
 from graph.nodes import (
@@ -111,6 +123,30 @@ async def reject_plan(
 ) -> dict[str, Any]:
     """用户拒绝：把 draft 归档，返回落库后的计划行（原 active 不变，永不写 ``rejected``，§3.2）。"""
     return {"plan": plan_dto(await _confirmation(body, request, "reject", business_day))}
+
+
+@router.post("/api/agent/confirm-workout")
+async def confirm_workout(
+    body: ConfirmWorkoutBody, request: Request
+) -> dict[str, Any]:
+    """自然语言打卡确认写入（stage6.md §2.4.2）：复用表单写入服务，写入成功后经既有 Stats 重查 PB。
+
+    与表单路径同源：同一个 ``WorkoutRecordsService.create`` 与同一套领域校验；本端点不调用任何模型，
+    也不要求服务端证明当前 ``conversation_id`` 此前完成过一次自然语言解析。载荷未通过 DTO／领域／
+    目录／日程关联校验时不写库：领域错误按既有 JSON 错误形状与明确 HTTP 状态映射（``api/dto.py``）。
+    """
+    db = request.app.state.db
+    session = await WorkoutRecordsService(db).create(
+        body.performed_on,
+        workout_set_inputs_from_dto(body.sets),
+        plan_session_id=body.plan_session_id,
+        auto_link=body.auto_link,
+    )
+    bests = await StatsService(db).list_personal_bests()
+    return {
+        "workout_session": record_dto(session),
+        "personal_bests": [personal_best_dto(best) for best in bests],
+    }
 
 
 def _runtime(request: Request) -> AgentRuntime:

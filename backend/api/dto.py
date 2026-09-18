@@ -22,7 +22,7 @@ Stage 5 的 Agent 三端点（``api/routes_agent.py``）也在这里定义请求
 """
 
 import sqlite3
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from datetime import date
 from typing import Annotated, Any, cast
 from uuid import UUID
@@ -187,6 +187,40 @@ class AgentPlanBody(BaseModel):
     plan_id: int
 
 
+class WorkoutSetBody(BaseModel):
+    """自然语言打卡确认提交的一组训练事实；组序号由模型提取结果原样携带（stage6.md §2.2）。
+
+    与表单 ``SetIn`` 的差别只有 ``set_no``：自然语言路径的提取结果已含组序号，用户修改后提交
+    的是同一形状的完整载荷。取值范围、负重口径与必填／互斥字段一律由 ``domain.records`` 拒绝。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    exercise_id: str
+    set_no: int
+    set_type: str
+    reps: int | None = None
+    load_convention: str | None = None
+    weight_kg: float | None = None
+    duration_seconds: int | None = None
+
+
+class ConfirmWorkoutBody(BaseModel):
+    """``POST /api/agent/confirm-workout`` 的请求体（stage6.md §2.4.2）：完整确认载荷。
+
+    ``conversation_id`` 按 UUID 校验（与 Agent Run 同一约定）；本端点不要求服务端证明该 session
+    此前完成过自然语言解析，所以它只做形状校验，不参与任何关联查询。``sets`` 是用户可修改后的完整值。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    conversation_id: UUID
+    performed_on: date
+    sets: list[WorkoutSetBody]
+    plan_session_id: int | None = None
+    auto_link: bool = False
+
+
 # ---------- 请求体 → 领域对象 ----------
 
 
@@ -218,6 +252,27 @@ def _fact_from_in(name: str, raw: ProfileFactIn) -> Fact[Any]:
             raise InvalidRequestShape(f"画像字段 {name} 需要文本数组：{value!r}")
         return Fact.known(tuple(value))
     return Fact.known(value)
+
+
+def workout_set_inputs_from_dto(sets: Sequence[WorkoutSetBody]) -> tuple[WorkoutSetInput, ...]:
+    """自然语言确认请求体的组列表 → 组事实；``set_no`` 原样采用（提取结果已给出）。
+
+    组序号范围与同一动作内不重复、组类型、负重口径、重量、次数、时长与按记录口径的必填字段
+    一律由 ``domain.records`` 校验，本层不猜、不补默认值；这也使确认路径与表单路径复用同一套
+    领域规则（stage6.md §2.2）。
+    """
+    return tuple(
+        WorkoutSetInput(
+            exercise_id=item.exercise_id,
+            set_no=item.set_no,
+            reps=item.reps,
+            set_type=cast(SetType, item.set_type),
+            load_convention=cast(LoadConvention | None, item.load_convention),
+            weight_kg=item.weight_kg,
+            duration_seconds=item.duration_seconds,
+        )
+        for item in sets
+    )
 
 
 def workout_facts_from_dto(body: RecordBody) -> tuple[WorkoutSetInput, ...]:
