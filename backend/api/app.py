@@ -2,13 +2,22 @@
 
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime
 from pathlib import Path
 from urllib.parse import urlsplit
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse
+from langgraph.checkpoint.base import BaseCheckpointSaver
 
-from api import dto, routes_plans, routes_profile, routes_records, routes_stats
+from api import (
+    dto,
+    routes_agent,
+    routes_plans,
+    routes_profile,
+    routes_records,
+    routes_stats,
+)
 from config import (
     checkpoint_database_path,
     database_path,
@@ -17,7 +26,27 @@ from config import (
     model_api_key_configured,
     resolve_data_dir,
 )
+from domain.actions.service import ActionCatalogService
+from domain.plans.service import (
+    PlanActivationService,
+    PlanPersistenceService,
+    PlanReadService,
+)
+from domain.profile.service import ProfileService
+from domain.stats.repo import StatsRepo
+from domain.stats.service import StatsService
 from graph.checkpointer import open_checkpointer
+from graph.context import MemoryAssembler
+from graph.model import (
+    MODEL_CALL_FAILED_MESSAGE,
+    ModelCall,
+    ModelCallFailed,
+    ModelConfigurationError,
+    openai_compatible_model_call,
+)
+from graph.nodes import GeneratePlanDeps
+from graph.skills import SkillLoader
+from graph.workflow import AgentRunDeps, build_generate_plan_graph
 from storage.db import Database
 
 _LOOPBACK_HOSTNAMES = frozenset({"localhost", "127.0.0.1", "::1"})
@@ -90,6 +119,8 @@ def create_app(
                 checkpoint_database_path(resolved)
             ) as checkpointer:
                 app.state.checkpointer = checkpointer
+                # Agent 三端点的依赖与编译图只装配一次（stage5.md §4.3–§4.4）。
+                app.state.agent_runtime = build_agent_runtime(db, checkpointer)
                 app.state.business_timezone = local_timezone_name()
                 app.state.provider_has_api_key = model_api_key_configured()
                 yield
@@ -121,11 +152,74 @@ def create_app(
     app.include_router(routes_records.router)
     app.include_router(routes_plans.router)
     app.include_router(routes_stats.router)
+    app.include_router(routes_agent.router)
     _install_frontend_static(
         app,
         Path(frontend_dist) if frontend_dist is not None else frontend_dist_dir(),
     )
     return app
+
+
+def build_agent_runtime(
+    db: Database, checkpointer: BaseCheckpointSaver
+) -> routes_agent.AgentRuntime:
+    """装配 Agent 三端点的生产依赖（stage5.md §4.2–§4.4）：一份 Planner／Evaluator 与唯一模型入口。
+
+    同一个 ``PlanActivationService`` 供确认节点与 ``invoke_confirmation`` 的兜底路径共用；同一个模型
+    callable 供 ``GeneratePlanDeps``（计划链路）与 ``AgentRunDeps``（Router／非计划分支）共用，不建第二套
+    Agent。数据库用 lifespan 里的唯一连接，存档用 lifespan 里的独立 checkpointer。
+    """
+    model = _lazy_model_call()
+    deps = GeneratePlanDeps(
+        profiles=ProfileService(db),
+        catalog=ActionCatalogService(db),
+        stats=StatsRepo(db),
+        assembler=MemoryAssembler(db),
+        skills=SkillLoader(),
+        persistence=PlanPersistenceService(db),
+        plans=PlanReadService(db),
+        activation=PlanActivationService(db),
+        model=model,
+        now=lambda: datetime.now(UTC),
+    )
+    return routes_agent.AgentRuntime(
+        graph=build_generate_plan_graph(deps, checkpointer=checkpointer),
+        deps=deps,
+        run_deps=AgentRunDeps(
+            model=model,
+            stats=StatsService(db),
+            plans=deps.plans,
+            persistence=deps.persistence,
+        ),
+    )
+
+
+def _lazy_model_call() -> ModelCall:
+    """唯一模型入口的惰性形态：三个 ``MODEL_*`` 环境变量在首次调用时才校验。
+
+    启动不读环境变量（无 Key 也能起服务，``/healthz`` 只报 ``provider_has_api_key``）；缺配置时首次
+    模型调用抛 :class:`~graph.model.ModelConfigurationError`，由 ``/api/agent/run`` 按 §3.7 在流内发一个
+    SSE ``error``，不泄露端点、模型名或密钥。
+
+    **Provider 异常的文本不向上抛**：节点抛出的异常会被 LangGraph 写进 checkpoint 存档
+    （``writes`` 表的 ``__error__``），而 Provider／SDK 的 ``str(exc)`` 常带 Base URL 或模型名；因此
+    这里统一换成固定文本的 :class:`~graph.model.ModelCallFailed`（异常原文只进 ``__cause__``）。本项目
+    自己的模型配置错误原本就不含 Provider 取值，照原样上抛。
+    """
+    call: ModelCall | None = None
+
+    async def configured_call(system_prompt: str, user_payload: str) -> str:
+        nonlocal call
+        if call is None:
+            call = openai_compatible_model_call()
+        try:
+            return await call(system_prompt, user_payload)
+        except ModelConfigurationError:
+            raise
+        except Exception as exc:
+            raise ModelCallFailed(MODEL_CALL_FAILED_MESSAGE) from exc
+
+    return configured_call
 
 
 def _install_frontend_static(app: FastAPI, dist_dir: Path) -> None:

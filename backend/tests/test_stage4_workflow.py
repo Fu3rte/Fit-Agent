@@ -20,7 +20,6 @@ Checkpointer 用 ``tmp_path`` 下的独立 SQLite 存档。每次 invocation 都
 
 import ast
 import asyncio
-import importlib.util
 import json
 from collections.abc import AsyncIterator, Callable, Sequence
 from contextlib import asynccontextmanager
@@ -47,7 +46,11 @@ from domain.plans.schema import (
     evaluation_result_from_json,
     plan_draft_from_json,
 )
-from domain.plans.service import PlanPersistenceService, PlanReadService
+from domain.plans.service import (
+    PlanActivationService,
+    PlanPersistenceService,
+    PlanReadService,
+)
 from domain.profile.safety import MESSAGE_RED_FLAG_TERMS, message_red_flag_hits
 from domain.profile.schema import Fact, Profile
 from domain.profile.service import ProfileService
@@ -306,6 +309,7 @@ class CountingPersistence(PlanPersistenceService):
         *,
         existing_draft_id: int | None,
         created_at: str,
+        source_plan_id: int | None = None,
     ) -> Any:
         self.writes.append(evaluation)
         return await super().persist_plan_result(
@@ -313,6 +317,7 @@ class CountingPersistence(PlanPersistenceService):
             evaluation,
             existing_draft_id=existing_draft_id,
             created_at=created_at,
+            source_plan_id=source_plan_id,
         )
 
 
@@ -393,6 +398,8 @@ class _Doubles:
             assembler=self.assembler,
             skills=self.skills,
             persistence=self.persistence,
+            plans=PlanReadService(db),
+            activation=PlanActivationService(db),
             model=self.model,
             now=lambda: FIXED_NOW,
         )
@@ -1401,18 +1408,22 @@ async def test_checkpoint_file_carries_no_provider_configuration(
         assert forbidden.encode() not in serialized
 
 
-# ---------- §2.2／§3.10 Stage 4 没有 Agent 路由、SSE 或确认入口 ----------
+# ---------- §2.2：Stage 4 子图没有 Agent 路由／SSE；Subtask 05 的新增入口在此正向取证 ----------
 
-#: Stage 4 明确不做的入口形态（stage4.md §2.2／§3.10、§6 Subtask 05 验收）。
+#: SSE 入口形态只允许出现在 ``api/routes_agent.py``：别的 api 模块出现这些词即说明 SSE 入口外泄。
 FORBIDDEN_SSE_TOKENS: tuple[str, ...] = (
     "StreamingResponse",
     "EventSource",
     "text/event-stream",
 )
-#: 路径级证据：确认／Agent／SSE 入口都会在注册路径里出现这些词。
-FORBIDDEN_ROUTE_TOKENS: tuple[str, ...] = ("agent", "confirm", "stream", "sse")
 #: 路由注册以外还能直接新增入口的 FastAPI 方法。
 DIRECT_ROUTE_REGISTRATIONS: tuple[str, ...] = ("add_route", "add_api_route")
+#: §3.7 的三个 Agent 端点：Stage 5 的唯一新增路由。
+AGENT_ROUTES: tuple[str, ...] = (
+    "/api/agent/run",
+    "/api/agent/confirm",
+    "/api/agent/reject",
+)
 
 
 def _registered_paths(routes: Sequence[Any]) -> set[str]:
@@ -1430,10 +1441,15 @@ def _registered_paths(routes: Sequence[Any]) -> set[str]:
     return paths
 
 
-def test_stage4_registers_no_agent_route_sse_or_confirmation_entry(
+def test_stage5_registers_the_agent_endpoints_and_keeps_sse_in_routes_agent(
     tmp_path: Path,
 ) -> None:
-    """§2.2／§3.10 ＋ §6 Subtask 05 验收：``create_app`` 只注册四个既有路由，没有 routes_agent／SSE／确认入口。"""
+    """§4.5 定点更新：Stage 4 的「无 routes_agent／SSE」否定断言改为 Stage 5 正向断言。
+
+    ``create_app`` 注册四个既有路由 ＋ ``routes_agent``（三个 Agent 端点，§3.7）；SSE 入口形态（
+    ``StreamingResponse``／``text/event-stream``）只允许出现在 ``api/routes_agent.py``，其它 api 模块
+    仍不得新增 SSE 入口，也不得新增 checkpoint 查询类路径（``stream``／``sse``）。
+    """
     tree = ast.parse((BACKEND_ROOT / "api" / "app.py").read_text(encoding="utf-8"))
     create_app_node = next(
         node
@@ -1454,6 +1470,7 @@ def test_stage4_registers_no_agent_route_sse_or_confirmation_entry(
         "routes_records",
         "routes_plans",
         "routes_stats",
+        "routes_agent",
     ]
     assert not [
         node
@@ -1463,10 +1480,12 @@ def test_stage4_registers_no_agent_route_sse_or_confirmation_entry(
         and node.func.attr in DIRECT_ROUTE_REGISTRATIONS
     ]
 
-    assert not (BACKEND_ROOT / "api" / "routes_agent.py").exists()
-    assert importlib.util.find_spec("api.routes_agent") is None
     for module in sorted((BACKEND_ROOT / "api").glob("*.py")):
         source = module.read_text(encoding="utf-8")
+        if module.name == "routes_agent.py":
+            assert "StreamingResponse" in source
+            assert "text/event-stream" in source
+            continue
         for token in FORBIDDEN_SSE_TOKENS:
             assert token not in source, f"{module.name} 出现了 SSE 入口：{token}"
 
@@ -1475,8 +1494,5 @@ def test_stage4_registers_no_agent_route_sse_or_confirmation_entry(
         path for path in _registered_paths(app.routes) if path.startswith("/api")
     }
     assert api_paths, "没有读到已注册的表单 API 路由，测试无效"
-    assert not [
-        path
-        for path in api_paths
-        if any(token in path for token in FORBIDDEN_ROUTE_TOKENS)
-    ]
+    assert set(AGENT_ROUTES) <= api_paths
+    assert not [path for path in api_paths if "stream" in path or "sse" in path]

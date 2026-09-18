@@ -18,6 +18,10 @@
   直接消费），不抛异常——失败项要全量回传，供最多一次修订使用。规则标识是封闭的六项：
   ``weekly_frequency_mismatch``／``unknown_exercise``／``exercise_not_recommendable``／
   ``record_type_mismatch``／``forbidden_exercise``／``load_source_mismatch``。
+- :func:`validate_plan_adjustment` 与它同形返回、共用同一封闭六项：结构与目录检查完全一致，只把
+  「具体负荷必须等于最近一次有效工作组」换成「具体负荷必须等于按当前 active 的目标处方与关联日程
+  训练算出的渐进决策」（stage5.md §3.4；讨论总结 §7.3 的起始负荷口径仍是 active 没有目标处方的
+  动作的唯一来源）。
 - :func:`resolve_starting_load`／:func:`resolve_progression` 是纯决策函数（Stage 4 只提供规则，
   调整计划的 Graph 接线留 Stage 5）；只有「输入不满足规则前提」才抛 :class:`InvalidPlanRule`。
 
@@ -34,6 +38,7 @@ from domain.plans.schema import (
     KnownLoad,
     NeedsCalibration,
     PlanDraft,
+    PlannedExercise,
     RuleFailure,
     WeightedRepsPrescription,
 )
@@ -220,6 +225,84 @@ def resolve_progression(
     return ProgressionDecision("keep", target_load_kg)
 
 
+@dataclass(frozen=True, slots=True)
+class ActiveLoadTarget:
+    """当前 active 计划里一个动作的目标处方：渐进决策的全部输入面（无具体负荷的动作不产生它）。"""
+
+    sets: int
+    reps_min: int
+    reps_max: int
+    target_load_kg: float
+
+
+def _weekly_frequency_failures(
+    draft: PlanDraft, *, profile_weekly_frequency: int
+) -> list[RuleFailure]:
+    """每周训练次数必须复用画像的 ``known`` 值。"""
+    if draft.weekly_frequency == profile_weekly_frequency:
+        return []
+    return [
+        RuleFailure(
+            code="weekly_frequency_mismatch",
+            message=(
+                f"计划每周训练次数 {draft.weekly_frequency} 与画像 "
+                f"{profile_weekly_frequency} 不一致"
+            ),
+        )
+    ]
+
+
+def _prescription_failures(
+    planned: PlannedExercise,
+    *,
+    exercises: Mapping[str, Exercise],
+    forbidden: Collection[str],
+) -> list[RuleFailure]:
+    """一个候选动作的目录检查：动作存在、``recommendable``、记录口径一致、未被画像禁用。
+
+    负荷来源检查由调用方按生成计划或调整计划的口径分别追加（本函数不决定负荷规则）。
+    """
+    exercise = exercises.get(planned.exercise_id)
+    if exercise is None:
+        return [
+            RuleFailure(
+                code="unknown_exercise",
+                message=f"动作身份不在目录内：{planned.exercise_id}",
+                exercise_id=planned.exercise_id,
+            )
+        ]
+    failures: list[RuleFailure] = []
+    if not exercise.recommendable:
+        failures.append(
+            RuleFailure(
+                code="exercise_not_recommendable",
+                message=f"动作不可用于计划（recommendable=0）：{exercise.id}",
+                exercise_id=exercise.id,
+            )
+        )
+    expected_record_type = RECORD_TYPE_BY_PRESCRIPTION[planned.prescription.type]
+    if expected_record_type != exercise.record_type:
+        failures.append(
+            RuleFailure(
+                code="record_type_mismatch",
+                message=(
+                    f"处方类型 {planned.prescription.type!r} 与目录动作 {exercise.id!r} 的"
+                    f"记录口径 {exercise.record_type!r} 不一致"
+                ),
+                exercise_id=exercise.id,
+            )
+        )
+    if exercise.id in forbidden:
+        failures.append(
+            RuleFailure(
+                code="forbidden_exercise",
+                message=f"计划含画像明确禁用的动作：{exercise.id}",
+                exercise_id=exercise.id,
+            )
+        )
+    return failures
+
+
 def validate_plan_draft(
     draft: PlanDraft,
     *,
@@ -237,58 +320,18 @@ def validate_plan_draft(
 
     次数／时长区间与字段互斥已由 :class:`~domain.plans.schema.PlanDraft` 的 Schema 保证，本层不重复。
     """
-    failures: list[RuleFailure] = []
-    if draft.weekly_frequency != profile_weekly_frequency:
-        failures.append(
-            RuleFailure(
-                code="weekly_frequency_mismatch",
-                message=(
-                    f"计划每周训练次数 {draft.weekly_frequency} 与画像 "
-                    f"{profile_weekly_frequency} 不一致"
-                ),
-            )
-        )
+    failures = _weekly_frequency_failures(
+        draft, profile_weekly_frequency=profile_weekly_frequency
+    )
     forbidden = set(forbidden_exercise_ids)
     for day in draft.training_days:
         for planned in day.exercises:
+            failures.extend(
+                _prescription_failures(planned, exercises=exercises, forbidden=forbidden)
+            )
             exercise = exercises.get(planned.exercise_id)
             if exercise is None:
-                failures.append(
-                    RuleFailure(
-                        code="unknown_exercise",
-                        message=f"动作身份不在目录内：{planned.exercise_id}",
-                        exercise_id=planned.exercise_id,
-                    )
-                )
                 continue
-            if not exercise.recommendable:
-                failures.append(
-                    RuleFailure(
-                        code="exercise_not_recommendable",
-                        message=f"动作不可用于计划（recommendable=0）：{exercise.id}",
-                        exercise_id=exercise.id,
-                    )
-                )
-            expected_record_type = RECORD_TYPE_BY_PRESCRIPTION[planned.prescription.type]
-            if expected_record_type != exercise.record_type:
-                failures.append(
-                    RuleFailure(
-                        code="record_type_mismatch",
-                        message=(
-                            f"处方类型 {planned.prescription.type!r} 与目录动作 {exercise.id!r} 的"
-                            f"记录口径 {exercise.record_type!r} 不一致"
-                        ),
-                        exercise_id=exercise.id,
-                    )
-                )
-            if exercise.id in forbidden:
-                failures.append(
-                    RuleFailure(
-                        code="forbidden_exercise",
-                        message=f"计划含画像明确禁用的动作：{exercise.id}",
-                        exercise_id=exercise.id,
-                    )
-                )
             if isinstance(planned.prescription, WeightedRepsPrescription) and isinstance(
                 planned.prescription.load, KnownLoad
             ):
@@ -298,6 +341,125 @@ def validate_plan_draft(
                     )
                 )
     return tuple(failures)
+
+
+def validate_plan_adjustment(
+    draft: PlanDraft,
+    *,
+    active_draft: PlanDraft,
+    linked_workout_session_ids: Collection[int],
+    exercises: Mapping[str, Exercise],
+    profile_weekly_frequency: int,
+    forbidden_exercise_ids: Collection[str] = (),
+    work_sets: Sequence[ValidWorkSet] = (),
+) -> tuple[RuleFailure, ...]:
+    """调整计划的确定性层：结构与目录检查同生成计划，负荷按当前 active 的渐进决策判断。
+
+    对每个给出具体负荷的负重处方：active 里有同动作的目标处方（目标组数／次数区间／目标负荷）时，
+    按该目标与 ``linked_workout_session_ids`` 里的关联日程训练调用 :func:`resolve_progression`，
+    候选负荷必须等于决策给出的重量；决策为 ``needs_calibration`` 时候选不得给出具体重量。active 没有
+    该动作的目标处方（调整新增的动作）时没有渐进决策可判，按讨论总结 §7.3 的起始负荷口径回退到
+    生成计划的最近工作组规则。
+    """
+    failures = _weekly_frequency_failures(
+        draft, profile_weekly_frequency=profile_weekly_frequency
+    )
+    forbidden = set(forbidden_exercise_ids)
+    targets = _active_load_targets(active_draft)
+    for day in draft.training_days:
+        for planned in day.exercises:
+            failures.extend(
+                _prescription_failures(planned, exercises=exercises, forbidden=forbidden)
+            )
+            exercise = exercises.get(planned.exercise_id)
+            if exercise is None or not isinstance(
+                planned.prescription, WeightedRepsPrescription
+            ):
+                continue
+            load = planned.prescription.load
+            if not isinstance(load, KnownLoad):
+                continue
+            target = targets.get(planned.exercise_id)
+            if target is None or exercise.min_load_increment_kg is None:
+                # 没有 active 目标处方（或目录动作不是外加负重口径、已另有 record_type_mismatch）：
+                # 没有渐进决策可判，按起始负荷口径检查来源。
+                failures.extend(
+                    _load_source_failures(load, exercise_id=exercise.id, work_sets=work_sets)
+                )
+                continue
+            decision = resolve_progression(
+                work_sets,
+                linked_workout_session_ids=linked_workout_session_ids,
+                target_sets=target.sets,
+                reps_min=target.reps_min,
+                reps_max=target.reps_max,
+                target_load_kg=target.target_load_kg,
+                increment_kg=exercise.min_load_increment_kg,
+            )
+            failures.extend(
+                _progression_failures(
+                    load,
+                    decision=decision,
+                    exercise_id=exercise.id,
+                    target_load_kg=target.target_load_kg,
+                )
+            )
+    return tuple(failures)
+
+
+def _active_load_targets(active_draft: PlanDraft) -> dict[str, ActiveLoadTarget]:
+    """当前 active 里每个动作的目标处方；同一动作重复出现时取第一处（顺序稳定，不猜合并口径）。"""
+    targets: dict[str, ActiveLoadTarget] = {}
+    for day in active_draft.training_days:
+        for planned in day.exercises:
+            prescription = planned.prescription
+            if not isinstance(prescription, WeightedRepsPrescription) or not isinstance(
+                prescription.load, KnownLoad
+            ):
+                continue
+            targets.setdefault(
+                planned.exercise_id,
+                ActiveLoadTarget(
+                    sets=planned.sets,
+                    reps_min=prescription.reps_min,
+                    reps_max=prescription.reps_max,
+                    target_load_kg=prescription.load.weight_kg,
+                ),
+            )
+    return targets
+
+
+def _progression_failures(
+    load: KnownLoad,
+    *,
+    decision: ProgressionDecision,
+    exercise_id: str,
+    target_load_kg: float,
+) -> list[RuleFailure]:
+    """候选负荷必须等于渐进决策：``needs_calibration`` 时不得给出具体重量（复用负荷来源规则标识）。"""
+    if decision.action == "needs_calibration":
+        return [
+            RuleFailure(
+                code="load_source_mismatch",
+                message=(
+                    f"渐进决策为 needs_calibration：调整候选不得给出具体重量（active 目标 "
+                    f"{target_load_kg}kg）：{exercise_id}"
+                ),
+                exercise_id=exercise_id,
+            )
+        ]
+    if load.weight_kg == decision.load_kg:
+        return []
+    return [
+        RuleFailure(
+            code="load_source_mismatch",
+            message=(
+                f"调整候选负荷必须等于渐进决策：期望 {decision.action} 到 {decision.load_kg}kg"
+                f"（active 目标 {target_load_kg}kg）：{exercise_id}"
+            ),
+            exercise_id=exercise_id,
+        )
+    ]
 
 
 def _load_source_failures(

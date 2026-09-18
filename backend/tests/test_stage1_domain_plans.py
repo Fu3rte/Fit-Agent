@@ -221,12 +221,23 @@ async def test_read_service_exposes_active_drafts_history_and_sessions(
         await db.close()
 
 
-def test_repo_exposes_no_plan_write_entries() -> None:
-    """Stage 1 不开放计划创建、确认、拒绝或激活入口（激活事务留到 Stage 5）。"""
-    forbidden = ("create", "confirm", "reject", "activate", "archive", "insert", "update")
-    assert not [
-        name for name in dir(PlanRepo) if name.lower().startswith(forbidden)
-    ]
+def test_read_service_exposes_no_plan_write_entries() -> None:
+    """只读入口不开放计划创建、确认、拒绝或激活：读接口与写事务分层（Stage 5 §4.2）。
+
+    Stage 5 按 §4.2 在 ``PlanRepo`` 新增事务内状态／日程原语（draft→active、active／draft→archived、
+    取消未到期日程、建立新日程），调用方是 ``domain.plans.service`` 的写服务与激活服务；只读用例入口
+    仍是纯读，本断言只覆盖它。
+    """
+    forbidden = (
+        "create",
+        "confirm",
+        "reject",
+        "activate",
+        "archive",
+        "insert",
+        "update",
+        "write",
+    )
     assert not [
         name for name in dir(PlanReadService) if name.lower().startswith(forbidden)
     ]

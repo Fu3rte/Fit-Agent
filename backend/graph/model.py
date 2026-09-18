@@ -42,6 +42,20 @@ class InvalidModelResponse(ValueError):
     """模型响应不是合法 JSON 或不符合目标 Schema：运行错误，不消耗修订次数。"""
 
 
+class ModelCallFailed(ValueError):
+    """Provider／SDK 模型调用失败：只用固定文本，不回显端点、模型名、密钥或堆栈。
+
+    异常原文只进 ``__cause__``（链式追溯）；生产模型入口（``api/app.py::_lazy_model_call``）在 Provider／
+    SDK 异常发生时用它替换原文：模型调用发生在 Graph 节点内，而 LangGraph 会把节点异常原文写进 checkpoint
+    存档（``writes`` 表的 ``__error__``），Provider 异常的 ``str(exc)`` 常带 Base URL 或模型名，不能落盘
+    （stage5.md §3.7「不回显 Base URL、模型名、SQL、文件路径或堆栈」）。
+    """
+
+
+#: :class:`ModelCallFailed` 的可见文本：产品提示 ＋ 本次 Run 没有计划写入。
+MODEL_CALL_FAILED_MESSAGE = "模型调用失败：本次运行未产生计划写入，请稍后重试"
+
+
 def require_model_env(name: str) -> str:
     """读取一个模型环境变量；缺失或空白即 :class:`ModelConfigurationError`（不暴露其它取值）。"""
     value = os.environ.get(name, "").strip()

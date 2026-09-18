@@ -337,3 +337,70 @@ export interface TrendsResponseWire {
 export interface CalendarResponseWire {
   calendar: CalendarMonthWire;
 }
+
+/* ------------------------------- Agent 传输 ------------------------------- */
+
+/** POST /api/agent/run 请求体：conversation_id 由前端生成 UUID，即 Checkpointer 的 thread_id */
+export interface AgentRunBody {
+  conversation_id: string;
+  request: string;
+  /** 缺省 false：已有同类 draft 时按 §3.4 直接复用，不调模型 */
+  regenerate?: boolean;
+}
+
+/** POST /api/agent/confirm 与 /api/agent/reject 请求体：会话身份 + 目标计划身份 */
+export interface AgentPlanBody {
+  conversation_id: string;
+  plan_id: number;
+}
+
+/** confirm／reject 的响应：落库后的计划行（激活成功或幂等返回既有行） */
+export interface AgentPlanResponseWire {
+  plan: PlanWire;
+}
+
+/** 五类 SSE 产品事件名（与后端 AgentEventName 同一封闭集合，不发送别的名字） */
+export type AgentEventNameWire = "node" | "message" | "waiting" | "done" | "error";
+
+/** 当前 Graph 节点／阶段名 */
+export interface AgentNodeEventWire {
+  event: "node";
+  data: { name: string };
+}
+
+/** 面向用户的可见文本（安全提示、表单引导、统计解释、二次阻断说明） */
+export interface AgentMessageEventWire {
+  event: "message";
+  data: { text: string };
+}
+
+/** 已持久化 draft，等待确认；只带 draft 身份 */
+export interface AgentWaitingEventWire {
+  event: "waiting";
+  data: { draft_plan_id: number };
+}
+
+/** Run 正常结束；安全命中先于 Router 时没有分类结论，intent 因此可为 null */
+export interface AgentDoneEventWire {
+  event: "done";
+  data: {
+    ok: true;
+    intent: string | null;
+    termination_reason: string | null;
+    draft_plan_id: number | null;
+  };
+}
+
+/** 运行错误；message 是后端已脱敏的可见文本，不含密钥、Provider 配置或堆栈 */
+export interface AgentErrorEventWire {
+  event: "error";
+  data: { message: string };
+}
+
+/** 五类事件的判别联合：data 键集合与后端逐字一致，不增不减 */
+export type AgentEventWire =
+  | AgentNodeEventWire
+  | AgentMessageEventWire
+  | AgentWaitingEventWire
+  | AgentDoneEventWire
+  | AgentErrorEventWire;

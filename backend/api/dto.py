@@ -3,6 +3,10 @@
 响应侧同时是只读统计（PB、趋势、月历）的唯一边界映射：``personal_best_dto``／``trends_dto``／
 ``calendar_dto`` 也是 Subtask 05 前端契约的后端侧正本。
 
+Stage 5 的 Agent 三端点（``api/routes_agent.py``）也在这里定义请求体与 confirm／reject 异常到
+既有 JSON 错误形状的映射（stage5.md §4.4／§3.7）：``/api/agent/run`` 的流前校验错误与
+``/confirm``／``/reject`` 的领域错误都复用同一形状，不在 Agent 层另造一套。
+
 正本：``LANGGRAPH_REFACTOR_PLAN.md`` §4（目标代码结构）、§6.1（校验责任划分）与 Stage 1
 子任务 04（表单 API）。三条硬边界：
 
@@ -21,6 +25,7 @@ import sqlite3
 from collections.abc import Callable
 from datetime import date
 from typing import Annotated, Any, cast
+from uuid import UUID
 
 from fastapi import FastAPI, Query, Request
 from fastapi.exceptions import RequestValidationError
@@ -33,6 +38,7 @@ from domain.body_metrics.rules import InvalidBodyMetric
 from domain.body_metrics.schema import BodyMetric
 from domain.body_metrics.service import BodyMetricNotFound
 from domain.plans.schema import Plan, PlanSession
+from domain.plans.service import PlanActivationError, PlanNotFound
 from domain.profile.rules import InvalidProfile, UnknownExerciseReference
 from domain.profile.schema import (
     FIELD_VALUE_KINDS,
@@ -156,6 +162,29 @@ class ProfileBody(BaseModel):
     current_level: ProfileFactIn
     known_injuries: ProfileFactIn
     forbidden_exercise_ids: ProfileFactIn
+
+
+class AgentRunBody(BaseModel):
+    """``POST /api/agent/run`` 的请求体（stage5.md §3.7）：``conversation_id`` 按 UUID 校验。
+
+    ``conversation_id`` 就是 Checkpointer 的 ``thread_id``（不另建映射）；``regenerate`` 缺省 false。
+    形状、字段类型或 UUID 非法都在流建立**前**按既有 JSON 错误形状（400）拒绝，不进入 SSE。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    conversation_id: UUID
+    request: str
+    regenerate: bool = False
+
+
+class AgentPlanBody(BaseModel):
+    """``POST /api/agent/confirm``／``reject`` 的请求体（stage5.md §3.7）：会话身份 ＋ 目标计划身份。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    conversation_id: UUID
+    plan_id: int
 
 
 # ---------- 请求体 → 领域对象 ----------
@@ -445,6 +474,10 @@ def _optional_iso(value: date | None) -> str | None:
 #: 异常类型 → HTTP 状态码（``error_code`` 一律 ``invalid_request``）。请求体形状与 Pydantic
 #: 校验错（未知字段、缺字段、非法类型、非 JSON）是 400；领域规则与值域是 422；身份不存在是
 #: 404；关联日程不可用或候选不唯一、以及库内约束兜底是 409。未登记异常不映射（500）。
+#:
+#: 确认／拒绝（``api/routes_agent.py``）按 stage5.md §3.7 复用同一形状与状态码：计划不存在是 404；
+#: ID 不匹配、状态冲突、日期过期与再校验失败都是 409（``PlanActivationError`` 一族，含
+#: ``graph.nodes.ConfirmationConflict``；子类按 MRO 先命中更具体的登记项）。
 _ERROR_STATUS: tuple[tuple[type[Exception], int], ...] = (
     (RequestValidationError, 400),
     (InvalidRequestShape, 400),
@@ -457,8 +490,10 @@ _ERROR_STATUS: tuple[tuple[type[Exception], int], ...] = (
     (WorkoutRecordNotFound, 404),
     (BodyMetricNotFound, 404),
     (UnknownResource, 404),
+    (PlanNotFound, 404),
     (PlanSessionLinkUnavailable, 409),
     (PlanSessionLinkAmbiguous, 409),
+    (PlanActivationError, 409),
     (sqlite3.IntegrityError, 409),
 )
 

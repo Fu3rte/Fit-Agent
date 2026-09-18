@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { NavLink, Route, Routes } from "react-router-dom";
 import { Toaster } from "sonner";
-import { Dumbbell, LayoutDashboard, Moon, Sun, UserRound } from "lucide-react";
+import { Dumbbell, ClipboardList, LayoutDashboard, Moon, Sun, UserRound } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { getTheme, setTheme, type Theme } from "@/lib/theme";
 import { TooltipProvider } from "@/components/ui/tooltip";
@@ -23,10 +23,12 @@ import {
 import ProfilePage from "@/features/profile/ProfilePage";
 import RecordsPage from "@/features/records/RecordsPage";
 import DashboardPage from "@/features/dashboard/DashboardPage";
+import PlansPage from "@/features/plans/PlansPage";
 
-/** 保留页面：数据看板、画像与训练记录（讨论总结 §7；旧对话/复盘/设置页已随旧路径删除）。 */
+/** 保留页面：数据看板、计划、画像与训练记录（讨论总结 §7；旧对话/复盘/设置页已随旧路径删除）。 */
 const nav = [
   { to: "/dashboard", label: "数据看板", icon: LayoutDashboard, end: false },
+  { to: "/plans", label: "训练计划", icon: ClipboardList, end: false },
   { to: "/profile", label: "用户画像", icon: UserRound, end: false },
   { to: "/records", label: "训练记录", icon: Dumbbell, end: false },
 ];
@@ -120,6 +122,7 @@ export default function App() {
             <Routes>
               <Route path="/" element={<RecordsPage />} />
               <Route path="/dashboard" element={<DashboardPage />} />
+              <Route path="/plans" element={<PlansPage />} />
               <Route path="/profile" element={<ProfilePage />} />
               <Route path="/records" element={<RecordsPage />} />
             </Routes>
