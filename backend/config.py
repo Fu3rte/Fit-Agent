@@ -1,4 +1,4 @@
-"""本地数据目录、模型环境变量状态和前端构建路径。"""
+"""本地数据目录、模型环境变量名与前端构建路径。"""
 
 import os
 from pathlib import Path
@@ -13,6 +13,8 @@ APP_NAME = "Fit-Agent"
 DATABASE_FILENAME = "fit_agent_langgraph.db"
 # LangGraph Checkpointer 存档：独立文件名，绝不与业务库同库（讨论总结 §9）。
 CHECKPOINT_DATABASE_FILENAME = "langgraph_checkpoints.db"
+# 模型配置文件（设置页可编辑；provider.json 非空字段优先，空字段回落 MODEL_* 环境变量）。
+PROVIDER_CONFIG_FILENAME = "provider.json"
 DATA_DIR_OVERRIDE_ENV = "FIT_AGENT_DATA_DIR"
 MODEL_API_KEY_ENV = "MODEL_API_KEY"
 MODEL_BASE_URL_ENV = "MODEL_BASE_URL"
@@ -54,11 +56,6 @@ def checkpoint_database_path(data_dir: Path) -> Path:
 
 def frontend_dist_dir() -> Path:
     return Path(__file__).resolve().parent.parent / "frontend" / "dist"
-
-
-def model_api_key_configured() -> bool:
-    """只返回配置状态，不暴露密钥值。"""
-    return bool(os.environ.get(MODEL_API_KEY_ENV))
 
 
 def local_timezone_name() -> str:

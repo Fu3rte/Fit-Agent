@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { NavLink, Route, Routes } from "react-router-dom";
 import { Toaster } from "sonner";
-import { Dumbbell, ClipboardList, LayoutDashboard, MessageSquare, Moon, Sun, UserRound } from "lucide-react";
+import { Dumbbell, ClipboardList, LayoutDashboard, MessageSquare, Moon, Settings, Sun, UserRound } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { getTheme, setTheme, type Theme } from "@/lib/theme";
 import { TooltipProvider } from "@/components/ui/tooltip";
@@ -25,10 +25,12 @@ import RecordsPage from "@/features/records/RecordsPage";
 import DashboardPage from "@/features/dashboard/DashboardPage";
 import PlansPage from "@/features/plans/PlansPage";
 import ChatPage from "@/features/chat/ChatPage";
+import ProviderPage from "@/features/provider/ProviderPage";
 
 /**
  * 保留页面：数据看板、计划、画像与训练记录（讨论总结 §7；旧对话/复盘/设置页已随旧路径删除），
- * 外加 Stage 6 的对话页（stage6.md §2.5.1：自然语言打卡确认与计划生成／调整入口）。
+ * Stage 6 的对话页（stage6.md §2.5.1：自然语言打卡确认与计划生成／调整入口），
+ * 以及模型配置页（用户拍板：可编辑 Provider 配置，覆盖旧「设置页已删除」约束）。
  */
 const nav = [
   { to: "/chat", label: "对话", icon: MessageSquare, end: false },
@@ -36,6 +38,7 @@ const nav = [
   { to: "/plans", label: "训练计划", icon: ClipboardList, end: false },
   { to: "/profile", label: "用户画像", icon: UserRound, end: false },
   { to: "/records", label: "训练记录", icon: Dumbbell, end: false },
+  { to: "/provider", label: "模型配置", icon: Settings, end: false },
 ];
 
 /** 主题切换（C3B）：浅色默认，暗色第二主题 */
@@ -131,6 +134,7 @@ export default function App() {
               <Route path="/plans" element={<PlansPage />} />
               <Route path="/profile" element={<ProfilePage />} />
               <Route path="/records" element={<RecordsPage />} />
+              <Route path="/provider" element={<ProviderPage />} />
             </Routes>
           </div>
         </main>

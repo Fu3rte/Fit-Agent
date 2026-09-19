@@ -23,9 +23,10 @@ storage/   SQLite 连接与串行锁、编号迁移、事务入口
 
 ```text
 backend/
-├── config.py                 # 数据目录、fit_agent_langgraph.db / langgraph_checkpoints.db 文件名、
-│                             # MODEL_* 环境变量常量、60s/180s/5 次 Run 上限
+├── config.py                 # 数据目录、fit_agent_langgraph.db / langgraph_checkpoints.db /
+│                             # provider.json 文件名、MODEL_* 环境变量常量、60s/180s/5 次 Run 上限
 ├── business_time.py          # 业务时区校验与业务自然日
+├── provider_settings.py      # provider.json 读／写／清空与模型凭据解析（json 优先，空字段回落 env）
 ├── main.py                   # 进程入口：装配 api.app，单 Worker，仅回环地址
 ├── api/
 │   ├── app.py                # FastAPI 工厂 ＋ lifespan（迁移、唯一业务连接、独立 Checkpointer、运行时装配）
@@ -35,6 +36,7 @@ backend/
 │   ├── routes_records.py     # 训练记录、身体指标、动作目录
 │   ├── routes_plans.py       # 计划与计划日程只读
 │   ├── routes_profile.py     # 画像读取与整份覆盖写
+│   ├── routes_provider.py    # 模型配置 GET/PUT/DELETE（响应不含完整 API Key）
 │   └── routes_stats.py       # PB、趋势、月历只读
 ├── domain/
 │   ├── actions/              # 动作目录：稳定 exercise_id、记录口径、负重口径、增重单位
@@ -71,7 +73,9 @@ backend/
 4. SQL 只在 `domain/*/repo.py` 与 `storage/`；事务体内不做模型请求、不推 SSE。
 5. SSE 只发 `node`／`message`／`waiting`／`done`／`error` 五类产品事件，不暴露原始 LangGraph 事件、
    系统提示词或 Provider 配置。
-6. 模型配置只从 `MODEL_API_KEY`／`MODEL_BASE_URL`／`MODEL_MODEL` 读取，取值不回显、不落库、不进 State。
+6. 模型配置以数据目录 `provider.json`（设置页可编辑，POSIX 0600）非空字段优先，空字段回落
+   `MODEL_API_KEY`／`MODEL_BASE_URL`／`MODEL_MODEL`；取值不回显（完整 Key 不进响应／日志／SSE／
+   错误详情）、不落业务库、不进 State／Checkpointer。
 
 ## 运行与测试
 

@@ -221,6 +221,20 @@ class ConfirmWorkoutBody(BaseModel):
     auto_link: bool = False
 
 
+class ProviderPutBody(BaseModel):
+    """模型配置整份覆盖请求体（PUT ``/api/provider``）：字段未出现写空串，出现按值写入。
+
+    完整 API Key 只进本请求体与 ``provider.json``，不进任何响应；形状非法按既有 JSON
+    错误形状（400 ``invalid_request``）拒绝，``message`` 不回显任何字段取值。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    api_key: str | None = None
+    base_url: str | None = None
+    model: str | None = None
+
+
 # ---------- 请求体 → 领域对象 ----------
 
 

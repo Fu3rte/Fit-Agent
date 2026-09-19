@@ -6,7 +6,7 @@
  * routes_records / routes_plans / routes_stats 的传输形状。
  *
  * 冻结口径（讨论总结 §7、§9；REFACTOR_PLAN §5/§6）：无 RIR、无 context_version、
- * 无通用草稿/修订链、无 Run/Provider 传输形状。
+ * 无通用草稿/修订链。Provider 传输形状见文末「模型配置」段（用户拍板：设置页可编辑）。
  */
 
 /* ---------------------------------- 错误 ---------------------------------- */
@@ -468,3 +468,19 @@ export type AgentEventWire =
   | AgentWaitingWorkoutEventWire
   | AgentDoneEventWire
   | AgentErrorEventWire;
+
+/* ------------------------------ 模型配置（Provider） ------------------------------ */
+
+/** GET /api/provider 响应：后端不回传 api_key 本体，只给是否已配置的布尔 */
+export type ProviderStatusWire = {
+  has_api_key: boolean;
+  base_url: string;
+  model: string;
+};
+
+/** PUT /api/provider 请求体：整份覆盖，未出现的字段由后端写空串 */
+export type ProviderWriteBody = {
+  api_key?: string;
+  base_url?: string;
+  model?: string;
+};

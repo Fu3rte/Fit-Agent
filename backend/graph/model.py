@@ -1,32 +1,28 @@
-"""最小模型入口：三个模型环境变量的校验与一个 OpenAI 兼容调用入口（stage4.md §3.7、§5.3）。
+"""最小模型入口：模型配置的校验与一个 OpenAI 兼容调用入口（stage4.md §3.7、§5.3）。
 
-- **只在环境变量里取配置**：``MODEL_API_KEY``／``MODEL_BASE_URL``／``MODEL_MODEL`` 三者缺一即
-  :class:`ModelConfigurationError`；取值不回显、不写日志、不进 State／业务库／checkpoint。
-- **一个具体入口，不是基础设施**：:func:`openai_compatible_model_call` 返回节点接收的 callable
-  （系统提示词 ＋ 用户载荷 → 响应文本），:func:`build_chat_model` 暴露同一个 ``ChatOpenAI`` 对象；
-  不建 Planner／Evaluator 基类、Agent 工厂或 Provider 注册中心。
-- **单次请求超时 60 秒**（决策 8B）：在模型对象上固定；180 秒 Run 时限与最多 5 次请求由 Graph
-  运行上下文 ``graph.nodes.ModelRequestBudget`` 持有。
-- **响应文本 → 目标 Schema** 的解析在 :func:`parse_model_json`：非法结构是运行错误，不消耗修订次数、
-  不创建 rejected 计划。
+- **配置取值两级来源**：``provider_settings.resolve_model_credentials`` 先读数据目录
+  ``provider.json``，非空字段优先；空字段回落 ``MODEL_API_KEY``／``MODEL_BASE_URL``／
+  ``MODEL_MODEL`` 环境变量；两者皆空即 ``provider_settings.ModelConfigurationError``。
+- **一个具体入口，不是基础设施**：:func:`openai_compatible_model_call` 返回节点接收的 callable；
+  不建 Agent 工厂或 Provider 注册中心。
+- **单次请求超时 60 秒**（决策 8B）：在模型对象上固定。
 
-注入点：节点构造期传入 :data:`ModelCall`，测试用固定替身即可在无 API Key 的情况下驱动整条计划链路。
+注入点：节点构造期传入 :class:`ModelCall`；``data_dir`` 由 app 装配注入。
 """
 
-import os
 from collections.abc import Awaitable, Callable
+from pathlib import Path
 from typing import TypeVar
 
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
 from pydantic import BaseModel
 
-from config import (
-    MODEL_API_KEY_ENV,
-    MODEL_BASE_URL_ENV,
-    MODEL_MODEL_ENV,
-    MODEL_REQUEST_TIMEOUT_SECONDS,
+from config import MODEL_REQUEST_TIMEOUT_SECONDS
+from provider_settings import (
+    ModelConfigurationError as ModelConfigurationError,
 )
+from provider_settings import resolve_model_credentials
 
 #: 一次模型调用的注入契约：系统提示词 ＋ 用户载荷文本 → 原始响应文本。
 ModelCall = Callable[[str, str], Awaitable[str]]
@@ -34,54 +30,32 @@ ModelCall = Callable[[str, str], Awaitable[str]]
 TModel = TypeVar("TModel", bound=BaseModel)
 
 
-class ModelConfigurationError(ValueError):
-    """模型配置缺失：三个环境变量缺一即配置错误，不落默认值、不猜端点。"""
-
-
 class InvalidModelResponse(ValueError):
     """模型响应不是合法 JSON 或不符合目标 Schema：运行错误，不消耗修订次数。"""
 
 
 class ModelCallFailed(ValueError):
-    """Provider／SDK 模型调用失败：只用固定文本，不回显端点、模型名、密钥或堆栈。
-
-    异常原文只进 ``__cause__``（链式追溯）；生产模型入口（``api/app.py::_lazy_model_call``）在 Provider／
-    SDK 异常发生时用它替换原文：模型调用发生在 Graph 节点内，而 LangGraph 会把节点异常原文写进 checkpoint
-    存档（``writes`` 表的 ``__error__``），Provider 异常的 ``str(exc)`` 常带 Base URL 或模型名，不能落盘
-    （stage5.md §3.7「不回显 Base URL、模型名、SQL、文件路径或堆栈」）。
-    """
+    """Provider／SDK 模型调用失败：只用固定文本，不回显端点、模型名、密钥或堆栈。"""
 
 
 #: :class:`ModelCallFailed` 的可见文本：产品提示 ＋ 本次 Run 没有计划写入。
 MODEL_CALL_FAILED_MESSAGE = "模型调用失败：本次运行未产生计划写入，请稍后重试"
 
 
-def require_model_env(name: str) -> str:
-    """读取一个模型环境变量；缺失或空白即 :class:`ModelConfigurationError`（不暴露其它取值）。"""
-    value = os.environ.get(name, "").strip()
-    if not value:
-        raise ModelConfigurationError(f"缺少模型配置环境变量：{name}")
-    return value
-
-
-def build_chat_model() -> ChatOpenAI:
-    """按环境变量创建一个具体的 OpenAI 兼容模型对象（单次请求超时固定 60 秒）。"""
+def build_chat_model(data_dir: Path) -> ChatOpenAI:
+    """按 provider.json 优先、空字段回落 MODEL_* 创建模型对象（每次调用重新 resolve）。"""
+    api_key, base_url, model = resolve_model_credentials(data_dir)
     return ChatOpenAI(
-        api_key=require_model_env(MODEL_API_KEY_ENV),
-        base_url=require_model_env(MODEL_BASE_URL_ENV),
-        model=require_model_env(MODEL_MODEL_ENV),
+        api_key=api_key,
+        base_url=base_url,
+        model=model,
         timeout=MODEL_REQUEST_TIMEOUT_SECONDS,
     )
 
 
-def openai_compatible_model_call() -> ModelCall:
-    """创建 OpenAI 兼容的模型调用入口：系统提示词 ＋ 用户载荷 → 响应文本。
-
-    生产接线由 Stage 5 把它注入生成计划子图；本函数自己不做超时兜底（超时在模型对象上），
-    也不记录提示词或响应全文。
-    """
-
-    chat = build_chat_model()
+def openai_compatible_model_call(data_dir: Path) -> ModelCall:
+    """创建 OpenAI 兼容的模型调用入口：系统提示词 ＋ 用户载荷 → 响应文本。"""
+    chat = build_chat_model(data_dir)
 
     async def call(system_prompt: str, user_payload: str) -> str:
         response = await chat.ainvoke(
