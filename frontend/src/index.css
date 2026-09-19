@@ -128,6 +128,28 @@
   --radius-xl: calc(var(--radius) + 4px);
 }
 
+@layer components {
+  /* 气泡的排版数值全部来自契约层（bubbleContract.ts）写出的 CSS 变量：
+     测量与绘制共用同一组值，CSS 侧不重复声明
+     对齐 pretext bubbles.html:123-135 的 .msg */
+  .bubble {
+    @apply rounded-xl;
+    padding: var(--bubble-padding);
+    width: fit-content;
+    font: var(--bubble-font);
+    line-height: var(--bubble-line-height);
+    letter-spacing: var(--bubble-letter-spacing);
+    white-space: var(--bubble-white-space);
+    max-width: var(--bubble-max-width);
+    overflow-wrap: break-word;
+    word-break: normal;
+  }
+  /* 助手气泡占满消息列，不做最紧宽度 */
+  .bubble-assistant {
+    width: 100%;
+  }
+}
+
 @layer base {
   * {
     @apply border-border outline-ring/50;
@@ -135,6 +157,11 @@
   body {
     @apply bg-background text-foreground font-sans antialiased;
     letter-spacing: 0.15px;
+  }
+  /* Tailwind v4 的 preflight 把 button 的 cursor 重置为 default */
+  button:not(:disabled),
+  [role="button"]:not(:disabled) {
+    cursor: pointer;
   }
   /* 应用是固定高度外壳（App 的 h-screen），主区内部自滑；
      锁住视口，避免选词/拖选时浏览器再冒出一根窗口滚动条 */

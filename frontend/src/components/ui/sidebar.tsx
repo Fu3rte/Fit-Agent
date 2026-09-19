@@ -16,7 +16,7 @@ import { PanelLeft } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 
-const SIDEBAR_WIDTH = "16rem";
+const SIDEBAR_WIDTH = "14rem";
 const SIDEBAR_KEYBOARD_SHORTCUT = "b";
 
 type SidebarContextProps = {

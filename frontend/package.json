@@ -8,9 +8,11 @@
     "build": "tsc -b && vite build",
     "verify:stage5": "node scripts/stage5-plans-verify.mjs",
     "verify:stage6": "node scripts/stage6-natural-language-verify.mjs",
+    "verify:bubble": "node scripts/bubble-tight-width-check.mjs",
     "preview": "vite preview"
   },
   "dependencies": {
+    "@chenglou/pretext": "^0.0.9",
     "@fontsource/noto-sans-sc": "^5.3.0",
     "@radix-ui/react-tooltip": "^1.2.16",
     "@tanstack/react-query": "^5.102.8",
@@ -19,10 +21,8 @@
     "lucide-react": "^0.525.0",
     "react": "^19.1.0",
     "react-dom": "^19.1.0",
-    "react-markdown": "^10.1.0",
     "react-router-dom": "^7.6.0",
     "recharts": "^3.10.1",
-    "remark-gfm": "^4.0.1",
     "sonner": "^2.0.8",
     "tailwind-merge": "^3.3.1"
   },

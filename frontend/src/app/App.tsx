@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { NavLink, Route, Routes } from "react-router-dom";
+import { Navigate, NavLink, Route, Routes } from "react-router-dom";
 import { Toaster } from "sonner";
 import { Dumbbell, ClipboardList, LayoutDashboard, MessageSquare, Moon, Sun, UserRound } from "lucide-react";
 import { cn } from "@/lib/utils";
@@ -65,7 +65,10 @@ function SidebarToggle() {
     <div
       className={cn(
         "absolute top-8 z-20 transition-[left] duration-200 ease-linear",
-        state === "collapsed" ? "left-6" : "left-50",
+        // 展开时贴住品牌行内容右缘（侧栏 px-6 ＋ 按钮 size-8 = 3.5rem），跟随 --sidebar-width
+        state === "collapsed"
+          ? "left-6"
+          : "left-[calc(var(--sidebar-width)-3.5rem)]",
       )}
     >
       <SidebarTrigger className="cursor-pointer" />
@@ -102,7 +105,7 @@ export default function App() {
                           cn(
                             sidebarMenuButtonVariants(),
                             isActive &&
-                              "bg-sidebar-accent font-medium text-sidebar-accent-foreground",
+                            "bg-sidebar-accent font-medium text-sidebar-accent-foreground",
                           )
                         }
                       >
@@ -125,7 +128,7 @@ export default function App() {
         <main className="relative flex-1 overflow-y-auto">
           <div className="h-full">
             <Routes>
-              <Route path="/" element={<RecordsPage />} />
+              <Route path="/" element={<Navigate to="/chat" replace />} />
               <Route path="/chat" element={<ChatPage />} />
               <Route path="/dashboard" element={<DashboardPage />} />
               <Route path="/plans" element={<PlansPage />} />

@@ -25,7 +25,6 @@ import type {
   PlanItemWire,
   PlanListWire,
   PlanSessionCandidatesWire,
-  PlanSessionListWire,
   ProfileResponseWire,
   ProfileWriteBody,
   RecordItemWire,
@@ -85,9 +84,6 @@ export const listExercises = () => request<ExerciseListWire>("/api/exercises");
 /** 训练记录列表（稳定身份 + 发生日期 + 关联日程 + 全部组） */
 export const listRecords = () => request<RecordListWire>("/api/records");
 
-export const getRecordById = (recordId: number) =>
-  request<RecordItemWire>(`/api/records/${recordId}`);
-
 export const createRecord = (body: RecordWriteBody) =>
   post<RecordItemWire>("/api/records", body);
 
@@ -130,16 +126,10 @@ export const deleteBodyMetric = (metricId: number) =>
 
 /* ------------------------------ 计划（只读） ------------------------------- */
 
-/** 计划只读：全部版本（升序）、当前 active、按身份、计划日程 */
+/** 计划只读：全部版本（升序）与当前 active */
 export const listPlans = () => request<PlanListWire>("/api/plans");
 
 export const getActivePlan = () => request<PlanItemWire>("/api/plans/active");
-
-export const getPlanById = (planId: number) =>
-  request<PlanItemWire>(`/api/plans/${planId}`);
-
-export const listPlanSessions = (planId: number) =>
-  request<PlanSessionListWire>(`/api/plans/${planId}/sessions`);
 
 /* ------------------------------ 统计（只读现算） ------------------------------ */
 

@@ -10,12 +10,9 @@
   "SQL 只在 repo"）；repo 经 :meth:`under_lock` / :meth:`transaction` 在锁内执行。
 - 事务只包含数据库操作；事务体内禁止模型请求、工具执行或 SSE 推送，
   也禁止再次获取锁（锁不可重入，嵌套会死锁）。
-- 绑定参数含凭据的写入必须在 :meth:`Database.parameter_echo_suppressed` 内进行，
-  否则驱动层 DEBUG 日志会把绑定参数（含明文 Key）渲染进日志（10.3 绝对禁止）。
 """
 
 import asyncio
-import logging
 from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -26,11 +23,6 @@ import aiosqlite
 from storage.migrations import run_migrations
 
 BUSY_TIMEOUT_MS = 5000
-
-# 在 DEBUG 级别把「语句 + 其绑定参数」渲染成日志文本的第三方 logger。
-# aiosqlite 的连接工作线程对每条排队语句打 LOG.debug("executing %s", partial(...))，
-# 而 functools.partial 的 repr 包含实参元组：明文凭据作为绑定参数时即在此泄露。
-_PARAMETER_ECHOING_LOGGERS = ("aiosqlite",)
 
 T = TypeVar("T")
 
@@ -78,40 +70,6 @@ _PRAGMA_QUERIES: dict[str, str] = {
     "busy_timeout": "PRAGMA busy_timeout",
     "user_version": "PRAGMA user_version",
 }
-
-
-def _logger_state(name: str) -> tuple[int, bool]:
-    logger = logging.getLogger(name)
-    return (logger.level, logger.disabled)
-
-
-def _restore_logger_state(name: str, state: tuple[int, bool]) -> None:
-    logger = logging.getLogger(name)
-    logger.setLevel(state[0])
-    logger.disabled = state[1]
-
-
-# 压制状态按 logger 名引用计数（语义见 parameter_echo_suppressed）；计数与级别变更
-# 只发生在事件循环线程上（单一 uvicorn worker，见 11 章），因此无需加锁。
-_ECHO_SUPPRESSION_COUNT: dict[str, int] = {}
-_ECHO_SAVED_STATE: dict[str, tuple[int, bool]] = {}
-
-
-def _suppress_parameter_echo(name: str) -> None:
-    count = _ECHO_SUPPRESSION_COUNT.get(name, 0)
-    if count == 0:
-        _ECHO_SAVED_STATE[name] = _logger_state(name)
-        logging.getLogger(name).setLevel(logging.WARNING)
-    _ECHO_SUPPRESSION_COUNT[name] = count + 1
-
-
-def _release_parameter_echo(name: str) -> None:
-    count = _ECHO_SUPPRESSION_COUNT[name] - 1
-    if count == 0:
-        del _ECHO_SUPPRESSION_COUNT[name]
-        _restore_logger_state(name, _ECHO_SAVED_STATE.pop(name))
-    else:
-        _ECHO_SUPPRESSION_COUNT[name] = count
 
 
 class Database:
@@ -214,59 +172,6 @@ class Database:
                     # 回滚同样要跑完：取消不能把开放事务留给下一个持有者。
                     await _await_settled(conn.rollback())
                 raise
-
-    @asynccontextmanager
-    async def parameter_echo_suppressed(self) -> AsyncIterator[None]:
-        """把参数回显型 logger 临时抬到 WARNING，覆盖一段含凭据绑定参数的写入。
-
-        10.3 绝对禁止完整 Key 进日志：本应用 logger 从不打印 SQL/参数，唯一泄露面是
-        aiosqlite 在 DEBUG 下把绑定参数写进 "executing %s"。故只抬级别（WARNING 以上
-        照常输出，不丢生产诊断），并在 finally 无条件恢复进入前的原状态（含 NOTSET
-        继承与 disabled）。
-
-        退出前在锁内排一条无参数语句作栅栏：工作线程按队列顺序处理，而后继语句
-        settle 即证明前一条的日志点已过（aiosqlite 先 set_result 再打 "completed"
-        日志，故 await 返回不等于日志已产生）。栅栏的等待同样用 :func:`_await_settled`
-        屏蔽取消——外层在这段挂起中被取消时不得提前恢复 logger，否则凭据语句的尾部
-        DEBUG 日志正好落在已解压制的窗口里；恢复原状态后才重抛取消。
-
-        并发边界（07 7.1 单连接 + 单锁）：锁串行化语句但不串行化压制窗口，故按 logger
-        名引用计数（只在事件循环线程变更），先退出的窗口不会替仍开着的窗口恢复级别。
-        代价：压制是进程级 logger 状态，同窗口内其他 aiosqlite 连接（如测试的第二个库）
-        的 DEBUG 回显一并被压制——只丢诊断，不影响正确性。
-        约束：必须包在 :meth:`transaction` / :meth:`under_lock` 外层（退出时要取一次
-        锁），持锁区间内嵌套会因锁不可重入而死锁。
-        """
-        for name in _PARAMETER_ECHOING_LOGGERS:
-            _suppress_parameter_echo(name)
-        try:
-            yield
-        finally:
-            # 先等栅栏 settle 再恢复级别（取消只记账），见上文取消保护。
-            cancelled, drain_error = await _await_settled(
-                self._drain_statement_logging()
-            )
-            for name in _PARAMETER_ECHOING_LOGGERS:
-                _release_parameter_echo(name)
-            # 状态恢复完成后才传播取消；取消优先，栅栏异常挂在 __cause__ 上不被吞。
-            if cancelled:
-                raise asyncio.CancelledError from drain_error
-            if drain_error is not None:
-                raise drain_error
-
-    async def _drain_statement_logging(self) -> None:
-        """排一条无参数语句，确认工作线程已越过前一条语句的日志点（栅栏）。
-
-        连接已关闭时直接返回（没有后台线程会再产生日志）。调用方用屏蔽取消的独立
-        Task 等待本方法，故含取锁在内的任何挂起点都不会被外层取消打断。
-        """
-        if not self.is_open:
-            return
-
-        async def op(conn: aiosqlite.Connection) -> None:
-            await conn.execute("SELECT 1")
-
-        await self.under_lock(op)
 
     async def pragma_value(self, name: str) -> str | int | None:
         """查询固定名单内的 PRAGMA 当前值（连接配置可查询验证，S0-02）。"""

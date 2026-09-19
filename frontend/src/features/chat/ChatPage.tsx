@@ -14,7 +14,7 @@
  * - **取消只清本地状态**（§4.1）：不发请求、不写库；
  * - 多轮历史只在本页内存（每次运行新建 UUID，即后端 Checkpointer 的 thread_id；刷新即丢）。
  */
-import { useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   useMutation,
   useQuery,
@@ -61,6 +61,7 @@ import {
   type SessionChoice,
   type WorkoutDraftRow,
 } from "@/features/chat/workoutDraft";
+import { useBubbleShrinkwrap } from "@/features/chat/useBubbleShrinkwrap";
 
 /** 组类型固定三态（与后端 workout_sets CHECK 同集合） */
 const SET_TYPE_LABELS: Record<SetTypeWire, string> = {
@@ -491,6 +492,19 @@ export default function ChatPage() {
   const [confirmed, setConfirmed] = useState<ConfirmWorkoutResponseWire | null>(
     null,
   );
+  /** 消息流滚动容器：新增一轮即贴底；也是帧层读取消息列宽的唯一来源 */
+  const scrollRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight });
+  }, [rounds]);
+
+  /** 用户气泡节点与文本：帧层按文本量宽，直接写这两组节点的 maxWidth / width */
+  const bubbleNodes = useRef<(HTMLDivElement | null)[]>([]);
+  const bubbleTexts = useMemo(
+    () => rounds.map((round) => round.request),
+    [rounds],
+  );
+  useBubbleShrinkwrap(bubbleTexts, scrollRef, bubbleNodes);
 
   /** 事件进本轮的展示列表；`waiting` 按载荷判别路径，分别驱动两个确认 UI */
   const onEvent = (conversationId: string, event: AgentEventWire) => {
@@ -573,8 +587,8 @@ export default function ChatPage() {
   const cancelWorkoutDraft = () => setWorkoutDraft(null);
 
   return (
-    <div className="mx-auto w-full max-w-3xl px-6 pb-10">
-      <header className="pt-10 pb-6">
+    <div className="relative mx-auto flex h-full w-full max-w-3xl flex-col px-6">
+      <header className="pt-10 pb-4">
         <h2 className="font-display text-3xl font-light tracking-tight">
           对话
         </h2>
@@ -583,59 +597,46 @@ export default function ChatPage() {
         </p>
       </header>
 
-      <div className="flex flex-col gap-6">
-        <Card>
-          <CardHeader>
-            <CardTitle>输入</CardTitle>
-            <CardDescription>
-              例如「记录今天杠铃卧推60kg，4组5次」或「生成计划」。每次发送都是一次新的运行。
-            </CardDescription>
-          </CardHeader>
-          <CardContent className="flex flex-col gap-3">
-            <Textarea
-              value={request}
-              onChange={(event) => setRequest(event.target.value)}
-              placeholder="用一句话记录训练，或生成／调整计划"
-              disabled={run.isPending}
-            />
+      {/* 消息流：用户右气泡、助手左气泡；内部滚动，底部留出浮层空间 */}
+      <div
+        ref={scrollRef}
+        className="flex flex-1 flex-col gap-4 overflow-y-auto pb-40 [scrollbar-gutter:stable]"
+      >
+        {rounds.map((round, index) => (
+          <div key={round.conversation_id} className="flex flex-col gap-4">
             <div className="flex justify-end">
-              <Button onClick={send} disabled={run.isPending || request.trim() === ""}>
-                <SendHorizontal aria-hidden />
-                发送
-              </Button>
+              <div
+                ref={(node) => {
+                  bubbleNodes.current[index] = node;
+                }}
+                className="bubble bg-bubble-out text-bubble-out-foreground inset-ring-1 inset-ring-bubble-out-border"
+              >
+                {round.request}
+              </div>
             </div>
-          </CardContent>
-        </Card>
-
-        {rounds.map((round) => (
-          <Card key={round.conversation_id}>
-            <CardHeader>
-              <CardTitle>{round.request}</CardTitle>
-              <CardDescription>
-                本次运行的事件流；可见文本原样展示。
-              </CardDescription>
-            </CardHeader>
-            <CardContent className="flex flex-col gap-1 text-sm">
-              {round.events.length === 0 && (
-                <p className="text-xs text-muted-foreground">正在运行…</p>
-              )}
-              {round.events.map((event, index) => (
-                <p
-                  key={index}
-                  className={
-                    event.event === "error"
-                      ? "whitespace-pre-wrap text-destructive"
-                      : "whitespace-pre-wrap"
-                  }
-                >
-                  <span className="mr-2 text-xs text-muted-foreground">
-                    {event.event}
-                  </span>
-                  {eventText(event)}
-                </p>
-              ))}
-            </CardContent>
-          </Card>
+            <div className="flex justify-start">
+              <div className="bubble bubble-assistant bg-bubble-in text-bubble-in-foreground inset-ring-1 inset-ring-border">
+                {round.events.length === 0 && (
+                  <p className="animate-pulse text-xs text-muted-foreground">
+                    正在思考…
+                  </p>
+                )}
+                {round.events.map((event, index) => (
+                  <p
+                    key={index}
+                    className={
+                      event.event === "error" ? "text-destructive" : undefined
+                    }
+                  >
+                    <span className="mr-2 text-xs text-muted-foreground">
+                      {event.event}
+                    </span>
+                    {eventText(event)}
+                  </p>
+                ))}
+              </div>
+            </div>
+          </div>
         ))}
 
         {planDraft && (
@@ -665,6 +666,49 @@ export default function ChatPage() {
             bests={confirmed.personal_bests}
           />
         )}
+      </div>
+
+      {/* 输入容器：贴底浮层 + 上方渐变蒙板，消息从下方滚过 */}
+      <div className="absolute inset-x-0 bottom-0 z-10 bg-background px-6 pt-6 pb-8">
+        {/* 蒙板：贴着容器上沿，从背景色向透明淡出 */}
+        <div
+          aria-hidden
+          className="pointer-events-none absolute inset-x-0 bottom-full h-10 bg-linear-to-t from-background to-transparent"
+        />
+
+        {/* 运行中状态条 */}
+        {run.isPending && (
+          <div className="mb-2 flex items-center gap-2 rounded-lg bg-secondary px-3 py-1.5 text-xs text-secondary-foreground">
+            <span
+              className="size-1.5 animate-pulse rounded-full bg-current"
+              aria-hidden
+            />
+            处理中
+          </div>
+        )}
+
+        {/* 输入区：胶囊形输入框，发送按钮内嵌，仅有内容时显示 */}
+        <div className="relative">
+          <Textarea
+            value={request}
+            onChange={(event) => setRequest(event.target.value)}
+            placeholder="用一句话记录训练，或生成／调整计划"
+            disabled={run.isPending}
+            rows={1}
+            className="min-h-0 resize-none rounded-full border-0 bg-card py-4 pr-14 pl-5 shadow-md focus-visible:ring-0"
+          />
+          {request.trim() !== "" && (
+            <Button
+              size="icon"
+              aria-label="发送"
+              onClick={send}
+              disabled={run.isPending}
+              className="absolute top-1/2 right-5 size-8 -translate-y-1/2"
+            >
+              <SendHorizontal />
+            </Button>
+          )}
+        </div>
       </div>
     </div>
   );
