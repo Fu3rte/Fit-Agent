@@ -33,6 +33,13 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
 import {
   confirmPlan,
@@ -70,9 +77,6 @@ const SET_TYPE_LABELS: Record<SetTypeWire, string> = {
   assisted: "辅助",
 };
 
-/** 表单控件样式：与 components/ui/input 同规格的原生 select */
-const selectClass =
-  "h-10 rounded-md border border-input bg-transparent px-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40";
 
 /**
  * 训练写入后失效记录派生 Query：沿用 ``RecordsPage.tsx`` 的既有口径（无 key 全量失效），
@@ -230,24 +234,31 @@ function WorkoutConfirmCard({
           </label>
           <label className="flex flex-col gap-1 text-sm">
             计划日程
-            <select
-              className={selectClass}
+            <Select
               value={String(choice)}
-              onChange={(event) => {
-                const value = event.target.value;
+              onValueChange={(value) =>
                 setChoice(
                   value === "auto" || value === "extra" ? value : Number(value),
-                );
-              }}
+                )
+              }
             >
-              <option value="auto">未手动选择（恰一个候选时自动关联）</option>
-              <option value="extra">额外训练（不关联计划日程）</option>
-              {available.map((session) => (
-                <option key={session.id} value={session.id}>
-                  计划 {session.plan_id} · {session.scheduled_on}
-                </option>
-              ))}
-            </select>
+              <SelectTrigger aria-label="计划日程">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="auto">
+                  未手动选择（恰一个候选时自动关联）
+                </SelectItem>
+                <SelectItem value="extra">
+                  额外训练（不关联计划日程）
+                </SelectItem>
+                {available.map((session) => (
+                  <SelectItem key={session.id} value={String(session.id)}>
+                    计划 {session.plan_id} · {session.scheduled_on}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
           </label>
         </div>
 
@@ -302,23 +313,25 @@ function WorkoutConfirmCard({
                 </label>
                 <label className="flex flex-col gap-1 text-xs text-muted-foreground">
                   组类型
-                  <select
-                    className={selectClass}
+                  <Select
                     value={row.set_type}
-                    onChange={(event) =>
-                      updateRow(index, {
-                        set_type: event.target.value as SetTypeWire,
-                      })
+                    onValueChange={(value) =>
+                      updateRow(index, { set_type: value as SetTypeWire })
                     }
                   >
-                    {(Object.keys(SET_TYPE_LABELS) as SetTypeWire[]).map(
-                      (value) => (
-                        <option key={value} value={value}>
-                          {SET_TYPE_LABELS[value]}
-                        </option>
-                      ),
-                    )}
-                  </select>
+                    <SelectTrigger aria-label="组类型">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {(Object.keys(SET_TYPE_LABELS) as SetTypeWire[]).map(
+                        (value) => (
+                          <SelectItem key={value} value={value}>
+                            {SET_TYPE_LABELS[value]}
+                          </SelectItem>
+                        ),
+                      )}
+                    </SelectContent>
+                  </Select>
                 </label>
                 {row.timed ? (
                   <label className="flex flex-col gap-1 text-xs text-muted-foreground">

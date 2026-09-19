@@ -18,6 +18,13 @@ import {
 } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import {
   createBodyMetric,
   createRecord,
   deleteBodyMetric,
@@ -61,9 +68,6 @@ const RECORD_TYPE_LABELS: Record<CatalogRecordType, string> = {
   time: "计时",
 };
 
-/** 表单控件样式：与 components/ui/input 同规格的原生 select */
-const selectClass =
-  "h-10 rounded-md border border-input bg-transparent px-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40";
 
 /** 客户端本地自然日（表单默认值；业务日期一律由服务端按业务时区判定） */
 function todayIso(): string {
@@ -164,8 +168,8 @@ function toSetInputs(
 
 /**
  * 训练或身体数据写入后失效记录派生 Query（训练记录、PB、趋势、月历、计划日程状态）。
- * 看板的统计 key（``personal-bests``／``trends``／``calendar``，见 DashboardPage）同样被全量失效覆盖，
- * 因此这里不逐条枚举 key：枚举会在看板命名变化时静默失效，而全量失效对单用户本地库无成本问题。
+ * 看板与计划页的统计 key（``personal-bests``／``trends``／``calendar``，见 DashboardPage 与 PlansPage）
+ * 同样被全量失效覆盖，因此这里不逐条枚举 key：枚举会在命名变化时静默失效，而全量失效对单用户本地库无成本问题。
  */
 function invalidateRecordDerivedQueries(queryClient: QueryClient): Promise<void> {
   return queryClient.invalidateQueries();
@@ -274,21 +278,26 @@ function RecordFormCard({
           </label>
           <label className="flex flex-col gap-1 text-sm">
             计划日程
-            <select
-              className={selectClass}
+            <Select
               value={String(selected)}
-              onChange={(event) => {
-                const value = event.target.value;
-                setSessionChoice(value === "extra" ? "extra" : Number(value));
-              }}
+              onValueChange={(value) =>
+                setSessionChoice(value === "extra" ? "extra" : Number(value))
+              }
             >
-              <option value="extra">额外训练（不关联计划日程）</option>
-              {options.map((option) => (
-                <option key={option.id} value={option.id}>
-                  {option.label}
-                </option>
-              ))}
-            </select>
+              <SelectTrigger aria-label="计划日程">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="extra">
+                  额外训练（不关联计划日程）
+                </SelectItem>
+                {options.map((option) => (
+                  <SelectItem key={option.id} value={String(option.id)}>
+                    {option.label}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
           </label>
         </div>
 
@@ -329,12 +338,11 @@ function RecordFormCard({
                 <div className="flex flex-wrap items-end gap-2">
                   <label className="flex flex-col gap-1 text-xs text-muted-foreground">
                     动作
-                    <select
-                      className={selectClass}
+                    <Select
                       value={row.exerciseId}
-                      onChange={(event) =>
+                      onValueChange={(value) =>
                         updateRow(index, {
-                          exerciseId: event.target.value,
+                          exerciseId: value,
                           /* 切换动作后清除不再适用的旧值：重量、次数与秒数都不跨动作保留 */
                           reps: "",
                           weight: "",
@@ -342,33 +350,40 @@ function RecordFormCard({
                         })
                       }
                     >
-                      <option value="">请选择动作</option>
-                      {exercises.map((item) => (
-                        <option key={item.id} value={item.id}>
-                          {item.standard_name_zh}
-                        </option>
-                      ))}
-                    </select>
+                      <SelectTrigger aria-label="动作">
+                        <SelectValue placeholder="请选择动作" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="">请选择动作</SelectItem>
+                        {exercises.map((item) => (
+                          <SelectItem key={item.id} value={item.id}>
+                            {item.standard_name_zh}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
                   </label>
                   <label className="flex flex-col gap-1 text-xs text-muted-foreground">
                     组类型
-                    <select
-                      className={selectClass}
+                    <Select
                       value={row.setType}
-                      onChange={(event) =>
-                        updateRow(index, {
-                          setType: event.target.value as SetTypeWire,
-                        })
+                      onValueChange={(value) =>
+                        updateRow(index, { setType: value as SetTypeWire })
                       }
                     >
-                      {(
-                        Object.keys(SET_TYPE_LABELS) as SetTypeWire[]
-                      ).map((value) => (
-                        <option key={value} value={value}>
-                          {SET_TYPE_LABELS[value]}
-                        </option>
-                      ))}
-                    </select>
+                      <SelectTrigger aria-label="组类型">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {(Object.keys(SET_TYPE_LABELS) as SetTypeWire[]).map(
+                          (value) => (
+                            <SelectItem key={value} value={value}>
+                              {SET_TYPE_LABELS[value]}
+                            </SelectItem>
+                          ),
+                        )}
+                      </SelectContent>
+                    </Select>
                   </label>
                   {recordType === "time" ? (
                     <label className="flex flex-col gap-1 text-xs text-muted-foreground">

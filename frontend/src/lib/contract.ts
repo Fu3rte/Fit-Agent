@@ -484,3 +484,10 @@ export type ProviderWriteBody = {
   base_url?: string;
   model?: string;
 };
+
+/** POST /api/provider/test 响应：ok 为 false 时 latency_ms 为 null，message 为固定文案 */
+export type ProviderTestWire = {
+  ok: boolean;
+  latency_ms: number | null;
+  message: string;
+};

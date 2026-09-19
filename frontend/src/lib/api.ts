@@ -28,6 +28,7 @@ import type {
   ProfileResponseWire,
   ProfileWriteBody,
   ProviderStatusWire,
+  ProviderTestWire,
   ProviderWriteBody,
   RecordItemWire,
   RecordListWire,
@@ -40,9 +41,8 @@ export type { ApiError };
 /** 后端统一 JSON 错误形状 → Error（形状不变；SSE 与普通请求共用同一份错误处理） */
 function apiError(body: unknown, status: number): Error & Partial<ApiError> {
   const err = body as Partial<ApiError> | null;
-  const error = new Error(
-    err?.message ?? `请求失败（${status}）`,
-  ) as Error & Partial<ApiError>;
+  const error = new Error(err?.message ?? `请求失败（${status}）`) as Error &
+    Partial<ApiError>;
   error.http_status = err?.http_status ?? status;
   error.error_code = err?.error_code ?? "invalid_request";
   return error;
@@ -92,6 +92,10 @@ export const putProvider = (body: ProviderWriteBody) =>
 export const deleteProvider = () =>
   request<ProviderStatusWire>("/api/provider", { method: "DELETE" });
 
+/** 连通性测试：用请求体里的表单值发一次最小调用，不落库、不消耗 Run 预算 */
+export const testProvider = (body: ProviderWriteBody) =>
+  post<ProviderTestWire>("/api/provider/test", body);
+
 /* -------------------------------- 动作目录 --------------------------------- */
 
 /** 动作目录全量：表单的动作选择与负重口径来源 */
@@ -128,7 +132,8 @@ export const listPlanSessionCandidates = (date?: string) =>
 /* -------------------------------- 身体指标 --------------------------------- */
 
 /** 身体指标列表；体脂未记录为 null，不补 0 */
-export const listBodyMetrics = () => request<BodyMetricListWire>("/api/body-metrics");
+export const listBodyMetrics = () =>
+  request<BodyMetricListWire>("/api/body-metrics");
 
 export const createBodyMetric = (body: BodyMetricWriteBody) =>
   post<BodyMetricItemWire>("/api/body-metrics", body);

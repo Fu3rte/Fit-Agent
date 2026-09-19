@@ -18,6 +18,13 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { getProfile, listExercises, putProfile } from "@/lib/api";
 import type {
   FactState,
@@ -55,9 +62,6 @@ const LIST_KEYS: FieldKey[] = [
   "explicit_preferences",
   "known_injuries",
 ];
-
-const selectClass =
-  "h-10 rounded-md border border-input bg-transparent px-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40";
 
 const splitList = (text: string) =>
   text
@@ -180,20 +184,25 @@ export default function ProfilePage() {
             <div key={key} className="space-y-2">
               <div className="flex items-center gap-3">
                 <span className="w-32 text-sm font-medium">{label}</span>
-                <select
-                  className={selectClass}
+                <Select
                   value={states[key]}
-                  onChange={(event) =>
-                    onFactState(key, event.target.value as FactState)
+                  onValueChange={(value) =>
+                    onFactState(key, value as FactState)
                   }
-                  aria-label={`${label}填写状态`}
                 >
-                  {(Object.keys(FACT_STATE_LABELS) as FactState[]).map((s) => (
-                    <option key={s} value={s}>
-                      {FACT_STATE_LABELS[s]}
-                    </option>
-                  ))}
-                </select>
+                  <SelectTrigger aria-label={`${label}填写状态`}>
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {(Object.keys(FACT_STATE_LABELS) as FactState[]).map(
+                      (s) => (
+                        <SelectItem key={s} value={s}>
+                          {FACT_STATE_LABELS[s]}
+                        </SelectItem>
+                      ),
+                    )}
+                  </SelectContent>
+                </Select>
                 {states[key] !== "known" && (
                   <span className="text-xs text-muted-foreground">
                     {states[key] === "unknown" ? "尚未填写" : "用户明确表示没有"}

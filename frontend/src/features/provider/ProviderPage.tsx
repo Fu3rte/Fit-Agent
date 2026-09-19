@@ -1,11 +1,3 @@
-/**
- * /provider 模型配置：LLM Provider 连接信息的读取、整份覆盖保存与凭据清除。
- *
- * 契约 ``/api/provider``：GET 不回传 api_key 本体（只给 has_api_key），Key 输入框
- * 永不回填；PUT 整份覆盖三字段（未出现的字段后端写空串），保存始终提交表单当前值，
- * Key 留空即清除已配置凭据；DELETE 清空全部配置并返回空状态。
- * 环境变量 MODEL_* 只在服务端字段为空时回落，非敏感常量提示直接写在页面。
- */
 import { useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
@@ -19,7 +11,7 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
-import { deleteProvider, getProvider, putProvider } from "@/lib/api";
+import { deleteProvider, getProvider, putProvider, testProvider } from "@/lib/api";
 import type { ProviderWriteBody } from "@/lib/contract";
 
 export default function ProviderPage() {
@@ -31,13 +23,12 @@ export default function ProviderPage() {
   const [apiKeyInput, setApiKeyInput] = useState("");
 
   const loaded = provider.data ?? null;
+  // 只在服务端字段真的变化时回填：后台 refetch 与保存后的 setQueryData 不得清掉已输入的 Key
   useEffect(() => {
     if (!loaded) return;
     setBaseUrl(loaded.base_url);
     setModel(loaded.model);
-    // GET 不含 Key 本体：输入框只在加载与刷新时保持空
-    setApiKeyInput("");
-  }, [loaded]);
+  }, [loaded?.base_url, loaded?.model]);
 
   const save = useMutation({
     mutationFn: (body: ProviderWriteBody) => putProvider(body),
@@ -60,6 +51,16 @@ export default function ProviderPage() {
       toast.error(error instanceof Error ? error.message : "凭据清除失败"),
   });
 
+  const test = useMutation({
+    mutationFn: (body: ProviderWriteBody) => testProvider(body),
+    onSuccess: (data) => {
+      if (data.ok) toast.success(`${data.message}（${data.latency_ms} ms）`);
+      else toast.error(data.message);
+    },
+    onError: (error) =>
+      toast.error(error instanceof Error ? error.message : "模型测试失败"),
+  });
+
   if (provider.isLoading) {
     return <p className="mt-10 text-sm text-muted-foreground">加载模型配置…</p>;
   }
@@ -73,12 +74,14 @@ export default function ProviderPage() {
 
   const hasApiKey = loaded?.has_api_key ?? false;
 
+  const formBody = (): ProviderWriteBody => ({
+    api_key: apiKeyInput,
+    base_url: baseUrl.trim(),
+    model: model.trim(),
+  });
+
   const submit = () => {
-    save.mutate({
-      api_key: apiKeyInput,
-      base_url: baseUrl.trim(),
-      model: model.trim(),
-    });
+    save.mutate(formBody());
   };
 
   return (
@@ -132,12 +135,16 @@ export default function ProviderPage() {
               placeholder="输入新 Key 以写入"
               onChange={(event) => setApiKeyInput(event.target.value)}
             />
-            <p className="text-xs text-muted-foreground">
-              留空保存将清除已配置的 Key；服务端不回传 Key 本体，输入框始终从空开始。
-            </p>
           </div>
 
-          <div className="flex flex-wrap items-center gap-3">
+          <div className="flex flex-wrap justify-end items-center gap-3">
+            <Button
+              variant="secondary"
+              onClick={() => test.mutate(formBody())}
+              disabled={test.isPending}
+            >
+              测试模型
+            </Button>
             <Button onClick={submit} disabled={save.isPending}>
               保存配置
             </Button>
@@ -149,25 +156,6 @@ export default function ProviderPage() {
               清除凭据
             </Button>
           </div>
-
-          <p className="text-xs text-muted-foreground">
-            配置落在服务端数据目录 provider.json；字段为空时由环境变量 MODEL_*
-            回落。
-          </p>
-        </CardContent>
-      </Card>
-
-      <Card>
-        <CardHeader>
-          <CardTitle>Run 边界</CardTitle>
-          <CardDescription>服务端非敏感常量，只读展示。</CardDescription>
-        </CardHeader>
-        <CardContent>
-          <ul className="space-y-1.5 text-sm text-muted-foreground">
-            <li>单次请求超时：60 秒</li>
-            <li>单次 Run 超时：180 秒</li>
-            <li>每个 Run 最多请求：5 次</li>
-          </ul>
         </CardContent>
       </Card>
     </div>

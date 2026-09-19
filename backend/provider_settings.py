@@ -57,13 +57,21 @@ def write_provider_config(data_dir: Path, config: ProviderConfig) -> None:
         os.chmod(path, 0o600)
 
 
-def resolve_model_credentials(data_dir: Path) -> tuple[str, str, str]:
-    """返回 (api_key, base_url, model)：provider.json 非空字段优先，空字段回落同名 MODEL_* 环境变量。
+def resolve_model_credentials(
+    data_dir: Path, override: ProviderConfig | None = None
+) -> tuple[str, str, str]:
+    """返回 (api_key, base_url, model)：override 非空字段覆盖 provider.json，其余回落同名 MODEL_* 环境变量。
 
     两者皆空即 :class:`ModelConfigurationError`（消息只含环境变量名，不含任何取值）；
     不落默认端点、不猜 URL。
     """
     config = read_provider_config(data_dir)
+    if override is not None:
+        config = ProviderConfig(
+            api_key=override.api_key or config.api_key,
+            base_url=override.base_url or config.base_url,
+            model=override.model or config.model,
+        )
     return (
         _resolve_field(config.api_key, MODEL_API_KEY_ENV),
         _resolve_field(config.base_url, MODEL_BASE_URL_ENV),

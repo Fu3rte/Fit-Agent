@@ -1,25 +1,3 @@
-"""Agent 端点：``POST /api/agent/run``（SSE）、``/api/agent/confirm``、``/api/agent/reject``
-与 ``POST /api/agent/confirm-workout``。
-
-正本：``refactor-log/stage5.md`` §3.7（HTTP 与错误契约）／§3.8（SSE 事件契约）／§4.4；
-``refactor-log/stage6.md`` §2.4.2（confirm-workout）；``LANGGRAPH_REFACTOR_PLAN.md`` §9.4／§10；
-``Fit-Agent-LangGraph-重构讨论总结.md`` §9／§10。
-
-传输边界（本模块只做传输与事件序列化，不做领域规则、不写 SQL、不自己写计划行）：
-
-- **事件来源是 LangGraph stream**：五类产品事件由 ``graph/workflow.py::stream_agent_run`` 从节点更新与
-  确认 interrupt 产出（``node``／``message``／``waiting``／``done``），本层只把它序列化成 SSE 文本帧，
-  不发送隐藏推理、完整系统提示词、Provider 配置或原始 LangChain 事件。
-- **错误边界严格二分**：请求 JSON 形状、字段类型与 ``conversation_id`` UUID 非法在流建立**前**按既有
-  JSON 错误形状拒绝（``api/dto.py`` 的 DTO 与统一处理器）；流建立后的模型配置、超时、Router、无
-  active、draft 冲突等运行错误只发**一个** SSE ``error`` 后关闭，不混用 JSON。``confirm``／``reject``
-  的领域错误复用同一 JSON 形状与明确 HTTP 状态（映射在 ``api/dto.py``）。
-- **不回显敏感信息**：``error`` 的可见文本只取本项目自己写的产品错误，Provider／SDK／SQLite／超时异常
-  一律固定文本（``str(exc)`` 可能带 Base URL、模型名、SQL、文件路径或堆栈）。
-- **断线不是信号**：客户端断开只结束本次流，不触发额外业务写入，也不回滚已完成的 draft 持久化；恢复
-  页面用既有 ``GET /api/plans`` 定位唯一 draft，本模块不新增 checkpoint 查询端点。
-"""
-
 import json
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
