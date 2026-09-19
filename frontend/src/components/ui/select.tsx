@@ -4,7 +4,8 @@ import { CheckIcon, ChevronDownIcon, ChevronUpIcon } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 /* 主题规范：触发器与 components/ui/input 同规格（h-10、rounded-md、hairline-strong 描边），
-   下拉面板用 popover 底色 ＋ 描边 ＋ shadow-md，与 tooltip 面板同层级（z-50） */
+   下拉面板默认 ``position="popper"`` 贴触发器下沿展开（与原生 select 同位置），
+   面板用 popover 底色 ＋ 描边 ＋ shadow-md，与 tooltip 面板同层级（z-50） */
 
 function Select(props: React.ComponentProps<typeof SelectPrimitive.Root>) {
   return <SelectPrimitive.Root {...props} />;
@@ -50,7 +51,7 @@ function SelectTrigger({
 function SelectContent({
   className,
   children,
-  position = "item-aligned",
+  position = "popper",
   align = "center",
   ...props
 }: React.ComponentProps<typeof SelectPrimitive.Content>) {

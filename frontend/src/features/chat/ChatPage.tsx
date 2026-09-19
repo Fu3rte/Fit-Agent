@@ -21,7 +21,12 @@ import {
   useQueryClient,
   type QueryClient,
 } from "@tanstack/react-query";
-import { SendHorizontal, Trash2 } from "lucide-react";
+import {
+  Maximize2,
+  Minimize2,
+  SendHorizontal,
+  Trash2,
+} from "lucide-react";
 import { toast } from "sonner";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -58,6 +63,7 @@ import type {
   RecordWire,
   SetTypeWire,
 } from "@/lib/contract";
+import { SET_TYPE_LABELS } from "@/lib/catalogLabels";
 import {
   addSetRow,
   confirmBodyOf,
@@ -70,19 +76,13 @@ import {
 } from "@/features/chat/workoutDraft";
 import { useBubbleShrinkwrap } from "@/features/chat/useBubbleShrinkwrap";
 
-/** 组类型固定三态（与后端 workout_sets CHECK 同集合） */
-const SET_TYPE_LABELS: Record<SetTypeWire, string> = {
-  work: "工作",
-  warmup: "热身",
-  assisted: "辅助",
-};
-
-
 /**
  * 训练写入后失效记录派生 Query：沿用 ``RecordsPage.tsx`` 的既有口径（无 key 全量失效），
  * 不新造第二套 key 命名——枚举会在看板命名变化时静默漏失效。
  */
-function invalidateRecordDerivedQueries(queryClient: QueryClient): Promise<void> {
+function invalidateRecordDerivedQueries(
+  queryClient: QueryClient,
+): Promise<void> {
   return queryClient.invalidateQueries();
 }
 
@@ -145,10 +145,16 @@ function WorkoutConfirmCard({
   onCancel: () => void;
 }) {
   const queryClient = useQueryClient();
-  const exercises = useQuery({ queryKey: ["exercises"], queryFn: listExercises });
+  const exercises = useQuery({
+    queryKey: ["exercises"],
+    queryFn: listExercises,
+  });
   const [performedOn, setPerformedOn] = useState(draft.workout.performed_on);
   const [choice, setChoice] = useState<SessionChoice>(() =>
-    initialSessionChoice(draft.workout.plan_session_id, draft.workout.auto_link),
+    initialSessionChoice(
+      draft.workout.plan_session_id,
+      draft.workout.auto_link,
+    ),
   );
   const [rows, setRows] = useState<WorkoutDraftRow[]>(() =>
     rowsFromWorkout(draft.workout.sets),
@@ -284,7 +290,8 @@ function WorkoutConfirmCard({
         )}
         {candidates.isSuccess && available.length > 1 && (
           <p className="text-xs text-muted-foreground">
-            当天有 {available.length} 个未完成日程：请选择本次训练对应的那个，或显式选择「额外训练」；
+            当天有 {available.length}{" "}
+            个未完成日程：请选择本次训练对应的那个，或显式选择「额外训练」；
             保持「未手动选择」会被既有领域规则判为日程歧义。
           </p>
         )}
@@ -434,7 +441,8 @@ function PlanWaitingCard({
       <CardHeader>
         <CardTitle>待确认计划 #{planId}</CardTitle>
         <CardDescription>
-          确认后启用为新 active；拒绝会归档该 draft，原计划保持不变。计划详情在「训练计划」页查看。
+          确认后启用为新 active；拒绝会归档该
+          draft，原计划保持不变。计划详情在「训练计划」页查看。
         </CardDescription>
       </CardHeader>
       <CardContent className="flex justify-end gap-2">
@@ -510,6 +518,29 @@ export default function ChatPage() {
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight });
   }, [rounds]);
+
+  /** Gemini 式输入壳：展开加大编辑区；单行时发送与文字同行，多行时发送贴底 */
+  const requestRef = useRef<HTMLTextAreaElement>(null);
+  const [composerExpanded, setComposerExpanded] = useState(false);
+  const [singleLine, setSingleLine] = useState(true);
+  const [atMaxHeight, setAtMaxHeight] = useState(false);
+  useEffect(() => {
+    const element = requestRef.current;
+    if (element === null) return;
+    const style = window.getComputedStyle(element);
+    const lineHeight = Number.parseFloat(style.lineHeight);
+    const padY =
+      Number.parseFloat(style.paddingTop) + Number.parseFloat(style.paddingBottom);
+    const maxHeight = Number.parseFloat(style.maxHeight);
+    setSingleLine(element.scrollHeight <= lineHeight * 1.5 + padY);
+    setAtMaxHeight(
+      request.trim() !== "" &&
+        Number.isFinite(maxHeight) &&
+        element.scrollHeight >= maxHeight - 1,
+    );
+  }, [request, composerExpanded]);
+  const showExpand =
+    composerExpanded || (request.trim() !== "" && atMaxHeight);
 
   /** 用户气泡节点与文本：帧层按文本量宽，直接写这两组节点的 maxWidth / width */
   const bubbleNodes = useRef<(HTMLDivElement | null)[]>([]);
@@ -700,27 +731,61 @@ export default function ChatPage() {
           </div>
         )}
 
-        {/* 输入区：胶囊形输入框，发送按钮内嵌，仅有内容时显示 */}
-        <div className="relative">
+        {/* 输入壳：圆角卡片；到最大高度才出现右上角展开 */}
+        <div className="relative flex flex-col rounded-3xl bg-card px-4 py-3 shadow-md">
+          {showExpand && (
+            <button
+              type="button"
+              aria-label={composerExpanded ? "收起输入框" : "展开输入框"}
+              onClick={() => setComposerExpanded((value) => !value)}
+              className="absolute top-2 right-2 z-10 grid size-8 place-items-center rounded-full text-muted-foreground hover:bg-secondary hover:text-foreground"
+            >
+              {composerExpanded ? (
+                <Minimize2 aria-hidden className="size-4" />
+              ) : (
+                <Maximize2 aria-hidden className="size-4" />
+              )}
+            </button>
+          )}
+
           <Textarea
+            ref={requestRef}
             value={request}
             onChange={(event) => setRequest(event.target.value)}
             placeholder="用一句话记录训练，或生成／调整计划"
             disabled={run.isPending}
             rows={1}
-            className="min-h-0 resize-none rounded-full border-0 bg-card py-4 pr-14 pl-5 shadow-md focus-visible:ring-0"
+            className={
+              composerExpanded
+                ? "min-h-32 max-h-[min(40vh,20rem)] w-full resize-none overflow-y-auto border-0 bg-transparent py-1 pr-10 pl-1 focus-visible:ring-0 [field-sizing:content] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
+                : "min-h-0 max-h-[4.25rem] w-full resize-none overflow-y-auto border-0 bg-transparent py-1 pr-16 pl-1 focus-visible:ring-0 [field-sizing:content] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
+            }
           />
-          {request.trim() !== "" && (
-            <Button
-              size="icon"
-              aria-label="发送"
-              onClick={send}
-              disabled={run.isPending}
-              className="absolute top-1/2 right-5 size-8 -translate-y-1/2"
-            >
-              <SendHorizontal />
-            </Button>
-          )}
+
+          {request.trim() !== "" &&
+            (composerExpanded || !singleLine ? (
+              <div className="mt-1 flex justify-end">
+                <Button
+                  size="icon"
+                  aria-label="发送"
+                  onClick={send}
+                  disabled={run.isPending}
+                  className="size-8"
+                >
+                  <SendHorizontal />
+                </Button>
+              </div>
+            ) : (
+              <Button
+                size="icon"
+                aria-label="发送"
+                onClick={send}
+                disabled={run.isPending}
+                className="absolute top-1/2 right-11 size-8 -translate-y-1/2"
+              >
+                <SendHorizontal />
+              </Button>
+            ))}
         </div>
       </div>
     </div>

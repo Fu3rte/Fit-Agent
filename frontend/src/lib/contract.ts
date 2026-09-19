@@ -178,7 +178,7 @@ export interface PlanWire {
   version: number;
   status: "draft" | "active" | "archived" | "rejected";
   source_plan_id: number | null;
-  /** 结构化计划内容：后端只保证是合法 JSON，形状不在此层解释 */
+  /** 结构化计划内容：形状即 PlanDraftWire（与 domain/plans/schema.py 的 PlanDraft 同一 Schema） */
   structured_content: unknown;
   evaluator_result: unknown | null;
   created_at: string;
@@ -188,6 +188,62 @@ export interface PlanWire {
 
 export interface PlanListWire {
   plans: PlanWire[];
+}
+
+/* 计划内容的判别联合（plan_draft_schema）：字段与 domain/plans/schema.py 逐字对应 */
+
+/** 负荷判别联合：``status`` 是判别键；没有有效历史时为 needs_calibration，不带任何重量 */
+export type LoadWire =
+  | {
+      status: "known";
+      weight_kg: number;
+      source_workout_session_id: number;
+      source_set_no: number;
+    }
+  | { status: "needs_calibration" };
+
+/** 三类处方：``type`` 是判别键，字段严格互斥（只有外加负重次数处方携带 load） */
+export type PrescriptionWire =
+  | {
+      type: "weighted_reps";
+      reps_min: number;
+      reps_max: number;
+      progression_note: string | null;
+      load: LoadWire;
+    }
+  | {
+      type: "bodyweight_reps";
+      reps_min: number;
+      reps_max: number;
+      progression_note: string | null;
+    }
+  | {
+      type: "timed";
+      duration_seconds_min: number;
+      duration_seconds_max: number;
+      progression_note: string | null;
+    };
+
+/** 计划里的一个动作：稳定身份、组数与一个处方 */
+export interface PlannedExerciseWire {
+  exercise_id: string;
+  sets: number;
+  prescription: PrescriptionWire;
+}
+
+/** 一个训练日：窗口内的一个日期与它的动作（同日不重复同一动作） */
+export interface TrainingDayWire {
+  scheduled_on: string;
+  exercises: PlannedExerciseWire[];
+}
+
+/** 统一计划草案：``weekly_frequency`` 与 ``training_days`` 数量由后端强约束相等 */
+export interface PlanDraftWire {
+  goal: string;
+  starts_on: string;
+  explanation: string;
+  weekly_frequency: number;
+  training_days: TrainingDayWire[];
 }
 
 export interface PlanItemWire {
@@ -380,7 +436,8 @@ export interface ConfirmWorkoutResponseWire {
 }
 
 /** 五类 SSE 产品事件名（与后端 AgentEventName 同一封闭集合，不发送别的名字） */
-export type AgentEventNameWire = "node" | "message" | "waiting" | "done" | "error";
+export type AgentEventNameWire =
+  "node" | "message" | "waiting" | "done" | "error";
 
 /** 当前 Graph 节点／阶段名 */
 export interface AgentNodeEventWire {

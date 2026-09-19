@@ -57,7 +57,7 @@ export default function WeightTrendCard({ trends }: { trends: TrendsWire }) {
   const earliest = points.length === 0 ? null : points[0];
 
   return (
-    <Card>
+    <Card className="flex-1">
       <CardHeader>
         <div className="flex items-start justify-between gap-3">
           <div>
@@ -73,7 +73,7 @@ export default function WeightTrendCard({ trends }: { trends: TrendsWire }) {
 
         <div className="grid grid-cols-3 gap-3 border-b pt-3 pb-4">
           <KpiValue
-            label="窗口首条"
+            label="表格首条"
             value={earliest === null ? null : String(earliest.value)}
             date={earliest?.measured_on ?? null}
           />
@@ -105,6 +105,7 @@ export default function WeightTrendCard({ trends }: { trends: TrendsWire }) {
               <AreaChart
                 data={points}
                 margin={{ top: 8, right: 16, bottom: 0, left: 0 }}
+                accessibilityLayer={false}
               >
                 <defs>
                   <linearGradient
@@ -174,7 +175,7 @@ export default function WeightTrendCard({ trends }: { trends: TrendsWire }) {
           </div>
         )}
         <p className="text-xs text-muted-foreground">
-          时间 {trends.from} 至 {trends.to}；窗口内无记录的日期不出现点。
+          时间 {trends.from} 至 {trends.to}。
         </p>
       </CardContent>
     </Card>

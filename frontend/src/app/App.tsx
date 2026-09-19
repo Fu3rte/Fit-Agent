@@ -1,7 +1,14 @@
 import { useState } from "react";
 import { Navigate, NavLink, Route, Routes } from "react-router-dom";
 import { Toaster } from "sonner";
-import { Dumbbell, ClipboardList, LayoutDashboard, MessageSquare, Moon, Settings, Sun, UserRound } from "lucide-react";
+import {
+  ClipboardList,
+  LayoutDashboard,
+  MessageSquare,
+  Moon,
+  Settings,
+  Sun,
+} from "lucide-react";
 import { cn } from "@/lib/utils";
 import { getTheme, setTheme, type Theme } from "@/lib/theme";
 import { TooltipProvider } from "@/components/ui/tooltip";
@@ -20,26 +27,24 @@ import {
   sidebarMenuButtonVariants,
   useSidebar,
 } from "@/components/ui/sidebar";
-import ProfilePage from "@/features/profile/ProfilePage";
-import RecordsPage from "@/features/records/RecordsPage";
 import DashboardPage from "@/features/dashboard/DashboardPage";
 import PlansPage from "@/features/plans/PlansPage";
 import ChatPage from "@/features/chat/ChatPage";
-import ProviderPage from "@/features/provider/ProviderPage";
+import { ProviderDialog } from "@/features/provider/ProviderDialog";
 
-/**
- * 保留页面：数据看板、计划、画像与训练记录（讨论总结 §7；旧对话/复盘/设置页已随旧路径删除），
- * Stage 6 的对话页（stage6.md §2.5.1：自然语言打卡确认与计划生成／调整入口），
- * 以及模型配置页（用户拍板：可编辑 Provider 配置，覆盖旧「设置页已删除」约束）。
- */
+/** 主导航：对话、数据看板、训练计划；模型配置由侧栏底部弹层承载 */
 const nav = [
   { to: "/chat", label: "对话", icon: MessageSquare, end: false },
   { to: "/dashboard", label: "数据看板", icon: LayoutDashboard, end: false },
   { to: "/plans", label: "训练计划", icon: ClipboardList, end: false },
-  { to: "/profile", label: "用户画像", icon: UserRound, end: false },
-  { to: "/records", label: "训练记录", icon: Dumbbell, end: false },
-  { to: "/provider", label: "模型配置", icon: Settings, end: false },
 ];
+
+/** 侧栏导航项视觉 */
+const navLinkClass = ({ isActive }: { isActive: boolean }) =>
+  cn(
+    sidebarMenuButtonVariants(),
+    isActive && "bg-sidebar-accent font-medium text-sidebar-accent-foreground",
+  );
 
 /** 主题切换（C3B）：浅色默认，暗色第二主题 */
 function ThemeToggle() {
@@ -51,11 +56,7 @@ function ThemeToggle() {
   };
   return (
     <SidebarMenuButton onClick={toggle} className="cursor-pointer">
-      {theme === "light" ? (
-        <Moon className="size-4" aria-hidden />
-      ) : (
-        <Sun className="size-4" aria-hidden />
-      )}
+      {theme === "light" ? <Moon aria-hidden /> : <Sun aria-hidden />}
       <span>{theme === "light" ? "切换暗色" : "切换浅色"}</span>
     </SidebarMenuButton>
   );
@@ -80,6 +81,8 @@ function SidebarToggle() {
 }
 
 export default function App() {
+  const [providerOpen, setProviderOpen] = useState(false);
+
   return (
     <TooltipProvider>
       {/* 全局反馈 toast（A5），全应用仅此一处 */}
@@ -101,17 +104,7 @@ export default function App() {
                 <SidebarMenu>
                   {nav.map(({ to, label, icon: Icon, end }) => (
                     <SidebarMenuItem key={to}>
-                      <NavLink
-                        to={to}
-                        end={end}
-                        className={({ isActive }) =>
-                          cn(
-                            sidebarMenuButtonVariants(),
-                            isActive &&
-                            "bg-sidebar-accent font-medium text-sidebar-accent-foreground",
-                          )
-                        }
-                      >
+                      <NavLink to={to} end={end} className={navLinkClass}>
                         <Icon aria-hidden />
                         <span>{label}</span>
                       </NavLink>
@@ -123,6 +116,13 @@ export default function App() {
           </SidebarContent>
 
           <SidebarFooter className="px-3 pb-4">
+            <SidebarMenuButton
+              onClick={() => setProviderOpen(true)}
+              className="cursor-pointer"
+            >
+              <Settings aria-hidden />
+              <span>模型配置</span>
+            </SidebarMenuButton>
             <ThemeToggle />
           </SidebarFooter>
         </Sidebar>
@@ -135,12 +135,13 @@ export default function App() {
               <Route path="/chat" element={<ChatPage />} />
               <Route path="/dashboard" element={<DashboardPage />} />
               <Route path="/plans" element={<PlansPage />} />
-              <Route path="/profile" element={<ProfilePage />} />
-              <Route path="/records" element={<RecordsPage />} />
-              <Route path="/provider" element={<ProviderPage />} />
             </Routes>
           </div>
         </main>
+
+        {providerOpen && (
+          <ProviderDialog onClose={() => setProviderOpen(false)} />
+        )}
 
         <SidebarToggle />
       </SidebarProvider>
