@@ -11,8 +11,8 @@
 权重与阈值。
 
 模型只经构造期注入的 callable 调用（:attr:`GeneratePlanDeps.model`）：测试注入固定替身，生产由
-``graph.model.openai_compatible_model_call`` 提供 OpenAI 兼容入口；API Key／Base URL／模型名只从
-环境变量读取，不进入 State、业务库或 checkpoint。
+``graph.model.openai_compatible_model_call`` 提供 OpenAI 兼容入口；API Key／Base URL／模型名按
+``provider.json`` 优先、空字段回落 ``MODEL_*`` 环境变量解析，不进入 State、业务库或 checkpoint。
 
 四条边界：
 

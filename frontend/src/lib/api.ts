@@ -27,6 +27,8 @@ import type {
   PlanSessionCandidatesWire,
   ProfileResponseWire,
   ProfileWriteBody,
+  ProviderStatusWire,
+  ProviderWriteBody,
   RecordItemWire,
   RecordListWire,
   RecordWriteBody,
@@ -73,6 +75,22 @@ export const putProfile = (body: ProfileWriteBody) =>
     method: "PUT",
     body: JSON.stringify(body),
   });
+
+/* ------------------------------ 模型配置（Provider） ------------------------------ */
+
+/** Provider 状态：has_api_key 表示是否已存 Key，响应不含 Key 本体 */
+export const getProvider = () => request<ProviderStatusWire>("/api/provider");
+
+/** 整份覆盖写入 Provider 配置：请求里未出现的字段后端写空串 */
+export const putProvider = (body: ProviderWriteBody) =>
+  request<ProviderStatusWire>("/api/provider", {
+    method: "PUT",
+    body: JSON.stringify(body),
+  });
+
+/** 清除全部 Provider 配置，返回空状态 */
+export const deleteProvider = () =>
+  request<ProviderStatusWire>("/api/provider", { method: "DELETE" });
 
 /* -------------------------------- 动作目录 --------------------------------- */
 

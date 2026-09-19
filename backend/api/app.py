@@ -15,6 +15,7 @@ from api import (
     routes_agent,
     routes_plans,
     routes_profile,
+    routes_provider,
     routes_records,
     routes_stats,
 )
@@ -23,7 +24,6 @@ from config import (
     database_path,
     frontend_dist_dir,
     local_timezone_name,
-    model_api_key_configured,
     resolve_data_dir,
 )
 from domain.actions.service import ActionCatalogService
@@ -48,6 +48,7 @@ from graph.model import (
 from graph.nodes import GeneratePlanDeps
 from graph.skills import SkillLoader
 from graph.workflow import AgentRunDeps, build_generate_plan_graph
+from provider_settings import provider_api_key_configured
 from storage.db import Database
 
 _LOOPBACK_HOSTNAMES = frozenset({"localhost", "127.0.0.1", "::1"})
@@ -109,6 +110,7 @@ def create_app(
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         resolved = resolve_data_dir(data_dir)
         resolved.mkdir(parents=True, exist_ok=True)
+        app.state.data_dir = resolved
         db = Database(database_path(resolved))
         app.state.db = db
         try:
@@ -121,9 +123,8 @@ def create_app(
             ) as checkpointer:
                 app.state.checkpointer = checkpointer
                 # Agent 三端点的依赖与编译图只装配一次（stage5.md §4.3–§4.4）。
-                app.state.agent_runtime = build_agent_runtime(db, checkpointer)
+                app.state.agent_runtime = build_agent_runtime(db, checkpointer, resolved)
                 app.state.business_timezone = local_timezone_name()
-                app.state.provider_has_api_key = model_api_key_configured()
                 yield
         finally:
             await db.close()
@@ -144,7 +145,10 @@ def create_app(
             "status": "ok",
             "database": "open" if db.is_open else "closed",
             "business_timezone": request.app.state.business_timezone,
-            "provider_has_api_key": request.app.state.provider_has_api_key,
+            # 与 /api/provider 同源：每次请求现算 provider.json ＋ MODEL_API_KEY，不缓存启动快照。
+            "provider_has_api_key": provider_api_key_configured(
+                request.app.state.data_dir
+            ),
         }
 
     # 表单 API 路由必须先于 /{path:path} 静态兜底注册，否则会被前端宿主吞掉。
@@ -154,6 +158,7 @@ def create_app(
     app.include_router(routes_plans.router)
     app.include_router(routes_stats.router)
     app.include_router(routes_agent.router)
+    app.include_router(routes_provider.router)
     _install_frontend_static(
         app,
         Path(frontend_dist) if frontend_dist is not None else frontend_dist_dir(),
@@ -162,15 +167,16 @@ def create_app(
 
 
 def build_agent_runtime(
-    db: Database, checkpointer: BaseCheckpointSaver
+    db: Database,
+    checkpointer: BaseCheckpointSaver,
+    data_dir: Path,
 ) -> routes_agent.AgentRuntime:
     """装配 Agent 三端点的生产依赖（stage5.md §4.2–§4.4）：一份 Planner／Evaluator 与唯一模型入口。
 
-    同一个 ``PlanActivationService`` 供确认节点与 ``invoke_confirmation`` 的兜底路径共用；同一个模型
-    callable 供 ``GeneratePlanDeps``（计划链路）与 ``AgentRunDeps``（Router／非计划分支）共用，不建第二套
-    Agent。数据库用 lifespan 里的唯一连接，存档用 lifespan 里的独立 checkpointer。
+    同一个模型 callable 供 GeneratePlanDeps 与 AgentRunDeps 共用；``data_dir`` 是 provider.json
+    的宿主目录。
     """
-    model = _lazy_model_call()
+    model = _lazy_model_call(data_dir)
     deps = GeneratePlanDeps(
         profiles=ProfileService(db),
         catalog=ActionCatalogService(db),
@@ -197,25 +203,12 @@ def build_agent_runtime(
     )
 
 
-def _lazy_model_call() -> ModelCall:
-    """唯一模型入口的惰性形态：三个 ``MODEL_*`` 环境变量在首次调用时才校验。
-
-    启动不读环境变量（无 Key 也能起服务，``/healthz`` 只报 ``provider_has_api_key``）；缺配置时首次
-    模型调用抛 :class:`~graph.model.ModelConfigurationError`，由 ``/api/agent/run`` 按 §3.7 在流内发一个
-    SSE ``error``，不泄露端点、模型名或密钥。
-
-    **Provider 异常的文本不向上抛**：节点抛出的异常会被 LangGraph 写进 checkpoint 存档
-    （``writes`` 表的 ``__error__``），而 Provider／SDK 的 ``str(exc)`` 常带 Base URL 或模型名；因此
-    这里统一换成固定文本的 :class:`~graph.model.ModelCallFailed`（异常原文只进 ``__cause__``）。本项目
-    自己的模型配置错误原本就不含 Provider 取值，照原样上抛。
-    """
-    call: ModelCall | None = None
+def _lazy_model_call(data_dir: Path) -> ModelCall:
+    """唯一模型入口：每次调用重新 resolve 配置；Provider 异常换成固定文本 ModelCallFailed。"""
 
     async def configured_call(system_prompt: str, user_payload: str) -> str:
-        nonlocal call
-        if call is None:
-            call = openai_compatible_model_call()
         try:
+            call = openai_compatible_model_call(data_dir)
             return await call(system_prompt, user_payload)
         except ModelConfigurationError:
             raise
