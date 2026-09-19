@@ -1,25 +1,4 @@
-"""表单 API 传输层：请求体模型 ↔ 领域对象映射、领域对象 → 响应 DTO、统一错误形状。
-
-响应侧同时是只读统计（PB、趋势、月历）的唯一边界映射：``personal_best_dto``／``trends_dto``／
-``calendar_dto`` 也是 Subtask 05 前端契约的后端侧正本。
-
-Stage 5 的 Agent 三端点（``api/routes_agent.py``）也在这里定义请求体与 confirm／reject 异常到
-既有 JSON 错误形状的映射（stage5.md §4.4／§3.7）：``/api/agent/run`` 的流前校验错误与
-``/confirm``／``/reject`` 的领域错误都复用同一形状，不在 Agent 层另造一套。
-
-正本：``LANGGRAPH_REFACTOR_PLAN.md`` §4（目标代码结构）、§6.1（校验责任划分）与 Stage 1
-子任务 04（表单 API）。三条硬边界：
-
-- **只做传输**：不写 SQL、不创建 Agent Run 或通用草稿；表单写入直接调用领域 service。
-- **校验责任分层**：Pydantic 模型只管 JSON 形状、必填字段与基础类型（一律 ``extra="forbid"``，
-  未知字段即拒绝）；日期、数值范围、动作与负重口径匹配、组类型、日程关联规则由 ``domain``
-  拒绝（422），本层不重复实现，也不把领域错误静默改写成别的形状（例如不把 ``known([])``
-  改写成 ``denied``）。
-- **错误形状统一且不泄漏**：响应体固定为
-  ``{"http_status": int, "error_code": "invalid_request", "message": str}``；``message`` 只取
-  异常文本，不含 SQL、文件路径或堆栈；未登记的异常不映射（保持 500 服务端故障，不伪装成
-  客户端错误）。
-"""
+"""表单 API 传输层：请求体模型 ↔ 领域对象映射、领域对象 → 响应 DTO、统一错误形状。"""
 
 import sqlite3
 from collections.abc import Callable, Sequence
@@ -63,52 +42,30 @@ from domain.stats.schema import (
     WorkoutGap,
 )
 
-#: 统一错误码：本层只表达「请求或输入不合法」，不新增业务语义错误码。
 ERROR_CODE_INVALID_REQUEST = "invalid_request"
 
 
 class InvalidRequestShape(ValueError):
-    """请求体不是接口约定的 JSON 形状（在触碰领域层之前即拒绝，400 ``invalid_request``）。"""
+    """请求体不是接口约定的 JSON 形状。"""
 
 
 class UnknownResource(ValueError):
-    """按身份读取的只读资源不存在（计划版本）：404 ``invalid_request``。
-
-    明确未找到，不创建资源、不伪造空结果；不新增前端契约之外的 ``error_code``。
-    训练记录与身体指标的「不存在」由领域服务抛出（:class:`WorkoutRecordNotFound`／
-    :class:`BodyMetricNotFound`），计划侧只有只读服务，因此没有对应的领域异常。
-    """
+    """按身份读取的只读资源不存在（计划版本）。"""
 
 
 # ---------- 查询参数 ----------
 
-#: 月历月份参数：严格的 ``YYYY-MM``（不接受 ``2026-6`` 这类非补零写法，也不接受多个月份集合）。
-_MONTH_PATTERN = r"^[0-9]{4}-(0[1-9]|1[0-2])$"
+#: 月历月份参数：严格的 ``YYYY-MM``（年份首位不得为 0）。
+_MONTH_PATTERN = r"^[1-9][0-9]{3}-(0[1-9]|1[0-2])$"
 
 MonthQuery = Annotated[str, Query(pattern=_MONTH_PATTERN)]
-
-
-def decode_year_month(month: str) -> tuple[int, int]:
-    """``YYYY-MM`` → ``(年, 月)``；形状已由 :data:`MonthQuery` 正则保证，这里只拒绝不存在的年份。
-
-    年份 0 不是合法自然年，不靠数据库或领域层兜底（那会变成 500），在传输层直接归为 400。
-    """
-    year_text, _, month_text = month.partition("-")
-    year = int(year_text)
-    if year < 1:
-        raise InvalidRequestShape(f"月份年份非法：{month}")
-    return year, int(month_text)
 
 
 # ---------- 请求体模型（Pydantic 只管形状、必填与基础类型） ----------
 
 
 class SetIn(BaseModel):
-    """提交的一组训练事实；组序号由 API 按提交顺序分配（05 不要求输入组序号）。
-
-    ``reps``／``duration_seconds`` 都可省略：哪一项必填由目录动作的记录口径决定，
-    本层不重复实现该规则（与值域、负重口径同口径：一律由 ``domain`` 拒绝）。
-    """
+    """提交的一组训练事实；组序号由 API 按提交顺序分配。"""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -165,11 +122,7 @@ class ProfileBody(BaseModel):
 
 
 class AgentRunBody(BaseModel):
-    """``POST /api/agent/run`` 的请求体（stage5.md §3.7）：``conversation_id`` 按 UUID 校验。
-
-    ``conversation_id`` 就是 Checkpointer 的 ``thread_id``（不另建映射）；``regenerate`` 缺省 false。
-    形状、字段类型或 UUID 非法都在流建立**前**按既有 JSON 错误形状（400）拒绝，不进入 SSE。
-    """
+    """``POST /api/agent/run`` 的请求体。"""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -179,7 +132,7 @@ class AgentRunBody(BaseModel):
 
 
 class AgentPlanBody(BaseModel):
-    """``POST /api/agent/confirm``／``reject`` 的请求体（stage5.md §3.7）：会话身份 ＋ 目标计划身份。"""
+    """``POST /api/agent/confirm``／``reject`` 的请求体：会话身份 ＋ 目标计划身份。"""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -188,11 +141,7 @@ class AgentPlanBody(BaseModel):
 
 
 class WorkoutSetBody(BaseModel):
-    """自然语言打卡确认提交的一组训练事实；组序号由模型提取结果原样携带（stage6.md §2.2）。
-
-    与表单 ``SetIn`` 的差别只有 ``set_no``：自然语言路径的提取结果已含组序号，用户修改后提交
-    的是同一形状的完整载荷。取值范围、负重口径与必填／互斥字段一律由 ``domain.records`` 拒绝。
-    """
+    """自然语言打卡确认提交的一组训练事实。"""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -206,11 +155,7 @@ class WorkoutSetBody(BaseModel):
 
 
 class ConfirmWorkoutBody(BaseModel):
-    """``POST /api/agent/confirm-workout`` 的请求体（stage6.md §2.4.2）：完整确认载荷。
-
-    ``conversation_id`` 按 UUID 校验（与 Agent Run 同一约定）；本端点不要求服务端证明该 session
-    此前完成过自然语言解析，所以它只做形状校验，不参与任何关联查询。``sets`` 是用户可修改后的完整值。
-    """
+    """``POST /api/agent/confirm-workout`` 的请求体：完整确认载荷。"""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -222,11 +167,7 @@ class ConfirmWorkoutBody(BaseModel):
 
 
 class ProviderPutBody(BaseModel):
-    """模型配置整份覆盖请求体（PUT ``/api/provider``）：字段未出现写空串，出现按值写入。
-
-    完整 API Key 只进本请求体与 ``provider.json``，不进任何响应；形状非法按既有 JSON
-    错误形状（400 ``invalid_request``）拒绝，``message`` 不回显任何字段取值。
-    """
+    """模型配置整份覆盖请求体（PUT ``/api/provider``）。"""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -239,12 +180,7 @@ class ProviderPutBody(BaseModel):
 
 
 def profile_from_dto(body: ProfileBody) -> Profile:
-    """画像请求体 → :class:`Profile`（整份覆盖）。
-
-    只做三态形状映射：``known`` 必须带值、``unknown``／``denied`` 不得带值。列表字段的
-    ``known`` 空列表**原样传给领域层**，由 ``domain.profile.rules`` 拒绝（明确为空只能用
-    ``denied`` 表达，本层不代它改写）。值是否符合字段类型与值域同样归领域校验。
-    """
+    """画像请求体 → :class:`Profile`（整份覆盖）。"""
     return Profile(
         **{
             name: _fact_from_in(name, getattr(body, name))
@@ -268,50 +204,34 @@ def _fact_from_in(name: str, raw: ProfileFactIn) -> Fact[Any]:
     return Fact.known(value)
 
 
-def workout_set_inputs_from_dto(sets: Sequence[WorkoutSetBody]) -> tuple[WorkoutSetInput, ...]:
-    """自然语言确认请求体的组列表 → 组事实；``set_no`` 原样采用（提取结果已给出）。
-
-    组序号范围与同一动作内不重复、组类型、负重口径、重量、次数、时长与按记录口径的必填字段
-    一律由 ``domain.records`` 校验，本层不猜、不补默认值；这也使确认路径与表单路径复用同一套
-    领域规则（stage6.md §2.2）。
-    """
-    return tuple(
-        WorkoutSetInput(
-            exercise_id=item.exercise_id,
-            set_no=item.set_no,
-            reps=item.reps,
-            set_type=cast(SetType, item.set_type),
-            load_convention=cast(LoadConvention | None, item.load_convention),
-            weight_kg=item.weight_kg,
-            duration_seconds=item.duration_seconds,
-        )
-        for item in sets
+def _workout_set_input(
+    item: SetIn | WorkoutSetBody, *, set_no: int
+) -> WorkoutSetInput:
+    """请求体的一条组 → 组事实；取值域与必填／互斥字段由 ``domain.records`` 校验。"""
+    return WorkoutSetInput(
+        exercise_id=item.exercise_id,
+        set_no=set_no,
+        reps=item.reps,
+        set_type=cast(SetType, item.set_type),
+        load_convention=cast(LoadConvention | None, item.load_convention),
+        weight_kg=item.weight_kg,
+        duration_seconds=item.duration_seconds,
     )
 
 
-def workout_facts_from_dto(body: RecordBody) -> tuple[WorkoutSetInput, ...]:
-    """训练记录请求体的组列表 → 组事实；``set_no`` 按提交顺序对同一动作依次分配 1,2,3…
+def workout_set_inputs_from_dto(sets: Sequence[WorkoutSetBody]) -> tuple[WorkoutSetInput, ...]:
+    """自然语言确认请求体的组列表 → 组事实；``set_no`` 原样采用提取结果。"""
+    return tuple(_workout_set_input(item, set_no=item.set_no) for item in sets)
 
-    组的取值域（组类型、负重口径、重量、次数、时长、总组数与按记录口径的必填字段）一律由
-    ``domain.records`` 校验，本层不猜、不补默认值。计时时长的不小于 1 秒也是同一条领域规则
-    （``domain.records.rules.validate_duration_seconds``），本层不另写一遍。
-    """
+
+def workout_facts_from_dto(body: RecordBody) -> tuple[WorkoutSetInput, ...]:
+    """训练记录请求体的组列表 → 组事实；``set_no`` 按提交顺序对同一动作依次分配。"""
     counters: dict[str, int] = {}
     facts: list[WorkoutSetInput] = []
     for item in body.sets:
         set_no = counters.get(item.exercise_id, 0) + 1
         counters[item.exercise_id] = set_no
-        facts.append(
-            WorkoutSetInput(
-                exercise_id=item.exercise_id,
-                set_no=set_no,
-                reps=item.reps,
-                set_type=cast(SetType, item.set_type),
-                load_convention=cast(LoadConvention | None, item.load_convention),
-                weight_kg=item.weight_kg,
-                duration_seconds=item.duration_seconds,
-            )
-        )
+        facts.append(_workout_set_input(item, set_no=set_no))
     return tuple(facts)
 
 
@@ -449,11 +369,7 @@ def workout_gap_dto(gap: WorkoutGap) -> dict[str, Any]:
 
 
 def trends_dto(report: TrendReport) -> dict[str, Any]:
-    """趋势报告 → 传输对象：窗口、体重／体脂原始点、力量累计 PB 系列与趋势摘要。
-
-    ``strength`` 由后端按截至各日期的累计 PB 算出（Stage 2 前端不展示该曲线）；
-    所有点数、状态与差值都是后端事实，前端不得重算。
-    """
+    """趋势报告 → 传输对象。"""
     return {
         "window_days": report.window_days,
         "from": report.from_on.isoformat(),
@@ -494,11 +410,7 @@ def trends_dto(report: TrendReport) -> dict[str, Any]:
 
 
 def calendar_dto(month: CalendarMonth) -> dict[str, Any]:
-    """月历 → 传输对象：只含有事实的日期；计划状态落在 ``scheduled_on``，训练落在 ``performed_on``。
-
-    空白日期不出条目（不生成「休息日」文案）；计划条目的 ``workout_session_id`` 非空即已完成该日程，
-    ``actual_performed_on`` 在跨日、跨月时仍给出真实训练日期；``workout.plan_session_id`` 为 null 即额外训练。
-    """
+    """月历 → 传输对象：只含有事实的日期。"""
     return {
         "month": month.month,
         "from": month.from_on.isoformat(),
@@ -538,15 +450,6 @@ def _optional_iso(value: date | None) -> str | None:
     return None if value is None else value.isoformat()
 
 
-# ---------- 异常 → 统一错误形状 ----------
-
-#: 异常类型 → HTTP 状态码（``error_code`` 一律 ``invalid_request``）。请求体形状与 Pydantic
-#: 校验错（未知字段、缺字段、非法类型、非 JSON）是 400；领域规则与值域是 422；身份不存在是
-#: 404；关联日程不可用或候选不唯一、以及库内约束兜底是 409。未登记异常不映射（500）。
-#:
-#: 确认／拒绝（``api/routes_agent.py``）按 stage5.md §3.7 复用同一形状与状态码：计划不存在是 404；
-#: ID 不匹配、状态冲突、日期过期与再校验失败都是 409（``PlanActivationError`` 一族，含
-#: ``graph.nodes.ConfirmationConflict``；子类按 MRO 先命中更具体的登记项）。
 _ERROR_STATUS: tuple[tuple[type[Exception], int], ...] = (
     (RequestValidationError, 400),
     (InvalidRequestShape, 400),
@@ -570,7 +473,7 @@ _ERROR_STATUS: tuple[tuple[type[Exception], int], ...] = (
 def _handler_for(
     status: int,
 ) -> Callable[[Request, Exception], JSONResponse]:
-    def handler(request: Request, exc: Exception) -> JSONResponse:
+    def handler(_request: Request, exc: Exception) -> JSONResponse:
         return JSONResponse(
             status_code=status,
             content={

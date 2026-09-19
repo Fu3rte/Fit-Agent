@@ -86,7 +86,6 @@ export function useBubbleShrinkwrap(
     };
     void document.fonts.ready.then(reprepare);
     document.fonts.addEventListener("loadingdone", reprepare);
-    return () =>
-      document.fonts.removeEventListener("loadingdone", reprepare);
+    return () => document.fonts.removeEventListener("loadingdone", reprepare);
   }, []);
 }

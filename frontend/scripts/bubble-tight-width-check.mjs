@@ -51,10 +51,10 @@ const server = await createServer({
 
 try {
   const contract = await server.ssrLoadModule(
-    "/src/features/chat/bubbleContract.ts",
+    "/src/features/chat/utils/bubbleContract.ts",
   );
   const metrics = await server.ssrLoadModule(
-    "/src/features/chat/bubbleMetrics.ts",
+    "/src/features/chat/utils/bubbleMetrics.ts",
   );
   const { BUBBLE, bubbleContentMaxWidth, bubbleMaxWidthFor } = contract;
   const {

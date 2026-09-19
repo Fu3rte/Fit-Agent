@@ -1,12 +1,4 @@
-"""body_metrics 类型定义：一条身体指标事实（讨论总结 §9、REFACTOR_PLAN §5.3；Stage 1 子任务 02 §6）。
-
-与 ``body_metrics`` 表列一一对应：发生日期（业务时区自然日）、体重（必填）、体脂（可选）。
-两条硬边界：
-
-- **日期是日期对象**：``measured_on`` 用 ``datetime.date``，由调用方按业务时区算好后注入；
-  repo 与领域服务不得自行取「今天」（REFACTOR_PLAN §5.5：禁止 ``date.today()``）。
-- **无数据保持空值**：体脂未记录时为 ``None``／库内 NULL，不补 0，也不与其他日期的值比较。
-"""
+"""body_metrics 类型定义：一条身体指标事实。"""
 
 from collections.abc import Mapping
 from dataclasses import dataclass

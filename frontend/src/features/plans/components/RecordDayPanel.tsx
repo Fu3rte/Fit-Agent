@@ -17,7 +17,7 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
-import { LOAD_CONVENTION_LABELS, SET_TYPE_LABELS } from "@/lib/catalogLabels";
+import { SET_TYPE_LABELS } from "@/lib/catalogLabels";
 import type {
   CalendarPlanSessionWire,
   LoadConvention,
@@ -251,7 +251,7 @@ export default function RecordDayPanel({
           </Button>
         </div>
       </CardHeader>
-      <CardContent className="flex flex-col gap-3 @min-[60rem]:min-h-0 @min-[60rem]:flex-1 @min-[60rem]:overflow-y-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+      <CardContent className="flex flex-col gap-3 @min-[60rem]:min-h-0 @min-[60rem]:flex-1 @min-[60rem]:overflow-y-auto scrollbar-none [&::-webkit-scrollbar]:hidden">
         {records.map((record) => (
           <RecordBlock
             key={record.id}

@@ -1,11 +1,4 @@
-"""请求依赖注入：业务日期（固定业务时区下的自然日）。
-
-本模块只保留**业务时间**注入（LANGGRAPH_REFACTOR_PLAN §5.5、Stage 1 子任务 04）：新版自然日
-统一由 ``business_time.business_date()`` 按 lifespan 冻结的本机 IANA 时区折算，不接受客户端
-传入（客户端时钟不是可信基线）。repo、领域服务与路由都不得自行调用 ``date.today()``。
-
-测试用 FastAPI ``dependency_overrides`` 覆盖 :func:`business_today` 固定时钟，不靠系统真实日期。
-"""
+"""请求依赖注入：业务日期（固定业务时区下的自然日）。"""
 
 from datetime import UTC, date, datetime
 

@@ -1,18 +1,4 @@
-"""stats 用例编排：从当前有效训练组确定性现算三类 PB、趋势摘要与月历状态（讨论总结
-§3.2／§6.4／§7.1、REFACTOR_PLAN §6.2／§6.4、stage2.md §6.2／§7／§8）。
-
-边界：不接 HTTP／Agent（Stats API 与响应 DTO 在 ``api``），不写任何表、不建缓存、不调模型，
-也不调 ``date.today()``——PB 的日期只来自来源训练自己的 ``performed_on``，趋势窗口与停训天数
-的「今天」由调用方注入业务日期。SQL 只在 ``domain.stats.repo`` 与 ``domain.plans.repo``：本层
-只做查询编排与确定性计算。
-
-口径（stage2.md §7／§8）：
-
-- **不补 0**：窗口内只返回真实存在的原始点；数据不足的摘要显式返回 ``no_data``／
-  ``insufficient_data``，不伪造变化值。
-- **不评价**：不输出进步、退步、停滞或疲劳判断，也不含训练容量与计划完成率。
-- **不聚合完成率**：月历只给单次日程的取消／未完成／已完成状态与实际训练日。
-"""
+"""stats 用例编排：从当前有效训练组确定性现算三类 PB、趋势摘要与月历状态。"""
 
 from calendar import monthrange
 from collections.abc import Callable, Mapping, Sequence
@@ -58,10 +44,7 @@ class StatsService:
         self._plans = PlanRepo(db)
 
     async def list_personal_bests(self) -> tuple[PersonalBest, ...]:
-        """按当前有效训练组现算全部三类 PB（修改或删除记录后再次查询即反映最新结果）。
-
-        返回按动作身份、PB 类型（重量、次数、时长）、适用重量升序排列。
-        """
+        """按当前有效训练组现算全部三类 PB。"""
         return compute_personal_bests(await self._repo.list_valid_work_sets())
 
     async def trends(self, business_day: date) -> TrendReport:
@@ -85,10 +68,7 @@ class StatsService:
         )
 
     async def trend_summary(self, business_day: date) -> TrendSummary:
-        """确定性趋势摘要：最近两条体重、最近两条非空体脂与距上次训练天数。
-
-        同一实现供看板与 Stage 3 MemoryAssembler 复用；本子任务不实现 Stage 3。
-        """
+        """确定性趋势摘要：最近两条体重、最近两条非空体脂与距上次训练天数。"""
         return compute_trend_summary(
             await self._repo.read_latest_two_weights(),
             await self._repo.read_latest_two_body_fats(),
@@ -123,12 +103,7 @@ class StatsService:
 
 
 def compute_personal_bests(facts: Sequence[ValidWorkSet]) -> tuple[PersonalBest, ...]:
-    """把有效工作组归约成三类 PB（同一份事实必得同一份结果：无模型、无缓存、无「今天」）。
-
-    分组口径：``weight_pb`` 按（动作、负重口径）；``reps_pb`` 只由纯自重动作产生、按动作；
-    ``duration_pb`` 只按动作。故三类动作互不混算：外加重量动作只出重量 PB，不按同重量再算次数 PB
-    （讨论总结 §7.1）；多组次数只比大小、不累加。
-    """
+    """把有效工作组归约成三类 PB。"""
     weighted: dict[tuple[str, LoadConvention | None], list[ValidWorkSet]] = {}
     bodyweight_reps: dict[str, list[ValidWorkSet]] = {}
     timed: dict[str, list[ValidWorkSet]] = {}
@@ -144,15 +119,12 @@ def compute_personal_bests(facts: Sequence[ValidWorkSet]) -> tuple[PersonalBest,
             timed.setdefault(fact.exercise_id, []).append(fact)
 
     bests: list[PersonalBest] = []
-    # 最大实际重量：同动作、同负重口径比较，次数只作为来源组事实。
     for group in weighted.values():
         source, weight = _best_source(group, _weight_of)
         bests.append(_personal_best("weight_pb", source, weight, weight))
-    # 最大次数：只有纯自重动作有次数 PB，直接取单组最大次数（无重量、无口径）。
     for group in bodyweight_reps.values():
         source, reps = _best_source(group, _reps_of)
         bests.append(_personal_best("reps_pb", source, reps, None))
-    # 最长时长：计时动作取单组最大持续秒数（无重量、无口径）。
     for group in timed.values():
         source, seconds = _best_source(group, _duration_of)
         bests.append(_personal_best("duration_pb", source, seconds, None))
@@ -163,11 +135,7 @@ def compute_personal_bests(facts: Sequence[ValidWorkSet]) -> tuple[PersonalBest,
 def _best_source(
     group: Sequence[ValidWorkSet], measure: Callable[[ValidWorkSet], int | float]
 ) -> tuple[ValidWorkSet, int | float]:
-    """取度量最大的组及其度量值；度量并列时取最先达成的来源。
-
-    ``min`` 配「度量取负 + 来源排序升序」即「度量最大、并列取最早」；度量是不小于 0 的次数、
-    秒数或重量，取负不改变可比性。
-    """
+    """取度量最大的组及其度量值；度量并列时取最先达成的来源。"""
     source = min(group, key=lambda fact: (-measure(fact), *_source_rank(fact)))
     return source, measure(source)
 
@@ -205,11 +173,7 @@ def _result_order(best: PersonalBest) -> tuple[str, int, float]:
 def _order_key(
     exercise_id: str, pb_type: PersonalBestType, weight_kg: float | None
 ) -> tuple[str, int, float]:
-    """PB 结果与力量趋势系列共用的输出顺序键。
-
-    无适用重量（纯自重次数 PB 与计时 PB）用 -1 占位即可：重量下限是 0kg，且同一动作同一 PB
-    类型下不会既有适用重量又无适用重量——区分它们的是动作自己的记录口径。
-    """
+    """PB 结果与力量趋势系列共用的输出顺序键。"""
     return (
         exercise_id,
         PERSONAL_BEST_TYPES.index(pb_type),
@@ -255,11 +219,7 @@ def compute_trend_summary(
     last_workout_on: date | None,
     business_day: date,
 ) -> TrendSummary:
-    """把「最近两条体重／体脂记录 + 最近一次训练日期 + 注入的业务日期」归约成摘要。
-
-    ``latest_weights``／``latest_body_fats`` 由 repo 以最新在前给出；体脂为 NULL 的行不参与
-    （未记录体脂不是 0%）。停训天数由业务日期与最近 ``performed_on`` 相减得到，不由本层取「今天」。
-    """
+    """把最近两条体重／体脂记录、最近一次训练日期与业务日期归约成摘要。"""
     return TrendSummary(
         weight_change=_metric_change(
             tuple((metric.measured_on, metric.weight_kg) for metric in latest_weights)
@@ -330,13 +290,7 @@ class _SeriesKey:
 def compute_strength_trends(
     facts: Sequence[ValidWorkSet], from_on: date, to_on: date
 ) -> tuple[StrengthTrend, ...]:
-    """把有效工作组归约成「截至各日期的累计 PB」系列（历史最好成绩，曲线不下降）。
-
-    系列口径与三类 PB 的分组一致（同一个有效工作组事实，不另写一套过滤）：外加重量动作只进入
-    「累计最大重量」系列，不生成次数 PB 曲线（讨论总结 §7.1）；纯自重动作进入累计单组最大次数
-    系列；计时动作进入累计单组最长秒数系列。累计值包含窗口之前的全部历史，故窗口内每个有该系列
-    有效组的日期都给一个点，没有有效组的日期不补点（不补 0）。
-    """
+    """把有效工作组归约成「截至各日期的累计 PB」系列。"""
     daily: dict[_SeriesKey, dict[date, int | float]] = {}
     for fact in facts:
         key, measure = _measures(fact)
@@ -402,11 +356,7 @@ def _calendar_days(
     from_on: date,
     to_on: date,
 ) -> tuple[CalendarDay, ...]:
-    """把 active 计划的日程与实际训练按各自日期落天：跨日关联时两边各出现在自己的日期。
-
-    ``completed`` 是「计划日程身份 → 完成它的训练事实」；只含窗口内的日程与训练，两端都按
-    日期升序（``PlanRepo`` 与 ``StatsRepo`` 的查询顺序）分组，不给空白日期造「休息日」条目。
-    """
+    """把 active 计划的日程与实际训练按各自日期落天。"""
     sessions_by_day: dict[date, list[CalendarPlanSession]] = {}
     for session in sessions:
         if not from_on <= session.scheduled_on <= to_on:

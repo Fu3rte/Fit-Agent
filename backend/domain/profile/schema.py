@@ -1,19 +1,4 @@
-"""001_initial.sql athlete_profile：长期画像七字段与三态 JSON 编解码（讨论总结 §5.1、REFACTOR_PLAN §5.1；Stage 1 子任务 02 §5）。
-
-七字段（已拍口径，不增不减）：训练目标、每周训练次数、可用器械、明确偏好、当前水平、已知
-伤病、禁用动作 ID。三条硬边界：
-
-- **每字段三态**（01 决策 3A）：``{state: unknown|denied|known, value: 值或 null}``，只有
-  ``known`` 携带值。未填写＝``unknown``、明确为空＝``denied``，两者必须可区分，不得静默
-  混为默认值或补造事实。列表字段的 ``known`` 不得为空：明确为空只能用 ``denied`` 表达
-  （2026-09-15 02 拍板 A）。
-- **整份覆盖**：``profile_json`` 一次写入全部七字段的三态事实（PUT 语义），未填写用
-  ``unknown`` 表达；不做字段级合并、不读回旧值。
-- **无 ``context_version``**：讨论总结 §8 删除全局版本过期机制，画像只承载事实本身。
-
-本模块只做结构与编解码：值域与字段校验归 ``domain.profile.rules``，读写归
-``domain.profile.repo``。解码时缺字段／多字段／状态非法一律视为档案数据损坏，大声失败。
-"""
+"""athlete_profile：长期画像七字段与三态 JSON 编解码。"""
 
 import json
 from dataclasses import dataclass
@@ -24,7 +9,6 @@ FACT_STATES: tuple[FactState, ...] = ("unknown", "denied", "known")
 
 T = TypeVar("T")
 
-#: 字段名 → 值类型标记；rules 据此做结构校验，编解码据此解析（键集即 ``profile_json`` 键集）。
 FIELD_VALUE_KINDS: dict[str, str] = {
     "training_goal": "text",
     "weekly_frequency": "integer",
@@ -63,7 +47,7 @@ class Fact(Generic[T]):
 
     @classmethod
     def denied(cls) -> "Fact[T]":
-        """明确为空（如用户明确表示无可用器械、无已知伤病、无禁用动作）。"""
+        """明确为空（如无可用器械、无已知伤病、无禁用动作）。"""
         return cls("denied", None)
 
     @classmethod
@@ -74,14 +58,6 @@ class Fact(Generic[T]):
     @property
     def is_known(self) -> bool:
         return self.state == "known"
-
-    @property
-    def is_denied(self) -> bool:
-        return self.state == "denied"
-
-    @property
-    def is_unknown(self) -> bool:
-        return self.state == "unknown"
 
 
 @dataclass(frozen=True, slots=True)

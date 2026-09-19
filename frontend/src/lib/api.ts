@@ -64,8 +64,6 @@ const post = <T>(path: string, body?: unknown) =>
     body: body === undefined ? "{}" : JSON.stringify(body),
   });
 
-/* --------------------------------- 画像 ----------------------------------- */
-
 /** 画像（七字段三态事实）；profile: null = 未建档 */
 export const getProfile = () => request<ProfileResponseWire>("/api/profile");
 
@@ -75,8 +73,6 @@ export const putProfile = (body: ProfileWriteBody) =>
     method: "PUT",
     body: JSON.stringify(body),
   });
-
-/* ------------------------------ 模型配置（Provider） ------------------------------ */
 
 /** Provider 状态：has_api_key 表示是否已存 Key，响应不含 Key 本体 */
 export const getProvider = () => request<ProviderStatusWire>("/api/provider");
@@ -96,12 +92,8 @@ export const deleteProvider = () =>
 export const testProvider = (body: ProviderWriteBody) =>
   post<ProviderTestWire>("/api/provider/test", body);
 
-/* -------------------------------- 动作目录 --------------------------------- */
-
 /** 动作目录全量：表单的动作选择与负重口径来源 */
 export const listExercises = () => request<ExerciseListWire>("/api/exercises");
-
-/* -------------------------------- 训练记录 --------------------------------- */
 
 /** 训练记录列表（稳定身份 + 发生日期 + 关联日程 + 全部组） */
 export const listRecords = () => request<RecordListWire>("/api/records");
@@ -129,8 +121,6 @@ export const listPlanSessionCandidates = (date?: string) =>
       : "/api/records/plan-session-candidates",
   );
 
-/* -------------------------------- 身体指标 --------------------------------- */
-
 /** 身体指标列表；体脂未记录为 null，不补 0 */
 export const listBodyMetrics = () =>
   request<BodyMetricListWire>("/api/body-metrics");
@@ -147,14 +137,10 @@ export const updateBodyMetric = (metricId: number, body: BodyMetricWriteBody) =>
 export const deleteBodyMetric = (metricId: number) =>
   request<void>(`/api/body-metrics/${metricId}`, { method: "DELETE" });
 
-/* ------------------------------ 计划（只读） ------------------------------- */
-
 /** 计划只读：全部版本（升序）与当前 active */
 export const listPlans = () => request<PlanListWire>("/api/plans");
 
 export const getActivePlan = () => request<PlanItemWire>("/api/plans/active");
-
-/* ------------------------------ 统计（只读现算） ------------------------------ */
 
 /** 三类 PB（最大重量、最大次数、最长时长）及来源训练、组序号与日期 */
 export const listPersonalBests = () =>
@@ -168,8 +154,6 @@ export const getCalendarMonth = (month: string) =>
   request<CalendarResponseWire>(
     `/api/stats/calendar?month=${encodeURIComponent(month)}`,
   );
-
-/* -------------------------------- Agent（run 流 ＋ 确认／拒绝） -------------------------------- */
 
 /** 五类 SSE 产品事件名（与 contract.ts::AgentEventNameWire 同一集合） */
 const AGENT_EVENT_NAMES: readonly AgentEventNameWire[] = [

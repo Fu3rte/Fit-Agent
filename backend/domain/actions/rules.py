@@ -1,21 +1,9 @@
-"""actions 确定性规则：13 项动作模式词表与写入记录前的口径校验（Stage 1 子任务 02 §4）。
-
-纯规则：不碰 IO、不读数据库、不依赖 Agent 框架（``domain/__init__`` 约束）。三条口径：
-
-- ``MODE_VOCABULARY``：13 项动作模式词表原词，是 ``exercises.modes_json`` 的唯一取值域
-  （库内 CHECK 只保证 ``json_valid``，元素级校验只能在这里）。
-- ``RECORD_TYPES``／``LOAD_CONVENTIONS``：三类记录口径与六种负重口径，与库内 CHECK 同集合；
-  记录侧（``domain.records``）复用本词表，不另造第二套。
-- ``validate_record_against_exercise``：写入训练记录前的确定性校验（03 records 复用）——
-  动作存在（在 service 层查库）之外，记录口径必须与目录一致；外加负重型必须给出与目录
-  相同的负重口径，自重／计时型必须无口径（不虚构 0kg）。
-"""
+"""actions 确定性规则：13 项动作模式词表与写入记录前的口径校验。"""
 
 from collections.abc import Sequence
 
 from domain.actions.schema import Exercise, LoadConvention, RecordType
 
-#: 13 项动作模式词表（pre-prj/stage/stage1.md §5 S1-03「已确认的动作模式映射」）。
 MODE_VOCABULARY: tuple[str, ...] = (
     "深蹲",
     "髋铰链",
@@ -32,10 +20,8 @@ MODE_VOCABULARY: tuple[str, ...] = (
     "核心",
 )
 
-#: 三类记录口径（不新增辅助负重型、不建第四类）。
 RECORD_TYPES: tuple[RecordType, ...] = ("reps_weight", "reps_bodyweight", "time")
 
-#: 六种负重口径（仅外加负重类型需要）；``external_added_weight`` 用于独立负重引体（外加重量，不含体重）。
 LOAD_CONVENTIONS: tuple[LoadConvention, ...] = (
     "barbell_includes_bar_total",
     "dumbbell_per_hand",
@@ -73,12 +59,7 @@ def validate_record_against_exercise(
     record_type: RecordType,
     load_convention: LoadConvention | None,
 ) -> None:
-    """写入训练记录前的口径校验：记录口径必须与目录一致，负重口径按记录口径对齐。
-
-    - ``reps_weight``（外加负重）：记录必须给出负重口径，且与目录取值相同。
-    - ``reps_bodyweight``／``time``（自重／计时）：记录不得携带任何负重口径。
-    口径不符即拒绝，不静默改写成目录口径（不猜、不补默认值）。
-    """
+    """写入训练记录前的口径校验：记录口径必须与目录一致，负重口径按记录口径对齐。"""
     if record_type not in RECORD_TYPES:
         raise RecordLoadMismatch(f"记录口径不在目录三类内：{record_type!r}")
     if record_type != exercise.record_type:

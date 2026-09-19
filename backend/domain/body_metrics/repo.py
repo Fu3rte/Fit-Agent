@@ -1,15 +1,4 @@
-"""body_metrics 业务表手写 SQL：新增、按身份查询、全量查询、修改、删除（Stage 1 子任务 02 §6）。
-
-全部访问经 ``storage.db.Database`` 的唯一连接与锁（07 7.1）。三条硬边界：
-
-- **写入前校验归 rules**：本层只把已校验的值落库；不猜重量、不补体脂。库内 CHECK 与
-  ``REAL NOT NULL`` 是兜底，不是唯一防线。
-- **无数据保持 NULL**：体脂为 None 时插入／更新为 NULL，不补 0。
-- **多语句走事务**：新增与修改都要「写回后读回」，两条语句必须原子（db.py：多语句原子性必须
-  走 ``transaction()``）；单语句的查询与删除走 ``under_lock``。
-
-SQL 一律以字面量书写并参数化（storage/README 硬规则 3）；语句常量复用同一份列清单。
-"""
+"""body_metrics 业务表手写 SQL：新增、按身份查询、全量查询、修改、删除。"""
 
 from datetime import date
 
@@ -52,7 +41,7 @@ class BodyMetricsRepo:
             finally:
                 await cursor.close()
             record = await _read_by_id(conn, metric_id)
-            if record is None:  # 写成功却读不到即存储状态异常，回滚并显式失败
+            if record is None:
                 raise RuntimeError(f"身体指标写入后读回失败：{metric_id}")
         return record
 

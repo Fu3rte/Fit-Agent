@@ -103,32 +103,17 @@ function SidebarProvider({
 }
 
 function Sidebar({
-  collapsible = "offcanvas",
   className,
   children,
   ...props
-}: React.ComponentProps<"div"> & { collapsible?: "offcanvas" | "none" }) {
+}: React.ComponentProps<"div">) {
   const { state } = useSidebar();
-
-  if (collapsible === "none") {
-    return (
-      <div
-        className={cn(
-          "flex h-full w-(--sidebar-width) flex-col bg-sidebar text-sidebar-foreground",
-          className,
-        )}
-        {...props}
-      >
-        {children}
-      </div>
-    );
-  }
 
   return (
     <div
       className="group peer text-sidebar-foreground"
       data-state={state}
-      data-collapsible={state === "collapsed" ? collapsible : ""}
+      data-collapsible={state === "collapsed" ? "offcanvas" : ""}
     >
       {/* 占位：收起时宽度归零，主区自然占满 */}
       <div className="relative w-(--sidebar-width) bg-transparent transition-[width] duration-200 ease-linear group-data-[collapsible=offcanvas]:w-0" />
@@ -260,8 +245,6 @@ const sidebarMenuButtonVariants = cva(
     variants: {
       size: {
         default: "h-8 text-sm",
-        sm: "h-7 text-xs",
-        lg: "h-12 text-sm",
       },
     },
     defaultVariants: { size: "default" },

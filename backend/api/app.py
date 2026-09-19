@@ -26,11 +26,11 @@ from config import (
     local_timezone_name,
     resolve_data_dir,
 )
-from domain.actions.service import ActionCatalogService
+from domain.actions.repo import ExerciseRepo
+from domain.plans.repo import PlanRepo
 from domain.plans.service import (
     PlanActivationService,
     PlanPersistenceService,
-    PlanReadService,
 )
 from domain.profile.service import ProfileService
 from domain.records.service import WorkoutRecordsService
@@ -115,14 +115,11 @@ def create_app(
         app.state.db = db
         try:
             await db.open()
-            # 启动即执行新版 001_initial.sql 建立业务表；迁移失败则启动失败（不对外开放）。
             await db.migrate()
-            # Checkpoint 存档独立于业务库：独立文件、独立连接，随生命周期开闭（REFACTOR_PLAN §5.6）。
             async with open_checkpointer(
                 checkpoint_database_path(resolved)
             ) as checkpointer:
                 app.state.checkpointer = checkpointer
-                # Agent 三端点的依赖与编译图只装配一次（stage5.md §4.3–§4.4）。
                 app.state.agent_runtime = build_agent_runtime(db, checkpointer, resolved)
                 app.state.business_timezone = local_timezone_name()
                 yield
@@ -145,7 +142,6 @@ def create_app(
             "status": "ok",
             "database": "open" if db.is_open else "closed",
             "business_timezone": request.app.state.business_timezone,
-            # 与 /api/provider 同源：每次请求现算 provider.json ＋ MODEL_API_KEY，不缓存启动快照。
             "provider_has_api_key": provider_api_key_configured(
                 request.app.state.data_dir
             ),
@@ -171,20 +167,16 @@ def build_agent_runtime(
     checkpointer: BaseCheckpointSaver,
     data_dir: Path,
 ) -> routes_agent.AgentRuntime:
-    """装配 Agent 三端点的生产依赖（stage5.md §4.2–§4.4）：一份 Planner／Evaluator 与唯一模型入口。
-
-    同一个模型 callable 供 GeneratePlanDeps 与 AgentRunDeps 共用；``data_dir`` 是 provider.json
-    的宿主目录。
-    """
+    """装配 Agent 三端点的生产依赖：一份 Planner／Evaluator 与唯一模型入口。"""
     model = _lazy_model_call(data_dir)
     deps = GeneratePlanDeps(
         profiles=ProfileService(db),
-        catalog=ActionCatalogService(db),
+        catalog=ExerciseRepo(db),
         stats=StatsRepo(db),
         assembler=MemoryAssembler(db),
         skills=SkillLoader(),
         persistence=PlanPersistenceService(db),
-        plans=PlanReadService(db),
+        plans=PlanRepo(db),
         activation=PlanActivationService(db),
         model=model,
         now=lambda: datetime.now(UTC),

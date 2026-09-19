@@ -1,26 +1,4 @@
-"""records 类型定义：一次训练（workout_sessions）与它的组（workout_sets）。
-
-正本：``Fit-Agent-LangGraph-重构讨论总结.md`` §9（关键关系：``workout_sets.set_type`` 区分
-work／warmup／assisted；``workout_sessions.plan_session_id`` 可空外键，NULL 表示额外训练；
-同一日程最多完成一次）、``LANGGRAPH_REFACTOR_PLAN.md`` §5.4（组类型固定三态、RIR 不出现在
-任何列或 DTO）；列与约束以 ``storage/migrations/001_initial.sql`` 与 ``002_timed_sets_and_new_actions.sql``
-（重建 ``workout_sets``：``reps`` 可空、新增 ``duration_seconds``）的既有定义为准。
-
-三条硬边界：
-
-- **日期是日期对象**：``performed_on`` 用 ``datetime.date``，由调用方按业务时区算好后注入；
-  repo 与领域服务不得自行取「今天」（REFACTOR_PLAN §5.5：禁止 ``date.today()``）。
-- **组类型恰三态**：``work / warmup / assisted``；没有旧模型的「未申报保留为空」语义，
-  也没有 RIR、辅助次数或修订状态字段——它们不在这两张表的任何列里。
-- **负重口径与重量同现同隐**：外加负重型两者齐备（重量可为 0kg），自重／计时型两者均为
-  ``None``（库内 CHECK 同集合），不虚构 0kg。
-
-三种记录口径的必填／互斥字段（外加重量：重量与次数、禁时长；纯自重：次数、禁重量与时长；
-计时：时长、禁重量与次数）由 ``domain.records.rules`` 按目录动作的记录口径统一校验。
-
-``WorkoutSetInput`` 是写入侧的组事实：组身份（``id``）与所属训练（``workout_session_id``）由
-落库分配，调用方只给事实本身；``WorkoutSet`` 是库内行，两者字段互不兼容。
-"""
+"""records 类型定义：一次训练（workout_sessions）与它的组（workout_sets）。"""
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -30,28 +8,17 @@ from typing import Any, Literal, cast
 from domain.actions.rules import LOAD_CONVENTIONS
 from domain.actions.schema import LoadConvention
 
-#: 组类型固定三态（讨论总结 §9、REFACTOR_PLAN §5.4；库内 CHECK 同集合）。
 SetType = Literal["work", "warmup", "assisted"]
 SET_TYPES: tuple[SetType, ...] = ("work", "warmup", "assisted")
 
 
 class InvalidRecordRow(ValueError):
-    """workout_sessions／workout_sets 行无法解析：数据损坏，大声失败不静默兜底。
-
-    与 ``InvalidPlanRow``／``InvalidCatalogRow`` 同口径：读到的行与列约束不符（日期不是
-    ISO 日期、组类型越界、重量与负重口径只有一半）即显式失败。
-    """
+    """workout_sessions／workout_sets 行无法解析：数据损坏，大声失败不静默兜底。"""
 
 
 @dataclass(frozen=True, slots=True)
 class WorkoutSetInput:
-    """一组待写入的事实：动作身份、动作内组序号、组类型、次数、持续秒数与（外加负重的）重量。
-
-    不携带组身份与所属训练：``id``／``workout_session_id`` 由落库分配（见 :class:`WorkoutSet`）。
-    ``set_type`` 必须由调用方明确给出，不给默认值——组类型没有「未申报」态。
-    ``reps`` 与 ``duration_seconds`` 都可为 ``None``：哪一项必填由目录动作的记录口径决定
-    （计时组填 ``duration_seconds``，其余两类填 ``reps``），不在这里替调用方猜。
-    """
+    """一组待写入的事实：动作身份、动作内组序号、组类型、次数、持续秒数与（外加负重的）重量。"""
 
     exercise_id: str
     set_no: int
@@ -123,11 +90,7 @@ class WorkoutSession:
     def from_row(
         cls, row: Mapping[str, Any], sets: Sequence[WorkoutSet]
     ) -> "WorkoutSession":
-        """把 workout_sessions 行与其组行（另一张表，已解析）合成一次训练。
-
-        ``sets`` 由调用方按 ``workout_session_id`` 取好；日期无法按 ISO 自然日解析即
-        :class:`InvalidRecordRow`。
-        """
+        """把 workout_sessions 行与其组行（另一张表，已解析）合成一次训练。"""
         raw_date = row["performed_on"]
         try:
             performed_on = date.fromisoformat(str(raw_date))

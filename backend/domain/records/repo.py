@@ -1,18 +1,4 @@
-"""records 业务表手写 SQL：训练及其组的读写与计划日程关联候选（正本讨论总结 §9、001_initial.sql）。
-
-全部访问经 ``storage.db.Database`` 的唯一连接与锁（07 7.1）。SQL 一律以字面量书写并参数化
-（storage/README 硬规则 3）；列清单只在模块常量里出现一次。四类出口：
-
-- **写入原语必须复用外层事务**：一次训练与它的全部组行必须一起落库或一起不落库，因此
-  ``create_in_transaction``／``replace_in_transaction`` 只接受 ``Database.transaction()`` 的连接
-  （``storage.db.require_outer_transaction`` 守住契约），由领域服务在同一个事务里先解析关联日程
-  再写，避免「解析与写入分两次取锁」之间的竞态与裸 ``IntegrityError``。
-- **只读公开出口**走 ``under_lock``：按身份读取、全量读取、有界的最近若干次读取、当天未完成且未被占用的日程候选。
-- **删除是物理删除**（Stage 1 已拍 1A）：组行由库内 ``ON DELETE CASCADE`` 一并删除，
-  ``Database.open()`` 已开 ``PRAGMA foreign_keys=ON``。
-- **写入前校验归 rules／service**：本层不猜重量、不补口径；库内 CHECK、UNIQUE 与触发器是兜底，
-  不是唯一防线。
-"""
+"""records 业务表手写 SQL：训练及其组的读写与计划日程关联候选。"""
 
 from collections.abc import Sequence
 from datetime import date
@@ -23,19 +9,15 @@ from domain.plans.schema import PlanSession
 from domain.records.schema import WorkoutSession, WorkoutSet, WorkoutSetInput
 from storage.db import Database, require_outer_transaction
 
-#: workout_sessions 列清单：本模块所有读取共用同一份（列顺序即 from_row 读取的键）。
 _SELECT_SESSION = "SELECT id, performed_on, plan_session_id FROM workout_sessions"
 
-#: workout_sets 列清单：同上，与 001／002 迁移后的列一一对应（无 RIR／辅助次数列）。
 _SELECT_SET = (
     "SELECT id, workout_session_id, exercise_id, set_no, set_type, load_convention,"
     " weight_kg, reps, duration_seconds FROM workout_sets"
 )
 
-#: plan_sessions 列清单：只取关联校验需要的字段，计划侧读取出口在 domain.plans。
 _SELECT_PLAN_SESSION = "SELECT ps.id, ps.plan_id, ps.scheduled_on, ps.cancelled_at FROM plan_sessions ps"
 
-#: 训练的「最近」排序口径（最新在前）：近期上下文的有界读取与组行归属共用同一份，不各写一套。
 _RECENT_SESSION_ORDER = "performed_on DESC, id DESC"
 
 
@@ -89,32 +71,42 @@ async def _read_all_sessions(
 async def _read_recent_sessions(
     conn: aiosqlite.Connection, limit: int
 ) -> tuple[WorkoutSession, ...]:
-    """最近 ``limit`` 次训练及其全部组（最新在前）：同日训练各算一次（日期相同再按身份取大）。
-
-    有界读取：先按口径取至多 ``limit`` 条训练行，再只取这些训练的组行——不退化成「先读完整训练
-    历史再在调用方截断」。不足 ``limit`` 就返回实际存在的条数，空库返回空元组。
-    """
-    async with conn.execute(
-        _SELECT_SESSION + " ORDER BY " + _RECENT_SESSION_ORDER + " LIMIT ?", (limit,)
-    ) as cursor:
-        session_rows = await cursor.fetchall()
-    if not session_rows:
-        return ()
-    async with conn.execute(
-        _SELECT_SET
-        + " WHERE workout_session_id IN (SELECT id FROM workout_sessions ORDER BY "
+    """最近 ``limit`` 次训练及其全部组（最新在前）。"""
+    recent = (
+        "WITH recent AS (SELECT id, performed_on, plan_session_id FROM workout_sessions"
+        " ORDER BY "
         + _RECENT_SESSION_ORDER
-        + " LIMIT ?) ORDER BY workout_session_id, exercise_id, set_no",
-        (limit,),
-    ) as cursor:
-        set_rows = await cursor.fetchall()
+        + " LIMIT ?)"
+    )
+    statement = (
+        recent
+        + " SELECT s.id AS session_id, s.performed_on, s.plan_session_id,"
+        " ws.id, ws.workout_session_id, ws.exercise_id, ws.set_no, ws.set_type,"
+        " ws.load_convention, ws.weight_kg, ws.reps, ws.duration_seconds"
+        " FROM recent AS s LEFT JOIN workout_sets AS ws"
+        " ON ws.workout_session_id = s.id"
+        " ORDER BY s.performed_on DESC, s.id DESC, ws.exercise_id, ws.set_no"
+    )
+    async with conn.execute(statement, (limit,)) as cursor:
+        rows = await cursor.fetchall()
     grouped: dict[int, list[WorkoutSet]] = {}
-    for set_row in set_rows:
-        fact = WorkoutSet.from_row(dict(set_row))
-        grouped.setdefault(fact.workout_session_id, []).append(fact)
+    session_rows: dict[int, dict[str, object]] = {}
+    order: list[int] = []
+    for row in rows:
+        session_id = int(row["session_id"])
+        if session_id not in session_rows:
+            session_rows[session_id] = {
+                "id": session_id,
+                "performed_on": row["performed_on"],
+                "plan_session_id": row["plan_session_id"],
+            }
+            grouped[session_id] = []
+            order.append(session_id)
+        if row["id"] is not None:
+            grouped[session_id].append(WorkoutSet.from_row(dict(row)))
     return tuple(
-        WorkoutSession.from_row(dict(row), grouped.get(int(row["id"]), []))
-        for row in session_rows
+        WorkoutSession.from_row(session_rows[session_id], grouped[session_id])
+        for session_id in order
     )
 
 
@@ -209,10 +201,7 @@ class WorkoutRecordsRepo:
     async def read_plan_session_in_transaction(
         self, conn: aiosqlite.Connection, plan_session_id: int
     ) -> PlanSession | None:
-        """按身份读一条计划日程（含已取消行）；不存在即 None。
-
-        只在外层写事务内使用：关联校验必须与写入读同一份快照。
-        """
+        """按身份读一条计划日程（含已取消行）；不存在即 None。"""
         require_outer_transaction(conn, "训练记录关联日程读取")
         async with conn.execute(
             _SELECT_PLAN_SESSION + " WHERE ps.id = ?", (plan_session_id,)
@@ -243,7 +232,7 @@ class WorkoutRecordsRepo:
         self, conn: aiosqlite.Connection, session_id: int
     ) -> WorkoutSession:
         record = await _read_session(conn, session_id)
-        if record is None:  # 写成功却读不到即存储状态异常，随外层事务回滚并显式失败
+        if record is None:
             raise RuntimeError(f"训练记录写入后读回失败：{session_id}")
         return record
 
@@ -258,11 +247,7 @@ class WorkoutRecordsRepo:
         return await self._db.under_lock(_read_all_sessions)
 
     async def list_recent(self, limit: int) -> tuple[WorkoutSession, ...]:
-        """最近 ``limit`` 次训练及其全部组（最新在前）；供有界的近期上下文读取。
-
-        ``limit`` 必须为正数：SQLite 的 ``LIMIT -1`` 表示不限量，非正数会静默退化成全量读取，
-        故在此直接失败。
-        """
+        """最近 ``limit`` 次训练及其全部组（最新在前）。"""
         if limit < 1:
             raise ValueError(f"list_recent 的 limit 必须为正数：{limit!r}")
         return await self._db.under_lock(
@@ -278,11 +263,7 @@ class WorkoutRecordsRepo:
         )
 
     async def delete(self, session_id: int) -> bool:
-        """物理删除一次训练（组行由 ON DELETE CASCADE 一并删除），返回是否删除了训练行。
-
-        级联删除的组行不计入 ``rowcount``（SQLite 只统计本语句直接删除的行），故这里判断的是
-        训练行本身是否存在。
-        """
+        """物理删除一次训练（组行由 ON DELETE CASCADE 一并删除）。"""
 
         async def op(conn: aiosqlite.Connection) -> bool:
             cursor = await conn.execute(

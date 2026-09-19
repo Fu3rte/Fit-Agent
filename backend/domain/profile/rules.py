@@ -1,19 +1,9 @@
-"""profile 确定性规则：七字段结构校验与每周训练次数值域（Stage 1 子任务 02 §5）。
-
-纯函数、不碰 IO（不读库、不写库）。边界：
-
-- 只做结构表示与已拍值域校验；除 ``weekly_frequency`` 的 1–7 外不新增任何阈值，也不新增
-  业务必填规则（七字段都允许 ``unknown``／``denied``，画像允许逐步补全）。
-- 禁用动作 ID 的**存在性**校验需要读目录，归 ``domain.profile.service``（本模块只校验它
-  是非空文本构成的列表，列表的 ``known`` 不得为空（明确为空只能用 ``denied`` 表达），元素必须是
-  ``exercises.id`` 的形式约束在那里落地）。
-"""
+"""profile 确定性规则：七字段结构校验与每周训练次数值域。"""
 
 from typing import Any
 
 from domain.profile.schema import FIELD_VALUE_KINDS, PROFILE_FIELDS, Fact, Profile
 
-#: 每周训练次数值域（已拍口径：1–7）。
 WEEKLY_FREQUENCY_MIN = 1
 WEEKLY_FREQUENCY_MAX = 7
 

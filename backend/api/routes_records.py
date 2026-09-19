@@ -1,13 +1,4 @@
-"""训练记录、身体指标与动作目录表单路由（Stage 1 子任务 04 §9；plan §4 未列单独路由文件）。
-
-传输边界：只调用领域 service（``WorkoutRecordsService``／``BodyMetricsService``／
-``ActionCatalogService``），不做领域规则、不写 SQL、不创建 Agent Run 或草稿；请求体形状与错误
-映射见 :mod:`api.dto`。业务日期由 :func:`api.deps.current_business_date` 按固定业务时区注入，
-不接受客户端传入。
-
-路由顺序：``/api/records/plan-session-candidates`` 必须声明在 ``/api/records/{record_id}`` 之前，
-否则会被路径参数吞掉。
-"""
+"""训练记录、身体指标与动作目录表单路由。"""
 
 from datetime import date
 from typing import Any
@@ -24,14 +15,11 @@ from api.dto import (
     record_dto,
     workout_facts_from_dto,
 )
-from domain.actions.service import ActionCatalogService
+from domain.actions.repo import ExerciseRepo
 from domain.body_metrics.service import BodyMetricsService
 from domain.records.service import WorkoutRecordNotFound, WorkoutRecordsService
 
 router = APIRouter()
-
-
-# ---------- 训练记录 ----------
 
 
 @router.get("/api/records")
@@ -43,10 +31,7 @@ async def list_records(request: Request) -> dict[str, Any]:
 
 @router.post("/api/records")
 async def create_record(body: RecordBody, request: Request) -> dict[str, Any]:
-    """新增一次训练（连同全部组，原子写入）；``plan_session_id`` 为 None 即额外训练。
-
-    ``auto_link=true`` 时仅当天恰有一个未完成日程才关联，零个或多个候选一律 409（不猜）。
-    """
+    """新增一次训练（连同全部组，原子写入）；``plan_session_id`` 为 None 即额外训练。"""
     session = await WorkoutRecordsService(request.app.state.db).create(
         body.performed_on,
         workout_facts_from_dto(body),
@@ -100,9 +85,6 @@ async def delete_record(record_id: int, request: Request) -> None:
     await WorkoutRecordsService(request.app.state.db).delete(record_id)
 
 
-# ---------- 身体指标 ----------
-
-
 @router.get("/api/body-metrics")
 async def list_body_metrics(request: Request) -> dict[str, Any]:
     """全部身体指标（按发生日期排序）；体脂未记录保持 null。"""
@@ -136,11 +118,8 @@ async def delete_body_metric(metric_id: int, request: Request) -> None:
     await BodyMetricsService(request.app.state.db).delete(metric_id)
 
 
-# ---------- 动作目录 ----------
-
-
 @router.get("/api/exercises")
 async def list_exercises(request: Request) -> dict[str, Any]:
     """动作目录全量（按稳定身份排序）：表单的动作选择与负重口径来源。"""
-    exercises = await ActionCatalogService(request.app.state.db).list_all()
+    exercises = await ExerciseRepo(request.app.state.db).list_all()
     return {"exercises": [exercise_dto(exercise) for exercise in exercises]}

@@ -1,11 +1,6 @@
 import type * as React from "react";
 import { useMemo, useState } from "react";
-import {
-  useMutation,
-  useQuery,
-  useQueryClient,
-  type QueryClient,
-} from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Plus, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
@@ -14,7 +9,6 @@ import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
 import {
   Card,
   CardContent,
-  CardDescription,
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
@@ -147,17 +141,6 @@ function toSetInputs(
 }
 
 /**
- * 训练或身体数据写入后失效记录派生 Query（训练记录、PB、趋势、月历、计划日程状态）。
- * 看板与计划页的统计 key（``personal-bests``／``trends``／``calendar``，见 DashboardPage 与 PlansPage）
- * 同样被全量失效覆盖，因此这里不逐条枚举 key：枚举会在命名变化时静默失效，而全量失效对单用户本地库无成本问题。
- */
-export function invalidateRecordDerivedQueries(
-  queryClient: QueryClient,
-): Promise<void> {
-  return queryClient.invalidateQueries();
-}
-
-/**
  * 训练记录新增／编辑表单；record 为 null 即新增（日期默认取 ``initialDate``，缺省用本地当天）。
  */
 export function RecordFormCard({
@@ -231,7 +214,7 @@ export function RecordFormCard({
     },
     onSuccess: async () => {
       toast.success(record === null ? "训练记录已保存" : "训练记录已更新");
-      await invalidateRecordDerivedQueries(queryClient);
+      await queryClient.invalidateQueries();
       onDone();
     },
     onError: (error) =>
@@ -493,7 +476,7 @@ export function RecordFormDialog(
         className="max-h-[85dvh] max-w-3xl p-0"
       >
         <DialogTitle className="sr-only">{title}</DialogTitle>
-        <div className="min-h-0 flex-1 overflow-y-auto p-2 pt-6 [scrollbar-color:var(--color-border)_transparent] [scrollbar-width:thin] [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-border [&::-webkit-scrollbar]:w-2">
+        <div className="min-h-0 flex-1 overflow-y-auto p-2 pt-6 [scrollbar-color:var(--color-border)_transparent] scrollbar-thin [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-border [&::-webkit-scrollbar]:w-2">
           <RecordFormCard {...props} />
         </div>
       </DialogContent>

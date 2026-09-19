@@ -17,10 +17,7 @@ import {
 import ActivePlanCard from "@/features/plans/components/ActivePlanCard";
 import CalendarCard from "@/features/plans/components/CalendarCard";
 import RecordDayPanel from "@/features/plans/components/RecordDayPanel";
-import {
-  RecordFormDialog,
-  invalidateRecordDerivedQueries,
-} from "@/features/plans/components/RecordFormCard";
+import { RecordFormDialog } from "@/features/plans/components/RecordFormCard";
 import {
   deleteRecord,
   getActivePlan,
@@ -38,7 +35,7 @@ const PLAN_LIST_KEY = ["plans", "list"];
 /** 动作目录 Query key：与计划页、月历明细共用同一份缓存，不另拉一次目录 */
 const EXERCISE_LIST_KEY = ["exercises"];
 
-/** 训练记录 Query key：写入后由全量失效刷新（见 ``invalidateRecordDerivedQueries``） */
+/** 训练记录 Query key：写入后全量失效刷新 */
 const RECORD_LIST_KEY = ["records"];
 
 /** 月历 Query key：对话页的确认／拒绝后用同一 ``calendar`` 前缀失效 */
@@ -163,7 +160,7 @@ export default function PlansPage() {
     mutationFn: (recordId: number) => deleteRecord(recordId),
     onSuccess: async () => {
       toast.success("训练记录已删除");
-      await invalidateRecordDerivedQueries(queryClient);
+      await queryClient.invalidateQueries();
     },
     onError: (error) =>
       toast.error(error instanceof Error ? error.message : "训练记录删除失败"),

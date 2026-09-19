@@ -17,12 +17,10 @@ const buttonVariants = cva(
         ghost: "hover:bg-accent active:bg-accent",
         destructive:
           "bg-destructive text-destructive-foreground hover:bg-destructive/90",
-        link: "text-primary underline-offset-4 hover:underline",
       },
       size: {
         default: "h-10 px-5",
         sm: "h-8 px-3 text-xs",
-        lg: "h-12 px-8 text-base",
         icon: "size-10",
       },
     },

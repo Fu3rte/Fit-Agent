@@ -1,14 +1,4 @@
-"""profile 业务表手写 SQL：``athlete_profile`` 单例行（id=1）的读取与整份覆盖写入（Stage 1 子任务 02 §5）。
-
-全部访问经 ``storage.db.Database`` 的唯一连接与锁（07 7.1）。两条硬边界：
-
-- **单例行**：画像只有 id=1 一行；载体行缺失即存储损坏，大声失败而不是当成「未建档」。
-  未建档的技术载体是 ``profile_json IS NULL``，读取时返回 ``None``。
-- **整份覆盖**：写入是一条 ``UPDATE``（PUT 语义），不需要外层事务；不复用旧实现的草稿确认
-  写入路径，也不读写任何 ``context_version``（讨论总结 §8 已删除该机制）。
-
-SQL 一律以字面量书写并参数化（storage/README 硬规则 3）。
-"""
+"""profile 业务表手写 SQL：``athlete_profile`` 单例行（id=1）的读取与整份覆盖写入。"""
 
 import aiosqlite
 
@@ -21,7 +11,7 @@ async def _read_profile(conn: aiosqlite.Connection) -> Profile | None:
         "SELECT profile_json FROM athlete_profile WHERE id = 1"
     ) as cursor:
         row = await cursor.fetchone()
-    if row is None:  # 001_initial.sql 恒建该行；缺失即载体损坏
+    if row is None:
         raise RuntimeError("athlete_profile 单例载体缺失（id=1）")
     raw = row["profile_json"]
     return None if raw is None else profile_from_json(str(raw))

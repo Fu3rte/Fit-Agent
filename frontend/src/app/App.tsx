@@ -1,6 +1,12 @@
-import { useState } from "react";
-import { Navigate, NavLink, Route, Routes } from "react-router-dom";
-import { Toaster } from "sonner";
+import { useLayoutEffect, useRef, useState } from "react";
+import {
+  Navigate,
+  NavLink,
+  Route,
+  Routes,
+  useLocation,
+} from "react-router-dom";
+import { Toaster, useSonner } from "sonner";
 import {
   ClipboardList,
   LayoutDashboard,
@@ -46,6 +52,35 @@ const navLinkClass = ({ isActive }: { isActive: boolean }) =>
     isActive && "bg-sidebar-accent font-medium text-sidebar-accent-foreground",
   );
 
+/**
+ * 全局 toast 容器（A5）：用 ``popover="manual"`` 把 sonner 一起送进 top layer。
+ *
+ * 原生 ``<dialog>`` 的 ``showModal()`` 会把弹层与遮罩放进 top layer，普通流里的 z-index 再高也压不过它；
+ * top layer 内部按加入顺序叠放，因此每次 toast 集合变化都重新入栈，保证 toast 盖在已打开的弹层之上。
+ */
+function GlobalToaster() {
+  const layer = useRef<HTMLDivElement>(null);
+  const { toasts } = useSonner();
+  const ids = toasts.map((item) => item.id).join("|");
+
+  useLayoutEffect(() => {
+    const node = layer.current;
+    if (node === null) return;
+    if (node.matches(":popover-open")) node.hidePopover();
+    node.showPopover();
+  }, [ids]);
+
+  return (
+    <div
+      ref={layer}
+      popover="manual"
+      className="pointer-events-none fixed inset-0 m-0 size-auto max-h-none max-w-none overflow-visible border-0 bg-transparent p-0 [&_[data-sonner-toaster]]:pointer-events-auto"
+    >
+      <Toaster position="top-center" richColors />
+    </div>
+  );
+}
+
 /** 主题切换（C3B）：浅色默认，暗色第二主题 */
 function ThemeToggle() {
   const [theme, setThemeState] = useState<Theme>(getTheme());
@@ -82,15 +117,21 @@ function SidebarToggle() {
 
 export default function App() {
   const [providerOpen, setProviderOpen] = useState(false);
+  const location = useLocation();
+  /** 对话页自管滚动（消息列滚、输入框固定），主区锁高度避免再冒出整页滚动条 */
+  const mainOverflow =
+    location.pathname === "/chat" || location.pathname === "/"
+      ? "overflow-hidden"
+      : "overflow-y-auto";
 
   return (
     <TooltipProvider>
       {/* 全局反馈 toast（A5），全应用仅此一处 */}
-      <Toaster position="top-center" richColors />
+      <GlobalToaster />
 
       <SidebarProvider className="relative h-screen">
         {/* 侧边栏（PLAN-FRONTEND B2 结构） */}
-        <Sidebar collapsible="offcanvas">
+        <Sidebar>
           <SidebarHeader className="px-6 pt-8 pb-6">
             <h1 className="font-display text-2xl font-light tracking-tight">
               Fit-Agent
@@ -127,8 +168,7 @@ export default function App() {
           </SidebarFooter>
         </Sidebar>
 
-        {/* 主区 */}
-        <main className="relative flex-1 overflow-y-auto">
+        <main className={`relative min-h-0 flex-1 ${mainOverflow}`}>
           <div className="h-full">
             <Routes>
               <Route path="/" element={<Navigate to="/chat" replace />} />

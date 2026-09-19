@@ -1,23 +1,12 @@
-"""body_metrics 确定性规则：业务日期、必填字段与数值范围（Stage 1 子任务 02 §6）。
-
-纯函数、不碰 IO。值域与 001_initial.sql 的 CHECK 同集合（体重 20–400kg、体脂 0–100%），
-不在领域层新增任何未拍阈值（例如「不得晚于今天」）。三条口径：
-
-- 日期必须是日期对象而非时刻：``datetime`` 是 ``date`` 的子类，但它是绝对时刻，按业务时区
-  解释成自然日归 ``business_time``，不在本层猜测。
-- 体重必填且必须在值域内（含有限性：JSON 与库内 REAL 都不能可靠承载 NaN／Infinity）。
-- 体脂可选：``None`` 表示无数据，保持空值，不补 0、不换成任何默认值。
-"""
+"""body_metrics 确定性规则：业务日期、必填字段与数值范围。"""
 
 import math
 from datetime import date, datetime
 from typing import Any
 
-#: 体重允许范围（kg，与库内 CHECK 同集合）。
 WEIGHT_KG_MIN = 20.0
 WEIGHT_KG_MAX = 400.0
 
-#: 体脂允许范围（%，与库内 CHECK 同集合）。
 BODY_FAT_PCT_MIN = 0.0
 BODY_FAT_PCT_MAX = 100.0
 

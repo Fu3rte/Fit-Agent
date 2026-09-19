@@ -1,9 +1,4 @@
-"""body_metrics 用例编排：体重／体脂的新增、查询、修改、删除（Stage 1 子任务 02 §6；REFACTOR_PLAN §6.1）。
-
-边界：不接 HTTP／Agent／CLI，表单直接调用本服务，不创建草稿。每次写入前做日期、必填与数值
-范围校验（``domain.body_metrics.rules``）；「今天」不由本层决定——业务日期由调用方按业务时区
-注入（REFACTOR_PLAN §5.5）。
-"""
+"""body_metrics 用例编排：体重／体脂的新增、查询、修改、删除。"""
 
 from datetime import date
 
@@ -55,10 +50,7 @@ class BodyMetricsService:
         weight_kg: float,
         body_fat_pct: float | None = None,
     ) -> BodyMetric:
-        """整条覆盖修改；身份不存在抛 :class:`BodyMetricNotFound`。
-
-        体脂传 None 表示把该次的体脂改为未记录（写回 NULL），不是补 0。
-        """
+        """整条覆盖修改；身份不存在抛 :class:`BodyMetricNotFound`。"""
         record = await self._repo.update(
             metric_id,
             validate_measured_on(measured_on),

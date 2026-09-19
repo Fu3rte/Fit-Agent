@@ -1,7 +1,3 @@
-# 模型配置路由：GET／PUT／DELETE／POST /api/provider（传输边界只经 provider_settings 读写 provider.json）。
-# 响应契约：只回 has_api_key 布尔投影与 base_url／model 展示字段，完整 API Key 不进任何响应或日志；
-# 错误复用 api/dto.py 的统一 JSON 形状 {http_status, error_code, message}，message 不含 Key、端点与堆栈。
-# LoopbackGuard（api/app.py）对本路由同样生效；模型入口每次调用都重新 resolve，无版本号缓存。
 import time
 from pathlib import Path
 from typing import Any
@@ -40,7 +36,6 @@ async def delete_provider(request: Request) -> dict[str, Any]:
     return _provider_dto(ProviderConfig())
 
 
-#: 连通性测试的固定文案：不含 Base URL、模型名、Key 与堆栈。
 PROBE_OK_MESSAGE = "模型调用成功"
 PROBE_FAILED_MESSAGE = "模型调用失败：请检查 Base URL、模型名与 API Key"
 

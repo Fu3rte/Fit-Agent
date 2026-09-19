@@ -50,11 +50,7 @@ router = APIRouter()
 
 @dataclass(frozen=True, slots=True)
 class AgentRuntime:
-    """Agent 三端点的装配：编译图、计划子图依赖与运行入口依赖（``api/app.py`` lifespan 装配）。
-
-    ``deps``／``run_deps`` 共用同一个模型 callable（唯一模型入口）与同一个 ``PlanActivationService``
-    （确认／拒绝的唯一领域提交入口）；测试在同一 app 上换成固定替身的运行时，模型永不读环境变量。
-    """
+    """Agent 三端点的装配。"""
 
     graph: CompiledStateGraph
     deps: GeneratePlanDeps
@@ -67,11 +63,7 @@ async def run_agent(
     request: Request,
     business_day: date = Depends(current_business_date),
 ) -> StreamingResponse:
-    """一次 Agent Run：``text/event-stream`` 响应，五类产品事件，不混用 JSON（§3.7／§3.8）。
-
-    ``conversation_id`` 即 Checkpointer 的 ``thread_id``；``regenerate`` 按 §3.4 的同类替换规则处理
-    （缺省 false 且已有同类 draft 时不调模型）。业务日期与 Run 预算由本次请求注入，客户端不传。
-    """
+    """一次 Agent Run：``text/event-stream`` 响应，五类产品事件。"""
     runtime = _runtime(request)
     events = stream_agent_run(
         runtime.graph,
@@ -107,12 +99,7 @@ async def reject_plan(
 async def confirm_workout(
     body: ConfirmWorkoutBody, request: Request
 ) -> dict[str, Any]:
-    """自然语言打卡确认写入（stage6.md §2.4.2）：复用表单写入服务，写入成功后经既有 Stats 重查 PB。
-
-    与表单路径同源：同一个 ``WorkoutRecordsService.create`` 与同一套领域校验；本端点不调用任何模型，
-    也不要求服务端证明当前 ``conversation_id`` 此前完成过一次自然语言解析。载荷未通过 DTO／领域／
-    目录／日程关联校验时不写库：领域错误按既有 JSON 错误形状与明确 HTTP 状态映射（``api/dto.py``）。
-    """
+    """自然语言打卡确认写入：复用表单写入服务，写入成功后经既有 Stats 重查 PB。"""
     db = request.app.state.db
     session = await WorkoutRecordsService(db).create(
         body.performed_on,
@@ -143,11 +130,7 @@ async def _confirmation(
     action: Literal["confirm", "reject"],
     business_day: date,
 ) -> Plan:
-    """两条确认路径共用唯一确认入口（§3.3）：checkpoint 优先 ＋ 唯一 draft 兜底 ＋ 领域幂等。
-
-    请求 ``plan_id`` 是唯一操作目标：与等待中 interrupt／唯一 draft 的 ID 不一致即
-    :class:`~graph.nodes.ConfirmationConflict`（409），不写任何行。
-    """
+    """两条确认路径共用唯一确认入口：checkpoint 优先 ＋ 唯一 draft 兜底 ＋ 领域幂等。"""
     runtime = _runtime(request)
     return await invoke_confirmation(
         runtime.graph,
@@ -160,15 +143,11 @@ async def _confirmation(
 
 
 async def _sse_frames(events: AsyncIterator[AgentEvent]) -> AsyncIterator[str]:
-    """事件流 → SSE 文本帧；运行错误只发一个 ``error`` 事件再关闭，不混用 JSON（§3.7）。
-
-    客户端断开（取消／生成器被关闭）不被当成错误，也不触发任何写入或回滚：断线不是取消、确认或拒绝
-    信号（§3.8）。
-    """
+    """事件流 → SSE 文本帧；运行错误只发一个 ``error`` 事件再关闭。"""
     try:
         async for event in events:
             yield _frame(event)
-    except Exception as error:  # 任何登记或未登记的运行错误都只变成一条 SSE error
+    except Exception as error:
         yield _frame(AgentEvent("error", {"message": agent_run_error_message(error)}))
 
 
@@ -177,27 +156,19 @@ def _frame(event: AgentEvent) -> str:
     return f"event: {event.event}\ndata: {json.dumps(event.data, ensure_ascii=False)}\n\n"
 
 
-# ---------- SSE error 的可见文本：只回显本项目自己的产品错误（§3.7） ----------
-
-#: 模型配置缺失的固定文本：不回显环境变量名（§3.8 的 error 事件不发送 Provider 配置）。
 MODEL_CONFIGURATION_ERROR_MESSAGE = (
     "模型服务未配置：本次运行未产生计划写入，请检查服务端模型配置后重试"
 )
 
-#: 模型响应不符统一 Schema 的固定文本：不回显原始模型输出（§3.8 不发送原始模型事件）。
 INVALID_MODEL_RESPONSE_MESSAGE = (
     "模型响应不符合统一 Schema：本次运行未产生计划写入，请稍后重试"
 )
 
-#: 不回显 ``str(exc)`` 的异常类型 → 固定文本（上面的两条）。
 _FIXED_ERROR_MESSAGES: tuple[tuple[type[Exception], str], ...] = (
     (ModelConfigurationError, MODEL_CONFIGURATION_ERROR_MESSAGE),
     (InvalidModelResponse, INVALID_MODEL_RESPONSE_MESSAGE),
 )
 
-#: 可以在 SSE ``error`` 中原样返回的产品异常：全部是本项目自己写、面向用户的错误文本，不含密钥、
-#: 端点、模型名、SQL、文件路径或堆栈（``ModelCallFailed`` 的文本在生产模型入口
-#: ``api/app.py::_lazy_model_call`` 已换成固定文本）。
 _PRODUCT_ERROR_TYPES: tuple[type[Exception], ...] = (
     RequiredProfileMissing,
     RequiredActivePlanMissing,
@@ -211,17 +182,11 @@ _PRODUCT_ERROR_TYPES: tuple[type[Exception], ...] = (
     ModelCallFailed,
 )
 
-#: 其它运行错误（Provider／SDK／SQLite／超时等）的固定文本：``str(exc)`` 可能带 Base URL、模型名、
-#: SQL、文件路径或堆栈，一律不透传（§3.7 收尾条）。
 AGENT_RUN_ERROR_MESSAGE = "本次运行失败：未产生可激活计划，请稍后重试"
 
 
 def agent_run_error_message(error: BaseException) -> str:
-    """SSE ``error`` 事件的可见文本：本项目产品错误照原样，其余一律固定文本（不回显敏感信息）。
-
-    除 ``asyncio.CancelledError`` 之外的任何运行错误都会走到这里；断线（取消或生成器被关闭）是
-    ``BaseException``，不会进入本映射，也不被当成错误。
-    """
+    """SSE ``error`` 事件的可见文本：本项目产品错误照原样，其余一律固定文本。"""
     for error_type, message in _FIXED_ERROR_MESSAGES:
         if isinstance(error, error_type):
             return message

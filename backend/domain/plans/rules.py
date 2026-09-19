@@ -1,33 +1,4 @@
-"""plans 确定性规则：目录匹配、禁用动作、负荷来源与 10B／10B-1 渐进回退
-（stage4.md §3.1／§3.3／§3.4／§3.5；讨论总结 §7.3／§8／§9；REFACTOR_PLAN §6.5／§6.6）。
-
-纯函数：不读库、不写库、不取「今天」、不调用模型，也不依赖 FastAPI／LangGraph／模型 SDK
-（``domain/__init__`` 约束）。全部事实由调用方注入，本层不猜、不补默认值：
-
-- 目录动作（``domain.actions.schema.Exercise``）：动作是否存在、``recommendable``、记录口径与
-  ``min_load_increment_kg``；
-- 有效工作组（``domain.stats.schema.ValidWorkSet``）：其过滤口径（热身／assisted／不完整组不算）
-  的唯一出处是 ``domain.stats.repo`` 的共享 SQL，本层不重写；
-- 「关联当前 active 计划日程」的训练身份集合（``workout_sessions.plan_session_id``）：服务层把该
-  关联与有效工作组按 ``workout_session_id`` 有界连接后注入；``plan_session_id IS NULL`` 的额外训练
-  不在集合里，因此既不计入渐进历史，也不打断连续性。
-
-两类输出：
-
-- :func:`validate_plan_draft` 返回 :class:`~domain.plans.schema.RuleFailure` 元组（Evaluator 的确定性层
-  直接消费），不抛异常——失败项要全量回传，供最多一次修订使用。规则标识是封闭的六项：
-  ``weekly_frequency_mismatch``／``unknown_exercise``／``exercise_not_recommendable``／
-  ``record_type_mismatch``／``forbidden_exercise``／``load_source_mismatch``。
-- :func:`validate_plan_adjustment` 与它同形返回、共用同一封闭六项：结构与目录检查完全一致，只把
-  「具体负荷必须等于最近一次有效工作组」换成「具体负荷必须等于按当前 active 的目标处方与关联日程
-  训练算出的渐进决策」（stage5.md §3.4；讨论总结 §7.3 的起始负荷口径仍是 active 没有目标处方的
-  动作的唯一来源）。
-- :func:`resolve_starting_load`／:func:`resolve_progression` 是纯决策函数（Stage 4 只提供规则，
-  调整计划的 Graph 接线留 Stage 5）；只有「输入不满足规则前提」才抛 :class:`InvalidPlanRule`。
-
-边界：自重与计时动作本阶段不发明次数／时长递增阈值——本模块对它们只做处方结构与记录口径校验
-（见 :func:`validate_plan_draft`），不套用重量加重或回退规则。
-"""
+"""plans 确定性规则：目录匹配、禁用动作、负荷来源与 10B／10B-1 渐进回退。"""
 
 from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass
@@ -46,7 +17,6 @@ from domain.profile.schema import Profile
 from domain.records.rules import WEIGHT_KG_DECIMALS
 from domain.stats.schema import ValidWorkSet
 
-#: 处方类型与目录记录口径的一一对应（stage4.md §3.1：判别联合必须与 ``record_type`` 一致）。
 RECORD_TYPE_BY_PRESCRIPTION: dict[str, RecordType] = {
     "weighted_reps": "reps_weight",
     "bodyweight_reps": "reps_bodyweight",
@@ -55,7 +25,7 @@ RECORD_TYPE_BY_PRESCRIPTION: dict[str, RecordType] = {
 
 
 class InvalidPlanRule(ValueError):
-    """确定性规则的输入不满足前提（如加重单位非正）：不是计划内容失败，是调用方编程错误。"""
+    """确定性规则的输入不满足前提（如加重单位非正）。"""
 
 
 @dataclass(frozen=True, slots=True)
@@ -67,10 +37,7 @@ class ProgressionDecision:
 
 
 def known_forbidden_exercise_ids(profile: Profile) -> tuple[str, ...]:
-    """画像明确给出的禁用动作 ID：只取 ``known`` 值，``unknown``／``denied`` 都不补造 ID。
-
-    已知伤病文本不参与推导（讨论总结 §8.3：系统不得根据伤病名称自行推导新的禁用动作）。
-    """
+    """画像明确给出的禁用动作 ID：只取 ``known`` 值。"""
     fact = profile.forbidden_exercise_ids
     return fact.value if fact.is_known and fact.value is not None else ()
 
@@ -86,11 +53,7 @@ def filter_forbidden_exercises(
 def resolve_starting_load(
     work_sets: Sequence[ValidWorkSet], *, exercise_id: str
 ) -> KnownLoad | NeedsCalibration:
-    """起始负荷：该动作最近一次有效工作组（业务日期、训练身份、组序号排序），不使用 PB。
-
-    没有有效工作组可用作负荷来源时返回 :class:`~domain.plans.schema.NeedsCalibration`，不猜重量、
-    也不从 PB 反推日常训练重量（讨论总结 §7.3、stage4.md §3.4）。
-    """
+    """起始负荷：该动作最近一次有效工作组（业务日期、训练身份、组序号排序）。"""
     candidates = [
         work_set
         for work_set in work_sets
@@ -127,13 +90,7 @@ class _TrainingAssessment:
 def _assess_training(
     work_sets: Sequence[ValidWorkSet], *, target_sets: int, reps_min: int, reps_max: int
 ) -> _TrainingAssessment:
-    """按计划要求的目标组判定一次训练（同一次训练只取计划要求数量的目标 work 组）。
-
-    - ``failed``：目标组数不足，或任一目标组次数低于下限（10B-1 的「未达标」）；次数缺失同样算未达标。
-    - ``completed``：目标组齐、全部在同一负荷、且每组次数不低于下限（规则 6：负荷不一致不算同一负荷达标）。
-    - ``at_reps_max``：``completed`` 且每个目标组都达到次数上限。
-    - 额外的 work 组不改变判定（只按 ``set_no`` 取前 ``target_sets`` 组）。
-    """
+    """按计划要求的目标组判定一次训练。"""
     ordered = sorted(work_sets, key=lambda work_set: work_set.set_no)
     target = tuple(ordered[:target_sets])
     reps = [work_set.reps for work_set in target]
@@ -164,17 +121,7 @@ def resolve_progression(
     target_load_kg: float,
     increment_kg: float,
 ) -> ProgressionDecision:
-    """10B／10B-1：按当前 active 计划关联的负重训练历史给出下一步负荷。
-
-    - 最近两次关联计划训练都在当前目标负荷上完整完成全部目标组、且每组都达到次数上限：只加一次
-      目录 ``min_load_increment_kg``；
-    - 最近两次关联计划训练都未达标（组数不足或低于次数下限）：回退到关联历史中最近一次完整完成的
-      负荷；没有可回退的完整完成负荷时变为待校准；
-    - 其余情况（不足两次关联训练、只有一次达标、达标但未到上限、目标组负荷不一致）：保持目标负荷。
-
-    ``work_sets`` 只包含有效工作组（热身／assisted／不完整组上游已排除）；``linked_workout_session_ids``
-    之外的训练是额外训练，既不计入也不打断连续性。
-    """
+    """10B／10B-1：按当前 active 计划关联的负重训练历史给出下一步负荷。"""
     if target_sets < 1 or reps_min < 1 or reps_min > reps_max or increment_kg <= 0:
         raise InvalidPlanRule(
             "渐进规则输入不满足前提："
@@ -258,10 +205,7 @@ def _prescription_failures(
     exercises: Mapping[str, Exercise],
     forbidden: Collection[str],
 ) -> list[RuleFailure]:
-    """一个候选动作的目录检查：动作存在、``recommendable``、记录口径一致、未被画像禁用。
-
-    负荷来源检查由调用方按生成计划或调整计划的口径分别追加（本函数不决定负荷规则）。
-    """
+    """一个候选动作的目录检查：动作存在、``recommendable``、记录口径一致、未被画像禁用。"""
     exercise = exercises.get(planned.exercise_id)
     if exercise is None:
         return [
@@ -311,15 +255,7 @@ def validate_plan_draft(
     forbidden_exercise_ids: Collection[str] = (),
     work_sets: Sequence[ValidWorkSet] = (),
 ) -> tuple[RuleFailure, ...]:
-    """确定性层：Schema 之外的全部计划检查，按训练日／动作顺序全量返回失败项。
-
-    - 计划每周训练次数必须复用画像的 ``known`` 值；
-    - 动作必须在目录内、``recommendable``，且处方类型与目录记录口径一致；
-    - 禁用动作（画像 ``known`` 的稳定 ID）出现在计划里即失败；
-    - 外加负重处方的具体负荷必须精确等于该动作最近一次有效工作组（无历史时只能待校准）。
-
-    次数／时长区间与字段互斥已由 :class:`~domain.plans.schema.PlanDraft` 的 Schema 保证，本层不重复。
-    """
+    """确定性层：Schema 之外的全部计划检查，按训练日／动作顺序全量返回失败项。"""
     failures = _weekly_frequency_failures(
         draft, profile_weekly_frequency=profile_weekly_frequency
     )
@@ -353,19 +289,12 @@ def validate_plan_adjustment(
     forbidden_exercise_ids: Collection[str] = (),
     work_sets: Sequence[ValidWorkSet] = (),
 ) -> tuple[RuleFailure, ...]:
-    """调整计划的确定性层：结构与目录检查同生成计划，负荷按当前 active 的渐进决策判断。
-
-    对每个给出具体负荷的负重处方：active 里有同动作的目标处方（目标组数／次数区间／目标负荷）时，
-    按该目标与 ``linked_workout_session_ids`` 里的关联日程训练调用 :func:`resolve_progression`，
-    候选负荷必须等于决策给出的重量；决策为 ``needs_calibration`` 时候选不得给出具体重量。active 没有
-    该动作的目标处方（调整新增的动作）时没有渐进决策可判，按讨论总结 §7.3 的起始负荷口径回退到
-    生成计划的最近工作组规则。
-    """
+    """调整计划的确定性层：结构与目录检查同生成计划，负荷按当前 active 的渐进决策判断。"""
     failures = _weekly_frequency_failures(
         draft, profile_weekly_frequency=profile_weekly_frequency
     )
     forbidden = set(forbidden_exercise_ids)
-    targets = _active_load_targets(active_draft)
+    targets = active_load_targets(active_draft)
     for day in draft.training_days:
         for planned in day.exercises:
             failures.extend(
@@ -381,8 +310,6 @@ def validate_plan_adjustment(
                 continue
             target = targets.get(planned.exercise_id)
             if target is None or exercise.min_load_increment_kg is None:
-                # 没有 active 目标处方（或目录动作不是外加负重口径、已另有 record_type_mismatch）：
-                # 没有渐进决策可判，按起始负荷口径检查来源。
                 failures.extend(
                     _load_source_failures(load, exercise_id=exercise.id, work_sets=work_sets)
                 )
@@ -407,8 +334,8 @@ def validate_plan_adjustment(
     return tuple(failures)
 
 
-def _active_load_targets(active_draft: PlanDraft) -> dict[str, ActiveLoadTarget]:
-    """当前 active 里每个动作的目标处方；同一动作重复出现时取第一处（顺序稳定，不猜合并口径）。"""
+def active_load_targets(active_draft: PlanDraft) -> dict[str, ActiveLoadTarget]:
+    """当前 active 里每个动作的目标处方。"""
     targets: dict[str, ActiveLoadTarget] = {}
     for day in active_draft.training_days:
         for planned in day.exercises:

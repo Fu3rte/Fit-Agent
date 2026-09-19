@@ -1,25 +1,4 @@
-"""records 确定性规则：训练日期、组事实与组数的校验（正本讨论总结 §9、001_initial.sql）。
-
-纯函数、不碰 IO、不调 ``date.today()``。值域与 ``storage/migrations/001_initial.sql`` 的既有
-CHECK／UNIQUE／触发器同集合，不新增任何未拍阈值（例如「日期不得晚于今天」或「组序号必须从 1
-连续」都不在本层）：
-
-- 日期：必须是 ``datetime.date`` 对象——文本与 ``datetime`` 都拒绝（``datetime`` 是 ``date``
-  的子类，但它是绝对时刻，按业务时区解释成自然日归 ``business_time``，不在本层猜测）。
-- 组事实：次数 1–100 整数或空（计时组为空）；持续秒数为不小于 1 的整数（无业务上限）；
-  重量 0–1000kg 且最多一位小数；组类型恰三态；动作身份非空文本；组序号 1–50；
-  重量与负重口径同现同隐。
-- 记录口径对应的必填／互斥字段（:func:`validate_set_fields_for_record_type`）：外加重量要求次数、
-  禁止时长；纯自重要求次数、禁止时长；计时要求时长、禁止次数。
-- 一次训练的总组数：1–50（上限由库内触发器兜底，下限「提交时保证」是 001 里的约定）。
-- 同一动作内组序号不得重复（与库内 ``UNIQUE (workout_session_id, exercise_id, set_no)`` 同
-  集合），使越界调用得到领域错误而不是裸 ``IntegrityError``。
-
-边界：**负重口径与目录是否一致不在这里**——那需要读目录（IO），由记录服务落库前经
-``domain.actions.service.ActionCatalogService.validate_record_write`` 复验；本层只保证口径取值
-落词表内、且与重量同现同隐。**按记录口径的必填／互斥字段也不看目录**：调用方把目录动作的
-``record_type`` 传进来，规则本体（:func:`validate_set_fields_for_record_type`）仍是纯函数。
-"""
+"""records 确定性规则：训练日期、组事实与组数的校验。"""
 
 import math
 from collections.abc import Sequence
@@ -30,27 +9,19 @@ from domain.actions.rules import LOAD_CONVENTIONS, RECORD_TYPES
 from domain.actions.schema import LoadConvention, RecordType
 from domain.records.schema import SET_TYPES, SetType, WorkoutSetInput
 
-#: 单组次数范围（002 起 reps 可为空——计时组无次数；有值时仍是 001 的 1–100）。
 REPS_MIN = 1
 REPS_MAX = 100
 
-#: 计时动作的单组时长下限（秒）：不小于 1 的整数，**不设业务上限**。
-#: 这是时长范围的唯一校验规则（讨论总结 §3.1：只由 Domain 实施、DTO 复用同一规则、库内不加 CHECK）。
 DURATION_SECONDS_MIN = 1
 
-#: 外加负重的重量范围与精度（001_initial.sql workout_sets.weight_kg CHECK）。
 WEIGHT_KG_MIN = 0.0
 WEIGHT_KG_MAX = 1000.0
 WEIGHT_KG_DECIMALS = 1
-#: 精度容差：与库内 CHECK 的 ``ABS(weight_kg - ROUND(weight_kg, 1)) < 1e-9`` 严格同集合
-#: （差值恰好等于 1e-9 时库内拒绝，本层也必须拒绝，否则会漏出裸 IntegrityError）。
 PRECISION_EPSILON = 1e-9
 
-#: 动作内组序号范围（001_initial.sql workout_sets.set_no CHECK）。
 SET_NO_MIN = 1
 SET_NO_MAX = 50
 
-#: 一次训练的总组数范围（001_initial.sql：上限由触发器兜底，下限由本层在提交时保证）。
 SETS_PER_SESSION_MIN = 1
 SETS_PER_SESSION_MAX = 50
 
@@ -85,11 +56,7 @@ def validate_set_no(value: Any) -> int:
 
 
 def validate_reps(value: Any) -> int | None:
-    """校验并返回单组次数：``None`` 表示该组不记录次数（计时组）。
-
-    有值时必须是 1–100 的整数（``bool`` 不是次数）；是否必填由目录动作的记录口径决定
-    （:func:`validate_set_fields_for_record_type`）。
-    """
+    """校验并返回单组次数：``None`` 表示该组不记录次数（计时组）。"""
     if value is None:
         return None
     if isinstance(value, bool) or not isinstance(value, int):
@@ -100,11 +67,7 @@ def validate_reps(value: Any) -> int | None:
 
 
 def validate_duration_seconds(value: Any) -> int | None:
-    """校验并返回单组持续秒数：``None`` 表示该组不记录时长（外加重量／自重组）。
-
-    有值时必须是不小于 1 的整数（``bool`` 不是秒数），**没有业务上限**；该范围只在本函数实施，
-    DTO／API 复用同一规则，库内不加时长 CHECK（Subtask 01 冻结口径）。
-    """
+    """校验并返回单组持续秒数：``None`` 表示该组不记录时长（外加重量／自重组）。"""
     if value is None:
         return None
     if isinstance(value, bool) or not isinstance(value, int):
@@ -122,15 +85,7 @@ def validate_set_fields_for_record_type(
     reps: int | None,
     duration_seconds: int | None,
 ) -> None:
-    """按目录动作的记录口径校验组的必填／互斥字段（三种动作的唯一实现，讨论总结 §9）。
-
-    - ``reps_weight``（外加重量）：要求次数，禁止时长（重量与负重口径由口径规则保证同现）。
-    - ``reps_bodyweight``（纯自重）：要求次数，禁止时长（重量／口径由口径规则禁止）。
-    - ``time``（计时）：要求时长，禁止次数。
-
-    数值范围本身归 :func:`validate_reps`／:func:`validate_duration_seconds`（调用方先做），
-    本函数只看「该填的有没有填、不该有的有没有给」。
-    """
+    """按目录动作的记录口径校验组的必填／互斥字段。"""
     if record_type not in RECORD_TYPES:
         raise InvalidRecordFact(f"记录口径不在目录三类内：{record_type!r}")
     if record_type == "time":
@@ -178,11 +133,7 @@ def validate_load_convention(value: Any) -> LoadConvention | None:
 def validate_session_sets(
     values: Sequence[WorkoutSetInput],
 ) -> tuple[WorkoutSetInput, ...]:
-    """校验一次训练的全部组事实并返回归一化结果（不落库、不读目录）。
-
-    逐组校验动作身份、组序号、组类型、次数、计时时长、重量与「重量／负重口径同现同隐」，并校验
-    总组数在 1–50 之间、同一动作内组序号不重复。
-    """
+    """校验一次训练的全部组事实并返回归一化结果（不落库、不读目录）。"""
     if isinstance(values, (str, bytes)) or not isinstance(values, Sequence):
         raise InvalidRecordFact(f"一次训练的组必须是序列：{values!r}")
     if not SETS_PER_SESSION_MIN <= len(values) <= SETS_PER_SESSION_MAX:
@@ -228,8 +179,7 @@ def _require_unique_set_numbers(facts: Sequence[WorkoutSetInput]) -> None:
 def _require_finite_number(label: str, value: Any) -> float:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise InvalidRecordFact(f"{label}必须是数值：{value!r}")
-    # 超大整数（如 10**400）转 float 会抛 OverflowError；它同样是「超出可表示范围」的
-    # 非法输入，必须与越界值一样以领域错误拒绝，不向调用方漏出原生异常（总结 49／255）。
+    # 超大整数（如 10**400）转 float 会抛 OverflowError，同样按非法输入拒绝，不漏出原生异常。
     try:
         number = float(value)
     except (OverflowError, ValueError) as exc:

@@ -1,38 +1,11 @@
-"""records 用例编排：训练记录的新增、查询、修改与删除（正本讨论总结 §9；REFACTOR_PLAN §5.4）。
-
-边界：不接 HTTP／Agent，表单直接调用本服务（04 表单 API），不创建草稿、不写 ``plan_sessions``。
-落库前做三件事，顺序固定：
-
-1. **rules 校验事实**：日期、动作身份、负重口径、重量、次数、组数、组类型（``domain.records.rules``）；
-2. **目录复验**：逐个动作查 ``domain.actions.service.ActionCatalogService.validate_record_write``，
-   确认动作存在且负重口径与目录一致（外加负重型必须带口径，自重／计时型不得带口径与重量），
-   再按目录动作自身的记录口径调 ``domain.records.rules.validate_set_fields_for_record_type``
-   校验必填／互斥字段（外加重量与纯自重要求次数，计时要求时长）。
-   ``workout_sets`` 不存记录口径，故按目录动作自身派生后复验——记录侧只声明负重口径这一件事。
-   这一步必须在写事务之前（``under_lock`` 与写事务共用同一把不可重入的锁）；
-3. **关联日程**：在写事务内解析，避免「先查候选、再写库」之间的竞态与裸 ``IntegrityError``。
-
-关联口径（讨论总结 §9）：``plan_session_id`` 可空，``NULL`` 明确表示额外训练；用户可直接选择
-某个未完成日程；``auto_link=True`` 时仅当当天恰有一个未完成日程才关联，零个或多个候选一律抛
-:class:`PlanSessionLinkAmbiguous`（不猜、不静默写 NULL）；显式给出的 ``plan_session_id`` 优先于
-``auto_link``。同一日程最多被一条训练关联（库内 UNIQUE 兜底）。注意「未完成」按讨论总结 §9 判定：
-已被某条记录关联的日程即为已完成，因此对一条已关联日程的训练调用 ``update(..., auto_link=True)``
-会看到 0 个未完成候选并抛 :class:`PlanSessionLinkAmbiguous`——这是正确行为，编辑既有训练时调用方
-必须显式传 ``plan_session_id``。
-
-领域错误：身份不存在是 :class:`WorkoutRecordNotFound`，日程不可用是
-:class:`PlanSessionLinkUnavailable`，自动关联候选不唯一是 :class:`PlanSessionLinkAmbiguous`，
-输入事实不合法是 :class:`~domain.records.rules.InvalidRecordFact`（动作不在目录内沿用
-:class:`~domain.actions.rules.UnknownExercise`，口径不符沿用
-:class:`~domain.actions.rules.RecordLoadMismatch`）——它们都只继承 ``ValueError``、互不继承，
-调用方按类型区分。
-"""
+"""records 用例编排：训练记录的新增、查询、修改与删除。"""
 
 from collections.abc import Sequence
 from datetime import date
 
 import aiosqlite
 
+from domain.actions.repo import ExerciseRepo
 from domain.actions.rules import UnknownExercise
 from domain.actions.service import ActionCatalogService
 from domain.plans.schema import PlanSession
@@ -65,16 +38,12 @@ class WorkoutRecordsService:
         self._db = db
         self._repo = WorkoutRecordsRepo(db)
         self._catalog = ActionCatalogService(db)
+        self._exercises = ExerciseRepo(db)
 
     async def validate_record_facts(
         self, performed_on: date, sets: Sequence[WorkoutSetInput]
     ) -> tuple[date, tuple[WorkoutSetInput, ...]]:
-        """写入前的完整事实校验（日期 ＋ 组规则 ＋ 目录口径），不写库、不碰关联日程。
-
-        ``create``／``update`` 与本方法共用同一实现，因此自然语言打卡确认前的校验与表单写入
-        完全同源（stage6.md §2.2「与表单路径同一套规则」）；确认载荷不合规时在写事务之前即拒绝。
-        返回归一化后的业务日期与组事实。
-        """
+        """写入前的完整事实校验（日期 ＋ 组规则 ＋ 目录口径），不写库、不碰关联日程。"""
         day = validate_performed_on(performed_on)
         facts = validate_session_sets(sets)
         await self._validate_sets_against_catalog(facts)
@@ -105,12 +74,7 @@ class WorkoutRecordsService:
         return await self._repo.list_all()
 
     async def list_recent(self, limit: int) -> tuple[WorkoutSession, ...]:
-        """最近 ``limit`` 次训练及其全部组（最新在前，同日训练各算一次）。
-
-        供 MemoryAssembler 做有界近期读取（讨论总结 §5.2「最近 4 次训练」）：不先取完整训练历史
-        再在调用方截断，不足 ``limit`` 返回实际条数，空库返回空元组；``limit`` 为非正数时直接
-        失败（``ValueError``），不退化成全量读取。
-        """
+        """最近 ``limit`` 次训练及其全部组（最新在前，同日训练各算一次）。"""
         return await self._repo.list_recent(limit)
 
     async def update(
@@ -140,12 +104,6 @@ class WorkoutRecordsService:
         if not await self._repo.delete(session_id):
             raise WorkoutRecordNotFound(f"训练记录不存在：{session_id}")
 
-    async def auto_plan_session_id(self, performed_on: date) -> int | None:
-        """当天恰好一个未完成日程时返回其身份，否则 None（零个或多个候选都不猜）。"""
-        day = validate_performed_on(performed_on)
-        candidates = await self._repo.list_unfinished_plan_sessions(day)
-        return candidates[0].id if len(candidates) == 1 else None
-
     async def list_unfinished_plan_sessions(
         self, performed_on: date
     ) -> tuple[PlanSession, ...]:
@@ -157,15 +115,9 @@ class WorkoutRecordsService:
     async def _validate_sets_against_catalog(
         self, facts: Sequence[WorkoutSetInput]
     ) -> None:
-        """逐个动作复验目录：动作存在，负重口径与目录一致，且字段符合该动作的记录口径。
-
-        ``workout_sets`` 没有记录口径列，故取目录动作自身的 ``record_type`` 后调用
-        ``validate_record_write``（复验负重口径：外加负重型必须给出与目录相同的口径，
-        自重／计时型不得给出任何口径），再按同一 ``record_type`` 校验必填／互斥字段
-        （外加重量与纯自重要求次数，计时要求时长且禁次数）。
-        """
+        """逐个动作复验目录：动作存在，负重口径与目录一致，且字段符合该动作的记录口径。"""
         for fact in facts:
-            exercise = await self._catalog.get_by_id(fact.exercise_id)
+            exercise = await self._exercises.get_by_id(fact.exercise_id)
             if exercise is None:
                 raise UnknownExercise(f"动作身份不在目录内：{fact.exercise_id}")
             await self._catalog.validate_record_write(

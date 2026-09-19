@@ -9,8 +9,6 @@
  * 无通用草稿/修订链。Provider 传输形状见文末「模型配置」段（用户拍板：设置页可编辑）。
  */
 
-/* ---------------------------------- 错误 ---------------------------------- */
-
 /** 统一错误码：Stage 1 传输层只表达「请求或输入不合法」 */
 export type ErrorCode = "invalid_request";
 
@@ -19,8 +17,6 @@ export interface ApiError {
   error_code: ErrorCode;
   message: string;
 }
-
-/* ------------------------------- 动作目录 -------------------------------- */
 
 /** 目录记录口径恰三类（与 001_initial.sql exercises CHECK 同集合） */
 export type CatalogRecordType = "reps_weight" | "reps_bodyweight" | "time";
@@ -53,8 +49,6 @@ export interface ExerciseListWire {
   exercises: ExerciseWire[];
 }
 
-/* --------------------------------- 用户画像 -------------------------------- */
-
 /** 画像单字段三态（无 context_version）：known 带值，unknown／denied 值必须为 null */
 export type FactState = "unknown" | "denied" | "known";
 
@@ -81,8 +75,6 @@ export interface ProfileResponseWire {
 
 /** PUT /api/profile 请求体：整份覆盖，未填写用 unknown、明确为空用 denied */
 export type ProfileWriteBody = ProfileFactsWire;
-
-/* -------------------------------- 训练记录 -------------------------------- */
 
 /** 组类型固定三态（与 workout_sets CHECK 同集合；没有「未申报」态） */
 export type SetTypeWire = "work" | "warmup" | "assisted";
@@ -145,8 +137,6 @@ export interface PlanSessionCandidatesWire {
   sessions: PlanSessionCandidateWire[];
 }
 
-/* -------------------------------- 身体指标 -------------------------------- */
-
 /** 一条身体指标（body_metric_dto）；body_fat_pct 为 null 表示该次未记录体脂 */
 export interface BodyMetricWire {
   id: number;
@@ -169,8 +159,6 @@ export interface BodyMetricListWire {
 export interface BodyMetricItemWire {
   metric: BodyMetricWire;
 }
-
-/* --------------------------- 计划（只读，无写入入口） -------------------------- */
 
 /** 一个计划版本（plan_dto） */
 export interface PlanWire {
@@ -262,8 +250,6 @@ export interface PlanSessionWire {
 export interface PlanSessionListWire {
   sessions: PlanSessionWire[];
 }
-
-/* ------------------------------ 统计（只读现算） ------------------------------ */
 
 /** 三类 PB（与 dto.personal_best_dto 同集合）；没有容量 PB，也没有估算 1RM */
 export type PersonalBestTypeWire = "weight_pb" | "reps_pb" | "duration_pb";
@@ -394,8 +380,6 @@ export interface CalendarResponseWire {
   calendar: CalendarMonthWire;
 }
 
-/* ------------------------------- Agent 传输 ------------------------------- */
-
 /** POST /api/agent/run 请求体：conversation_id 由前端生成 UUID，即 Checkpointer 的 thread_id */
 export interface AgentRunBody {
   conversation_id: string;
@@ -525,8 +509,6 @@ export type AgentEventWire =
   | AgentWaitingWorkoutEventWire
   | AgentDoneEventWire
   | AgentErrorEventWire;
-
-/* ------------------------------ 模型配置（Provider） ------------------------------ */
 
 /** GET /api/provider 响应：后端不回传 api_key 本体，只给是否已配置的布尔 */
 export type ProviderStatusWire = {

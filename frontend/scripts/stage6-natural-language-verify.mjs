@@ -4,7 +4,7 @@
  * 两类断言，脚本内逐条标注：
  *
  * - **真实调用**（REAL）：直接 ``import`` ``../src/lib/api.ts`` 与
- *   ``../src/features/chat/workoutDraft.ts``（Node 24 原生 TS type stripping；两者对 ``@/lib/contract`` 的导入
+ *   ``../src/features/chat/utils/workoutDraft.ts``（Node 24 原生 TS type stripping；两者对 ``@/lib/contract`` 的导入
  *   都是 type-only，会被剥离），用桩 ``fetch`` 驱动 ``confirmWorkout`` 的 URL／方法／请求体逐字段与响应形状、
  *   错误形状，``runAgentStream`` 对 ``waiting`` 双路径载荷的解析，以及对话页打卡载荷的三种日程关联形状。
  * - **静态断言**（STATIC）：``ChatPage.tsx``／``PlansPage.tsx``／``App.tsx`` 是 React 组件，无 DOM 的 Node
@@ -14,7 +14,12 @@
  * 断言失败即进程非零退出；不使用 console 打印代替断言。
  */
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
+import { readFile as readFileRaw } from "node:fs/promises";
+
+/** 源码断言按 LF 口径比对；``core.autocrlf`` 检出的 CRLF 工作树在此归一化 */
+async function readFile(url) {
+  return (await readFileRaw(url, "utf8")).replace(/\r\n/g, "\n");
+}
 
 const api = await import("../src/lib/api.ts");
 
@@ -316,7 +321,7 @@ const apiSource = await readFile(
 
 assert.match(
   contract,
-  /export type AgentEventNameWire = "node" \| "message" \| "waiting" \| "done" \| "error";/,
+  /export type AgentEventNameWire =\s*\n\s*"node" \| "message" \| "waiting" \| "done" \| "error";/,
 );
 // 文件里出现的事件名字面量恰为五类，不新增第六类
 const declaredEventNames = [
@@ -449,8 +454,26 @@ const chatPageSource = await readFile(
   new URL("../src/features/chat/ChatPage.tsx", import.meta.url),
   "utf8",
 );
+const chatRoundSource = await readFile(
+  new URL("../src/features/chat/utils/chatRound.ts", import.meta.url),
+  "utf8",
+);
+const workoutConfirmSource = await readFile(
+  new URL(
+    "../src/features/chat/components/WorkoutConfirmCard.tsx",
+    import.meta.url,
+  ),
+  "utf8",
+);
+const planWaitingSource = await readFile(
+  new URL(
+    "../src/features/chat/components/PlanWaitingCard.tsx",
+    import.meta.url,
+  ),
+  "utf8",
+);
 const chatDraftSource = await readFile(
-  new URL("../src/features/chat/workoutDraft.ts", import.meta.url),
+  new URL("../src/features/chat/utils/workoutDraft.ts", import.meta.url),
   "utf8",
 );
 const appSource = await readFile(
@@ -475,9 +498,12 @@ for (const forbidden of [
   );
 }
 // 计划确认／拒绝的按钮与调用都在对话页（计划路径 waiting，D1-③ 裁决）
-assert.match(chatPageSource, /<CardTitle>待确认计划 #\{planId\}<\/CardTitle>/);
-assert.match(chatPageSource, />\s*\n\s*确认启用\s*\n\s*<\/Button>/);
-assert.match(chatPageSource, />\s*\n\s*拒绝\s*\n\s*<\/Button>/);
+assert.match(
+  planWaitingSource,
+  /<CardTitle>待确认计划 #\{planId\}<\/CardTitle>/,
+);
+assert.match(planWaitingSource, />\s*\n\s*确认启用\s*\n\s*<\/Button>/);
+assert.match(planWaitingSource, />\s*\n\s*拒绝\s*\n\s*<\/Button>/);
 for (const name of ["confirmPlan", "rejectPlan"]) {
   assert.ok(chatPageSource.includes(name), `对话页未使用 ${name}`);
 }
@@ -514,42 +540,49 @@ for (const forbidden of [
 }
 // message 的可见文本只被原样透传渲染一次，没有任何反解入口（§2.5.2）
 assert.equal(
-  (chatPageSource.match(/event\.data\.text/g) ?? []).length,
+  (chatRoundSource.match(/event\.data\.text/g) ?? []).length,
   1,
   "event.data.text 只能出现一次（原样渲染）",
 );
 assert.match(
-  chatPageSource,
+  chatRoundSource,
   /case "message":\s*\n\s*return event\.data\.text;/,
   "message 事件只能原样返回可见文本",
 );
 
 // 多候选必须展示并要求用户选择（§2.1）：三种选项与候选列表都在确认表单里
-for (const option of ['<option value="auto">', '<option value="extra">']) {
-  assert.ok(chatPageSource.includes(option), `确认表单缺 ${option}`);
+for (const option of ['"auto"', '"extra"']) {
+  assert.ok(
+    workoutConfirmSource.includes(`<SelectItem value=${option}>`),
+    `确认表单缺 ${option}`,
+  );
 }
 assert.match(
-  chatPageSource,
-  /available\.length > 1 &&[\s\S]{0,200}?请选择本次训练对应的那个/,
+  workoutConfirmSource,
+  /: `当天有 \$\{available\.length\} 个未完成日程：请选择本次训练对应的那个/,
   "多候选必须提示用户显式选择日程或额外训练",
 );
-// 取消确认只清本地状态（§4.1）
+// 取消确认只清本地状态（§4.1）：具名函数或 onCancel 内联，二者都不发请求
 assert.match(
   chatPageSource,
-  /const cancelWorkoutDraft = \(\) => setWorkoutDraft\(null\);/,
+  /const cancelWorkoutDraft = \(\) => setWorkoutDraft\(null\);|onCancel=\{\(\) => setWorkoutDraft\(null\)\}/,
   "取消确认只能清本地状态",
 );
 // 改日期后候选按新日期重查，且关联选择回到 waiting 的初始默认值（不沿用旧日期的日程 id）
 assert.match(
-  chatPageSource,
+  workoutConfirmSource,
   /const changePerformedOn = \(value: string\) => \{[\s\S]{0,200}?initialSessionChoice\(/,
   "改日期后关联选择必须回到初始默认值",
 );
 // 写入成功后沿用记录页的既有全量失效口径（不新造第二套 key 命名）
 assert.match(
-  chatPageSource,
-  /return queryClient\.invalidateQueries\(\);/,
+  workoutConfirmSource,
+  /await queryClient\.invalidateQueries\(\);/,
   "打卡确认成功后必须全量失效记录派生 Query",
+);
+assert.ok(
+  chatPageSource.includes("invalidatePlanAndCalendarQueries"),
+  "对话页未使用 invalidatePlanAndCalendarQueries",
 );
 assert.match(
   chatPageSource,
@@ -624,7 +657,7 @@ pass("STATIC 契约字段与后端 dto.py／workflow.py／routes_agent.py 源码
 
 /* --- REAL 10：对话页打卡载荷 → 确认请求：三种日程关联形状与组字段逐字往返（T2.4） --- */
 
-const chatDraft = await import("../src/features/chat/workoutDraft.ts");
+const chatDraft = await import("../src/features/chat/utils/workoutDraft.ts");
 
 // 三种提交形状（stage6.md §2.1 硬边界表／§2.4.2）
 assert.deepEqual(chatDraft.sessionLink("auto"), {

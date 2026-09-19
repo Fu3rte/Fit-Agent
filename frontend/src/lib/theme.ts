@@ -22,10 +22,4 @@ export function setTheme(theme: Theme): void {
   document.documentElement.classList.toggle("dark", theme === "dark");
 }
 
-export function toggleTheme(): Theme {
-  const next: Theme = getTheme() === "dark" ? "light" : "dark";
-  setTheme(next);
-  return next;
-}
-
 initTheme();

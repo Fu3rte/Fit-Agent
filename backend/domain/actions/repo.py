@@ -1,12 +1,4 @@
-"""actions 业务表手写 SQL：exercises 的目录全量与按稳定身份读取（Stage 1 子任务 02 §4）。
-
-全部访问经 ``storage.db.Database`` 的唯一连接与锁（07 7.1）；本层只读——动作种子由编号迁移
-``001_initial.sql`` 写入，领域层不提供目录写入口，也不在启动路径覆盖目录。
-
-读取出口只两个：目录全量与按稳定身份取一行。读到即校验 ``modes_json`` 元素落在 13 项词表内：
-库内 CHECK 只保证 ``json_valid``，越界行属目录数据损坏，必须大声失败而不是流给计划链路。
-SQL 一律以字面量书写并参数化（storage/README 硬规则 3）。
-"""
+"""actions 业务表手写 SQL：exercises 的目录全量与按稳定身份读取。"""
 
 import aiosqlite
 
@@ -14,7 +6,6 @@ from domain.actions.rules import validate_modes
 from domain.actions.schema import Exercise
 from storage.db import Database
 
-#: exercises 列清单：本模块所有读取共用同一份，避免漏列（列顺序即 Exercise.from_row 读取的键）。
 _COLUMNS = (
     "id, standard_name_zh, equipment_variant, record_type, load_convention,"
     " min_load_increment_kg, recommendable, modes_json, source_ref, attribution"

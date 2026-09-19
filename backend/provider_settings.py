@@ -1,6 +1,3 @@
-# 模型配置存取与取值解析：数据目录 provider.json 优先，空字段回落 MODEL_* 环境变量。
-# 存储边界：只落本地 provider.json（POSIX 创建权限 0600），不写业务库、不进 Checkpointer、
-# 不进 WorkflowState；完整 API Key 不进 GET 响应、日志、SSE 与异常详情。
 import json
 import os
 from dataclasses import asdict, dataclass
@@ -60,11 +57,7 @@ def write_provider_config(data_dir: Path, config: ProviderConfig) -> None:
 def resolve_model_credentials(
     data_dir: Path, override: ProviderConfig | None = None
 ) -> tuple[str, str, str]:
-    """返回 (api_key, base_url, model)：override 非空字段覆盖 provider.json，其余回落同名 MODEL_* 环境变量。
-
-    两者皆空即 :class:`ModelConfigurationError`（消息只含环境变量名，不含任何取值）；
-    不落默认端点、不猜 URL。
-    """
+    """返回 (api_key, base_url, model)：override 非空字段覆盖 provider.json，其余回落同名 MODEL_* 环境变量。"""
     config = read_provider_config(data_dir)
     if override is not None:
         config = ProviderConfig(
