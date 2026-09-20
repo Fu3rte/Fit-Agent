@@ -1,8 +1,3 @@
-/**
- * 主题切换（C3B）：浅色默认，暗色第二主题。
- * localStorage 键 fitagent-theme；class 策略挂在 documentElement 上，
- * 配合 index.css 的 @custom-variant dark。
- */
 export type Theme = "light" | "dark";
 
 const STORAGE_KEY = "fitagent-theme";

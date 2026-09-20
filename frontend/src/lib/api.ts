@@ -1,12 +1,3 @@
-/**
- * 契约 API 封装：每个端点一个函数，形状一律来自 src/lib/contract.ts。
- * 错误统一解析为 ApiError 形状抛出（后端固定
- * ``{http_status, error_code:"invalid_request", message}``）。
- *
- * 覆盖 Stage 1 交付端点：画像、训练记录与组、身体指标、动作目录、计划只读；
- * 以及 Stage 2 的 Stats 只读端点（三类 PB、趋势、月历）。
- * 表单写入直连业务端点，不经 Run／草稿。
- */
 import type {
   AgentEventNameWire,
   AgentEventWire,
@@ -14,6 +5,10 @@ import type {
   AgentPlanResponseWire,
   AgentRunBody,
   ApiError,
+  ConversationCreateBody,
+  ConversationDetailWire,
+  ConversationListWire,
+  ConversationWire,
   BodyMetricItemWire,
   BodyMetricListWire,
   BodyMetricWriteBody,
@@ -137,10 +132,13 @@ export const updateBodyMetric = (metricId: number, body: BodyMetricWriteBody) =>
 export const deleteBodyMetric = (metricId: number) =>
   request<void>(`/api/body-metrics/${metricId}`, { method: "DELETE" });
 
-/** 计划只读：全部版本（升序）与当前 active */
+/** 计划只读：全部版本（升序）、当前 active 与单版本身份 */
 export const listPlans = () => request<PlanListWire>("/api/plans");
 
 export const getActivePlan = () => request<PlanItemWire>("/api/plans/active");
+
+export const getPlan = (planId: number) =>
+  request<PlanItemWire>(`/api/plans/${planId}`);
 
 /** 三类 PB（最大重量、最大次数、最长时长）及来源训练、组序号与日期 */
 export const listPersonalBests = () =>
@@ -299,3 +297,24 @@ export const rejectPlan = (body: AgentPlanBody) =>
  */
 export const confirmWorkout = (body: ConfirmWorkoutBody) =>
   post<ConfirmWorkoutResponseWire>("/api/agent/confirm-workout", body);
+
+/** 会话列表：服务端按 ``updated_at`` 降序返回全部会话头 */
+export const listConversations = () =>
+  request<ConversationListWire>("/api/conversations");
+
+/** 新建空会话：标题非空由后端把关，返回落库后的会话头 */
+export const createConversation = (body: ConversationCreateBody) =>
+  post<ConversationWire>("/api/conversations", body);
+
+/** 会话详情：会话全部 Entry 重建的轮次与压缩分隔，刷新与切换路由后的唯一恢复来源 */
+export const readConversation = (conversationId: string) =>
+  request<ConversationDetailWire>(
+    `/api/conversations/${encodeURIComponent(conversationId)}`,
+  );
+
+/** 删除会话：Entry／Run／Event 由后端级联清理；不存在与非法身份返回同一错误 */
+export const deleteConversation = (conversationId: string) =>
+  request<{ deleted: boolean }>(
+    `/api/conversations/${encodeURIComponent(conversationId)}`,
+    { method: "DELETE" },
+  );

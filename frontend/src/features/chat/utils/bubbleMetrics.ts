@@ -1,7 +1,3 @@
-/**
- * 气泡宽度计算层（对齐 pretext pages/demos/bubbles-shared.ts）：纯算术，不碰 DOM。
- * 每个文本只 prepare 一次；宽度变化只重跑 walkLineRanges / layout。
- */
 import {
   layout,
   prepareWithSegments,
@@ -35,7 +31,7 @@ export function clearPreparedBubbleTexts(): void {
   preparedCache.clear();
 }
 
-/** CSS 等价度量：一次行走取行数与最宽行（bubbles-shared.ts collectWrapMetrics） */
+/** CSS 等价度量：一次行走取行数与最宽行 */
 export function collectWrapMetrics(
   prepared: PreparedTextWithSegments,
   maxWidth: number,
@@ -47,7 +43,7 @@ export function collectWrapMetrics(
   return { lineCount, height: lineCount * BUBBLE.lineHeight, maxLineWidth };
 }
 
-/** 最紧度量：二分出「行数不增加」的最窄宽度（bubbles-shared.ts findTightWrapMetrics） */
+/** 最紧度量：二分出「行数不增加」的最窄宽度 */
 export function findTightWrapMetrics(
   prepared: PreparedTextWithSegments,
   maxWidth: number,
@@ -64,7 +60,7 @@ export function findTightWrapMetrics(
   return collectWrapMetrics(prepared, lo);
 }
 
-/** 单条气泡外宽：最紧内容宽 + 左右内边距（bubbles-shared.ts 的 tightWidth） */
+/** 单条气泡外宽：最紧内容宽 + 左右内边距 */
 export function bubbleWidth(
   prepared: PreparedTextWithSegments,
   bubbleMaxWidth: number,

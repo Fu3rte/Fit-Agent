@@ -4,6 +4,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import date
 
+from domain.conversations.context import ContextMessage
 from domain.plans.repo import PlanRepo
 from domain.plans.schema import Plan
 from domain.profile.schema import Profile
@@ -19,7 +20,7 @@ RECENT_SESSION_LIMIT = 4
 
 @dataclass(frozen=True, slots=True)
 class MemoryContext:
-    """MemoryAssembler 的一次输出：恰好六类内容。"""
+    """MemoryAssembler 的一次输出：恰好六类业务事实、当前请求、业务日与对话历史投影。"""
 
     profile: Profile | None
     active_plan: Plan | None
@@ -27,6 +28,8 @@ class MemoryContext:
     personal_bests: tuple[PersonalBest, ...]
     trend_summary: TrendSummary
     request: str
+    business_day: date
+    conversation_messages: tuple[ContextMessage, ...] = ()
 
 
 class MemoryAssembler:
@@ -44,9 +47,11 @@ class MemoryAssembler:
         *,
         business_day: date,
         exercise_ids: Sequence[str] | None = None,
+        conversation_messages: Sequence[ContextMessage] = (),
     ) -> MemoryContext:
-        """装配一次上下文；各项业务事实都在本次调用里重新读取。"""
+        """装配一次上下文；各项业务事实都在本次调用里重新读取，对话历史由调用方投影后传入。"""
         return MemoryContext(
+            conversation_messages=tuple(conversation_messages),
             profile=await self._profiles.read(),
             active_plan=await self._plans.read_active(),
             recent_sessions=await self._records.list_recent(RECENT_SESSION_LIMIT),
@@ -55,6 +60,7 @@ class MemoryAssembler:
             ),
             trend_summary=await self._stats.trend_summary(business_day),
             request=request,
+            business_day=business_day,
         )
 
 

@@ -16,6 +16,9 @@ MODEL_REQUEST_TIMEOUT_SECONDS = 60
 GRAPH_RUN_TIMEOUT_SECONDS = 180
 MAX_MODEL_REQUESTS_PER_RUN = 5
 
+#: 上下文压缩阈值用的模型上下文窗口（Provider 无关的应用级常量）。
+MODEL_CONTEXT_WINDOW_TOKENS = 128_000
+
 
 def resolve_data_dir(override: str | os.PathLike[str] | None = None) -> Path:
     if override is not None:

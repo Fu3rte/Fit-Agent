@@ -1,18 +1,3 @@
-/**
- * Stage 6 前端可执行验证（Node 原生，无第三方依赖、无测试框架）：T2.3 契约 ＋ T2.4 对话页。
- *
- * 两类断言，脚本内逐条标注：
- *
- * - **真实调用**（REAL）：直接 ``import`` ``../src/lib/api.ts`` 与
- *   ``../src/features/chat/utils/workoutDraft.ts``（Node 24 原生 TS type stripping；两者对 ``@/lib/contract`` 的导入
- *   都是 type-only，会被剥离），用桩 ``fetch`` 驱动 ``confirmWorkout`` 的 URL／方法／请求体逐字段与响应形状、
- *   错误形状，``runAgentStream`` 对 ``waiting`` 双路径载荷的解析，以及对话页打卡载荷的三种日程关联形状。
- * - **静态断言**（STATIC）：``ChatPage.tsx``／``PlansPage.tsx``／``App.tsx`` 是 React 组件，无 DOM 的 Node
- *   不能渲染，因此用源码文本断言；``contract.ts``／``api.ts`` 的字段逐字一致同时与后端
- *   ``dto.py``／``workflow.py``／``routes_agent.py`` 源码交叉核对。
- *
- * 断言失败即进程非零退出；不使用 console 打印代替断言。
- */
 import assert from "node:assert/strict";
 import { readFile as readFileRaw } from "node:fs/promises";
 
@@ -25,8 +10,18 @@ const api = await import("../src/lib/api.ts");
 
 const encoder = new TextEncoder();
 const CONVERSATION_ID = "6a1c0f3e-2b47-4d90-8e5a-0c3f7b1d9a24";
+/** 稳定会话身份（conversations.id）；thread 身份与它不同，两者一起构成确认动作的定位 */
+const CHAT_ID = "8d5a4c21-7e36-4b90-9f13-2c6a0d8b5e47";
 
-/** ``waiting.workout``：后端 ``_workout_payload`` 的载荷（stage6.md §2.4.3），确认 UI 的编辑数据源 */
+/** 一轮 Run 的请求体：稳定会话身份 ＋ 本轮 thread 与幂等键，与后端 DTO 逐字段一致 */
+const runBody = (request) => ({
+  chat_id: CHAT_ID,
+  conversation_id: CONVERSATION_ID,
+  client_request_id: crypto.randomUUID(),
+  request,
+});
+
+/** ``waiting.workout``：后端 ``_workout_payload`` 的载荷，确认 UI 的编辑数据源 */
 const WAITING_WORKOUT = {
   performed_on: "2026-09-18",
   sets: [
@@ -53,7 +48,7 @@ const WAITING_WORKOUT = {
   auto_link: true,
 };
 
-/** ``waiting.candidate_plan_sessions``：数据库候选日程（stage6.md §2.4.3） */
+/** ``waiting.candidate_plan_sessions``：数据库候选日程 */
 const CANDIDATES = [
   { id: 11, plan_id: 3, scheduled_on: "2026-09-18" },
   { id: 12, plan_id: 3, scheduled_on: "2026-09-18" },
@@ -84,6 +79,7 @@ const PERSONAL_BESTS = [
 
 const CONFIRM_BODY_KEYS = [
   "auto_link",
+  "chat_id",
   "conversation_id",
   "performed_on",
   "plan_session_id",
@@ -151,7 +147,11 @@ function pass(name) {
 
 /* --- REAL 1：confirm-workout 的 URL／方法／请求体逐字段（waiting.workout 原样提交，auto_link=true） --- */
 
-const autoLinkBody = { conversation_id: CONVERSATION_ID, ...WAITING_WORKOUT };
+const autoLinkBody = {
+  chat_id: CHAT_ID,
+  conversation_id: CONVERSATION_ID,
+  ...WAITING_WORKOUT,
+};
 calls.length = 0;
 respond = () =>
   jsonResponse({
@@ -164,12 +164,13 @@ assert.equal(calls.length, 1);
 assert.equal(calls[0].path, "/api/agent/confirm-workout");
 assert.equal(calls[0].init.method, "POST");
 assert.equal(calls[0].init.headers["Content-Type"], "application/json");
-// 提交键集合恰为契约的五字段：不带 draft_plan_id，也不把 waiting 的其他字段塞进来
+// 提交键集合恰为契约的六字段：不带 draft_plan_id，也不把 waiting 的其他字段塞进来
 assert.deepEqual(Object.keys(calls[0].body).sort(), CONFIRM_BODY_KEYS);
 for (const set of calls[0].body.sets) {
   assert.deepEqual(Object.keys(set).sort(), CONFIRM_SET_KEYS);
 }
 assert.deepEqual(calls[0].body, {
+  chat_id: CHAT_ID,
   conversation_id: CONVERSATION_ID,
   performed_on: "2026-09-18",
   sets: WAITING_WORKOUT.sets,
@@ -180,7 +181,7 @@ assert.deepEqual(autoLinked, {
   workout_session: { ...WORKOUT_SESSION, plan_session_id: 11 },
   personal_bests: PERSONAL_BESTS,
 });
-pass("REAL confirm-workout 请求体五字段 ＋ 每组七字段（含 set_no）逐字段，响应 {workout_session, personal_bests}");
+pass("REAL confirm-workout 请求体六字段 ＋ 每组七字段（含 set_no）逐字段，响应 {workout_session, personal_bests}");
 
 /* --- REAL 2：用户修改后的完整载荷原样提交（显式选日程／显式额外训练） --- */
 
@@ -193,6 +194,7 @@ const editedSet = {
 calls.length = 0;
 respond = () => jsonResponse({ workout_session: WORKOUT_SESSION, personal_bests: [] });
 await api.confirmWorkout({
+  chat_id: CHAT_ID,
   conversation_id: CONVERSATION_ID,
   performed_on: "2026-09-19",
   sets: [editedSet],
@@ -200,6 +202,7 @@ await api.confirmWorkout({
   auto_link: false,
 });
 assert.deepEqual(calls[0].body, {
+  chat_id: CHAT_ID,
   conversation_id: CONVERSATION_ID,
   performed_on: "2026-09-19",
   sets: [editedSet],
@@ -210,6 +213,7 @@ assert.deepEqual(calls[0].body, {
 calls.length = 0;
 respond = () => jsonResponse({ workout_session: WORKOUT_SESSION, personal_bests: [] });
 await api.confirmWorkout({
+  chat_id: CHAT_ID,
   conversation_id: CONVERSATION_ID,
   performed_on: "2026-09-19",
   sets: [editedSet],
@@ -260,7 +264,7 @@ respond = () =>
   ]);
 const naturalLanguageEvents = [];
 await api.runAgentStream(
-  { conversation_id: CONVERSATION_ID, request: "记录今天杠铃卧推60kg5次" },
+  runBody("记录今天杠铃卧推60kg5次"),
   (event) => naturalLanguageEvents.push(event),
 );
 assert.deepEqual(
@@ -274,16 +278,15 @@ assert.deepEqual(naturalLanguageEvents[2], {
 // 自然语言打卡路径不带计划身份
 assert.equal(naturalLanguageEvents[3].data.draft_plan_id, null);
 
-// 计划路径的 waiting 仍是 Stage 5 形状（双路径同一事件名、不同载荷）
+// 计划路径的 waiting 形状（双路径同一事件名、不同载荷）
 calls.length = 0;
 respond = () =>
   streamResponse([
     encoder.encode('event: waiting\ndata: {"draft_plan_id":123}\n\n'),
   ]);
 const planWaitingEvents = [];
-await api.runAgentStream(
-  { conversation_id: CONVERSATION_ID, request: "生成计划" },
-  (event) => planWaitingEvents.push(event),
+await api.runAgentStream(runBody("生成计划"), (event) =>
+  planWaitingEvents.push(event),
 );
 assert.deepEqual(planWaitingEvents, [
   { event: "waiting", data: { draft_plan_id: 123 } },
@@ -297,7 +300,7 @@ respond = () =>
   ]);
 const sixthNameError = await errorOf(() =>
   api.runAgentStream(
-    { conversation_id: CONVERSATION_ID, request: "记录今天杠铃卧推60kg5次" },
+    runBody("记录今天杠铃卧推60kg5次"),
     () => {},
   ),
 );
@@ -334,7 +337,7 @@ assert.deepEqual([...new Set(declaredEventNames)].sort(), [
   "node",
   "waiting",
 ]);
-// 计划路径（Stage 5 契约）与自然语言打卡路径（§2.4.3）各一个 waiting 事件形状
+// 计划路径与自然语言打卡路径各一个 waiting 事件形状
 assert.match(contract, /data: \{ draft_plan_id: number \};/);
 const waitingWorkoutBlock = contract.slice(
   contract.indexOf("export interface AgentWaitingWorkoutEventWire"),
@@ -414,7 +417,7 @@ const confirmResponseBlock = contract.slice(
 );
 assert.match(confirmResponseBlock, /workout_session: RecordWire;/);
 assert.match(confirmResponseBlock, /personal_bests: PersonalBestWire\[\];/);
-pass("STATIC confirm-workout 请求体五字段、组七字段（比表单形状多 set_no）、响应两字段");
+pass("STATIC confirm-workout 请求体六字段（含 chat_id）、组七字段（比表单形状多 set_no）、响应两字段");
 
 /* --- STATIC 7：api.ts 复用既有 post 与唯一 SSE parser，不为 message.text 增解析入口 --- */
 
@@ -435,7 +438,7 @@ assert.ok(
   apiSource.includes('data: JSON.parse(data.join("\\n"))'),
   "SSE 帧的 JSON 解析必须只作用于 data 行",
 );
-// 唯一的运行时解析是 SSE 帧的 data 行：没有任何入口去解析 message 的可见文本（§2.5.2）
+// 唯一的运行时解析是 SSE 帧的 data 行：没有任何入口去解析 message 的可见文本
 assert.equal(
   (apiSource.match(/JSON\.parse\(/g) ?? []).length,
   1,
@@ -480,8 +483,15 @@ const appSource = await readFile(
   new URL("../src/app/App.tsx", import.meta.url),
   "utf8",
 );
+const chatTranscriptSource = await readFile(
+  new URL(
+    "../src/features/chat/components/ChatTranscript.tsx",
+    import.meta.url,
+  ),
+  "utf8",
+);
 
-// 计划页不再承载生成／调整与确认／拒绝入口（stage6.md §2.5.4，本轮裁决）：整页只读
+// 计划页不再承载生成／调整与确认／拒绝入口：整页只读
 for (const forbidden of [
   "runAgentStream",
   "startRun",
@@ -497,18 +507,46 @@ for (const forbidden of [
     `计划页不得再有写入入口：${forbidden}`,
   );
 }
-// 计划确认／拒绝的按钮与调用都在对话页（计划路径 waiting，D1-③ 裁决）
+// 计划确认／拒绝的按钮与调用都在对话页（计划路径 waiting）
 assert.match(
   planWaitingSource,
   /<CardTitle>待确认计划 #\{planId\}<\/CardTitle>/,
 );
 assert.match(planWaitingSource, />\s*\n\s*确认启用\s*\n\s*<\/Button>/);
 assert.match(planWaitingSource, />\s*\n\s*拒绝\s*\n\s*<\/Button>/);
+// 确认卡必须拉取并展示 draft 正文，供用户判断是否启用
+assert.match(
+  planWaitingSource,
+  /getPlan\(planId\)/,
+  "确认卡必须按 plan_id 读取计划版本",
+);
+assert.match(
+  planWaitingSource,
+  /structured_content as PlanDraftWire/,
+  "确认卡必须解析 structured_content",
+);
+for (const field of [
+  "draft.starts_on",
+  "draft.goal",
+  "draft.weekly_frequency",
+  "draft.training_days",
+  "draft.explanation",
+]) {
+  assert.ok(
+    planWaitingSource.includes(field),
+    `确认卡未展示计划字段：${field}`,
+  );
+}
+assert.match(
+  apiSource,
+  /export const getPlan = \(planId: number\) =>\s*\n\s*request<PlanItemWire>\(`\/api\/plans\/\$\{planId\}`\)/,
+  "api.ts 必须导出 getPlan",
+);
 for (const name of ["confirmPlan", "rejectPlan"]) {
   assert.ok(chatPageSource.includes(name), `对话页未使用 ${name}`);
 }
 
-// 对话页 waiting 判别：计划路径 → 计划确认卡片；打卡路径 → 打卡确认表单（§2.4.3 双载荷）
+// 对话页 waiting 判别：计划路径 → 计划确认卡片；打卡路径 → 打卡确认表单
 assert.match(
   chatPageSource,
   /if \("draft_plan_id" in event\.data\) \{[\s\S]{0,80}?setPlanDraft\(/,
@@ -538,7 +576,7 @@ for (const forbidden of [
     `对话页不得自建 SSE 解析或文本解析：${forbidden}`,
   );
 }
-// message 的可见文本只被原样透传渲染一次，没有任何反解入口（§2.5.2）
+// message 的可见文本只被原样透传渲染一次，没有任何反解入口
 assert.equal(
   (chatRoundSource.match(/event\.data\.text/g) ?? []).length,
   1,
@@ -550,7 +588,7 @@ assert.match(
   "message 事件只能原样返回可见文本",
 );
 
-// 多候选必须展示并要求用户选择（§2.1）：三种选项与候选列表都在确认表单里
+// 多候选必须展示并要求用户选择：三种选项与候选列表都在确认表单里
 for (const option of ['"auto"', '"extra"']) {
   assert.ok(
     workoutConfirmSource.includes(`<SelectItem value=${option}>`),
@@ -562,7 +600,7 @@ assert.match(
   /: `当天有 \$\{available\.length\} 个未完成日程：请选择本次训练对应的那个/,
   "多候选必须提示用户显式选择日程或额外训练",
 );
-// 取消确认只清本地状态（§4.1）：具名函数或 onCancel 内联，二者都不发请求
+// 取消确认只清本地状态：具名函数或 onCancel 内联，二者都不发请求
 assert.match(
   chatPageSource,
   /const cancelWorkoutDraft = \(\) => setWorkoutDraft\(null\);|onCancel=\{\(\) => setWorkoutDraft\(null\)\}/,
@@ -571,7 +609,7 @@ assert.match(
 // 改日期后候选按新日期重查，且关联选择回到 waiting 的初始默认值（不沿用旧日期的日程 id）
 assert.match(
   workoutConfirmSource,
-  /const changePerformedOn = \(value: string\) => \{[\s\S]{0,200}?initialSessionChoice\(/,
+  /const changePerformedOn = \(value: string\) => \{[\s\S]{0,200}?plan_session_id \?\? "extra"/,
   "改日期后关联选择必须回到初始默认值",
 );
 // 写入成功后沿用记录页的既有全量失效口径（不新造第二套 key 命名）
@@ -590,17 +628,34 @@ assert.match(
   "计划确认／拒绝后必须失效计划与日历 Query",
 );
 
-// App.tsx 路由与导航（D2 裁决：/chat ＋ 对话 ＋ MessageSquare）；既有四条 nav 不变
-assert.match(appSource, /<Route path="\/chat" element=\{<ChatPage \/>\} \/>/);
+// App.tsx 路由与导航（根路径为新会话状态 ＋ /chat/:chatId；nav 只剩看板与计划，会话历史由 ConversationList 承载）
+assert.match(appSource, /<Route path="\/" element=\{<ChatPage \/>\} \/>/);
+assert.ok(
+  !appSource.includes('path="/chat"'),
+  "根路径即新会话状态，不得再有独立 /chat 路由",
+);
 assert.match(
   appSource,
-  /\{ to: "\/chat", label: "对话", icon: MessageSquare, end: false \}/,
+  /<Route path="\/chat\/:chatId" element=\{<ChatPage \/>\} \/>/,
+);
+assert.match(
+  appSource,
+  /\{ to: "\/dashboard", label: "数据看板", icon: LayoutDashboard, end: false \}/,
+);
+assert.match(
+  appSource,
+  /\{ to: "\/plans", label: "训练计划", icon: ClipboardList, end: false \}/,
+);
+assert.match(appSource, /<ConversationList \/>/);
+assert.ok(
+  !appSource.includes('label: "对话"'),
+  "会话入口已由 ConversationList 承载，nav 不得再有对话项",
 );
 pass(
   "STATIC 对话页 waiting 双路径判别、无第二套 SSE／文本解析、多候选必须选择、取消不请求、失效口径、App 路由与导航",
 );
 
-/* --- STATIC 9：契约字段与后端源码逐字一致（对照索引见 stage6.md §2.4.2／§2.4.3） --- */
+/* --- STATIC 9：契约字段与后端源码逐字一致 --- */
 
 const {
   dtoSource,
@@ -659,7 +714,7 @@ pass("STATIC 契约字段与后端 dto.py／workflow.py／routes_agent.py 源码
 
 const chatDraft = await import("../src/features/chat/utils/workoutDraft.ts");
 
-// 三种提交形状（stage6.md §2.1 硬边界表／§2.4.2）
+// 三种提交形状
 assert.deepEqual(chatDraft.sessionLink("auto"), {
   plan_session_id: null,
   auto_link: true,
@@ -673,12 +728,13 @@ assert.deepEqual(chatDraft.sessionLink(12), {
   auto_link: false,
 });
 
-// waiting.workout 的关联默认值 → 选择项：初始 null/true 即「未手动选择」
-assert.equal(chatDraft.initialSessionChoice(null, true), "auto");
-assert.equal(chatDraft.initialSessionChoice(null, false), "extra");
-assert.equal(chatDraft.initialSessionChoice(12, true), 12);
+// 未显式给出日程时默认「额外训练」（WorkoutConfirmCard 内联 `plan_session_id ?? "extra"`）
+assert.ok(
+  workoutConfirmSource.includes('plan_session_id ?? "extra"'),
+  "确认卡默认日程选择必须是额外训练",
+);
 
-// 候选日程的初始值只在 waiting 自己的日期上生效；改日期后必须按新日期重查（§2.5.1）
+// 候选日程的初始值只在 waiting 自己的日期上生效；改日期后必须按新日期重查
 assert.deepEqual(
   chatDraft.initialCandidates("2026-09-18", "2026-09-18", CANDIDATES),
   { sessions: CANDIDATES },
@@ -703,6 +759,7 @@ assert.deepEqual(chatDraft.setsFromRows(rows), WAITING_WORKOUT.sets);
 calls.length = 0;
 respond = () => jsonResponse({ workout_session: WORKOUT_SESSION, personal_bests: [] });
 const autoBody = chatDraft.confirmBodyOf({
+  chat_id: CHAT_ID,
   conversation_id: CONVERSATION_ID,
   performed_on: WAITING_WORKOUT.performed_on,
   rows,
@@ -713,6 +770,7 @@ for (const set of autoBody.sets) {
   assert.deepEqual(Object.keys(set).sort(), CONFIRM_SET_KEYS);
 }
 assert.deepEqual(autoBody, {
+  chat_id: CHAT_ID,
   conversation_id: CONVERSATION_ID,
   performed_on: WAITING_WORKOUT.performed_on,
   sets: WAITING_WORKOUT.sets,
@@ -737,12 +795,14 @@ const edited = rows.map((row, index) =>
 );
 assert.deepEqual(
   chatDraft.confirmBodyOf({
+    chat_id: CHAT_ID,
     conversation_id: CONVERSATION_ID,
     performed_on: "2026-09-19",
     rows: edited,
     choice: 12,
   }),
   {
+    chat_id: CHAT_ID,
     conversation_id: CONVERSATION_ID,
     performed_on: "2026-09-19",
     sets: [
@@ -770,7 +830,7 @@ assert.deepEqual(
   },
 );
 
-// 增删组行（D4 裁决 c）：新增行沿用最后一行的动作并给同动作 max+1 的组序号初值，删除不重排
+// 增删组行：新增行沿用最后一行的动作并给同动作 max+1 的组序号初值，删除不重排
 const added = chatDraft.addSetRow(rows);
 assert.equal(added.length, 3);
 const appended = added[2];
@@ -821,7 +881,6 @@ for (const name of [
   "export function rowsFromWorkout",
   "export function setsFromRows",
   "export function sessionLink",
-  "export function initialSessionChoice",
   "export function initialCandidates",
   "export function addSetRow",
   "export function removeSetRow",
@@ -832,6 +891,204 @@ for (const name of [
 pass(
   "STATIC 对话页确认载荷由无 React 的纯映射模块给出（REAL 11–12 直接调用它）",
 );
+
+/* --- REAL 13：会话详情 → 消息列轮次的纯转换、在途轮次收敛与等待卡恢复 --- */
+
+const {
+  conversationTitle,
+  detailToRounds,
+  mergeRounds,
+  mergeWaitingDrafts,
+  waitingDrafts,
+} = await import("../src/features/chat/utils/conversationHistory.ts");
+
+const PENDING_THREAD = "1b9d5c74-3e0f-4a2b-8c61-5d0e2f7a9b34";
+const DETAIL = {
+  conversation: {
+    id: CHAT_ID,
+    title: "记录今天杠铃卧推60kg5次",
+    created_at: "2026-09-18T10:00:00+00:00",
+    updated_at: "2026-09-18T10:00:05+00:00",
+  },
+  rounds: [
+    {
+      run_id: "run-1",
+      conversation_id: CONVERSATION_ID,
+      status: "completed",
+      request: "记录今天杠铃卧推60kg5次",
+      assistants: [{ entry_id: "a-1", content: "已记录。", status: "complete" }],
+      confirmations: [],
+      events: [
+        { sequence: 1, event: "message", data: { text: "已记录。" } },
+        {
+          sequence: 2,
+          event: "done",
+          data: {
+            ok: true,
+            intent: "natural_language_record",
+            termination_reason: null,
+            draft_plan_id: null,
+          },
+        },
+      ],
+    },
+    {
+      run_id: "run-2",
+      conversation_id: PENDING_THREAD,
+      status: "waiting",
+      request: "生成计划",
+      assistants: [{ entry_id: "a-2", content: "解析中…", status: "partial" }],
+      confirmations: [],
+      events: [{ sequence: 1, event: "waiting", data: { draft_plan_id: 123 } }],
+    },
+  ],
+  compactions: [],
+};
+
+const restored = detailToRounds(DETAIL);
+assert.equal(restored.length, 2);
+assert.deepEqual(
+  restored[0].events.map((event) => event.event),
+  ["message", "done"],
+);
+// 落库事件进消息列时只保留 SSE 形状：sequence 是存储顺序，不是产品事件字段
+assert.deepEqual(Object.keys(restored[0].events[0]).sort(), ["data", "event"]);
+assert.equal(restored[0].request, DETAIL.rounds[0].request);
+assert.equal(restored[0].run_status, "completed");
+assert.deepEqual(Object.keys(restored[0].assistants[0]).sort(), [
+  "content",
+  "entry_id",
+  "status",
+]);
+
+const inFlight = {
+  chat_id: CHAT_ID,
+  conversation_id: "pending-thread-2",
+  request: "改成周三",
+  events: [],
+  assistants: [],
+  confirmations: [],
+  run_status: null,
+};
+// 服务端已有同一 thread 时以服务端投影为准，未落库的在途轮次接在末尾
+assert.deepEqual(
+  mergeRounds(restored, [
+    { ...inFlight, conversation_id: CONVERSATION_ID },
+  ]).map((round) => round.conversation_id),
+  [CONVERSATION_ID, PENDING_THREAD],
+);
+assert.deepEqual(
+  mergeRounds(restored, [inFlight]).map((round) => round.conversation_id),
+  [CONVERSATION_ID, PENDING_THREAD, "pending-thread-2"],
+);
+
+// waiting 恢复：未确认的计划等待恢复卡片，打卡路径不误恢复成另一条路径
+assert.deepEqual(waitingDrafts(restored, CHAT_ID), {
+  plan: { chat_id: CHAT_ID, conversation_id: PENDING_THREAD, plan_id: 123 },
+  workout: null,
+});
+const confirmedRound = restored.map((round) =>
+  round.conversation_id === PENDING_THREAD
+    ? {
+        ...round,
+        confirmations: [
+          { entry_id: "c-1", action: "plan_confirmed", text: "已确认" },
+        ],
+      }
+    : round,
+);
+assert.deepEqual(waitingDrafts(confirmedRound, CHAT_ID), {
+  plan: null,
+  workout: null,
+});
+
+// 详情空快照不得抹掉 SSE 已展示的 waiting；服务端确认投影出现后才清掉
+const localWorkout = {
+  chat_id: CHAT_ID,
+  conversation_id: "sse-thread",
+  workout: { performed_on: "2026-09-20", sets: [], plan_session_id: null, auto_link: false },
+  candidates: [],
+};
+assert.deepEqual(
+  mergeWaitingDrafts(localWorkout, null, restored),
+  localWorkout,
+);
+const serverConfirmed = detailToRounds({
+  ...DETAIL,
+  rounds: [
+    {
+      run_id: "run-sse",
+      conversation_id: "sse-thread",
+      status: "waiting",
+      request: "今天额外练了引体向上",
+      assistants: [],
+      confirmations: [
+        { entry_id: "c-w", action: "workout_confirmed", text: "已确认" },
+      ],
+      events: [
+        {
+          sequence: 1,
+          event: "waiting",
+          data: {
+            workout: localWorkout.workout,
+            candidate_plan_sessions: [],
+          },
+        },
+      ],
+    },
+  ],
+});
+assert.equal(
+  mergeWaitingDrafts(
+    localWorkout,
+    waitingDrafts(serverConfirmed, CHAT_ID).workout,
+    serverConfirmed,
+  ),
+  null,
+);
+
+// 标题按 Unicode 码点截断且不空白；根路径（``chatId`` 缺失）即新会话状态
+assert.equal(
+  conversationTitle("  记录今天杠铃卧推60kg5次  "),
+  "记录今天杠铃卧推60kg5次",
+);
+assert.equal(Array.from(conversationTitle("句".repeat(40))).length, 30);
+pass(
+  "REAL 会话详情→轮次（事件去 sequence）、在途轮次收敛、waiting 恢复与已确认不复活、空快照不抹本地卡、标题纯函数",
+);
+
+/* --- REAL 14：会话 REST 的 URL／方法与请求体 --- */
+
+calls.length = 0;
+respond = () => jsonResponse({ conversations: [DETAIL.conversation] });
+const conversations = await api.listConversations();
+assert.equal(calls.length, 1);
+assert.equal(calls[0].path, "/api/conversations");
+assert.equal(calls[0].init.method, undefined);
+assert.deepEqual(
+  conversations.conversations.map((conversation) => conversation.id),
+  [CHAT_ID],
+);
+
+calls.length = 0;
+respond = () => jsonResponse(DETAIL.conversation, 201);
+await api.createConversation({ title: "记录今天杠铃卧推60kg5次" });
+assert.equal(calls[0].path, "/api/conversations");
+assert.equal(calls[0].init.method, "POST");
+assert.deepEqual(calls[0].body, { title: "记录今天杠铃卧推60kg5次" });
+
+calls.length = 0;
+respond = () => jsonResponse(DETAIL);
+await api.readConversation(CHAT_ID);
+assert.equal(calls[0].path, `/api/conversations/${CHAT_ID}`);
+assert.equal(calls[0].init.method, undefined);
+
+calls.length = 0;
+respond = () => jsonResponse({ deleted: true });
+await api.deleteConversation(CHAT_ID);
+assert.equal(calls[0].path, `/api/conversations/${CHAT_ID}`);
+assert.equal(calls[0].init.method, "DELETE");
+pass("REAL 会话列表／新建／详情／删除的 URL、方法与请求体（删除用方法而非路径动词）");
 
 console.log(`通过 ${passed.length} 组断言：`);
 for (const name of passed) console.log(`  - ${name}`);

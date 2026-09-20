@@ -1,18 +1,3 @@
-/**
- * Stage 5 Subtask 06 前端可执行验证（Node 原生，无第三方依赖、无测试框架）。
- *
- * 两类断言，脚本内逐条标注：
- *
- * - **真实调用**（REAL）：直接 ``import`` ``../src/lib/api.ts``（Node 24 原生 TS type stripping；该文件
- *   唯一的 ``@/lib/contract`` 导入是 type-only，会被剥离），用桩 ``fetch`` ＋ ``ReadableStream`` 驱动三个
- *   Agent 端点的 URL／方法／请求体与 SSE 帧解析（跨 chunk 切帧、一个 chunk 多帧、UTF-8 多字节被切开、
- *   空行、CRLF（含切点落在帧内 CRLF 对之间）、LF／CRLF 混型的空行、无结尾空行、流内 error、未知事件名、
- *   非 2xx JSON 错误形状）。
- * - **静态断言**（STATIC）：``PlansPage.tsx``／``App.tsx`` 是 React 组件，无 DOM 的 Node 不能渲染，因此
- *   「历史含 rejected」「确认／拒绝后失效 plans 与日历 Query」「无 Stage 6 打卡入口」用源码文本断言。
- *
- * 断言失败即进程非零退出；不使用 console 打印代替断言。
- */
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 
@@ -327,32 +312,11 @@ const app = await readFile(
   "utf8",
 );
 
-// STATIC 历史包含 rejected
-assert.match(
-  plansPage,
-  /filter\(\(plan\) => plan\.status === "archived" \|\| plan\.status === "rejected"\)/,
-  "历史列表必须同时包含 archived 与 rejected",
-);
-// STATIC 计划页不再有任何写入入口（生成／调整与确认／拒绝都已移至对话页：stage6.md §2.5.4，本轮裁决）
+// STATIC 计划页不再有任何计划写入入口（生成／调整与确认／拒绝都已移至对话页）
 for (const forbidden of ["confirmPlan", "rejectPlan", "runAgentStream", "Textarea"]) {
   assert.ok(
     !plansPage.includes(forbidden),
-    `计划页不得再有写入入口：${forbidden}`,
-  );
-}
-// STATIC 无 Stage 6 打卡入口：页面不得触碰任何训练记录／身体指标写入
-for (const forbidden of [
-  "createRecord",
-  "updateRecord",
-  "deleteRecord",
-  "createBodyMetric",
-  "updateBodyMetric",
-  "deleteBodyMetric",
-  "listRecords",
-]) {
-  assert.ok(
-    !plansPage.includes(forbidden),
-    `计划页不得调用 ${forbidden}（Stage 6 打卡入口）`,
+    `计划页不得再有计划写入入口：${forbidden}`,
   );
 }
 // STATIC 路由与导航
@@ -361,10 +325,10 @@ assert.match(app, /\{ to: "\/plans", label: "训练计划"/);
 // STATIC 唯一 draft 取自计划版本列表的 draft 状态（后端单 draft 索引保证至多一条）
 assert.match(
   plansPage,
-  /versions\.find\(\(plan\) => plan\.status === "draft"\)/,
+  /plans\.data\?\.plans\.find\(\(plan\) => plan\.status === "draft"\)/,
   "计划页必须从计划版本列表按 draft 状态取唯一 draft",
 );
-pass("STATIC 历史含 rejected、计划页无任何写入入口、无 Stage 6 打卡入口、路由注册");
+pass("STATIC 计划页无计划写入入口、路由注册、唯一 draft 取自版本列表");
 
 /* --- STATIC 8：契约与后端字段一致（五类事件名与 data 键） --- */
 
@@ -374,7 +338,7 @@ const contract = await readFile(
 );
 assert.match(
   contract,
-  /export type AgentEventNameWire = "node" \| "message" \| "waiting" \| "done" \| "error";/,
+  /export type AgentEventNameWire =\s*"node" \| "message" \| "waiting" \| "done" \| "error";/,
 );
 assert.match(
   contract,

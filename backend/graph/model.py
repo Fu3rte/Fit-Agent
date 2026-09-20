@@ -130,12 +130,17 @@ def build_model_gateway(
         system_prompt: str, user_payload: str, schema: type[TModel]
     ) -> TModel:
         runnable = chat.with_structured_output(schema, **structured_kwargs)
-        return await runnable.ainvoke(
+        result = await runnable.ainvoke(
             [
                 SystemMessage(content=system_prompt),
                 HumanMessage(content=user_payload),
             ]
         )
+        # Provider 未发起 tool call 时 with_structured_output 返回 None：不把非目标 Schema 实例
+        # 交给调用方，否则下游按字段取值会崩溃成属性错误。
+        if not isinstance(result, schema):
+            raise InvalidModelResponse("模型响应不是目标 Schema 的实例：Provider 未返回结构化结果")
+        return result
 
     return ModelGateway(text=text, structured=structured)
 

@@ -1,12 +1,3 @@
-/**
- * 分页：shadcn/ui 官方 Pagination 结构的裁剪移植（零新增依赖，图标走 lucide-react）。
- *
- * 保留官方 API 形状：Pagination / PaginationContent / PaginationItem / PaginationLink /
- * PaginationPrevious / PaginationNext / PaginationEllipsis。
- *
- * 与官方一致的取舍：PaginationLink 渲染为 ``<a>``，SPA 内使用时由调用方 ``preventDefault`` 后改状态；
- * 上一页／下一页的可见文案由 ``text`` 传入，默认英文。
- */
 import type * as React from "react";
 import { ChevronLeft, ChevronRight, MoreHorizontal } from "lucide-react";
 import { buttonVariants, type Button } from "@/components/ui/button";

@@ -1,7 +1,3 @@
-/**
- * /dashboard 数据看板：聚合个人最好成绩、体重变化与用户画像；除画像整份覆盖提交外不写事实，
- * 也不在前端重算业务数值。
- */
 import type { ReactNode } from "react";
 import { useQuery, type UseQueryResult } from "@tanstack/react-query";
 import { getProfile, getTrends, listPersonalBests } from "@/lib/api";

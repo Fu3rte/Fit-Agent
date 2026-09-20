@@ -1,12 +1,3 @@
-/**
- * 对话页打卡确认的纯映射（无 React、无 DOM）：Node 验证脚本可直接 import 本文件做 REAL 断言。
- *
- * 边界（stage6.md §2.1／§2.2／§2.4.2／§2.5.1）：
- * - 只做「``waiting.workout`` ↔ 编辑行 ↔ 确认载荷」的形状转换与三种日程关联形状；
- * - 不复制领域校验：范围、负重口径、必填／互斥字段、组序号唯一性一律由后端复验（§2.2 第二层）；
- * - 组序号由用户在行内填写（本轮裁决 c），新增行给出同动作 ``max+1`` 的可编辑初值；
- * - 数值输入框的空串按 ``null`` 提交（不补 0、不猜默认值）。
- */
 import type {
   ConfirmWorkoutBody,
   LoadConvention,
@@ -115,18 +106,10 @@ export function removeSetRow(
   return rows.filter((_, position) => position !== index);
 }
 
-/** ``waiting.workout`` 的关联默认值 → 选择项（§2.4.3 初始 ``plan_session_id=null``、``auto_link=true``） */
-export function initialSessionChoice(
-  planSessionId: number | null,
-  autoLink: boolean,
-): SessionChoice {
-  return planSessionId ?? (autoLink ? "auto" : "extra");
-}
-
 /**
  * 候选日程的初始值：只在 ``waiting.workout`` 自己的日期上生效。
  *
- * 用户改日期后返回 ``undefined``，让查询按新日期重新结果（§2.5.1），旧日期的候选与旧日程 id
+ * 用户改日期后返回 ``undefined``，让查询按新日期重新结果，旧日期的候选与旧日程 id
  * 都不得出现在新日期的选项里。
  */
 export function initialCandidates(
@@ -138,7 +121,7 @@ export function initialCandidates(
 }
 
 /**
- * 三种提交形状（stage6.md §2.1 硬边界表／§2.4.2）：
+ * 三种提交形状：
  * - 未手动选择（含恰一个候选）：``plan_session_id=null`` 且 ``auto_link=true``，由既有服务解析唯一候选；
  * - 显式日程：``plan_session_id=<id>`` 且 ``auto_link=false``；
  * - 显式额外训练：``plan_session_id=null`` 且 ``auto_link=false``。
@@ -154,12 +137,14 @@ export function sessionLink(choice: SessionChoice): {
 
 /** 完整确认载荷：五字段由 ``waiting`` 结构化字段与用户编辑值构成，不从 ``message.text`` 反解 */
 export function confirmBodyOf(input: {
+  chat_id: string;
   conversation_id: string;
   performed_on: string;
   rows: WorkoutDraftRow[];
   choice: SessionChoice;
 }): ConfirmWorkoutBody {
   return {
+    chat_id: input.chat_id,
     conversation_id: input.conversation_id,
     performed_on: input.performed_on,
     sets: setsFromRows(input.rows),

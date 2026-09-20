@@ -10,10 +10,10 @@ import { Button } from "@/components/ui/button";
 import {
   Card,
   CardContent,
-  CardDescription,
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
+import { DatePicker } from "@/components/ui/date-picker";
 import { Input } from "@/components/ui/input";
 import {
   Select,
@@ -36,7 +36,6 @@ import {
   addSetRow,
   confirmBodyOf,
   initialCandidates,
-  initialSessionChoice,
   removeSetRow,
   rowsFromWorkout,
   type SessionChoice,
@@ -60,11 +59,8 @@ export default function WorkoutConfirmCard({
     queryFn: listExercises,
   });
   const [performedOn, setPerformedOn] = useState(draft.workout.performed_on);
-  const [choice, setChoice] = useState<SessionChoice>(() =>
-    initialSessionChoice(
-      draft.workout.plan_session_id,
-      draft.workout.auto_link,
-    ),
+  const [choice, setChoice] = useState<SessionChoice>(
+    draft.workout.plan_session_id ?? "extra",
   );
   const [rows, setRows] = useState<WorkoutDraftRow[]>(() =>
     rowsFromWorkout(draft.workout.sets),
@@ -85,7 +81,7 @@ export default function WorkoutConfirmCard({
     enabled: performedOn !== "",
   });
   const available = candidates.data?.sessions ?? [];
-  /** 候选数量提示（§2.1）：0／1／多候选三种措辞；多候选必须让用户显式选择，否则提交被判为日程歧义 */
+  /** 候选数量提示：0／1／多候选三种措辞；多候选必须让用户显式选择，否则提交被判为日程歧义 */
   const candidateHint =
     available.length === 0
       ? "当天没有可关联的计划日程：请显式选择「额外训练」，否则提交会被既有领域规则判为日程歧义。"
@@ -100,6 +96,7 @@ export default function WorkoutConfirmCard({
     mutationFn: () =>
       confirmWorkout(
         confirmBodyOf({
+          chat_id: draft.chat_id,
           conversation_id: draft.conversation_id,
           performed_on: performedOn,
           rows,
@@ -128,31 +125,22 @@ export default function WorkoutConfirmCard({
    */
   const changePerformedOn = (value: string) => {
     setPerformedOn(value);
-    setChoice(
-      initialSessionChoice(
-        draft.workout.plan_session_id,
-        draft.workout.auto_link,
-      ),
-    );
+    setChoice(draft.workout.plan_session_id ?? "extra");
   };
 
   return (
     <Card>
       <CardHeader>
-        <CardTitle>解析结果确认</CardTitle>
-        <CardDescription>
-          数据源是本次解析的结构化结果为编辑起点；服务端会按提交的完整载荷重新校验。
-        </CardDescription>
+        <CardTitle>确认训练</CardTitle>
       </CardHeader>
       <CardContent className="flex flex-col gap-4">
         <div className="flex flex-wrap items-end gap-3">
           <label className="flex flex-col gap-1 text-sm">
             日期
-            <Input
-              type="date"
+            <DatePicker
               value={performedOn}
-              onChange={(event) => changePerformedOn(event.target.value)}
-              className="w-44"
+              onChange={changePerformedOn}
+              label="训练日期"
             />
           </label>
           <label className="flex flex-col gap-1 text-sm">
@@ -169,11 +157,11 @@ export default function WorkoutConfirmCard({
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
-                <SelectItem value="auto">
-                  未手动选择（恰一个候选时自动关联）
-                </SelectItem>
                 <SelectItem value="extra">
                   额外训练（不关联计划日程）
+                </SelectItem>
+                <SelectItem value="auto">
+                  未手动选择（恰一个候选时自动关联）
                 </SelectItem>
                 {available.map((session) => (
                   <SelectItem key={session.id} value={String(session.id)}>

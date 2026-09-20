@@ -14,6 +14,7 @@ from pydantic import BaseModel, ConfigDict
 from domain.actions.repo import ExerciseRepo
 from domain.actions.rules import RecordLoadMismatch, UnknownExercise
 from domain.actions.schema import Exercise, LoadConvention
+from domain.conversations.context import history_payload
 from domain.plans.repo import PlanRepo
 from domain.plans.schema import (
     BodyweightRepsPrescription,
@@ -47,7 +48,6 @@ from graph.nodes import (
     GeneratePlanDeps,
     GeneratePlanNodes,
     GeneratePlanRun,
-    ModelRequestBudget,
     request_model,
     request_structured_model,
 )
@@ -122,9 +122,7 @@ def build_generate_plan_graph(
     builder.add_node("safety_check", nodes.safety_check)
     builder.add_node("safety_stop", nodes.safety_stop)
     builder.add_node("require_active_plan", nodes.require_active_plan)
-    builder.add_node(
-        "validate_required_profile", nodes.validate_required_profile
-    )
+    builder.add_node("validate_required_profile", nodes.validate_required_profile)
     builder.add_node("load_context", nodes.load_context)
     builder.add_node("load_skill", nodes.load_skill)
     builder.add_node("planner", nodes.planner)
@@ -245,6 +243,7 @@ FORM_RECORD_GUIDE = (
     "由既有记录接口写入；本流程不代写训练数据。"
 )
 
+
 class ExtractedWorkoutSet(BaseModel):
     """一组训练事实（模型提取结果）。"""
 
@@ -289,11 +288,11 @@ NATURAL_LANGUAGE_RECORD_MESSAGE_PROMPT = (
     "不重算任何数值、不提 RIR／完成率／估算 1RM。"
 )
 
+
 def invalid_natural_language_record_message(error: Exception) -> str:
     """确认前校验失败的可见文本：照原样给出本项目自己的领域错误，并明确本次不写库。"""
-    return (
-        f"自然语言打卡未通过校验：{error}。本次不写库；请修正训练描述后重试，或改用打卡表单。"
-    )
+    return f"自然语言打卡未通过校验：{error}。本次不写库；请修正训练描述后重试，或改用打卡表单。"
+
 
 SAFETY_STOP_MESSAGE = (
     "本次请求包含急性伤病相关描述：不生成训练计划，也不写入任何计划数据；"
@@ -330,7 +329,7 @@ GENERAL_CHAT_SYSTEM_PROMPT = (
     "你是 Fit-Agent 的对话助手。payload.request 是本次用户请求，它不属于计划管理、打卡、统计、"
     "日程查询与训练知识问答业务。硬要求：只做一般性中文答复，不生成或修改训练计划、不写业务库、"
     "不替用户决定训练处方；不做医疗诊断、不给个体化医疗结论，涉及疼痛、伤病或身体异常时明确建议"
-    "咨询专业医疗人员。只输出一段面向用户的中文文本。"
+    "咨询专业医疗人员。"
 )
 
 AgentEventName = Literal["node", "message", "waiting", "done", "error"]
@@ -405,7 +404,10 @@ async def stream_agent_run(
         target = ExistingDraftTarget()
         if not message_red_flag_hits(state["request"]):
             route = await classify_intent(
-                state["request"], model=deps.model, budget=run.budget
+                state["request"],
+                model=deps.model,
+                budget=run.budget,
+                history=run.conversation_messages,
             )
             intent = workflow_intent(route)
             if intent != ADJUST_PLAN_INTENT:
@@ -419,7 +421,9 @@ async def stream_agent_run(
                     yield AgentEvent("message", {"text": outcome.message})
                     if outcome.waiting is not None:
                         yield AgentEvent("waiting", outcome.waiting)
-                    yield _done_event(intent, termination_reason=None, draft_plan_id=None)
+                    yield _done_event(
+                        intent, termination_reason=None, draft_plan_id=None
+                    )
                     return
                 yield AgentEvent(
                     "message",
@@ -565,12 +569,7 @@ async def _non_plan_text(
 ) -> str:
     """非计划分支的可见文本：表单引导、统计解释、日程查询、知识问答与一般对话。"""
     if intent == "view_progress":
-        return await _progress_explanation(
-            request,
-            business_day=run.business_day,
-            budget=run.budget,
-            deps=deps,
-        )
+        return await _progress_explanation(request, run=run, deps=deps)
     if intent == "view_schedule":
         return await _schedule_text(route, run=run, deps=deps)
     if intent == "knowledge_qa":
@@ -598,6 +597,7 @@ async def _natural_language_record(
         NATURAL_LANGUAGE_RECORD_EXTRACTION_PROMPT,
         {
             "request": request,
+            **history_payload(run.conversation_messages),
             "business_day": run.business_day.isoformat(),
             "actions": [_action_payload(exercise) for exercise in catalog],
         },
@@ -624,6 +624,7 @@ async def _natural_language_record(
             NATURAL_LANGUAGE_RECORD_MESSAGE_PROMPT,
             {
                 "request": request,
+                **history_payload(run.conversation_messages),
                 "workout": workout,
                 "candidate_plan_sessions": candidate_payloads,
             },
@@ -662,9 +663,7 @@ def _action_payload(exercise: Exercise) -> dict[str, Any]:
     }
 
 
-def _workout_payload(
-    day: date, facts: Sequence[WorkoutSetInput]
-) -> dict[str, Any]:
+def _workout_payload(day: date, facts: Sequence[WorkoutSetInput]) -> dict[str, Any]:
     """``waiting.workout``（前端确认 UI 的编辑数据源）：日期、组事实与关联日程默认值。"""
     return {
         "performed_on": day.isoformat(),
@@ -788,6 +787,7 @@ async def _knowledge_answer(
         KNOWLEDGE_QA_SYSTEM_PROMPT,
         {
             "request": request,
+            **history_payload(run.conversation_messages),
             "knowledge_type": route.knowledge_type,
             "exercise_name": route.exercise_name,
             "catalog_exercise": None if matched is None else _action_payload(matched),
@@ -803,23 +803,22 @@ async def _general_answer(
 ) -> str:
     """``general`` 的唯一实现：一次文本模型调用，不写库、不进入计划子图。"""
     text = await request_model(
-        deps.model, GENERAL_CHAT_SYSTEM_PROMPT, {"request": request}, run.budget
+        deps.model,
+        GENERAL_CHAT_SYSTEM_PROMPT,
+        {"request": request, **history_payload(run.conversation_messages)},
+        run.budget,
     )
     return text.strip()
 
 
-def _matched_exercise(
-    catalog: Sequence[Exercise], name: str | None
-) -> Exercise | None:
+def _matched_exercise(catalog: Sequence[Exercise], name: str | None) -> Exercise | None:
     """动作名归一化：精确匹配 ``standard_name_zh``，再取被名称完整包含的最长目录名；无命中即 None。"""
     if name is None:
         return None
     exact = [exercise for exercise in catalog if exercise.standard_name_zh == name]
     if exact:
         return exact[0]
-    contained = [
-        exercise for exercise in catalog if exercise.standard_name_zh in name
-    ]
+    contained = [exercise for exercise in catalog if exercise.standard_name_zh in name]
     return max(
         contained, key=lambda exercise: len(exercise.standard_name_zh), default=None
     )
@@ -839,19 +838,18 @@ def _skill_payload(skill: LoadedSkill) -> dict[str, Any]:
 
 
 async def _progress_explanation(
-    request: str,
-    *,
-    business_day: date,
-    budget: ModelRequestBudget,
-    deps: AgentRunDeps,
+    request: str, *, run: GeneratePlanRun, deps: AgentRunDeps
 ) -> str:
     """``view_progress`` 的模型解释：统计由既有 ``StatsService`` 现算，模型只解释这些数值。"""
     payload = {
         "request": request,
-        "personal_bests": [asdict(best) for best in await deps.stats.list_personal_bests()],
-        "trend_summary": asdict(await deps.stats.trend_summary(business_day)),
+        **history_payload(run.conversation_messages),
+        "personal_bests": [
+            asdict(best) for best in await deps.stats.list_personal_bests()
+        ],
+        "trend_summary": asdict(await deps.stats.trend_summary(run.business_day)),
     }
     text = await request_model(
-        deps.model, VIEW_PROGRESS_SYSTEM_PROMPT, payload, budget
+        deps.model, VIEW_PROGRESS_SYSTEM_PROMPT, payload, run.budget
     )
     return text.strip()

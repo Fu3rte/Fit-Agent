@@ -1,13 +1,3 @@
-/**
- * 气泡最紧宽度的可执行验证（Node 原生 ＋ 项目自带 Vite，无第三方测试框架）。
- *
- * 只验证 ``bubbleMetrics.ts`` 这一层：正文句子对 Pretext 是不透明的，Node 里没有 canvas，
- * 因此装一个确定性的 canvas 后端（pretext 自带 ``src/layout.test.ts`` 同款做法），
- * 再经 ``server.ssrLoadModule`` 载入真实源码——断言的是**二分算法的不变量**，
- * 不是真实字体下的像素值（那部分由浏览器验收）。
- *
- * 断言失败即进程非零退出。
- */
 import assert from "node:assert/strict";
 import { createServer } from "vite";
 

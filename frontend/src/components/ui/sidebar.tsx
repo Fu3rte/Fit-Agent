@@ -1,15 +1,3 @@
-/**
- * 侧边栏：shadcn/ui 官方 Sidebar 结构的裁剪移植（零新增依赖）。
- *
- * 保留官方 API 形状：SidebarProvider / Sidebar / SidebarTrigger /
- * SidebarHeader / SidebarContent / SidebarFooter / SidebarGroup / SidebarGroupContent /
- * SidebarMenu / SidebarMenuItem / SidebarMenuButton。
- *
- * 裁掉（本项目不需要，理由见 plans/stage0.md 已拍 B5 桌面优先 + 折叠形态拍板 offcanvas）：
- * 移动端 Sheet、Tooltip、Skeleton、Separator、Input、cookie 持久化、icon 折叠、菜单子项、
- * SidebarRail（改为显式折叠按钮，不点边界折叠）。
- * 颜色 token 直接复用 index.css 已有的 --sidebar-*（@theme inline 已映射）。
- */
 import * as React from "react";
 import { cva, type VariantProps } from "class-variance-authority";
 import { PanelLeft } from "lucide-react";

@@ -1,15 +1,4 @@
-/**
- * Fit-Agent 前端契约（Stage 1 表单写入 + Stage 2 统计只读）。
- *
- * 本文件是前端唯一的数据形状来源：UI 组件与 API 封装（src/lib/api.ts）一律从此处
- * 引用类型，不得另写第三份形状。对齐 ``backend/api/dto.py`` 与 routes_profile /
- * routes_records / routes_plans / routes_stats 的传输形状。
- *
- * 冻结口径（讨论总结 §7、§9；REFACTOR_PLAN §5/§6）：无 RIR、无 context_version、
- * 无通用草稿/修订链。Provider 传输形状见文末「模型配置」段（用户拍板：设置页可编辑）。
- */
-
-/** 统一错误码：Stage 1 传输层只表达「请求或输入不合法」 */
+/** 请求或输入不合法 */
 export type ErrorCode = "invalid_request";
 
 export interface ApiError {
@@ -301,7 +290,7 @@ export interface StrengthPointWire {
   value: number;
 }
 
-/** 一个力量趋势系列；Stage 2 看板只透传不渲染该曲线，也不提供动作选择 UI */
+/** 一个力量趋势系列：看板只透传不渲染，不提供动作选择 UI */
 export interface StrengthTrendWire {
   exercise_id: string;
   exercise_name: string;
@@ -380,16 +369,23 @@ export interface CalendarResponseWire {
   calendar: CalendarMonthWire;
 }
 
-/** POST /api/agent/run 请求体：conversation_id 由前端生成 UUID，即 Checkpointer 的 thread_id */
+/**
+ * POST /api/agent/run 请求体：``chat_id`` 是稳定会话身份（conversations.id），
+ * ``conversation_id`` 是本轮由前端生成 UUID 的 LangGraph thread 身份，
+ * ``client_request_id`` 是本轮创建幂等键（重放同一键只重发已提交事件）。
+ */
 export interface AgentRunBody {
+  chat_id: string;
   conversation_id: string;
+  client_request_id: string;
   request: string;
-  /** 缺省 false：已有同类 draft 时按 §3.4 直接复用，不调模型 */
+  /** 缺省 false：已有同类 draft 时直接复用，不调模型 */
   regenerate?: boolean;
 }
 
 /** POST /api/agent/confirm 与 /api/agent/reject 请求体：会话身份 + 目标计划身份 */
 export interface AgentPlanBody {
+  chat_id: string;
   conversation_id: string;
   plan_id: number;
 }
@@ -400,12 +396,13 @@ export interface AgentPlanResponseWire {
 }
 
 /**
- * POST /api/agent/confirm-workout 请求体（stage6.md §2.4.2）：用户修改后的完整确认载荷。
+ * POST /api/agent/confirm-workout 请求体：用户修改后的完整确认载荷。
  *
- * 只提交 `waiting` 结构化字段，不从 `message.text` 反解（§2.5.2）；本端点不要求服务端证明该
+ * 只提交 `waiting` 结构化字段，不从 `message.text` 反解；本端点不要求服务端证明该
  * conversation_id 此前完成过一次自然语言解析。
  */
 export interface ConfirmWorkoutBody {
+  chat_id: string;
   conversation_id: string;
   performed_on: string;
   sets: WorkoutSetConfirmWire[];
@@ -417,6 +414,79 @@ export interface ConfirmWorkoutBody {
 export interface ConfirmWorkoutResponseWire {
   workout_session: RecordWire;
   personal_bests: PersonalBestWire[];
+}
+
+/* 会话历史 REST：GET 列表／POST 新建／GET 详情／DELETE 删除（conversation_dto 系列） */
+
+/** 一条会话头（conversation_dto）：稳定身份、展示标题与两个时间戳 */
+export interface ConversationWire {
+  id: string;
+  title: string;
+  created_at: string;
+  updated_at: string;
+}
+
+/** GET /api/conversations：服务端已按 ``updated_at`` 降序排列 */
+export interface ConversationListWire {
+  conversations: ConversationWire[];
+}
+
+/** POST /api/conversations 请求体：标题由客户端提供，空白标题由后端按 400 拒绝 */
+export interface ConversationCreateBody {
+  title: string;
+}
+
+/** Run 状态（conversation_runs.status 同集合）：``waiting`` 即该轮在等用户确认 */
+export type ConversationRunStatusWire =
+  | "pending"
+  | "running"
+  | "waiting"
+  | "completed"
+  | "failed"
+  | "cancelled";
+
+/** 服务端投影的一条 Assistant 文本与状态（message.status 同集合） */
+export interface ConversationAssistantWire {
+  entry_id: string;
+  content: string;
+  /** 不是 ``complete`` 时只用于展示，不进入后续模型上下文 */
+  status: "complete" | "partial" | "failed" | "aborted";
+}
+
+/** 一条确认投影：动作与面向用户的稳定文本（已确认／已拒绝／已打卡） */
+export interface ConversationConfirmationWire {
+  entry_id: string;
+  action: "plan_confirmed" | "plan_rejected" | "workout_confirmed";
+  text: string;
+}
+
+/** 一条 Run Event：``sequence`` 升序，``event``／``data`` 与 SSE 事件逐字同形 */
+export type ConversationRunEventWire = { sequence: number } & AgentEventWire;
+
+/** GET /api/conversations/{id} 详情里的一条轮次（与前端 ChatRound 同形，另带服务端身份与状态） */
+export interface ConversationRoundWire {
+  run_id: string;
+  /** 该轮的 LangGraph thread 身份，等于发起该轮时的 conversation_id */
+  conversation_id: string;
+  status: ConversationRunStatusWire;
+  request: string;
+  assistants: ConversationAssistantWire[];
+  confirmations: ConversationConfirmationWire[];
+  events: ConversationRunEventWire[];
+}
+
+/** 一次压缩的展示分隔：摘要与保留起点（原始 Entry 不受影响） */
+export interface ConversationCompactionWire {
+  entry_id: string;
+  summary: string;
+  first_kept_entry_id: string;
+}
+
+/** GET /api/conversations/{id}：会话头 ＋ 会话全部 Entry 重建的轮次与压缩分隔 */
+export interface ConversationDetailWire {
+  conversation: ConversationWire;
+  rounds: ConversationRoundWire[];
+  compactions: ConversationCompactionWire[];
 }
 
 /** 五类 SSE 产品事件名（与后端 AgentEventName 同一封闭集合，不发送别的名字） */
@@ -435,15 +505,14 @@ export interface AgentMessageEventWire {
   data: { text: string };
 }
 
-/** 计划确认路径的 `waiting`（Stage 5 契约）：已持久化 draft，只带 draft 身份 */
+/** 计划确认路径的 `waiting`：已持久化 draft，只带 draft 身份 */
 export interface AgentWaitingEventWire {
   event: "waiting";
   data: { draft_plan_id: number };
 }
 
 /**
- * 自然语言打卡的一条组事实（stage6.md §2.2 的 `WorkoutSetBody`）：`waiting.workout.sets` 与
- * confirm-workout 请求体共用同一形状。
+ * 自然语言打卡的一条组事实：`waiting.workout.sets` 与 confirm-workout 请求体共用同一形状。
  *
  * 与表单 `WorkoutSetInputWire` 的差别只有 `set_no`：自然语言提取结果已给出组序号，确认 UI 提交的
  * 是用户修改后的完整值（表单路径的组序号由后端按提交顺序分配，前端不送）。
@@ -459,8 +528,7 @@ export interface WorkoutSetConfirmWire {
 }
 
 /**
- * 自然语言打卡确认 UI 的编辑数据源 `waiting.workout`（stage6.md §2.4.3；后端 `_workout_payload`）：
- * 日期、组事实与日程关联默认值。
+ * 自然语言打卡确认 UI 的编辑数据源 `waiting.workout`：日期、组事实与日程关联默认值。
  */
 export interface ConfirmWorkoutDraftWire {
   performed_on: string;
@@ -474,7 +542,7 @@ export interface ConfirmWorkoutDraftWire {
   auto_link: boolean;
 }
 
-/** 自然语言打卡路径的 `waiting`（stage6.md §2.4.3）：结构化训练结果 ＋ 数据库候选日程 */
+/** 自然语言打卡路径的 `waiting`：结构化训练结果 ＋ 数据库候选日程 */
 export interface AgentWaitingWorkoutEventWire {
   event: "waiting";
   data: {

@@ -1,28 +1,41 @@
-/**
- * 对话页内存模型与事件可读行（无 React、无 DOM，边界见 stage6.md §2.4.3／§2.5.2）。
- */
 import type {
   AgentEventWire,
   ConfirmWorkoutDraftWire,
+  ConversationAssistantWire,
+  ConversationConfirmationWire,
+  ConversationRunStatusWire,
   PlanSessionCandidateWire,
 } from "@/lib/contract";
 
-/** 本页内存里的一轮对话（每次运行一条 UUID，即后端 Checkpointer 的 thread_id） */
+/**
+ * 消息列里的一轮对话：``conversation_id`` 是该轮的 LangGraph thread 身份。
+ *
+ * ``assistants``／``confirmations``／``run_status`` 只在服务端详情投影里存在，页面在途的一轮
+ * 这三项分别是空数组与 null，落库后由服务端详情替换。
+ */
 export interface ChatRound {
   conversation_id: string;
   request: string;
   events: AgentEventWire[];
+  /** 服务端投影的 Assistant 文本与状态（含失败／部分／中止） */
+  assistants: ConversationAssistantWire[];
+  /** 该轮已提交的确认投影：非空即这个等待已被用户处理过 */
+  confirmations: ConversationConfirmationWire[];
+  /** 服务端 Run 状态；页面在途轮次为 null */
+  run_status: ConversationRunStatusWire | null;
 }
 
-/** 打卡路径待确认载荷：``waiting`` 的两个字段 ＋ 产出它的那次运行的 conversation_id */
+/** 打卡路径待确认载荷：``waiting`` 的两个字段 ＋ 产出它的那次运行的会话身份 */
 export interface WorkoutDraft {
+  chat_id: string;
   conversation_id: string;
   workout: ConfirmWorkoutDraftWire;
   candidates: PlanSessionCandidateWire[];
 }
 
-/** 计划路径待确认载荷：``waiting.draft_plan_id`` ＋ 产出它的那次运行的 conversation_id */
+/** 计划路径待确认载荷：``waiting.draft_plan_id`` ＋ 产出它的那次运行的会话身份 */
 export interface PlanDraft {
+  chat_id: string;
   conversation_id: string;
   plan_id: number;
 }

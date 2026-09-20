@@ -1,17 +1,17 @@
 import { useLayoutEffect, useRef, useState } from "react";
 import {
-  Navigate,
   NavLink,
   Route,
   Routes,
   useLocation,
+  useNavigate,
 } from "react-router-dom";
 import { Toaster, useSonner } from "sonner";
 import {
   ClipboardList,
   LayoutDashboard,
-  MessageSquare,
   Moon,
+  Plus,
   Settings,
   Sun,
 } from "lucide-react";
@@ -36,11 +36,11 @@ import {
 import DashboardPage from "@/features/dashboard/DashboardPage";
 import PlansPage from "@/features/plans/PlansPage";
 import ChatPage from "@/features/chat/ChatPage";
+import ConversationList from "@/features/chat/components/ConversationList";
 import { ProviderDialog } from "@/features/provider/ProviderDialog";
 
-/** 主导航：对话、数据看板、训练计划；模型配置由侧栏底部弹层承载 */
+/** 主导航：新建会话、数据看板、训练计划；会话历史由 ConversationList 常驻承载；模型配置在侧栏底部 */
 const nav = [
-  { to: "/chat", label: "对话", icon: MessageSquare, end: false },
   { to: "/dashboard", label: "数据看板", icon: LayoutDashboard, end: false },
   { to: "/plans", label: "训练计划", icon: ClipboardList, end: false },
 ];
@@ -53,7 +53,7 @@ const navLinkClass = ({ isActive }: { isActive: boolean }) =>
   );
 
 /**
- * 全局 toast 容器（A5）：用 ``popover="manual"`` 把 sonner 一起送进 top layer。
+ * 全局 toast 容器：用 ``popover="manual"`` 把 sonner 一起送进 top layer。
  *
  * 原生 ``<dialog>`` 的 ``showModal()`` 会把弹层与遮罩放进 top layer，普通流里的 z-index 再高也压不过它；
  * top layer 内部按加入顺序叠放，因此每次 toast 集合变化都重新入栈，保证 toast 盖在已打开的弹层之上。
@@ -74,14 +74,14 @@ function GlobalToaster() {
     <div
       ref={layer}
       popover="manual"
-      className="pointer-events-none fixed inset-0 m-0 size-auto max-h-none max-w-none overflow-visible border-0 bg-transparent p-0 [&_[data-sonner-toaster]]:pointer-events-auto"
+      className="pointer-events-none fixed inset-0 m-0 size-auto max-h-none max-w-none overflow-visible border-0 bg-transparent p-0 **:data-sonner-toaster:pointer-events-auto"
     >
       <Toaster position="top-center" richColors />
     </div>
   );
 }
 
-/** 主题切换（C3B）：浅色默认，暗色第二主题 */
+/** 主题切换：浅色默认，暗色第二主题 */
 function ThemeToggle() {
   const [theme, setThemeState] = useState<Theme>(getTheme());
   const toggle = () => {
@@ -118,15 +118,16 @@ function SidebarToggle() {
 export default function App() {
   const [providerOpen, setProviderOpen] = useState(false);
   const location = useLocation();
+  const navigate = useNavigate();
   /** 对话页自管滚动（消息列滚、输入框固定），主区锁高度避免再冒出整页滚动条 */
   const mainOverflow =
-    location.pathname === "/chat" || location.pathname === "/"
+    location.pathname === "/" || location.pathname.startsWith("/chat/")
       ? "overflow-hidden"
       : "overflow-y-auto";
 
   return (
     <TooltipProvider>
-      {/* 全局反馈 toast（A5），全应用仅此一处 */}
+      {/* 全局反馈 toast，全应用仅此一处 */}
       <GlobalToaster />
 
       <SidebarProvider className="relative h-screen">
@@ -143,6 +144,15 @@ export default function App() {
             <SidebarGroup className="px-3">
               <SidebarGroupContent>
                 <SidebarMenu>
+                  <SidebarMenuItem>
+                    <SidebarMenuButton
+                      onClick={() => navigate("/")}
+                      className="cursor-pointer"
+                    >
+                      <Plus aria-hidden />
+                      <span>新建会话</span>
+                    </SidebarMenuButton>
+                  </SidebarMenuItem>
                   {nav.map(({ to, label, icon: Icon, end }) => (
                     <SidebarMenuItem key={to}>
                       <NavLink to={to} end={end} className={navLinkClass}>
@@ -154,6 +164,9 @@ export default function App() {
                 </SidebarMenu>
               </SidebarGroupContent>
             </SidebarGroup>
+
+            {/* 会话历史：常驻侧栏，点会话名直接进入对应对话 */}
+            <ConversationList />
           </SidebarContent>
 
           <SidebarFooter className="px-3 pb-4">
@@ -171,8 +184,8 @@ export default function App() {
         <main className={`relative min-h-0 flex-1 ${mainOverflow}`}>
           <div className="h-full">
             <Routes>
-              <Route path="/" element={<Navigate to="/chat" replace />} />
-              <Route path="/chat" element={<ChatPage />} />
+              <Route path="/" element={<ChatPage />} />
+              <Route path="/chat/:chatId" element={<ChatPage />} />
               <Route path="/dashboard" element={<DashboardPage />} />
               <Route path="/plans" element={<PlansPage />} />
             </Routes>

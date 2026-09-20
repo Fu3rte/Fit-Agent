@@ -13,6 +13,7 @@ from langgraph.checkpoint.base import BaseCheckpointSaver
 from api import (
     dto,
     routes_agent,
+    routes_conversations,
     routes_plans,
     routes_profile,
     routes_provider,
@@ -27,6 +28,7 @@ from config import (
     resolve_data_dir,
 )
 from domain.actions.repo import ExerciseRepo
+from domain.conversations.repo import ConversationRepo
 from domain.plans.repo import PlanRepo
 from domain.plans.service import (
     PlanActivationService,
@@ -52,6 +54,9 @@ from provider_settings import ModelConfigurationError, provider_api_key_configur
 from storage.db import Database
 
 _LOOPBACK_HOSTNAMES = frozenset({"localhost", "127.0.0.1", "::1"})
+
+#: 启动收敛的固定 ``error_code``：上一次进程终止时仍未结束的 Run 以该原因标为 ``failed``。
+INTERRUPTED_RUN_ERROR_CODE = "server_restart"
 
 
 def _header_value(headers: list[tuple[bytes, bytes]], name: bytes) -> str | None:
@@ -116,6 +121,11 @@ def create_app(
         try:
             await db.open()
             await db.migrate()
+            # 上次进程终止留下的未完成 Run 一律收敛为 failed，已提交 Run Event 原样保留供展示。
+            await ConversationRepo(db).converge_unfinished_runs(
+                error_code=INTERRUPTED_RUN_ERROR_CODE,
+                updated_at=datetime.now(UTC).isoformat(),
+            )
             async with open_checkpointer(
                 checkpoint_database_path(resolved)
             ) as checkpointer:
@@ -154,6 +164,7 @@ def create_app(
     app.include_router(routes_plans.router)
     app.include_router(routes_stats.router)
     app.include_router(routes_agent.router)
+    app.include_router(routes_conversations.router)
     app.include_router(routes_provider.router)
     _install_frontend_static(
         app,

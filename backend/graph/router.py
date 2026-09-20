@@ -1,8 +1,9 @@
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from typing import Literal, NamedTuple
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from domain.conversations.context import ContextMessage, history_payload
 from graph.model import ModelGateway
 from graph.nodes import ModelRequestBudget, request_structured_model
 from graph.state import Intent
@@ -146,13 +147,25 @@ ROUTER_SYSTEM_PROMPT = (
 
 
 async def classify_intent(
-    request: str, *, model: ModelGateway, budget: ModelRequestBudget
+    request: str,
+    *,
+    model: ModelGateway,
+    budget: ModelRequestBudget,
+    history: Sequence[ContextMessage] = (),
 ) -> FitnessIntent:
-    """路由的唯一入口：每个请求都调一次结构化分类，不设短语旁路。"""
+    """路由的唯一入口：每个请求都调一次结构化分类，不设短语旁路。
+
+    ``history`` 是本次请求之前的对话上下文投影；为空时 payload 只有 ``request``，
+    当前用户请求因此只出现一次。
+    """
+    payload: dict[str, object] = {
+        "request": request.strip(),
+        **history_payload(history),
+    }
     return await request_structured_model(
         model,
         ROUTER_SYSTEM_PROMPT,
-        {"request": request.strip()},
+        payload,
         budget,
         FitnessIntent,
     )

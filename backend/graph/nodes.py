@@ -16,6 +16,7 @@ from config import (
     MODEL_REQUEST_TIMEOUT_SECONDS,
 )
 from domain.actions.repo import ExerciseRepo
+from domain.conversations.context import ContextMessage, history_payload
 from domain.plans.repo import PlanRepo
 from domain.plans.rules import (
     active_load_targets,
@@ -64,7 +65,8 @@ PLANNER_SYSTEM_PROMPT = (
     "needs_calibration 时不得给出任何具体重量。\n"
     "3. 处方类型必须与目录记录口径一致：reps_weight→weighted_reps、"
     "reps_bodyweight→bodyweight_reps、time→timed；自重与计时处方不得携带负荷字段。\n"
-    "4. training_days 数量等于 weekly_frequency，日期落在 starts_on 起连续七天内且不重复。"
+    "4. training_days 数量等于 weekly_frequency，日期落在 starts_on 起连续七天内且不重复。\n"
+    "5. starts_on 不得早于 payload.business_day：计划从当天或未来起始。"
 )
 ADJUSTMENT_PLANNER_SYSTEM_PROMPT = (
     "你是 Fit-Agent 的训练计划 Planner，本次任务是在 payload.active_plan_draft（当前 active 计划）"
@@ -77,7 +79,8 @@ ADJUSTMENT_PLANNER_SYSTEM_PROMPT = (
     "动作（active 没有目标处方的动作）照抄候选动作的 starting_load。\n"
     "4. 处方类型必须与目录记录口径一致：reps_weight→weighted_reps、"
     "reps_bodyweight→bodyweight_reps、time→timed；自重与计时处方不得携带负荷字段。\n"
-    "5. training_days 数量等于 weekly_frequency，日期落在 starts_on 起连续七天内且不重复。"
+    "5. training_days 数量等于 weekly_frequency，日期落在 starts_on 起连续七天内且不重复。\n"
+    "6. starts_on 不得早于 payload.business_day：计划从当天或未来起始。"
 )
 EVALUATOR_SYSTEM_PROMPT = (
     "你是 Fit-Agent 的训练计划 Evaluator，只做判定、不改写计划、不重算业务事实。"
@@ -152,6 +155,8 @@ class GeneratePlanRun:
     budget: ModelRequestBudget = field(default_factory=ModelRequestBudget)
     adjustment: AdjustmentContext | None = None
     regenerate: bool = False
+    #: 本次请求之前的完整对话上下文投影；当前用户消息不在其中（由 ``request`` 单独给出）。
+    conversation_messages: tuple[ContextMessage, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -226,6 +231,7 @@ class GeneratePlanNodes:
             state["request"],
             business_day=_run(runtime).business_day,
             exercise_ids=_active_exercise_ids(_run(runtime).adjustment),
+            conversation_messages=_run(runtime).conversation_messages,
         )
         return {"context": context}
 
@@ -395,6 +401,9 @@ class GeneratePlanNodes:
         context: MemoryContext = state["context"]
         skill: LoadedSkill = state["loaded_skill"]
         payload = asdict(context)
+        payload.pop("conversation_messages")
+        # 无历史时不出现该键：与 Router／Evaluator 的载荷形状一致。
+        payload.update(history_payload(context.conversation_messages))
         payload["skill"] = asdict(skill)
         payload["candidate_actions"] = await self._candidate_actions(context.profile)
         if adjustment is not None:
@@ -460,12 +469,19 @@ class GeneratePlanNodes:
     def _evaluator_payload(
         self, context: MemoryContext, draft: PlanDraft
     ) -> dict[str, Any]:
-        """Rubric 输入：当前请求、画像事实与候选计划；不含确定性失败项（未通过时根本不调用模型）。"""
-        return {
+        """Rubric 输入：当前请求、画像事实、候选计划与本次请求之前的对话历史。
+
+        不含确定性失败项（未通过时根本不调用模型）；当前用户消息只在 ``request`` 出现一次。
+        """
+        payload: dict[str, Any] = {
             "request": context.request,
             "profile": asdict(context.profile),
             "plan": draft.model_dump(mode="json"),
+            "business_day": context.business_day.isoformat(),
+            # 无历史时不出现该键：与 Router／Planner 的载荷形状一致。
+            **history_payload(context.conversation_messages),
         }
+        return payload
 
     def _created_at(self) -> str:
         """业务记录时间由注入时钟给出（节点不读系统时钟）。"""

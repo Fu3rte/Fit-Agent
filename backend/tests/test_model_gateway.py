@@ -40,11 +40,16 @@ _OPENAI_FUNCTION_CALLING_KWARGS = {"method": "function_calling", "strict": True}
 _ANTHROPIC_JSON_SCHEMA_KWARGS = {"method": "json_schema"}
 
 
+#: 结构化替身未显式指定返回值时的哨兵：默认仍走目标 Schema 的校验结果。
+_UNSET = object()
+
+
 class RecordingChat:
     """替身 Chat 客户端：记录传入的消息与 with_structured_output 的关键字。"""
 
-    def __init__(self, *, content: Any = "OK") -> None:
+    def __init__(self, *, content: Any = "OK", structured_result: Any = _UNSET) -> None:
         self.content = content
+        self.structured_result = structured_result
         self.messages: list[list[Any]] = []
         self.structured_calls: list[tuple[Any, Mapping[str, Any]]] = []
 
@@ -57,6 +62,8 @@ class RecordingChat:
 
         async def invoke(messages: Sequence[Any]) -> Any:
             self.messages.append(list(messages))
+            if self.structured_result is not _UNSET:
+                return self.structured_result
             return schema.model_validate(
                 {"ok": True, "note": None, "detail": {"label": "probe"}}
             )
@@ -168,6 +175,17 @@ def test_unknown_structured_output_fails_at_resolve(tmp_path: Path) -> None:
                 structured_output=STRUCTURED_OUTPUT_FUNCTION_CALLING_STRICT,
             ),
         )
+
+
+async def test_structured_call_rejects_result_outside_the_schema(
+    recording_chat: RecordingChat,
+) -> None:
+    """Provider 未返回目标 Schema 实例时明确失败：None 不得被当作合法结构化结果。"""
+    recording_chat.structured_result = None
+    gateway = build_model_gateway(Path("unused"), _full_config())
+
+    with pytest.raises(InvalidModelResponse):
+        await gateway.structured("系统提示", "用户载荷", StructuredProbeResult)
 
 
 async def test_text_call_returns_text_and_rejects_other_content(

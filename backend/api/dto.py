@@ -9,13 +9,15 @@ from uuid import UUID
 from fastapi import FastAPI, Query, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from domain.actions.rules import RecordLoadMismatch, UnknownExercise
 from domain.actions.schema import Exercise, LoadConvention
 from domain.body_metrics.rules import InvalidBodyMetric
 from domain.body_metrics.schema import BodyMetric
 from domain.body_metrics.service import BodyMetricNotFound
+from domain.conversations.repo import ConversationNotFound
+from domain.conversations.schema import Conversation
 from domain.plans.schema import Plan, PlanSession
 from domain.plans.service import PlanActivationError, PlanNotFound
 from domain.profile.rules import InvalidProfile, UnknownExerciseReference
@@ -123,12 +125,18 @@ class ProfileBody(BaseModel):
 
 
 class AgentRunBody(BaseModel):
-    """``POST /api/agent/run`` 的请求体。"""
+    """``POST /api/agent/run`` 的请求体。
+
+    ``chat_id`` 是稳定会话身份，``conversation_id`` 是本次用的 LangGraph thread 身份，
+    ``client_request_id`` 是本轮幂等键；幂等键与请求原文的空白值在 DTO 层就拒绝（§8）。
+    """
 
     model_config = ConfigDict(extra="forbid")
 
+    chat_id: UUID
     conversation_id: UUID
-    request: str
+    client_request_id: Annotated[str, Field(min_length=1)]
+    request: Annotated[str, Field(min_length=1)]
     regenerate: bool = False
 
 
@@ -137,6 +145,7 @@ class AgentPlanBody(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
+    chat_id: UUID
     conversation_id: UUID
     plan_id: int
 
@@ -160,11 +169,20 @@ class ConfirmWorkoutBody(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
+    chat_id: UUID
     conversation_id: UUID
     performed_on: date
     sets: list[WorkoutSetBody]
     plan_session_id: int | None = None
     auto_link: bool = False
+
+
+class ConversationCreateBody(BaseModel):
+    """``POST /api/conversations`` 的请求体：新建会话的标题由客户端提供。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    title: str
 
 
 class ProviderPutBody(BaseModel):
@@ -453,6 +471,16 @@ def _optional_iso(value: date | None) -> str | None:
     return None if value is None else value.isoformat()
 
 
+def conversation_dto(conversation: Conversation) -> dict[str, Any]:
+    """会话头 → 传输对象：稳定身份、展示标题与两个时间戳。"""
+    return {
+        "id": conversation.id,
+        "title": conversation.title,
+        "created_at": conversation.created_at,
+        "updated_at": conversation.updated_at,
+    }
+
+
 _ERROR_STATUS: tuple[tuple[type[Exception], int], ...] = (
     (RequestValidationError, 400),
     (InvalidRequestShape, 400),
@@ -466,6 +494,7 @@ _ERROR_STATUS: tuple[tuple[type[Exception], int], ...] = (
     (WorkoutRecordNotFound, 404),
     (BodyMetricNotFound, 404),
     (UnknownResource, 404),
+    (ConversationNotFound, 404),
     (PlanNotFound, 404),
     (PlanSessionLinkUnavailable, 409),
     (PlanSessionLinkAmbiguous, 409),

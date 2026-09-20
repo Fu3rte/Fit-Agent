@@ -1,11 +1,3 @@
-/**
- * 帧层（对齐 pretext pages/demos/bubbles.ts）：事件只排帧，一帧里读一次宽度 → 计算 → 写 DOM。
- *
- * - 只写 maxWidth 与 width 两个属性，几何以外不碰 DOM；
- * - resize 只重跑算术（prepare 结果按文本缓存，不重跑）；
- * - webfont 晚到：clearCache() 后按新字体重新 prepare，再同步重画一次；
- * - 首次同步画一遍（bubbles.html 的 parse-time paint），首帧不会以未就位的变量渲染。
- */
 import { clearCache } from "@chenglou/pretext";
 import {
   useCallback,
