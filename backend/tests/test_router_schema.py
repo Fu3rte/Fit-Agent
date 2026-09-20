@@ -1,6 +1,6 @@
 # 路由契约的纯测试：合法组合表、非法组合拒绝、可穷尽映射与统一结构化路由调用。
 # 依据：本轮拍板的 FitnessIntent Schema（domain／action／execution_type／knowledge_type／
-# exercise_name／schedule_day）、唯一纯映射函数 FitnessIntent → Intent、取消确定性短语旁路。
+# exercise_name，日期槽已移除）、唯一纯映射函数 FitnessIntent → Intent、取消确定性短语旁路。
 
 import json
 from collections.abc import Mapping
@@ -22,7 +22,6 @@ from graph.router import (
     FitnessIntent,
     KnowledgeType,
     RouteKey,
-    ScheduleDay,
     classify_intent,
     workflow_intent,
 )
@@ -52,7 +51,6 @@ DOMAIN_REPRESENTATIVES: tuple[tuple[str, Mapping[str, Any], Intent], ...] = (
             "domain": "workout_execution",
             "action": "query",
             "execution_type": "schedule_query",
-            "schedule_day": "today",
         },
         "view_schedule",
     ),
@@ -150,20 +148,12 @@ ILLEGAL_ROUTES: tuple[tuple[str, Mapping[str, Any]], ...] = (
         },
     ),
     (
-        "schedule_day 只属于 schedule_query",
-        {
-            "domain": "workout_execution",
-            "action": "create",
-            "execution_type": "form_record",
-            "schedule_day": "today",
-        },
-    ),
-    (
-        "schedule_query 必须给出 schedule_day",
+        "schedule_query 不再接受日期槽",
         {
             "domain": "workout_execution",
             "action": "query",
             "execution_type": "schedule_query",
+            "schedule_day": "today",
         },
     ),
     (
@@ -242,19 +232,17 @@ def test_illegal_combinations_are_rejected_at_parse_time(
 def test_every_literal_combination_either_maps_or_is_rejected() -> None:
     """可穷尽性：枚举全部判别字段取值，命中组合表的能映射，表外组合全部被拒绝。"""
     mapped: set[RouteKey] = set()
-    for domain, action, execution_type, knowledge_type, schedule_day in product(
+    for domain, action, execution_type, knowledge_type in product(
         get_args(Domain),
         get_args(Action),
         (*get_args(ExecutionType), None),
         (*get_args(KnowledgeType), None),
-        (*get_args(ScheduleDay), None),
     ):
         fields: dict[str, Any] = {
             "domain": domain,
             "action": action,
             "execution_type": execution_type,
             "knowledge_type": knowledge_type,
-            "schedule_day": schedule_day,
             "exercise_name": (
                 "杠铃平板卧推" if knowledge_type == "exercise_technique" else None
             ),
@@ -269,6 +257,34 @@ def test_every_literal_combination_either_maps_or_is_rejected() -> None:
     assert mapped == set(WORKFLOW_INTENTS)
 
 
+#: 相对日期、星期与月历问法的代表请求：路由只给 schedule_query，日期由工具路径的模型解释。
+SCHEDULE_PHRASINGS: tuple[str, ...] = (
+    "今天练什么",
+    "明天练什么",
+    "后天练什么",
+    "周五练什么",
+    "这个月有哪些训练",
+)
+
+
+def test_schedule_query_needs_no_date_slot() -> None:
+    """日期槽已从 Schema 移除：日程查询只需 domain／action／execution_type 三个判别字段。"""
+    assert "schedule_day" not in FitnessIntent.model_fields
+
+    scheduled = FitnessIntent(
+        domain="workout_execution", action="query", execution_type="schedule_query"
+    )
+
+    assert workflow_intent(scheduled) == "view_schedule"
+
+
+def test_history_and_recent_workout_questions_are_analytics_queries() -> None:
+    """个人最佳、趋势、最近训练与历史训练内容都归 analytics/query 同一个只读工具分支。"""
+    analytics = FitnessIntent(domain="analytics", action="query")
+
+    assert workflow_intent(analytics) == "view_progress"
+
+
 def test_exercise_name_is_normalized_to_text() -> None:
     """动作名去掉首尾空白；空白动作名按未给出处理。"""
     fitness = FitnessIntent(
@@ -281,27 +297,29 @@ def test_exercise_name_is_normalized_to_text() -> None:
     assert fitness.exercise_name == "杠铃平板卧推"
 
 
-def test_router_prompt_states_every_domain_action_and_the_schedule_day_rule() -> None:
-    """业务提示词覆盖全部 domain／action 取值，并写明 today／tomorrow 的取值规则。"""
+def test_router_prompt_states_every_domain_action_and_the_schedule_scope() -> None:
+    """业务提示词覆盖全部 domain／action 取值，并写明日程查询不再提取日期参数。"""
     for domain in get_args(Domain):
         assert domain in ROUTER_SYSTEM_PROMPT
     for action in get_args(Action):
         assert f"action={action}" in ROUTER_SYSTEM_PROMPT
-    assert "schedule_day 取 tomorrow" in ROUTER_SYSTEM_PROMPT
-    assert "未指明日期时取 today" in ROUTER_SYSTEM_PROMPT
+    assert "schedule_query" in ROUTER_SYSTEM_PROMPT
+    assert "训练日历" in ROUTER_SYSTEM_PROMPT
+    assert "这个月" in ROUTER_SYSTEM_PROMPT
+    assert "不提取日期参数" in ROUTER_SYSTEM_PROMPT
+    assert "schedule_day" not in ROUTER_SYSTEM_PROMPT
     assert "active 计划" in ROUTER_SYSTEM_PROMPT
     assert "渐进式超负荷" in ROUTER_SYSTEM_PROMPT
     assert "分化思路" in ROUTER_SYSTEM_PROMPT
 
 
-#: 六个字段的 Schema 描述必须覆盖的语义片段：字段名 → 描述须包含的关键词。
+#: 五个字段的 Schema 描述必须覆盖的语义片段：字段名 → 描述须包含的关键词。
 FIELD_DESCRIPTION_KEYWORDS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("domain", ("领域",)),
     ("action", ("动作",)),
     ("execution_type", ("workout_execution", "必须为 null")),
     ("knowledge_type", ("knowledge_qa", "必须为 null")),
     ("exercise_name", ("knowledge_qa", "exercise_technique", "必须为 null")),
-    ("schedule_day", ("schedule_query", "必须为 null")),
 )
 
 
@@ -315,7 +333,6 @@ def test_schema_property_descriptions_state_field_semantics() -> None:
         "execution_type",
         "knowledge_type",
         "exercise_name",
-        "schedule_day",
     }
     for name, keywords in FIELD_DESCRIPTION_KEYWORDS:
         description = properties[name].get("description")
@@ -356,3 +373,37 @@ async def test_every_request_pays_one_structured_router_call(
     assert model.calls[0][1] == dump_model_payload({"request": request_text})
     assert json.loads(model.calls[0][1]) == {"request": request_text}
     assert budget.used == 1
+
+
+@pytest.mark.parametrize("request_text", SCHEDULE_PHRASINGS)
+async def test_relative_and_calendar_phrasings_route_without_a_date_slot(
+    request_text: str,
+) -> None:
+    """今天／明天／后天／星期／月历问法：路由载荷只有原始请求，落点只由 domain 与 execution_type 决定。"""
+    model = RouterGateway(
+        responses=[
+            {
+                "domain": "workout_execution",
+                "action": "query",
+                "execution_type": "schedule_query",
+            }
+        ]
+    )
+
+    fitness = await classify_intent(
+        request_text, model=model, budget=ModelRequestBudget()
+    )
+
+    assert workflow_intent(fitness) == "view_schedule"
+    assert model.calls[0][1] == dump_model_payload({"request": request_text})
+
+
+async def test_history_question_routes_to_the_progress_branch() -> None:
+    """“上次练了什么”属于 analytics/query：历史训练内容走进展工具分支。"""
+    model = RouterGateway(responses=[{"domain": "analytics", "action": "query"}])
+
+    fitness = await classify_intent(
+        "我上次练了什么", model=model, budget=ModelRequestBudget()
+    )
+
+    assert workflow_intent(fitness) == "view_progress"

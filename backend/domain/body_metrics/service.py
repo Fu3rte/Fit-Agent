@@ -9,6 +9,7 @@ from domain.body_metrics.rules import (
     validate_weight_kg,
 )
 from domain.body_metrics.schema import BodyMetric
+from domain.tool_cache.repo import ToolCacheRevisionsRepo
 from storage.db import Database
 
 
@@ -20,7 +21,9 @@ class BodyMetricsService:
     """身体指标 CRUD（写入前统一校验）。"""
 
     def __init__(self, db: Database):
+        self._db = db
         self._repo = BodyMetricsRepo(db)
+        self._revisions = ToolCacheRevisionsRepo(db)
 
     async def create(
         self,
@@ -29,11 +32,15 @@ class BodyMetricsService:
         body_fat_pct: float | None = None,
     ) -> BodyMetric:
         """新增一条身体指标；体脂未记录时传 None（落库为 NULL，不补 0）。"""
-        return await self._repo.insert(
-            validate_measured_on(measured_on),
-            validate_weight_kg(weight_kg),
-            validate_body_fat_pct(body_fat_pct),
-        )
+        measured_on = validate_measured_on(measured_on)
+        weight_kg = validate_weight_kg(weight_kg)
+        body_fat_pct = validate_body_fat_pct(body_fat_pct)
+        async with self._db.transaction() as conn:
+            record = await self._repo.create_in_transaction(
+                conn, measured_on, weight_kg, body_fat_pct
+            )
+            await self._revisions.bump_in_transaction(conn, "metrics")
+            return record
 
     async def get(self, metric_id: int) -> BodyMetric | None:
         """按身份查询；不存在即 None。"""
@@ -51,17 +58,21 @@ class BodyMetricsService:
         body_fat_pct: float | None = None,
     ) -> BodyMetric:
         """整条覆盖修改；身份不存在抛 :class:`BodyMetricNotFound`。"""
-        record = await self._repo.update(
-            metric_id,
-            validate_measured_on(measured_on),
-            validate_weight_kg(weight_kg),
-            validate_body_fat_pct(body_fat_pct),
-        )
-        if record is None:
-            raise BodyMetricNotFound(f"身体指标不存在：{metric_id}")
-        return record
+        measured_on = validate_measured_on(measured_on)
+        weight_kg = validate_weight_kg(weight_kg)
+        body_fat_pct = validate_body_fat_pct(body_fat_pct)
+        async with self._db.transaction() as conn:
+            record = await self._repo.update_in_transaction(
+                conn, metric_id, measured_on, weight_kg, body_fat_pct
+            )
+            if record is None:
+                raise BodyMetricNotFound(f"身体指标不存在：{metric_id}")
+            await self._revisions.bump_in_transaction(conn, "metrics")
+            return record
 
     async def delete(self, metric_id: int) -> None:
         """删除一条身体指标；身份不存在抛 :class:`BodyMetricNotFound`。"""
-        if not await self._repo.delete(metric_id):
-            raise BodyMetricNotFound(f"身体指标不存在：{metric_id}")
+        async with self._db.transaction() as conn:
+            if not await self._repo.delete_in_transaction(conn, metric_id):
+                raise BodyMetricNotFound(f"身体指标不存在：{metric_id}")
+            await self._revisions.bump_in_transaction(conn, "metrics")

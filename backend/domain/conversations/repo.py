@@ -674,6 +674,24 @@ class ConversationRepo:
                 await cursor.close()
         return converged
 
+    async def cancel_active_run(self, run_id: str, *, updated_at: str) -> bool:
+        """客户端断开收敛：仍活动的 Run 转 ``cancelled``，返回是否发生迁移；其余状态保持不动。
+
+        只有 :data:`_UNFINISHED_STATUSES` 是活动态，可走这一迁移；终态不复活，
+        ``waiting`` 已把确认事实提交在同一事务里，刷新后要按它恢复确认流程，断连不得把它
+        降级为 ``cancelled``。判定与写入同事务，迁移矩阵仍由写入路径校验。
+        """
+        require_text(run_id, "run_id")
+        require_text(updated_at, "updated_at")
+        async with self._db.transaction() as conn:
+            current = await _read_run_in_transaction(conn, run_id)
+            if current.status not in _UNFINISHED_STATUSES:
+                return False
+            await _update_run_status_in_transaction(
+                conn, run_id, status="cancelled", updated_at=updated_at
+            )
+            return True
+
 
 async def _read_run_by_request_id_in_transaction(
     conn: aiosqlite.Connection, client_request_id: str

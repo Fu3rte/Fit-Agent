@@ -16,6 +16,7 @@ from domain.records.rules import (
     validate_set_fields_for_record_type,
 )
 from domain.records.schema import WorkoutSession, WorkoutSetInput
+from domain.tool_cache.repo import ToolCacheRevisionsRepo
 from storage.db import Database
 
 
@@ -37,6 +38,7 @@ class WorkoutRecordsService:
     def __init__(self, db: Database):
         self._db = db
         self._repo = WorkoutRecordsRepo(db)
+        self._revisions = ToolCacheRevisionsRepo(db)
         self._catalog = ActionCatalogService(db)
         self._exercises = ExerciseRepo(db)
 
@@ -63,7 +65,9 @@ class WorkoutRecordsService:
             link = await self._resolve_link_in_transaction(
                 conn, day, plan_session_id, auto_link, exclude_session_id=None
             )
-            return await self._repo.create_in_transaction(conn, day, link, facts)
+            record = await self._repo.create_in_transaction(conn, day, link, facts)
+            await self._revisions.bump_in_transaction(conn, "workouts")
+            return record
 
     async def get(self, session_id: int) -> WorkoutSession | None:
         """按身份读取一次训练及其全部组；不存在即 None。"""
@@ -97,12 +101,15 @@ class WorkoutRecordsService:
             )
             if record is None:
                 raise WorkoutRecordNotFound(f"训练记录不存在：{session_id}")
+            await self._revisions.bump_in_transaction(conn, "workouts")
             return record
 
     async def delete(self, session_id: int) -> None:
         """物理删除一次训练（组行随训练一并删除）；身份不存在抛领域错误。"""
-        if not await self._repo.delete(session_id):
-            raise WorkoutRecordNotFound(f"训练记录不存在：{session_id}")
+        async with self._db.transaction() as conn:
+            if not await self._repo.delete_in_transaction(conn, session_id):
+                raise WorkoutRecordNotFound(f"训练记录不存在：{session_id}")
+            await self._revisions.bump_in_transaction(conn, "workouts")
 
     async def list_unfinished_plan_sessions(
         self, performed_on: date

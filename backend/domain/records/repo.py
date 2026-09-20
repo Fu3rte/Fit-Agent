@@ -236,6 +236,19 @@ class WorkoutRecordsRepo:
             raise RuntimeError(f"训练记录写入后读回失败：{session_id}")
         return record
 
+    async def delete_in_transaction(
+        self, conn: aiosqlite.Connection, session_id: int
+    ) -> bool:
+        """物理删除一次训练（组行由 ON DELETE CASCADE 一并删除）；返回是否删除了行。"""
+        require_outer_transaction(conn, "训练记录删除")
+        cursor = await conn.execute(
+            "DELETE FROM workout_sessions WHERE id = ?", (session_id,)
+        )
+        try:
+            return cursor.rowcount >= 1
+        finally:
+            await cursor.close()
+
     # ---------- 只读公开出口（under_lock） ----------
 
     async def read(self, session_id: int) -> WorkoutSession | None:
@@ -261,17 +274,3 @@ class WorkoutRecordsRepo:
         return await self._db.under_lock(
             lambda conn: _read_link_candidates(conn, scheduled_on)
         )
-
-    async def delete(self, session_id: int) -> bool:
-        """物理删除一次训练（组行由 ON DELETE CASCADE 一并删除）。"""
-
-        async def op(conn: aiosqlite.Connection) -> bool:
-            cursor = await conn.execute(
-                "DELETE FROM workout_sessions WHERE id = ?", (session_id,)
-            )
-            try:
-                return cursor.rowcount >= 1
-            finally:
-                await cursor.close()
-
-        return await self._db.under_lock(op)

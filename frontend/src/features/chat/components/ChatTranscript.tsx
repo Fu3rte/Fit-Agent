@@ -11,15 +11,11 @@ import {
   MessageScrollerViewport,
 } from "@/components/ui/message-scroller";
 import { Marker, MarkerContent, MarkerIcon } from "@/components/ui/marker";
-import { eventText, type ChatRound } from "@/features/chat/utils/chatRound";
-
-/** 未完成的 Assistant 状态在消息列上的固定文案（失败／部分／中止都只用于展示） */
-const INCOMPLETE_LABEL: Record<string, string> = {
-  partial: "输出未完成",
-  failed: "本次运行失败",
-  aborted: "本次运行被中断",
-  cancelled: "本次运行被中断",
-};
+import {
+  eventText,
+  interruptedNotice,
+  type ChatRound,
+} from "@/features/chat/utils/chatRound";
 
 function isSettled(round: ChatRound): boolean {
   if (
@@ -60,24 +56,11 @@ export default function ChatTranscript({
               // 落库的 Assistant 投影优先（含失败／部分／中止文本）；页面在途轮次只有流式 message 事件
               const assistantLines =
                 round.assistants.length > 0
-                  ? round.assistants.map((assistant) => ({
-                      text: assistant.content,
-                      status: assistant.status,
-                    }))
+                  ? round.assistants.map((assistant) => assistant.content)
                   : round.events
                       .filter((event) => event.event === "message")
-                      .map((event) => ({
-                        text: eventText(event),
-                        status: "complete",
-                      }));
-              const incomplete = assistantLines.find(
-                (line) => line.status !== "complete",
-              );
-              const interruptedStatus =
-                incomplete?.status ??
-                (round.run_status === "failed" || round.run_status === "cancelled"
-                  ? round.run_status
-                  : undefined);
+                      .map((event) => eventText(event));
+              const notice = interruptedNotice(round);
               const settled = isSettled(round);
               return (
                 <Fragment key={round.conversation_id}>
@@ -96,7 +79,7 @@ export default function ChatTranscript({
 
                   {(assistantLines.length > 0 ||
                     !settled ||
-                    interruptedStatus !== undefined) && (
+                    notice !== undefined) && (
                     <MessageScrollerItem
                       messageId={`${round.conversation_id}:assistant`}
                     >
@@ -114,16 +97,14 @@ export default function ChatTranscript({
                             <Bubble variant="secondary" align="start">
                               <BubbleContent className="flex flex-col gap-1">
                                 {assistantLines.map((line, lineIndex) => (
-                                  <p key={lineIndex}>{line.text}</p>
+                                  <p key={lineIndex}>{line}</p>
                                 ))}
                               </BubbleContent>
                             </Bubble>
                           )}
-                          {interruptedStatus !== undefined && (
+                          {notice !== undefined && (
                             <Marker role="status" className="mt-1 w-auto">
-                              <MarkerContent>
-                                {INCOMPLETE_LABEL[interruptedStatus]}
-                              </MarkerContent>
+                              <MarkerContent>{notice}</MarkerContent>
                             </Marker>
                           )}
                         </MessageContent>

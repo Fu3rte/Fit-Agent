@@ -26,8 +26,6 @@ ExecutionType = Literal[
 
 KnowledgeType = Literal["exercise_technique", "methodology"]
 
-ScheduleDay = Literal["today", "tomorrow"]
-
 
 class RouteKey(NamedTuple):
     """合法路由组合的键：只含判别字段，不含用户填写的动作名与查询日。"""
@@ -77,10 +75,6 @@ class FitnessIntent(BaseModel):
         default=None,
         description="动作名，仅当 domain=knowledge_qa 且 knowledge_type=exercise_technique 时填写；其余任何组合都必须为 null。",
     )
-    schedule_day: ScheduleDay | None = Field(
-        default=None,
-        description="查询日，仅当 execution_type=schedule_query 时取值 today／tomorrow；其余任何组合都必须为 null。",
-    )
 
     @field_validator("exercise_name")
     @classmethod
@@ -103,10 +97,6 @@ class FitnessIntent(BaseModel):
             raise ValueError("knowledge_type=exercise_technique 必须给出 exercise_name")
         if self.knowledge_type == "methodology" and self.exercise_name is not None:
             raise ValueError("knowledge_type=methodology 不得给出 exercise_name")
-        if self.execution_type == "schedule_query" and self.schedule_day is None:
-            raise ValueError("execution_type=schedule_query 必须给出 schedule_day")
-        if self.schedule_day is not None and self.execution_type != "schedule_query":
-            raise ValueError(f"schedule_day 只属于 schedule_query：{self.schedule_day!r}")
         return self
 
 
@@ -126,21 +116,21 @@ ROUTER_SYSTEM_PROMPT = (
     "你是 Fit-Agent 的请求路由器，只做一次分类：不执行任何业务动作、不写库、不生成或修改计划、"
     "不做安全判定。只在下列合法组合里选一个，输出结构由 Schema 约束：\n"
     "- workout_execution：本次训练的执行与当前日程。\n"
-    "  * action=query、execution_type=schedule_query：查询 active 计划中今天或明天练什么。"
-    "用户明确说“明天”时 schedule_day 取 tomorrow；明确说“今天”或未指明日期时取 today。\n"
+    "  * action=query、execution_type=schedule_query：查询当前 active 计划与训练日历，包含今天、"
+    "明天、后天、本周五、下周一、指定 ISO 日期以及这个月、下个月等全部日程问法；不提取日期参数。\n"
     "  * action=create、execution_type=form_record：用户要用打卡表单记录训练。\n"
     "  * action=create、execution_type=natural_language_record：用户用自然语言报告一次训练事实，"
     "同时出现记录动词与事实标记。\n"
     "- plan_management：计划版本的管理。action=create 是生成一份新的训练计划；"
     "action=modify 是调整、修改已有训练安排。\n"
-    "- analytics：action=query 是查看训练进展、个人最佳或趋势。\n"
+    "- analytics：action=query 是查看训练进展，覆盖个人最佳、趋势、最近训练与历史训练内容。\n"
     "- knowledge_qa：action=query 是训练知识问答。具体动作规范、发力机制与轨迹归为 "
     "knowledge_type=exercise_technique，exercise_name 必填；减载、渐进式超负荷、疲劳管理与分化思路归为 "
     "knowledge_type=methodology，exercise_name 必须为空。\n"
     "- general：action=chat 是闲聊与不属于上述业务的请求，包含删除数据、查询计划版本、复盘、"
     "伤病判断等超出能力范围的请求。\n"
     "组合表之外的组合一律非法：execution_type 只出现在 workout_execution，knowledge_type 与 "
-    "exercise_name 只出现在 knowledge_qa，schedule_day 只出现在 schedule_query。\n"
+    "exercise_name 只出现在 knowledge_qa。\n"
     "strict Schema 要求输出全部字段：未用到的字段必须在输出里显式给出 null，不得省略。"
     "每个字段的语义以 Schema 的字段描述为准，描述与本节规则一致。"
 )

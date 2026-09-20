@@ -4,7 +4,7 @@
 
 import asyncio
 import json
-from collections.abc import AsyncIterator, Mapping, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from typing import Any
@@ -12,6 +12,7 @@ from typing import Any
 import httpx
 import pytest
 from fastapi import FastAPI
+from fastapi.responses import StreamingResponse
 from langgraph.graph.state import CompiledStateGraph
 from test_agent_run_branches import (
     BUSINESS_DAY,
@@ -19,6 +20,9 @@ from test_agent_run_branches import (
     _extraction_scripts,
     _harness,
     _plan_scripts,
+    _tool_harnesses,
+    final_answer,
+    tool_call,
 )
 
 from api import routes_agent
@@ -56,7 +60,6 @@ from graph.workflow import (
     KNOWLEDGE_QA_SYSTEM_PROMPT,
     NATURAL_LANGUAGE_RECORD_EXTRACTION_PROMPT,
     NATURAL_LANGUAGE_RECORD_MESSAGE_PROMPT,
-    VIEW_PROGRESS_SYSTEM_PROMPT,
     AgentEvent,
     AgentRunDeps,
 )
@@ -101,6 +104,7 @@ def _app(harness_graph: CompiledStateGraph, db: Database, model: ScriptedGateway
             catalog=ExerciseRepo(db),
             records=WorkoutRecordsService(db),
             skills=SkillLoader(),
+            tool_harnesses=_tool_harnesses(),
         ),
     )
     app.dependency_overrides[current_business_date] = lambda: BUSINESS_DAY
@@ -171,6 +175,67 @@ def _natural_language_scripts() -> dict[type, list[Mapping[str, Any]]]:
         ],
         **_extraction_scripts(),
     }
+
+
+async def _call_with_disconnect(
+    asgi: Callable[..., Awaitable[None]],
+    *,
+    path: str,
+    body: bytes,
+    disconnect_after: int,
+    suspend_send: bool = False,
+) -> list[str]:
+    """直连 ASGI 应用：第 ``disconnect_after`` 个响应分片送抵客户端后投递 ``http.disconnect``。
+
+    ``httpx.ASGITransport`` 不能在流中投递断连，所以按 ASGI server 的语义自己实现 receive：
+    断连到达后 ``StreamingResponse`` 的监听任务结束并取消分派任务组，正在生成器内的等待
+    因此收到真实的 AnyIO 取消（非测试注入的异常）。
+
+    ``suspend_send``：该分片的 ``send`` 用永不放行的等待挂住（客户端读得慢的真实形态），
+    取消只能落在生成器交出帧之后的下游 ``send`` 上，不会进入生成器帧。
+    """
+    request_delivered = False
+    disconnected = asyncio.Event()
+    stalled = asyncio.Event()
+    chunks: list[str] = []
+
+    async def receive() -> dict[str, Any]:
+        nonlocal request_delivered
+        if not request_delivered:
+            request_delivered = True
+            return {"type": "http.request", "body": body, "more_body": False}
+        await disconnected.wait()
+        return {"type": "http.disconnect"}
+
+    async def send(message: dict[str, Any]) -> None:
+        chunk = message.get("body")
+        if message["type"] == "http.response.body" and chunk:
+            chunks.append(str(chunk.decode()))
+            if len(chunks) == disconnect_after:
+                disconnected.set()
+                if suspend_send:
+                    await stalled.wait()
+
+    scope: dict[str, Any] = {
+        "type": "http",
+        "asgi": {"version": "3.0", "spec_version": "2.3"},
+        "http_version": "1.1",
+        "method": "POST",
+        "scheme": "http",
+        "path": path,
+        "raw_path": path.encode(),
+        "query_string": b"",
+        "root_path": "",
+        "headers": [
+            (b"host", b"localhost"),
+            (b"content-type", b"application/json"),
+            (b"content-length", str(len(body)).encode()),
+        ],
+        "client": ("127.0.0.1", 4321),
+        "server": ("localhost", 8000),
+    }
+    await asgi(scope, receive, send)
+    return chunks
 
 
 async def _create_conversation(client: httpx.AsyncClient, title: str) -> str:
@@ -648,6 +713,207 @@ async def test_failing_run_is_persisted_as_failed_with_an_error_event(
         assert [event.sequence for event in persisted] == [1, 2]
 
 
+async def test_client_disconnect_cancels_the_active_run(tmp_path: Any) -> None:
+    """真实 ASGI 断连（spec 2.3 任务组）：活动 Run 收敛为 cancelled，已提交事件保留，
+    不发 error 帧、不写 Assistant Entry。"""
+    async with _harness(
+        tmp_path,
+        structured=_general_scripts(),
+        text={GENERAL_CHAT_SYSTEM_PROMPT: [FIRST_ANSWER]},
+    ) as harness:
+        app = _app(harness.graph, harness.db, harness.model)
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://localhost"
+        ) as client:
+            chat_id = await _create_conversation(client, "会话癸")
+        repo = ConversationRepo(harness.db)
+        body = json.dumps(
+            _run_body(
+                chat_id=chat_id,
+                thread_id=THREAD_1,
+                request=FIRST_REQUEST,
+                client_request_id="request-1",
+            )
+        ).encode()
+        # 分派任务组把生成器抛出的取消当作自身取消吞下：ASGI 调用正常返回，不发生未处理异常。
+        chunks = await _call_with_disconnect(
+            app,
+            path="/api/agent/run",
+            body=body,
+            disconnect_after=1,
+        )
+
+        frames = _frames("".join(chunks))
+        run = (await repo.list_runs(chat_id))[0]
+        assert run.status == "cancelled"
+        assert run.error_code is None
+        assert run.assistant_entry_id is None
+        # 先落库再发送：已送出的每个分片都已提交，取消不回滚已提交事件、不追加 error。
+        persisted = [event.event_type for event in await repo.list_run_events(run.id)]
+        assert persisted[: len(frames)] == [name for name, _ in frames]
+        assert "error" not in persisted
+        entries = await repo.list_entries(chat_id)
+        assert [entry.entry_type for entry in entries] == ["message"]
+        assert entries[0].payload["role"] == "user"
+
+
+async def test_disconnect_in_suspended_send_before_the_waiting_commit_cancels_the_run(
+    tmp_path: Any,
+) -> None:
+    """断连落在下游 ``send`` 上（send 永不放行）且确认点尚未提交：取消不进入生成器帧，
+    响应边界仍把 ``running`` Run 收敛为 ``cancelled``，已提交事件保留、不发 error 帧、不写 Assistant Entry。
+    """
+    async with _harness(
+        tmp_path,
+        structured=_natural_language_scripts(),
+        text={NATURAL_LANGUAGE_RECORD_MESSAGE_PROMPT: [NL_SUMMARY]},
+    ) as harness:
+        app = _app(harness.graph, harness.db, harness.model)
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://localhost"
+        ) as client:
+            chat_id = await _create_conversation(client, "会话子")
+        repo = ConversationRepo(harness.db)
+        body = json.dumps(
+            _run_body(
+                chat_id=chat_id,
+                thread_id=THREAD_1,
+                request=NL_REQUEST,
+                client_request_id="request-1",
+            )
+        ).encode()
+        # 断连在第一个分片的 send 内挂起等待时到达：生成器停在 yield 上、收不到取消，
+        # 收敛只能由响应自己的 send 边界完成；ASGI 调用返回即证明收敛已跑完。
+        chunks = await _call_with_disconnect(
+            app,
+            path="/api/agent/run",
+            body=body,
+            disconnect_after=1,
+            suspend_send=True,
+        )
+
+        frames = _frames("".join(chunks))
+        assert [name for name, _ in frames] == ["node"]
+        run = (await repo.list_runs(chat_id))[0]
+        assert run.status == "cancelled"
+        assert run.error_code is None
+        assert run.assistant_entry_id is None
+        persisted = [event.event_type for event in await repo.list_run_events(run.id)]
+        assert persisted == [name for name, _ in frames]
+        entries = await repo.list_entries(chat_id)
+        assert [entry.entry_type for entry in entries] == ["message"]
+
+
+async def test_disconnect_in_suspended_send_after_the_waiting_commit_keeps_waiting(
+    tmp_path: Any,
+) -> None:
+    """断连落在下游 ``send`` 上且 ``waiting`` 已与确认点同事务提交：Run 保持 ``waiting``，
+    已提交事件（含恢复确认流程所需的 waiting 载荷）全部保留，不发 error 帧、不写 Assistant Entry。
+    """
+    async with _harness(
+        tmp_path,
+        structured=_natural_language_scripts(),
+        text={NATURAL_LANGUAGE_RECORD_MESSAGE_PROMPT: [NL_SUMMARY]},
+    ) as harness:
+        app = _app(harness.graph, harness.db, harness.model)
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://localhost"
+        ) as client:
+            chat_id = await _create_conversation(client, "会话丑")
+        repo = ConversationRepo(harness.db)
+        body = json.dumps(
+            _run_body(
+                chat_id=chat_id,
+                thread_id=THREAD_1,
+                request=NL_REQUEST,
+                client_request_id="request-1",
+            )
+        ).encode()
+        # 第三个分片是 waiting：它的 Event 与 Run ``waiting`` 先落库，send 才拿到这一帧。
+        chunks = await _call_with_disconnect(
+            app,
+            path="/api/agent/run",
+            body=body,
+            disconnect_after=3,
+            suspend_send=True,
+        )
+
+        frames = _frames("".join(chunks))
+        assert [name for name, _ in frames] == ["node", "message", "waiting"]
+        run = (await repo.list_runs(chat_id))[0]
+        assert run.status == "waiting"
+        assert run.error_code is None
+        assert run.assistant_entry_id is None
+        persisted = await repo.list_run_events(run.id)
+        assert [event.event_type for event in persisted] == [name for name, _ in frames]
+        assert persisted[-1].payload == frames[-1][1]
+        assert [entry.entry_type for entry in await repo.list_entries(chat_id)] == [
+            "message"
+        ]
+        # 刷新恢复：会话读回仍按 waiting 报告该轮，确认流程据同一份载荷继续。
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://localhost"
+        ) as client:
+            detail = (await client.get(f"/api/conversations/{chat_id}")).json()
+        assert detail["rounds"][0]["status"] == "waiting"
+
+
+async def test_disconnect_after_done_keeps_the_completed_run(tmp_path: Any) -> None:
+    """done 已落库后断连：Run 保持 completed，不尝试终态 -> cancelled 的非法迁移。"""
+    async with _harness(tmp_path) as harness:
+        repo = ConversationRepo(harness.db)
+        conversation = await repo.create_conversation(
+            conversation_id="11111111-2222-3333-4444-888888888888",
+            title="会话壬",
+            created_at="2026-06-01T08:00:00+00:00",
+        )
+        async with harness.db.transaction() as conn:
+            run, _user_entry = await repo.begin_run_in_transaction(
+                conn,
+                conversation_id=conversation.id,
+                run_id="run-1",
+                thread_id=THREAD_1,
+                client_request_id="request-1",
+                entry_id="entry-user",
+                content=FIRST_REQUEST,
+                created_at="2026-06-01T08:00:00+00:00",
+            )
+            await repo.update_run_status_in_transaction(
+                conn, run.id, status="running", updated_at="2026-06-01T08:00:01+00:00"
+            )
+
+        released = asyncio.Event()
+
+        async def events() -> AsyncIterator[AgentEvent]:
+            yield AgentEvent("message", {"text": FIRST_ANSWER})
+            yield AgentEvent("done", {"ok": True, "intent": "general"})
+            # done 已与终态同事务提交，此处仍挂着：断连到达时 Run 已是 completed。
+            await released.wait()
+
+        response = StreamingResponse(
+            _persisted_frames(harness.db, repo, run.id, events()),
+            media_type="text/event-stream",
+        )
+        chunks = await _call_with_disconnect(
+            response,
+            path="/api/agent/run",
+            body=b"",
+            disconnect_after=2,
+        )
+
+        assert [name for name, _ in _frames("".join(chunks))] == ["message", "done"]
+        completed = await repo.read_run(run.id)
+        assert completed is not None and completed.status == "completed"
+        assert completed.error_code is None
+        assert completed.assistant_entry_id is not None
+        persisted = [event.event_type for event in await repo.list_run_events(run.id)]
+        assert persisted == ["message", "done"]
+        assert [entry.entry_type for entry in await repo.list_entries(conversation.id)] == [
+            "message",
+            "message",
+        ]
+
+
 async def test_blank_non_waiting_answer_fails_the_run_without_committing_done(
     tmp_path: Any,
 ) -> None:
@@ -1039,8 +1305,10 @@ async def test_natural_language_record_prompts_receive_history_once(
             assert all(message["text"] != NL_REQUEST for message in history)
 
 
-async def test_progress_and_knowledge_prompts_receive_history_once(tmp_path: Any) -> None:
-    """统计解释与知识问答都带上历史，本轮请求在每个载荷里只出现一次。"""
+async def test_progress_harness_and_knowledge_prompt_receive_history_once(
+    tmp_path: Any,
+) -> None:
+    """进展工具分支与知识问答都带上历史，本轮请求在每个模型输入里只出现一次。"""
     async with _client(
         tmp_path,
         structured={
@@ -1056,10 +1324,9 @@ async def test_progress_and_knowledge_prompts_receive_history_once(tmp_path: Any
         },
         text={
             GENERAL_CHAT_SYSTEM_PROMPT: [FIRST_ANSWER],
-            VIEW_PROGRESS_SYSTEM_PROMPT: [SECOND_ANSWER],
             KNOWLEDGE_QA_SYSTEM_PROMPT: [NL_SUMMARY],
         },
-    ) as (client, model, _db):
+    ) as (client, model, db):
         chat_id = await _create_conversation(client, "会话乙一")
         await _run(
             client,
@@ -1068,7 +1335,10 @@ async def test_progress_and_knowledge_prompts_receive_history_once(tmp_path: Any
             request=FIRST_REQUEST,
             client_request_id="request-1",
         )
-        await _run(
+        model.harness_scripts.extend(
+            [tool_call("read_progress"), final_answer(SECOND_ANSWER)]
+        )
+        frames = await _run(
             client,
             chat_id=chat_id,
             thread_id=THREAD_2,
@@ -1082,18 +1352,41 @@ async def test_progress_and_knowledge_prompts_receive_history_once(tmp_path: Any
             request=KNOWLEDGE_REQUEST,
             client_request_id="request-3",
         )
-        progress = model.payload_for(VIEW_PROGRESS_SYSTEM_PROMPT)
-        assert set(progress) == {
-            "request",
-            "conversation_messages",
-            "personal_bests",
-            "trend_summary",
-        }
-        assert progress["request"] == PROGRESS_REQUEST
-        assert progress["conversation_messages"] == [
-            {"role": "user", "text": FIRST_REQUEST},
-            {"role": "assistant", "text": FIRST_ANSWER},
+        assert [name for name, _payload in frames] == ["node", "message", "done"]
+        assert frames[0][1] == {"name": "view_progress"}
+        assert frames[1][1] == {"text": SECOND_ANSWER}
+        progress_messages = model.harness_calls[0].messages
+        assert [type(message).__name__ for message in progress_messages] == [
+            "SystemMessage",
+            "HumanMessage",
+            "AIMessage",
+            "HumanMessage",
         ]
+        assert [message.content for message in progress_messages[1:3]] == [
+            FIRST_REQUEST,
+            FIRST_ANSWER,
+        ]
+        assert progress_messages[-1].content == PROGRESS_REQUEST
+        assert [
+            message.content for message in progress_messages
+        ].count(PROGRESS_REQUEST) == 1
+        # 内部 ToolMessage 不落库：进展轮只多出 user 与 assistant 两条完整 message Entry。
+        repo = ConversationRepo(db)
+        runs = await repo.list_runs(chat_id)
+        events = await repo.list_run_events(runs[1].id)
+        assert [event.event_type for event in events] == ["node", "message", "done"]
+        contents = [
+            entry.payload.get("content")
+            for entry in await repo.list_entries(chat_id)
+            if entry.entry_type == "message"
+        ]
+        assert contents[:4] == [
+            FIRST_REQUEST,
+            FIRST_ANSWER,
+            PROGRESS_REQUEST,
+            SECOND_ANSWER,
+        ]
+        assert len(contents) == 6
         knowledge = model.payload_for(KNOWLEDGE_QA_SYSTEM_PROMPT)
         assert knowledge["request"] == KNOWLEDGE_REQUEST
         assert knowledge["conversation_messages"] == [

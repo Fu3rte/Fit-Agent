@@ -21,6 +21,7 @@ from domain.plans.schema import (
 )
 from domain.profile.service import ProfileService
 from domain.stats.repo import StatsRepo
+from domain.tool_cache.repo import ToolCacheRevisionsRepo
 from storage.db import Database
 
 
@@ -34,6 +35,7 @@ class PlanPersistenceService:
     def __init__(self, db: Database):
         self._db = db
         self._repo = PlanRepo(db)
+        self._revisions = ToolCacheRevisionsRepo(db)
 
     async def get_unique_draft(self) -> Plan | None:
         """当前唯一可确认 draft；没有即 None。"""
@@ -98,6 +100,7 @@ class PlanPersistenceService:
                         f"draft 已变化（不存在或不再是 draft），不覆盖：{existing_draft_id}"
                     )
             await self._require_active_unchanged(conn, before)
+            await self._revisions.bump_in_transaction(conn, "plans")
             return written
 
     async def _persist_blocking_failure(
@@ -125,6 +128,7 @@ class PlanPersistenceService:
                 created_at=created_at,
             )
             await self._require_active_unchanged(conn, before)
+            await self._revisions.bump_in_transaction(conn, "plans")
             return written
 
     async def _require_active_unchanged(
@@ -179,6 +183,7 @@ class PlanActivationService:
     def __init__(self, db: Database):
         self._db = db
         self._repo = PlanRepo(db)
+        self._revisions = ToolCacheRevisionsRepo(db)
         self._profiles = ProfileService(db)
         self._exercises = ExerciseRepo(db)
         self._stats = StatsRepo(db)
@@ -248,6 +253,7 @@ class PlanActivationService:
                 plan_id,
                 scheduled_on=[day.scheduled_on for day in draft.training_days],
             )
+            await self._revisions.bump_in_transaction(conn, "plans")
             return activated
 
     async def reject(self, plan_id: int, *, archived_at: str) -> Plan:
@@ -267,6 +273,7 @@ class PlanActivationService:
             )
             if archived is None:
                 raise PlanActivationConflict(f"计划已不是 draft：{plan_id}")
+            await self._revisions.bump_in_transaction(conn, "plans")
             return archived
 
     async def _revalidation_failures(

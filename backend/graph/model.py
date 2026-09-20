@@ -1,11 +1,12 @@
 import json
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, TypeVar
 
 from langchain_anthropic import ChatAnthropic
-from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
+from langchain_core.tools import BaseTool
 from langchain_openai import ChatOpenAI
 from pydantic import BaseModel, ConfigDict
 
@@ -26,6 +27,11 @@ ModelCall = Callable[[str, str], Awaitable[str]]
 
 #: 结构化形态模型调用：Schema 由所选结构化输出机制约束，直接返回 Pydantic 实例。
 StructuredModelCall = Callable[[str, str, type[TModel]], Awaitable[TModel]]
+
+#: 工具调用形态模型调用：原生消息序列与 offered 工具 tuple → 含 ``tool_calls`` 的 AIMessage。
+ToolModelCall = Callable[
+    [Sequence[BaseMessage], Sequence[BaseTool]], Awaitable[AIMessage]
+]
 
 #: 各 transport → 客户端类：只看 ``api``，base_url 原样传入，不改写任何端点。
 _APIS: dict[str, type] = {
@@ -52,10 +58,11 @@ _STRUCTURED_KWARGS: dict[tuple[str, str], dict[str, Any]] = {
 
 @dataclass(frozen=True, slots=True)
 class ModelGateway:
-    """唯一模型入口的两个形态：每次调用都重新解析 Provider 配置。"""
+    """唯一模型入口的三个形态：每次调用都重新解析 Provider 配置。"""
 
     text: ModelCall
     structured: StructuredModelCall
+    tools: ToolModelCall
 
 
 class InvalidModelResponse(ValueError):
@@ -142,7 +149,16 @@ def build_model_gateway(
             raise InvalidModelResponse("模型响应不是目标 Schema 的实例：Provider 未返回结构化结果")
         return result
 
-    return ModelGateway(text=text, structured=structured)
+    async def tools(
+        messages: Sequence[BaseMessage], offered_tools: Sequence[BaseTool]
+    ) -> AIMessage:
+        # 与 text／structured 共用同一个 chat client；工具调用只读标准 AIMessage.tool_calls。
+        response = await chat.bind_tools(tuple(offered_tools)).ainvoke(messages)
+        if not isinstance(response, AIMessage):
+            raise InvalidModelResponse("模型响应不是 AIMessage：无法读取原生工具调用")
+        return response
+
+    return ModelGateway(text=text, structured=structured, tools=tools)
 
 
 async def probe_model_call(

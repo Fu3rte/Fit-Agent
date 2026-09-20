@@ -1,6 +1,6 @@
-# 一次 Agent Run 的分支行为：每个 domain 代表请求走唯一映射后的可见输出与只读边界，
-# 既有 generate／adjust／record／progress 行为无回归，非法路由组合在进入任何分支前失败。
-# 依据：本轮拍板的 FitnessIntent Schema 与 view_schedule／knowledge_qa／general 三个新增分支。
+# 一次 Agent Run 的非工具分支行为：表单引导、自然语言打卡、知识问答、一般对话与计划链路的可见输出、
+# 只读边界与预算，非法路由组合在进入任何分支前失败。
+# 依据：本轮拍板的 FitnessIntent Schema；日程与进展两个只读工具分支在 test_agent_tool_branches.py。
 # 计划事实用 tmp_path 下的真实迁移库，模型是可脚本化的固定替身，不调真实模型。
 
 import json
@@ -12,11 +12,14 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from langchain_core.messages import AIMessage, BaseMessage
+from langchain_core.tools import BaseTool
 from langgraph.graph.state import CompiledStateGraph
 from pydantic import BaseModel, ValidationError
 
-from config import MAX_MODEL_REQUESTS_PER_RUN
+from config import MAX_MODEL_REQUESTS_PER_RUN, TOOL_TIMEOUT_SECONDS
 from domain.actions.repo import ExerciseRepo
+from domain.conversations.context import ContextMessage
 from domain.plans.repo import PlanRepo
 from domain.plans.schema import PlanDraft, RubricResult
 from domain.plans.service import PlanActivationService, PlanPersistenceService
@@ -37,19 +40,20 @@ from graph.nodes import (
 )
 from graph.router import ROUTER_SYSTEM_PROMPT, FitnessIntent
 from graph.skills import SkillLoader
+from graph.state import Intent
 from graph.workflow import (
     FORM_RECORD_GUIDE,
     GENERAL_CHAT_SYSTEM_PROMPT,
     KNOWLEDGE_QA_SYSTEM_PROMPT,
     NATURAL_LANGUAGE_RECORD_MESSAGE_PROMPT,
-    NO_ACTIVE_PLAN_SCHEDULE_MESSAGE,
-    VIEW_PROGRESS_SYSTEM_PROMPT,
     AgentRunDeps,
     AgentRunResult,
     ExtractedWorkout,
     build_generate_plan_graph,
     invoke_agent_run,
 )
+from harness.graph import build_tool_harness
+from harness.tools.training import PROGRESS_TOOLS, SCHEDULE_TOOLS
 from storage.db import Database
 
 BUSINESS_DAY = date(2026, 6, 1)
@@ -74,15 +78,25 @@ COUNTED_TABLES = (
 )
 
 
+@dataclass(frozen=True, slots=True)
+class HarnessCall:
+    """一次 harness 模型调用的记录：offered 工具名与收到的完整消息序列。"""
+
+    offered: tuple[str, ...]
+    messages: tuple[BaseMessage, ...]
+
+
 @dataclass
 class ScriptedGateway:
-    """固定替身模型入口：结构化响应按 Schema 出队，文本响应按系统提示词出队。"""
+    """固定替身模型入口：结构化按 Schema 出队，文本按系统提示词出队，工具响应按序出队。"""
 
     structured_scripts: dict[type[BaseModel], list[Mapping[str, Any]]] = field(
         default_factory=dict
     )
     text_scripts: dict[str, list[str]] = field(default_factory=dict)
+    harness_scripts: list[AIMessage] = field(default_factory=list)
     calls: list[tuple[str, str]] = field(default_factory=list)
+    harness_calls: list[HarnessCall] = field(default_factory=list)
 
     async def text(self, system_prompt: str, user_payload: str) -> str:
         self.calls.append((system_prompt, user_payload))
@@ -103,6 +117,18 @@ class ScriptedGateway:
             raise AssertionError(f"固定替身收到未脚本化的结构化调用：{schema.__name__}")
         return schema.model_validate(scripts.pop(0))
 
+    async def tools(
+        self, messages: Sequence[BaseMessage], offered_tools: Sequence[BaseTool]
+    ) -> AIMessage:
+        self.harness_calls.append(
+            HarnessCall(
+                tuple(tool.name for tool in offered_tools), tuple(messages)
+            )
+        )
+        if not self.harness_scripts:
+            raise AssertionError("固定替身收到未脚本化的工具调用请求")
+        return self.harness_scripts.pop(0)
+
     def text_calls(self) -> list[str]:
         """文本调用的系统提示词序列（结构化路由调用不计入）。"""
         return [
@@ -120,35 +146,78 @@ class ScriptedGateway:
         raise AssertionError(f"没有该提示词的调用：{system_prompt[:24]!r}")
 
 
+def tool_call(
+    name: str, args: Mapping[str, Any] | None = None, *, call_id: str = "call-1"
+) -> AIMessage:
+    """脚本化一次工具调用：content 为空，``tool_calls`` 恰一条。"""
+    return AIMessage(
+        content="",
+        tool_calls=[
+            {
+                "name": name,
+                "args": dict(args or {}),
+                "id": call_id,
+                "type": "tool_call",
+            }
+        ],
+    )
+
+
+def final_answer(text: str) -> AIMessage:
+    """脚本化一次不带工具调用的最终答复：harness 循环由此进入 END。"""
+    return AIMessage(content=text)
+
+
+def _tool_harnesses() -> Mapping[Intent, CompiledStateGraph]:
+    """与 ``build_agent_runtime()`` 同形的测试装配：两个只读 intent 各一份无 checkpointer 的 harness。"""
+    return {
+        "view_schedule": build_tool_harness(
+            SCHEDULE_TOOLS,
+            timeout_seconds=TOOL_TIMEOUT_SECONDS,
+        ),
+        "view_progress": build_tool_harness(
+            PROGRESS_TOOLS,
+            timeout_seconds=TOOL_TIMEOUT_SECONDS,
+        ),
+    }
+
+
 @dataclass
 class Harness:
-    """一次测试的图、业务库与固定替身，共用唯一运行入口。"""
+    """一次测试的图、业务库、固定替身与 Run 依赖，共用唯一运行入口。"""
 
     graph: CompiledStateGraph
     db: Database
     model: ScriptedGateway
+    run_deps: AgentRunDeps
 
     async def invoke(
-        self, request: str, *, budget: ModelRequestBudget | None = None
+        self,
+        request: str,
+        *,
+        budget: ModelRequestBudget | None = None,
+        history: Sequence[ContextMessage] = (),
     ) -> AgentRunResult:
-        run = GeneratePlanRun(
-            business_day=BUSINESS_DAY,
-            budget=ModelRequestBudget() if budget is None else budget,
-        )
+        run = self.run_context(budget=budget, history=history)
         return await invoke_agent_run(
             self.graph,
             {"conversation_id": CONVERSATION_ID, "request": request},
             thread_config(CONVERSATION_ID),
             run,
-            AgentRunDeps(
-                model=self.model,
-                stats=StatsService(self.db),
-                plans=PlanRepo(self.db),
-                persistence=PlanPersistenceService(self.db),
-                catalog=ExerciseRepo(self.db),
-                records=WorkoutRecordsService(self.db),
-                skills=SkillLoader(),
-            ),
+            self.run_deps,
+        )
+
+    def run_context(
+        self,
+        *,
+        budget: ModelRequestBudget | None = None,
+        history: Sequence[ContextMessage] = (),
+    ) -> GeneratePlanRun:
+        """一次 Run 的运行上下文：业务日、共享预算与本次请求之前的上下文投影。"""
+        return GeneratePlanRun(
+            business_day=BUSINESS_DAY,
+            budget=ModelRequestBudget() if budget is None else budget,
+            conversation_messages=tuple(history),
         )
 
 
@@ -158,6 +227,7 @@ async def _harness(
     *,
     structured: Mapping[type[BaseModel], Sequence[Mapping[str, Any]]] | None = None,
     text: Mapping[str, Sequence[str]] | None = None,
+    harness: Sequence[AIMessage] = (),
 ) -> AsyncIterator[Harness]:
     db = Database(tmp_path / "fit_agent.db")
     await db.open()
@@ -172,6 +242,7 @@ async def _harness(
             text_scripts={
                 prompt: list(items) for prompt, items in (text or {}).items()
             },
+            harness_scripts=list(harness),
         )
         deps = GeneratePlanDeps(
             profiles=ProfileService(db),
@@ -190,6 +261,16 @@ async def _harness(
                 graph=build_generate_plan_graph(deps, checkpointer=saver),
                 db=db,
                 model=model,
+                run_deps=AgentRunDeps(
+                    model=model,
+                    stats=StatsService(db),
+                    plans=PlanRepo(db),
+                    persistence=PlanPersistenceService(db),
+                    catalog=ExerciseRepo(db),
+                    records=WorkoutRecordsService(db),
+                    skills=SkillLoader(),
+                    tool_harnesses=_tool_harnesses(),
+                ),
             )
     finally:
         await db.close()
@@ -388,94 +469,6 @@ async def test_form_record_request_guides_to_the_form_without_writing(
         assert await _row_counts(h.db) == before
 
 
-async def test_view_schedule_today_renders_the_plan_training_day(
-    tmp_path: Path,
-) -> None:
-    """``schedule_day=today``：按业务日取确定日期，动作名、组数与处方由计划草案确定性成文。"""
-    async with _harness(
-        tmp_path,
-        structured=_route(
-            domain="workout_execution",
-            action="query",
-            execution_type="schedule_query",
-            schedule_day="today",
-        ),
-    ) as h:
-        await _insert_active_plan(h.db, _schedule_plan_content())
-        before = await _row_counts(h.db)
-        result = await h.invoke("今天训练什么？")
-
-        assert result.intent == "view_schedule"
-        assert result.messages == (
-            "2026-06-01 的训练安排（计划目标：增肌）：\n"
-            "- 杠铃背蹲：3 组，5–8 次，60 kg\n"
-            "- 平板支撑：2 组，45–60 秒",
-        )
-        assert h.model.text_calls() == []
-        assert await _row_counts(h.db) == before
-
-
-async def test_view_schedule_tomorrow_targets_the_next_business_day(
-    tmp_path: Path,
-) -> None:
-    """``schedule_day=tomorrow``：查询日等于业务日 +1 天，自重处方不带负荷。"""
-    async with _harness(
-        tmp_path,
-        structured=_route(
-            domain="workout_execution",
-            action="query",
-            execution_type="schedule_query",
-            schedule_day="tomorrow",
-        ),
-    ) as h:
-        await _insert_active_plan(h.db, _schedule_plan_content())
-        result = await h.invoke("明天训练什么？")
-
-        assert result.messages == (
-            "2026-06-02 的训练安排（计划目标：增肌）：\n"
-            "- 自重引体向上：3 组，8–12 次（自重）",
-        )
-
-
-async def test_view_schedule_reports_a_rest_day_with_the_plan_days(
-    tmp_path: Path,
-) -> None:
-    """目标日期不是训练日：给出休息日说明与本周训练日，不调文本模型。"""
-    async with _harness(
-        tmp_path,
-        structured=_route(
-            domain="workout_execution",
-            action="query",
-            execution_type="schedule_query",
-            schedule_day="today",
-        ),
-    ) as h:
-        await _insert_active_plan(h.db, _bodyweight_plan_content())
-        result = await h.invoke("今天训练什么？")
-
-        assert result.messages == (
-            "2026-06-01 不是计划里的训练日，当天按休息安排；本次计划的训练日为 2026-06-02。",
-        )
-        assert h.model.text_calls() == []
-
-
-async def test_view_schedule_reports_the_missing_active_plan(tmp_path: Path) -> None:
-    """没有 active 计划：给出确定性说明，不写库、不生成计划。"""
-    async with _harness(
-        tmp_path,
-        structured=_route(
-            domain="workout_execution",
-            action="query",
-            execution_type="schedule_query",
-            schedule_day="today",
-        ),
-    ) as h:
-        result = await h.invoke("今天训练什么？")
-
-        assert result.messages == (NO_ACTIVE_PLAN_SCHEDULE_MESSAGE,)
-        assert result.draft_plan_id is None
-
-
 @pytest.mark.parametrize(
     "exercise_name, expected_id",
     [
@@ -564,25 +557,6 @@ async def test_general_chat_answers_with_one_text_call(tmp_path: Path) -> None:
         assert result.messages == (ANSWER,)
         assert result.draft_plan_id is None
         assert h.model.payload_for(GENERAL_CHAT_SYSTEM_PROMPT) == {"request": "你好"}
-        assert await _row_counts(h.db) == before
-
-
-async def test_view_progress_still_explains_the_statservice_values(
-    tmp_path: Path,
-) -> None:
-    """回归：``analytics/query`` 仍只解释既有统计，载荷字段与调用次数不变。"""
-    async with _harness(
-        tmp_path,
-        structured=_route(domain="analytics", action="query"),
-        text={VIEW_PROGRESS_SYSTEM_PROMPT: [ANSWER]},
-    ) as h:
-        before = await _row_counts(h.db)
-        result = await h.invoke("查看进步")
-        payload = h.model.payload_for(VIEW_PROGRESS_SYSTEM_PROMPT)
-
-        assert result.intent == "view_progress"
-        assert result.messages == (ANSWER,)
-        assert set(payload) == {"request", "personal_bests", "trend_summary"}
         assert await _row_counts(h.db) == before
 
 

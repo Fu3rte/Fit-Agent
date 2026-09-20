@@ -9,6 +9,7 @@
     "verify:stage5": "node scripts/stage5-plans-verify.mjs",
     "verify:stage6": "node scripts/stage6-natural-language-verify.mjs",
     "verify:bubble": "node scripts/bubble-tight-width-check.mjs",
+    "verify:chat-round": "node scripts/chat-round-notice-check.mjs",
     "preview": "vite preview"
   },
   "dependencies": {

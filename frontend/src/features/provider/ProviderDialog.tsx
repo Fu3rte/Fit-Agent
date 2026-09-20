@@ -153,10 +153,6 @@ export function ProviderDialog({ onClose }: { onClose: () => void }) {
           <DialogTitle className="font-medium tracking-tight">
             模型配置
           </DialogTitle>
-          <p className="text-xs text-muted-foreground">
-            LLM Provider 的 Base URL、模型名、客户端 transport、结构化输出方式与
-            API Key；保存时 Api Key 留空则沿用已存的 Key，其余字段整份覆盖。
-          </p>
         </div>
 
         {provider.isLoading ? (

@@ -58,3 +58,27 @@ export function eventText(event: AgentEventWire): string {
       return `错误：${event.data.message}`;
   }
 }
+
+/** 未完成的 Assistant 状态与 Run 状态的固定文案（失败／部分／中止都只用于展示） */
+const INCOMPLETE_LABEL: Record<string, string> = {
+  partial: "输出未完成",
+  failed: "本次运行失败",
+  aborted: "本次运行被中断",
+  cancelled: "本次运行被中断",
+};
+
+/**
+ * 一轮的失败／中断提示：优先用已提交 ``error`` Event 的可见文本（后端已脱敏），没有 error Event 时
+ * 按 Assistant 投影状态或 Run 状态取固定文案；失败提示缺失（正常轮次）返回 undefined。
+ */
+export function interruptedNotice(round: ChatRound): string | undefined {
+  const errorEvent = round.events.find((event) => event.event === "error");
+  if (errorEvent?.event === "error") return errorEvent.data.message;
+  const incomplete = round.assistants.find(
+    (assistant) => assistant.status !== "complete",
+  );
+  const status = incomplete?.status ?? round.run_status;
+  return status !== null && status !== undefined && status in INCOMPLETE_LABEL
+    ? INCOMPLETE_LABEL[status]
+    : undefined;
+}

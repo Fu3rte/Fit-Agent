@@ -3,21 +3,17 @@
 #       Pi agent-session.ts:689-708（message_end 才持久化消息）、transform-messages.ts:196-206
 #       （error／aborted Assistant 保留在历史里但从模型输入中跳过）；死锁约束：事务内只调 *_in_transaction。
 
-import asyncio
 import json
-from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
 
-import pytest
 from test_conversation_routes import _client, _create_conversation, _run
 
 from api.app import INTERRUPTED_RUN_ERROR_CODE, create_app
-from api.routes_agent import _persisted_frames
 from config import database_path
 from domain.conversations.repo import ConversationRepo
 from graph.router import ROUTER_SYSTEM_PROMPT, FitnessIntent
-from graph.workflow import GENERAL_CHAT_SYSTEM_PROMPT, AgentEvent
+from graph.workflow import GENERAL_CHAT_SYSTEM_PROMPT
 from storage.db import Database
 
 CHAT_ID = "11111111-1111-1111-1111-111111111111"
@@ -61,10 +57,10 @@ async def _crash_mid_stream(
     request: str,
     fragment: str,
 ) -> None:
-    """复现 SSE 中途进程终止：Run 停在 ``running``，已推送的 ``message`` 片段留在 Event 里。
+    """复现进程中途终止：Run 停在 ``running``，已推送的 ``message`` 片段留在 Event 里。
 
-    取消走 ``BaseException`` 通道，与 ``_persisted_frames`` 的 ``except Exception`` 错误分支不同，
-    因此不写 ``error`` Event，也不把 Run 收敛为 ``failed``。
+    硬终止不执行任何处理分支：Run 的状态与事件由启动收敛接手；客户端断开走
+    ``asyncio.CancelledError`` 分支，由取消语义自身收敛为 ``cancelled``。
     """
     conversations = ConversationRepo(db)
     await _begin(
@@ -78,14 +74,14 @@ async def _crash_mid_stream(
         await conversations.update_run_status_in_transaction(
             conn, run_id, status="running", updated_at=CREATED_AT
         )
-
-    async def interrupted() -> AsyncIterator[AgentEvent]:
-        yield AgentEvent("message", {"text": fragment})
-        raise asyncio.CancelledError
-
-    with pytest.raises(asyncio.CancelledError):
-        async for _frame in _persisted_frames(db, conversations, run_id, interrupted()):
-            pass
+        await conversations.append_event_in_transaction(
+            conn,
+            run_id=run_id,
+            sequence=1,
+            event_type="message",
+            payload={"text": fragment},
+            created_at=CREATED_AT,
+        )
 
 
 def _event_texts(round_: dict[str, Any]) -> list[tuple[str, str]]:

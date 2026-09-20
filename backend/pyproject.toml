@@ -11,6 +11,7 @@ dependencies = [
     "fastapi>=0.115",
     "uvicorn>=0.30",
     "aiosqlite>=0.21",
+    "anyio>=4",
     "platformdirs>=4.3",
     "tzlocal>=5",
     "tzdata>=2024.1",

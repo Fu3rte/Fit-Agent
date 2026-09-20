@@ -1,6 +1,6 @@
 """Fit-Agent 本地 FastAPI 应用基线。"""
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping, Sequence
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from pathlib import Path
@@ -8,7 +8,10 @@ from urllib.parse import urlsplit
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse
+from langchain_core.messages import AIMessage, BaseMessage
+from langchain_core.tools import BaseTool
 from langgraph.checkpoint.base import BaseCheckpointSaver
+from langgraph.graph.state import CompiledStateGraph
 
 from api import (
     dto,
@@ -21,6 +24,7 @@ from api import (
     routes_stats,
 )
 from config import (
+    TOOL_TIMEOUT_SECONDS,
     checkpoint_database_path,
     database_path,
     frontend_dist_dir,
@@ -38,10 +42,12 @@ from domain.profile.service import ProfileService
 from domain.records.service import WorkoutRecordsService
 from domain.stats.repo import StatsRepo
 from domain.stats.service import StatsService
+from domain.tool_cache.repo import ToolCacheRevisionsRepo
 from graph.checkpointer import open_checkpointer
 from graph.context import MemoryAssembler
 from graph.model import (
     MODEL_CALL_FAILED_MESSAGE,
+    InvalidModelResponse,
     ModelCallFailed,
     ModelGateway,
     TModel,
@@ -49,7 +55,11 @@ from graph.model import (
 )
 from graph.nodes import GeneratePlanDeps
 from graph.skills import SkillLoader
+from graph.state import Intent
 from graph.workflow import AgentRunDeps, build_generate_plan_graph
+from harness.cache import ToolResultCache
+from harness.graph import build_tool_harness
+from harness.tools.training import PROGRESS_TOOLS, SCHEDULE_TOOLS
 from provider_settings import ModelConfigurationError, provider_api_key_configured
 from storage.db import Database
 
@@ -121,6 +131,9 @@ def create_app(
         try:
             await db.open()
             await db.migrate()
+            user_version = await db.pragma_value("user_version")
+            if not isinstance(user_version, int):
+                raise RuntimeError(f"迁移后 user_version 不是整数：{user_version!r}")
             # 上次进程终止留下的未完成 Run 一律收敛为 failed，已提交 Run Event 原样保留供展示。
             await ConversationRepo(db).converge_unfinished_runs(
                 error_code=INTERRUPTED_RUN_ERROR_CODE,
@@ -130,7 +143,9 @@ def create_app(
                 checkpoint_database_path(resolved)
             ) as checkpointer:
                 app.state.checkpointer = checkpointer
-                app.state.agent_runtime = build_agent_runtime(db, checkpointer, resolved)
+                app.state.agent_runtime = build_agent_runtime(
+                    db, checkpointer, resolved, schema_version=user_version
+                )
                 app.state.business_timezone = local_timezone_name()
                 yield
         finally:
@@ -177,10 +192,19 @@ def build_agent_runtime(
     db: Database,
     checkpointer: BaseCheckpointSaver,
     data_dir: Path,
+    *,
+    schema_version: int,
 ) -> routes_agent.AgentRuntime:
-    """装配 Agent 三端点的生产依赖：一份 Planner／Evaluator 与唯一模型入口。"""
+    """装配 Agent 三端点的生产依赖：一份 Planner／Evaluator、唯一模型入口与一次性创建的只读工具缓存。"""
     model = _lazy_model_call(data_dir)
     skills = SkillLoader()
+    cache = ToolResultCache(
+        revisions=ToolCacheRevisionsRepo(db), schema_version=schema_version
+    )
+    tool_harnesses: Mapping[Intent, CompiledStateGraph] = {
+        "view_schedule": _tool_harness(SCHEDULE_TOOLS, cache=cache),
+        "view_progress": _tool_harness(PROGRESS_TOOLS, cache=cache),
+    }
     deps = GeneratePlanDeps(
         profiles=ProfileService(db),
         catalog=ExerciseRepo(db),
@@ -204,7 +228,19 @@ def build_agent_runtime(
             catalog=deps.catalog,
             records=WorkoutRecordsService(db),
             skills=skills,
+            tool_harnesses=tool_harnesses,
         ),
+    )
+
+
+def _tool_harness(
+    tools: Sequence[BaseTool], *, cache: ToolResultCache
+) -> CompiledStateGraph:
+    """只读工具 harness 的编译：无 checkpointer，工具超时、输出定界与缓存由装配方注入。"""
+    return build_tool_harness(
+        tools,
+        timeout_seconds=TOOL_TIMEOUT_SECONDS,
+        cache=cache,
     )
 
 
@@ -231,7 +267,21 @@ def _lazy_model_call(data_dir: Path) -> ModelGateway:
         except Exception as exc:
             raise ModelCallFailed(MODEL_CALL_FAILED_MESSAGE) from exc
 
-    return ModelGateway(text=text, structured=structured)
+    async def tools(
+        messages: Sequence[BaseMessage], offered_tools: Sequence[BaseTool]
+    ) -> AIMessage:
+        try:
+            gateway = build_model_gateway(data_dir)
+            return await gateway.tools(messages, offered_tools)
+        except ModelConfigurationError:
+            raise
+        except InvalidModelResponse:
+            # 响应不是 AIMessage 属模型响应错误，不是 Provider 调用失败：原样上抛给 Harness。
+            raise
+        except Exception as exc:
+            raise ModelCallFailed(MODEL_CALL_FAILED_MESSAGE) from exc
+
+    return ModelGateway(text=text, structured=structured, tools=tools)
 
 
 def _install_frontend_static(app: FastAPI, dist_dir: Path) -> None:

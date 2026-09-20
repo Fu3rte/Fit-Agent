@@ -1,9 +1,15 @@
 import asyncio
 from collections.abc import AsyncIterator, Mapping, Sequence
-from dataclasses import asdict, dataclass
-from datetime import date, timedelta
+from dataclasses import dataclass
+from datetime import date
 from typing import Any, Literal
 
+from langchain_core.messages import (
+    AIMessage,
+    BaseMessage,
+    HumanMessage,
+    SystemMessage,
+)
 from langchain_core.runnables import RunnableConfig
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.graph import END, START, StateGraph
@@ -14,20 +20,9 @@ from pydantic import BaseModel, ConfigDict
 from domain.actions.repo import ExerciseRepo
 from domain.actions.rules import RecordLoadMismatch, UnknownExercise
 from domain.actions.schema import Exercise, LoadConvention
-from domain.conversations.context import history_payload
+from domain.conversations.context import ContextMessage, history_payload
 from domain.plans.repo import PlanRepo
-from domain.plans.schema import (
-    BodyweightRepsPrescription,
-    EvaluationResult,
-    NeedsCalibration,
-    Plan,
-    PlanDraft,
-    PlanSession,
-    Prescription,
-    RepsPrescription,
-    TimedPrescription,
-    WeightedRepsPrescription,
-)
+from domain.plans.schema import EvaluationResult, Plan, PlanSession
 from domain.plans.service import (
     PlanDraftConflict,
     PlanNotFound,
@@ -39,7 +34,7 @@ from domain.records.schema import SetType, WorkoutSetInput
 from domain.records.service import WorkoutRecordsService
 from domain.stats.service import StatsService
 from graph.checkpointer import thread_config
-from graph.model import ModelGateway
+from graph.model import InvalidModelResponse, ModelGateway
 from graph.nodes import (
     ADJUST_PLAN_INTENT,
     ADJUSTMENT_SKILL_NAME,
@@ -53,12 +48,12 @@ from graph.nodes import (
 )
 from graph.router import (
     FitnessIntent,
-    ScheduleDay,
     classify_intent,
     workflow_intent,
 )
 from graph.skills import LoadedSkill, SkillLoader
 from graph.state import Intent, TerminationReason, WorkflowState
+from harness.tools.training import TrainingHarnessContext
 
 WAITING_CONFIRMATION_NODE = "wait_for_confirmation"
 
@@ -303,11 +298,14 @@ REJECT_DRAFT_MESSAGE = (
     "计划未通过评估（二次评估仍未通过）：本次不产生可激活计划，原计划保持不变。"
 )
 
-VIEW_PROGRESS_SYSTEM_PROMPT = (
-    "你是 Fit-Agent 的进步看板解释器。payload 里的 personal_bests 与 trend_summary 都是后端已经"
-    "算好的确定性统计结果：只能解释它们，不得重算、补算或推断任何数值，也不得编造记录里没有的成绩。"
-    "不评价进步／退步／停滞／疲劳，不输出 RIR、估算 1RM、训练容量或完成率。"
-    "只输出一段面向用户的中文说明文本。"
+TOOL_HARNESS_SYSTEM_PROMPT = (
+    "你是 Fit-Agent 的训练日程与进展助手，只负责依据工具结果回答。硬要求：\n"
+    "1. 当前业务日是 {business_day}：今天、明天、后天、本周五、下周一、ISO 日期、这个月与下个月"
+    "都按该业务日解释。\n"
+    "2. 涉及用户数据库事实时必须调用工具；只能依据工具结果回答，工具没有返回的事实不得编造。\n"
+    "3. 计划 coverage 之外不得推断为休息日；只有 coverage 内且没有训练日时才是休息日。\n"
+    "4. 计划、训练记录与统计均为空时明确说明没有数据。\n"
+    "5. 只输出面向用户的中文文本：不输出 JSON、不输出附加字段。"
 )
 
 KNOWLEDGE_QA_SYSTEM_PROMPT = (
@@ -343,11 +341,8 @@ NON_PLAN_INTENTS: tuple[Intent, ...] = (
     "general",
 )
 
-SCHEDULE_DAY_OFFSETS: Mapping[ScheduleDay, int] = {"today": 0, "tomorrow": 1}
-
-NO_ACTIVE_PLAN_SCHEDULE_MESSAGE = (
-    "当前没有已生效的训练计划：先生成并确认一份计划，日程查询才能给出具体安排。"
-)
+#: 走只读工具 harness 的两个 intent：最终文本仍回既有 ``message``／``done``。
+TOOL_INTENTS: tuple[Intent, ...] = ("view_schedule", "view_progress")
 
 INTERRUPT_EVENT_KEY = "__interrupt__"
 
@@ -379,6 +374,7 @@ class AgentRunDeps:
     catalog: ExerciseRepo
     records: WorkoutRecordsService
     skills: SkillLoader
+    tool_harnesses: Mapping[Intent, CompiledStateGraph]
 
 
 @dataclass(frozen=True, slots=True)
@@ -425,14 +421,14 @@ async def stream_agent_run(
                         intent, termination_reason=None, draft_plan_id=None
                     )
                     return
-                yield AgentEvent(
-                    "message",
-                    {
-                        "text": await _non_plan_text(
-                            intent, route, state["request"], run=run, deps=deps
-                        )
-                    },
+                text = (
+                    await _tool_answer(intent, state["request"], run=run, deps=deps)
+                    if intent in TOOL_INTENTS
+                    else await _non_plan_text(
+                        intent, route, state["request"], run=run, deps=deps
+                    )
                 )
+                yield AgentEvent("message", {"text": text})
                 yield _done_event(intent, termination_reason=None, draft_plan_id=None)
                 return
             target = await _existing_draft_target(
@@ -559,6 +555,69 @@ async def _existing_draft_target(
     return ExistingDraftTarget(replacement_id=draft.id)
 
 
+async def _tool_answer(
+    intent: Intent, request: str, *, run: GeneratePlanRun, deps: AgentRunDeps
+) -> str:
+    """``view_schedule``／``view_progress`` 的唯一实现：只读工具 harness 产出最终可见文本。"""
+    context = TrainingHarnessContext(
+        model=deps.model,
+        budget=run.budget,
+        business_day=run.business_day,
+        plans=deps.plans,
+        catalog=deps.catalog,
+        records=deps.records,
+        stats=deps.stats,
+    )
+    result = await deps.tool_harnesses[intent].ainvoke(
+        {
+            "messages": harness_messages(
+                request,
+                business_day=run.business_day,
+                history=run.conversation_messages,
+            )
+        },
+        context=context,
+    )
+    return harness_answer(result["messages"])
+
+
+def harness_messages(
+    request: str, *, business_day: date, history: Sequence[ContextMessage]
+) -> list[BaseMessage]:
+    """harness 的消息序列：业务日 system ＋ 已重建历史 ＋ 当前请求（只出现一次）。"""
+    return [
+        SystemMessage(
+            content=TOOL_HARNESS_SYSTEM_PROMPT.format(
+                business_day=business_day.isoformat()
+            )
+        ),
+        *(
+            HumanMessage(content=message.text)
+            if message.role == "user"
+            else AIMessage(content=message.text)
+            for message in history
+        ),
+        HumanMessage(content=request),
+    ]
+
+
+def harness_answer(messages: Sequence[BaseMessage]) -> str:
+    """harness 的最终可见文本：最后一个 ``AIMessage`` 的字符串 content。"""
+    final = next(
+        (
+            message
+            for message in reversed(messages)
+            if isinstance(message, AIMessage)
+        ),
+        None,
+    )
+    if final is None:
+        raise InvalidModelResponse("工具回答没有产生最终 AIMessage")
+    if not isinstance(final.content, str):
+        raise InvalidModelResponse("工具回答的最终响应不是纯文本：无法作为可见文本使用")
+    return final.content.strip()
+
+
 async def _non_plan_text(
     intent: Intent,
     route: FitnessIntent,
@@ -567,11 +626,7 @@ async def _non_plan_text(
     run: GeneratePlanRun,
     deps: AgentRunDeps,
 ) -> str:
-    """非计划分支的可见文本：表单引导、统计解释、日程查询、知识问答与一般对话。"""
-    if intent == "view_progress":
-        return await _progress_explanation(request, run=run, deps=deps)
-    if intent == "view_schedule":
-        return await _schedule_text(route, run=run, deps=deps)
+    """非计划分支的可见文本：表单引导、知识问答与一般对话。"""
     if intent == "knowledge_qa":
         return await _knowledge_answer(route, request, run=run, deps=deps)
     if intent == "general":
@@ -693,77 +748,6 @@ def _candidate_plan_session_payload(session: PlanSession) -> dict[str, Any]:
     }
 
 
-async def _schedule_text(
-    route: FitnessIntent, *, run: GeneratePlanRun, deps: AgentRunDeps
-) -> str:
-    """``view_schedule`` 的唯一实现：active 计划草案按查询日确定性成文，不调模型、不写库。"""
-    target = _schedule_target(route, run.business_day)
-    active = await deps.plans.read_active()
-    if active is None:
-        return NO_ACTIVE_PLAN_SCHEDULE_MESSAGE
-    draft = PlanDraft.model_validate(active.structured_content)
-    day = next(
-        (item for item in draft.training_days if item.scheduled_on == target), None
-    )
-    if day is None:
-        training_days = "、".join(
-            item.scheduled_on.isoformat() for item in draft.training_days
-        )
-        return (
-            f"{target.isoformat()} 不是计划里的训练日，当天按休息安排；"
-            f"本次计划的训练日为 {training_days}。"
-        )
-    catalog = {exercise.id: exercise for exercise in await deps.catalog.list_all()}
-    lines = [f"{target.isoformat()} 的训练安排（计划目标：{draft.goal}）："]
-    lines.extend(
-        f"- {_exercise_name(catalog, planned.exercise_id)}：{planned.sets} 组，"
-        f"{_prescription_text(planned.prescription)}"
-        for planned in day.exercises
-    )
-    return "\n".join(lines)
-
-
-def _schedule_target(route: FitnessIntent, business_day: date) -> date:
-    """查询日 → 业务日期；``schedule_day`` 缺失属于无法成文的组合。"""
-    day = route.schedule_day
-    if day is None:
-        raise ValueError("view_schedule 缺少 schedule_day：Schema 已拒绝该组合")
-    return business_day + timedelta(days=SCHEDULE_DAY_OFFSETS[day])
-
-
-def _exercise_name(catalog: Mapping[str, Exercise], exercise_id: str) -> str:
-    """动作显示名：目录命中用 ``standard_name_zh``，未命中回落到稳定 ``exercise_id``。"""
-    exercise = catalog.get(exercise_id)
-    return exercise_id if exercise is None else exercise.standard_name_zh
-
-
-def _prescription_text(prescription: Prescription) -> str:
-    """处方 → 确定性文本：三种处方各自给出次数区间与负荷或时长。"""
-    if isinstance(prescription, WeightedRepsPrescription):
-        load = prescription.load
-        weight = (
-            "重量待校准"
-            if isinstance(load, NeedsCalibration)
-            else f"{load.weight_kg:g} kg"
-        )
-        return f"{_reps_text(prescription)}，{weight}"
-    if isinstance(prescription, BodyweightRepsPrescription):
-        return f"{_reps_text(prescription)}（自重）"
-    if isinstance(prescription, TimedPrescription):
-        return (
-            f"{prescription.duration_seconds_min}–"
-            f"{prescription.duration_seconds_max} 秒"
-        )
-    raise ValueError(f"未知处方类型：{prescription!r}")
-
-
-def _reps_text(prescription: RepsPrescription) -> str:
-    """次数区间文本：上下限相同时只写一个值。"""
-    if prescription.reps_min == prescription.reps_max:
-        return f"{prescription.reps_min} 次"
-    return f"{prescription.reps_min}–{prescription.reps_max} 次"
-
-
 async def _knowledge_answer(
     route: FitnessIntent, request: str, *, run: GeneratePlanRun, deps: AgentRunDeps
 ) -> str:
@@ -835,21 +819,3 @@ def _skill_payload(skill: LoadedSkill) -> dict[str, Any]:
             for reference in skill.references
         ],
     }
-
-
-async def _progress_explanation(
-    request: str, *, run: GeneratePlanRun, deps: AgentRunDeps
-) -> str:
-    """``view_progress`` 的模型解释：统计由既有 ``StatsService`` 现算，模型只解释这些数值。"""
-    payload = {
-        "request": request,
-        **history_payload(run.conversation_messages),
-        "personal_bests": [
-            asdict(best) for best in await deps.stats.list_personal_bests()
-        ],
-        "trend_summary": asdict(await deps.stats.trend_summary(run.business_day)),
-    }
-    text = await request_model(
-        deps.model, VIEW_PROGRESS_SYSTEM_PROMPT, payload, run.budget
-    )
-    return text.strip()

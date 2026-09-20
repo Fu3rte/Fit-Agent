@@ -126,10 +126,10 @@ async def _drive_to(
         )
 
 
-async def test_fresh_database_migrates_to_version_four(tmp_path: Path) -> None:
-    """全新库迁移到 v4；四张对话表与 entries 时间序索引就位。"""
+async def test_fresh_database_migrates_to_version_five(tmp_path: Path) -> None:
+    """全新库迁移到 v5；四张对话表与 entries 时间序索引就位。"""
     async with _harness(tmp_path) as (db, _repo):
-        assert await db.pragma_value("user_version") == 4
+        assert await db.pragma_value("user_version") == 5
 
         async def op(conn: aiosqlite.Connection) -> tuple[list[str], list[str]]:
             async with conn.execute(
@@ -147,16 +147,16 @@ async def test_fresh_database_migrates_to_version_four(tmp_path: Path) -> None:
 
 
 def test_migration_files_are_contiguous() -> None:
-    """004 归入连续编号清单（编号即 user_version，不跳号）。"""
+    """005 归入连续编号清单（编号即 user_version，不跳号）。"""
     migrations = load_migrations(MIGRATIONS_DIR)
-    assert [version for version, _name, _sql in migrations] == [1, 2, 3, 4]
-    assert migrations[-1][1] == "004_conversation_history.sql"
+    assert [version for version, _name, _sql in migrations] == [1, 2, 3, 4, 5]
+    assert migrations[-1][1] == "005_tool_cache_revisions.sql"
 
 
 async def test_version_three_database_upgrades_without_business_data_loss(
     tmp_path: Path,
 ) -> None:
-    """真实 v3 库（含业务数据）升级到 v4：业务行原样保留。"""
+    """真实 v3 库（含业务数据）升级到 v5：业务行原样保留。"""
     v3_dir = tmp_path / "v3"
     v3_dir.mkdir()
     for name in ("001_initial.sql", "002_timed_sets_and_new_actions.sql", "003_rejected_plan_status.sql"):
@@ -203,8 +203,8 @@ async def test_version_three_database_upgrades_without_business_data_loss(
         before = await legacy_db.under_lock(business_rows)
 
     async with _open_db(db_path) as upgraded_db:
-        assert await upgraded_db.migrate() == 4
-        assert await upgraded_db.pragma_value("user_version") == 4
+        assert await upgraded_db.migrate() == 5
+        assert await upgraded_db.pragma_value("user_version") == 5
         after = await upgraded_db.under_lock(business_rows)
         repo = ConversationRepo(upgraded_db)
         conversation = await repo.create_conversation(
@@ -734,6 +734,38 @@ async def test_waiting_event_and_run_status_commit_together(tmp_path: Path) -> N
                 )
         assert await _count(db, "conversation_entries") == 1
         assert await repo.read_run("run-w") == still_waiting
+
+
+async def test_cancel_active_run_only_converges_unfinished_runs(tmp_path: Path) -> None:
+    """断连收敛只动活动态：``running`` 转 ``cancelled``（重复调用不再迁移），
+    已提交 ``waiting`` 的 Run 保持不动。"""
+    async with _harness(tmp_path) as (db, repo):
+        await repo.create_conversation(
+            conversation_id="conv-1",
+            title="断连",
+            created_at="2026-06-01T09:00:00+00:00",
+        )
+        await _create_run(repo, db, "conv-1", "k")
+        await _drive_to(repo, db, "run-k", "running")
+        assert await repo.cancel_active_run(
+            "run-k", updated_at="2026-06-01T09:00:40+00:00"
+        )
+        cancelled = await repo.read_run("run-k")
+        assert cancelled is not None and cancelled.status == "cancelled"
+        assert (
+            await repo.cancel_active_run("run-k", updated_at="2026-06-01T09:00:41+00:00")
+            is False
+        )
+
+        await _create_run(repo, db, "conv-1", "v")
+        await _drive_to(repo, db, "run-v", "waiting")
+        assert (
+            await repo.cancel_active_run("run-v", updated_at="2026-06-01T09:00:42+00:00")
+            is False
+        )
+        waiting = await repo.read_run("run-v")
+        assert waiting is not None and waiting.status == "waiting"
+        assert waiting.updated_at == "2026-06-01T09:05:00+00:00"
 
 
 async def test_latest_compaction_is_read_by_sequence(tmp_path: Path) -> None:

@@ -5,7 +5,7 @@ from datetime import date
 import aiosqlite
 
 from domain.body_metrics.schema import BodyMetric
-from storage.db import Database
+from storage.db import Database, require_outer_transaction
 
 _COLUMNS = "id, measured_on, weight_kg, body_fat_pct"
 
@@ -26,24 +26,62 @@ class BodyMetricsRepo:
     def __init__(self, db: Database):
         self._db = db
 
-    async def insert(
-        self, measured_on: date, weight_kg: float, body_fat_pct: float | None
+    # ---------- 事务内写原语（调用方持有 Database.transaction()） ----------
+
+    async def create_in_transaction(
+        self,
+        conn: aiosqlite.Connection,
+        measured_on: date,
+        weight_kg: float,
+        body_fat_pct: float | None,
     ) -> BodyMetric:
-        """新增一条身体指标并读回（同一事务）。"""
-        async with self._db.transaction() as conn:
-            cursor = await conn.execute(
-                "INSERT INTO body_metrics (measured_on, weight_kg, body_fat_pct)"
-                " VALUES (?, ?, ?)",
-                (measured_on.isoformat(), weight_kg, body_fat_pct),
-            )
-            try:
-                metric_id = int(cursor.lastrowid or 0)
-            finally:
-                await cursor.close()
-            record = await _read_by_id(conn, metric_id)
-            if record is None:
-                raise RuntimeError(f"身体指标写入后读回失败：{metric_id}")
+        """新增一条身体指标并读回；必须复用外层事务。"""
+        require_outer_transaction(conn, "身体指标新增")
+        cursor = await conn.execute(
+            "INSERT INTO body_metrics (measured_on, weight_kg, body_fat_pct)"
+            " VALUES (?, ?, ?)",
+            (measured_on.isoformat(), weight_kg, body_fat_pct),
+        )
+        try:
+            metric_id = int(cursor.lastrowid or 0)
+        finally:
+            await cursor.close()
+        record = await _read_by_id(conn, metric_id)
+        if record is None:
+            raise RuntimeError(f"身体指标写入后读回失败：{metric_id}")
         return record
+
+    async def update_in_transaction(
+        self,
+        conn: aiosqlite.Connection,
+        metric_id: int,
+        measured_on: date,
+        weight_kg: float,
+        body_fat_pct: float | None,
+    ) -> BodyMetric | None:
+        """整条覆盖修改（PUT 语义）并读回；身份不存在即 None。"""
+        require_outer_transaction(conn, "身体指标修改")
+        await conn.execute(
+            "UPDATE body_metrics SET measured_on = ?, weight_kg = ?,"
+            " body_fat_pct = ? WHERE id = ?",
+            (measured_on.isoformat(), weight_kg, body_fat_pct, metric_id),
+        )
+        return await _read_by_id(conn, metric_id)
+
+    async def delete_in_transaction(
+        self, conn: aiosqlite.Connection, metric_id: int
+    ) -> bool:
+        """物理删除一条身体指标；返回是否删除了行（表内无软删除列）。"""
+        require_outer_transaction(conn, "身体指标删除")
+        cursor = await conn.execute(
+            "DELETE FROM body_metrics WHERE id = ?", (metric_id,)
+        )
+        try:
+            return cursor.rowcount == 1
+        finally:
+            await cursor.close()
+
+    # ---------- 只读公开出口（under_lock） ----------
 
     async def read(self, metric_id: int) -> BodyMetric | None:
         """按身份读取；不存在即 None。"""
@@ -58,35 +96,5 @@ class BodyMetricsRepo:
             ) as cursor:
                 rows = await cursor.fetchall()
             return tuple(BodyMetric.from_row(dict(row)) for row in rows)
-
-        return await self._db.under_lock(op)
-
-    async def update(
-        self,
-        metric_id: int,
-        measured_on: date,
-        weight_kg: float,
-        body_fat_pct: float | None,
-    ) -> BodyMetric | None:
-        """整条覆盖修改（PUT 语义）并读回；身份不存在即 None。"""
-        async with self._db.transaction() as conn:
-            await conn.execute(
-                "UPDATE body_metrics SET measured_on = ?, weight_kg = ?,"
-                " body_fat_pct = ? WHERE id = ?",
-                (measured_on.isoformat(), weight_kg, body_fat_pct, metric_id),
-            )
-            return await _read_by_id(conn, metric_id)
-
-    async def delete(self, metric_id: int) -> bool:
-        """物理删除一条身体指标；返回是否删除了行（表内无软删除列）。"""
-
-        async def op(conn: aiosqlite.Connection) -> bool:
-            cursor = await conn.execute(
-                "DELETE FROM body_metrics WHERE id = ?", (metric_id,)
-            )
-            try:
-                return cursor.rowcount == 1
-            finally:
-                await cursor.close()
 
         return await self._db.under_lock(op)

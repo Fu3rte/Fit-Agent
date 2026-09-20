@@ -1,3 +1,4 @@
+import asyncio
 import json
 from collections.abc import AsyncIterator, Sequence
 from dataclasses import dataclass
@@ -5,9 +6,11 @@ from datetime import date
 from typing import Any, Literal, cast
 from uuid import uuid4
 
+from anyio import CancelScope
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import StreamingResponse
 from langgraph.graph.state import CompiledStateGraph
+from starlette.types import Send
 
 from api.deps import current_business_date, iso_now
 from api.dto import (
@@ -73,6 +76,24 @@ class AgentRuntime:
     run_deps: AgentRunDeps
 
 
+class _AgentRunStream(StreamingResponse):
+    """客户端断开的收敛覆盖到下游 ``send`` 边界。"""
+
+    def __init__(
+        self, content: AsyncIterator[str], *, conversations: ConversationRepo, run_id: str
+    ) -> None:
+        super().__init__(content, media_type="text/event-stream")
+        self._conversations = conversations
+        self._run_id = run_id
+
+    async def stream_response(self, send: Send) -> None:
+        try:
+            await super().stream_response(send)
+        except asyncio.CancelledError:
+            await _converge_cancelled_run(self._conversations, self._run_id)
+            raise
+
+
 @router.post("/api/agent/run")
 async def run_agent(
     body: AgentRunBody,
@@ -120,14 +141,15 @@ async def run_agent(
             _replay_frames(conversations, run.id), media_type="text/event-stream"
         )
     # 压缩、上下文重建与模型调用都不在本请求的数据库事务内；三段顺序固定在 ``_run_events`` 里。
-    return StreamingResponse(
+    return _AgentRunStream(
         _persisted_frames(
             db,
             conversations,
             run.id,
             _run_events(runtime, db, run=run, body=body, business_day=business_day),
         ),
-        media_type="text/event-stream",
+        conversations=conversations,
+        run_id=run.id,
     )
 
 
@@ -375,7 +397,10 @@ async def _persisted_frames(
     run_id: str,
     events: AsyncIterator[AgentEvent],
 ) -> AsyncIterator[str]:
-    """事件流 → SSE 文本帧：每个语义事件先落库再发送，运行错误只发一个 ``error`` 帧再关闭。"""
+    """事件流 → SSE 文本帧：每个语义事件先落库再发送，运行错误只发一个 ``error`` 帧再关闭。
+
+    客户端断开（``asyncio.CancelledError``）按取消语义收敛 Run，不发帧、不写 Assistant Entry。
+    """
     sequence = 0
     messages: list[str] = []
     try:
@@ -388,6 +413,11 @@ async def _persisted_frames(
             if event.event == "message":
                 messages.append(str(event.data["text"]))
             yield _frame(event)
+    except asyncio.CancelledError:
+        # 客户端断开：生成器帧内的取消走同一次收敛；帧外交出的取消由 :class:`_AgentRunStream`
+        # 的下游 send 边界收尾。
+        await _converge_cancelled_run(conversations, run_id)
+        raise
     except Exception as error:
         message = agent_run_error_message(error)
         async with db.transaction() as conn:
@@ -402,6 +432,12 @@ async def _persisted_frames(
                 created_at=iso_now(),
             )
         yield _frame(AgentEvent("error", {"message": message}))
+
+
+async def _converge_cancelled_run(conversations: ConversationRepo, run_id: str) -> None:
+    # AnyIO 在已取消作用域内反复重投取消，shield 保证收敛事务跑完。
+    with CancelScope(shield=True):
+        await conversations.cancel_active_run(run_id, updated_at=iso_now())
 
 
 async def _record_event(
