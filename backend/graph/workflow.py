@@ -1,8 +1,7 @@
 import asyncio
-import json
 from collections.abc import AsyncIterator, Mapping, Sequence
 from dataclasses import asdict, dataclass
-from datetime import date
+from datetime import date, timedelta
 from typing import Any, Literal
 
 from langchain_core.runnables import RunnableConfig
@@ -16,7 +15,18 @@ from domain.actions.repo import ExerciseRepo
 from domain.actions.rules import RecordLoadMismatch, UnknownExercise
 from domain.actions.schema import Exercise, LoadConvention
 from domain.plans.repo import PlanRepo
-from domain.plans.schema import EvaluationResult, Plan, PlanSession
+from domain.plans.schema import (
+    BodyweightRepsPrescription,
+    EvaluationResult,
+    NeedsCalibration,
+    Plan,
+    PlanDraft,
+    PlanSession,
+    Prescription,
+    RepsPrescription,
+    TimedPrescription,
+    WeightedRepsPrescription,
+)
 from domain.plans.service import (
     PlanDraftConflict,
     PlanNotFound,
@@ -28,17 +38,26 @@ from domain.records.schema import SetType, WorkoutSetInput
 from domain.records.service import WorkoutRecordsService
 from domain.stats.service import StatsService
 from graph.checkpointer import thread_config
-from graph.model import ModelCall, parse_model_json
+from graph.model import ModelGateway
 from graph.nodes import (
     ADJUST_PLAN_INTENT,
+    ADJUSTMENT_SKILL_NAME,
+    PLANNING_SKILL_NAME,
     ConfirmationConflict,
     GeneratePlanDeps,
     GeneratePlanNodes,
     GeneratePlanRun,
     ModelRequestBudget,
     request_model,
+    request_structured_model,
 )
-from graph.router import classify_intent
+from graph.router import (
+    FitnessIntent,
+    ScheduleDay,
+    classify_intent,
+    workflow_intent,
+)
+from graph.skills import LoadedSkill, SkillLoader
 from graph.state import Intent, TerminationReason, WorkflowState
 
 WAITING_CONFIRMATION_NODE = "wait_for_confirmation"
@@ -249,10 +268,6 @@ class ExtractedWorkout(BaseModel):
     sets: list[ExtractedWorkoutSet]
 
 
-_EXTRACTED_WORKOUT_SCHEMA_TEXT = json.dumps(
-    ExtractedWorkout.model_json_schema(), ensure_ascii=False, sort_keys=True
-)
-
 NATURAL_LANGUAGE_RECORD_EXTRACTION_PROMPT = (
     "你是 Fit-Agent 的自然语言打卡提取器。只把用户这次训练描述提取为结构化事实，不写库、"
     "不计算任何统计、不决定候选计划日程。硬要求：\n"
@@ -261,9 +276,7 @@ NATURAL_LANGUAGE_RECORD_EXTRACTION_PROMPT = (
     "payload.business_day 折算。\n"
     "3. 每条组给出 set_no（同一动作内从 1 开始）、set_type（work／warmup／assisted）；外加重量"
     "动作给 weight_kg ＋ reps ＋ 与目录一致的 load_convention；纯自重动作只给 reps；计时动作"
-    "只给 duration_seconds。\n"
-    "4. 只输出一个 JSON 对象，字段与下方 Schema 完全一致，不输出任何解释文字或额外字段。\n"
-    "提取 Schema：" + _EXTRACTED_WORKOUT_SCHEMA_TEXT
+    "只给 duration_seconds。"
 )
 
 NATURAL_LANGUAGE_RECORD_MESSAGE_PROMPT = (
@@ -298,12 +311,43 @@ VIEW_PROGRESS_SYSTEM_PROMPT = (
     "只输出一段面向用户的中文说明文本。"
 )
 
+KNOWLEDGE_QA_SYSTEM_PROMPT = (
+    "你是 Fit-Agent 的训练知识问答助手。payload.knowledge_type 决定本次知识源：\n"
+    "- exercise_technique：payload.exercise_name 是用户问到的动作名，payload.catalog_exercise 是动作"
+    "目录里归一化后的实体（可能为 null），payload.skills 为空。\n"
+    "- methodology：payload.skills 是仓库内既有训练方法论 Skill 的正文与引用文件，"
+    "payload.catalog_exercise 为空。\n"
+    "硬要求：\n"
+    "1. catalog_exercise 非空时，它的记录口径与负重口径照原样使用；catalog_exercise 为 null 时"
+    "只讲该动作的一般技术要点，不编造目录事实。\n"
+    "2. payload.skills 非空时以它为主要依据；依据不足时给出通行的一般方法论并说明这是一般性说明。\n"
+    "3. 只给一般健身教育信息：不做医疗诊断、不给个体化医疗结论、不承诺疗效；涉及疼痛、伤病或身体"
+    "异常时明确建议咨询专业医疗人员。\n"
+    "4. 只输出一段面向用户的中文文本：不生成或修改训练计划、不输出 JSON、不输出额外字段。"
+)
+
+GENERAL_CHAT_SYSTEM_PROMPT = (
+    "你是 Fit-Agent 的对话助手。payload.request 是本次用户请求，它不属于计划管理、打卡、统计、"
+    "日程查询与训练知识问答业务。硬要求：只做一般性中文答复，不生成或修改训练计划、不写业务库、"
+    "不替用户决定训练处方；不做医疗诊断、不给个体化医疗结论，涉及疼痛、伤病或身体异常时明确建议"
+    "咨询专业医疗人员。只输出一段面向用户的中文文本。"
+)
+
 AgentEventName = Literal["node", "message", "waiting", "done", "error"]
 
 NON_PLAN_INTENTS: tuple[Intent, ...] = (
     "form_record",
     "natural_language_record",
     "view_progress",
+    "view_schedule",
+    "knowledge_qa",
+    "general",
+)
+
+SCHEDULE_DAY_OFFSETS: Mapping[ScheduleDay, int] = {"today": 0, "tomorrow": 1}
+
+NO_ACTIVE_PLAN_SCHEDULE_MESSAGE = (
+    "当前没有已生效的训练计划：先生成并确认一份计划，日程查询才能给出具体安排。"
 )
 
 INTERRUPT_EVENT_KEY = "__interrupt__"
@@ -329,12 +373,13 @@ class ExistingDraftTarget:
 class AgentRunDeps:
     """``invoke_agent_run``／``stream_agent_run`` 的构造期依赖。"""
 
-    model: ModelCall
+    model: ModelGateway
     stats: StatsService
     plans: PlanRepo
     persistence: PlanPersistenceService
     catalog: ExerciseRepo
     records: WorkoutRecordsService
+    skills: SkillLoader
 
 
 @dataclass(frozen=True, slots=True)
@@ -359,9 +404,10 @@ async def stream_agent_run(
         intent: Intent | None = None
         target = ExistingDraftTarget()
         if not message_red_flag_hits(state["request"]):
-            intent = await classify_intent(
+            route = await classify_intent(
                 state["request"], model=deps.model, budget=run.budget
             )
+            intent = workflow_intent(route)
             if intent != ADJUST_PLAN_INTENT:
                 run.adjustment = None
             if intent in NON_PLAN_INTENTS:
@@ -379,7 +425,7 @@ async def stream_agent_run(
                     "message",
                     {
                         "text": await _non_plan_text(
-                            intent, state["request"], run=run, deps=deps
+                            intent, route, state["request"], run=run, deps=deps
                         )
                     },
                 )
@@ -510,9 +556,14 @@ async def _existing_draft_target(
 
 
 async def _non_plan_text(
-    intent: Intent, request: str, *, run: GeneratePlanRun, deps: AgentRunDeps
+    intent: Intent,
+    route: FitnessIntent,
+    request: str,
+    *,
+    run: GeneratePlanRun,
+    deps: AgentRunDeps,
 ) -> str:
-    """两类非计划分支的可见文本：表单引导，或 ``view_progress`` 的统计解释。"""
+    """非计划分支的可见文本：表单引导、统计解释、日程查询、知识问答与一般对话。"""
     if intent == "view_progress":
         return await _progress_explanation(
             request,
@@ -520,6 +571,12 @@ async def _non_plan_text(
             budget=run.budget,
             deps=deps,
         )
+    if intent == "view_schedule":
+        return await _schedule_text(route, run=run, deps=deps)
+    if intent == "knowledge_qa":
+        return await _knowledge_answer(route, request, run=run, deps=deps)
+    if intent == "general":
+        return await _general_answer(request, run=run, deps=deps)
     return FORM_RECORD_GUIDE
 
 
@@ -536,17 +593,15 @@ async def _natural_language_record(
 ) -> NaturalLanguageRecordOutcome:
     """自然语言打卡的唯一实现：提取 → 校验 → 候选日程 → 可读摘要。"""
     catalog = await deps.catalog.list_all()
-    extraction = parse_model_json(
-        await request_model(
-            deps.model,
-            NATURAL_LANGUAGE_RECORD_EXTRACTION_PROMPT,
-            {
-                "request": request,
-                "business_day": run.business_day.isoformat(),
-                "actions": [_action_payload(exercise) for exercise in catalog],
-            },
-            run.budget,
-        ),
+    extraction = await request_structured_model(
+        deps.model,
+        NATURAL_LANGUAGE_RECORD_EXTRACTION_PROMPT,
+        {
+            "request": request,
+            "business_day": run.business_day.isoformat(),
+            "actions": [_action_payload(exercise) for exercise in catalog],
+        },
+        run.budget,
         ExtractedWorkout,
     )
     try:
@@ -636,6 +691,150 @@ def _candidate_plan_session_payload(session: PlanSession) -> dict[str, Any]:
         "id": session.id,
         "plan_id": session.plan_id,
         "scheduled_on": session.scheduled_on.isoformat(),
+    }
+
+
+async def _schedule_text(
+    route: FitnessIntent, *, run: GeneratePlanRun, deps: AgentRunDeps
+) -> str:
+    """``view_schedule`` 的唯一实现：active 计划草案按查询日确定性成文，不调模型、不写库。"""
+    target = _schedule_target(route, run.business_day)
+    active = await deps.plans.read_active()
+    if active is None:
+        return NO_ACTIVE_PLAN_SCHEDULE_MESSAGE
+    draft = PlanDraft.model_validate(active.structured_content)
+    day = next(
+        (item for item in draft.training_days if item.scheduled_on == target), None
+    )
+    if day is None:
+        training_days = "、".join(
+            item.scheduled_on.isoformat() for item in draft.training_days
+        )
+        return (
+            f"{target.isoformat()} 不是计划里的训练日，当天按休息安排；"
+            f"本次计划的训练日为 {training_days}。"
+        )
+    catalog = {exercise.id: exercise for exercise in await deps.catalog.list_all()}
+    lines = [f"{target.isoformat()} 的训练安排（计划目标：{draft.goal}）："]
+    lines.extend(
+        f"- {_exercise_name(catalog, planned.exercise_id)}：{planned.sets} 组，"
+        f"{_prescription_text(planned.prescription)}"
+        for planned in day.exercises
+    )
+    return "\n".join(lines)
+
+
+def _schedule_target(route: FitnessIntent, business_day: date) -> date:
+    """查询日 → 业务日期；``schedule_day`` 缺失属于无法成文的组合。"""
+    day = route.schedule_day
+    if day is None:
+        raise ValueError("view_schedule 缺少 schedule_day：Schema 已拒绝该组合")
+    return business_day + timedelta(days=SCHEDULE_DAY_OFFSETS[day])
+
+
+def _exercise_name(catalog: Mapping[str, Exercise], exercise_id: str) -> str:
+    """动作显示名：目录命中用 ``standard_name_zh``，未命中回落到稳定 ``exercise_id``。"""
+    exercise = catalog.get(exercise_id)
+    return exercise_id if exercise is None else exercise.standard_name_zh
+
+
+def _prescription_text(prescription: Prescription) -> str:
+    """处方 → 确定性文本：三种处方各自给出次数区间与负荷或时长。"""
+    if isinstance(prescription, WeightedRepsPrescription):
+        load = prescription.load
+        weight = (
+            "重量待校准"
+            if isinstance(load, NeedsCalibration)
+            else f"{load.weight_kg:g} kg"
+        )
+        return f"{_reps_text(prescription)}，{weight}"
+    if isinstance(prescription, BodyweightRepsPrescription):
+        return f"{_reps_text(prescription)}（自重）"
+    if isinstance(prescription, TimedPrescription):
+        return (
+            f"{prescription.duration_seconds_min}–"
+            f"{prescription.duration_seconds_max} 秒"
+        )
+    raise ValueError(f"未知处方类型：{prescription!r}")
+
+
+def _reps_text(prescription: RepsPrescription) -> str:
+    """次数区间文本：上下限相同时只写一个值。"""
+    if prescription.reps_min == prescription.reps_max:
+        return f"{prescription.reps_min} 次"
+    return f"{prescription.reps_min}–{prescription.reps_max} 次"
+
+
+async def _knowledge_answer(
+    route: FitnessIntent, request: str, *, run: GeneratePlanRun, deps: AgentRunDeps
+) -> str:
+    """``knowledge_qa`` 的唯一实现：知识类型决定装配的知识源，模型只作答、不写库。"""
+    methodology = route.knowledge_type == "methodology"
+    skills = (
+        [
+            _skill_payload(deps.skills.load(name))
+            for name in (PLANNING_SKILL_NAME, ADJUSTMENT_SKILL_NAME)
+        ]
+        if methodology
+        else []
+    )
+    matched = (
+        None
+        if methodology
+        else _matched_exercise(await deps.catalog.list_all(), route.exercise_name)
+    )
+    text = await request_model(
+        deps.model,
+        KNOWLEDGE_QA_SYSTEM_PROMPT,
+        {
+            "request": request,
+            "knowledge_type": route.knowledge_type,
+            "exercise_name": route.exercise_name,
+            "catalog_exercise": None if matched is None else _action_payload(matched),
+            "skills": skills,
+        },
+        run.budget,
+    )
+    return text.strip()
+
+
+async def _general_answer(
+    request: str, *, run: GeneratePlanRun, deps: AgentRunDeps
+) -> str:
+    """``general`` 的唯一实现：一次文本模型调用，不写库、不进入计划子图。"""
+    text = await request_model(
+        deps.model, GENERAL_CHAT_SYSTEM_PROMPT, {"request": request}, run.budget
+    )
+    return text.strip()
+
+
+def _matched_exercise(
+    catalog: Sequence[Exercise], name: str | None
+) -> Exercise | None:
+    """动作名归一化：精确匹配 ``standard_name_zh``，再取被名称完整包含的最长目录名；无命中即 None。"""
+    if name is None:
+        return None
+    exact = [exercise for exercise in catalog if exercise.standard_name_zh == name]
+    if exact:
+        return exact[0]
+    contained = [
+        exercise for exercise in catalog if exercise.standard_name_zh in name
+    ]
+    return max(
+        contained, key=lambda exercise: len(exercise.standard_name_zh), default=None
+    )
+
+
+def _skill_payload(skill: LoadedSkill) -> dict[str, Any]:
+    """知识问答的知识源：Skill 名称、正文与它引用的 reference 原文。"""
+    return {
+        "name": skill.metadata.name,
+        "description": skill.metadata.description,
+        "body": skill.body,
+        "references": [
+            {"path": reference.path, "text": reference.text}
+            for reference in skill.references
+        ],
     }
 
 

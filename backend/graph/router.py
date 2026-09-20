@@ -1,122 +1,158 @@
-"""确定性 Intent Router：封闭短语高置信分类 ＋ 零／多命中时的一次严格枚举兜底。"""
+from collections.abc import Mapping
+from typing import Literal, NamedTuple
 
-import asyncio
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from pydantic import BaseModel, ConfigDict
-
-from graph.model import ModelCall, parse_model_json
-from graph.nodes import ModelRequestBudget
+from graph.model import ModelGateway
+from graph.nodes import ModelRequestBudget, request_structured_model
 from graph.state import Intent
 
-FORM_RECORD_PHRASES: tuple[str, ...] = ("打开打卡表单", "使用表单记录", "表单打卡")
+Domain = Literal[
+    "workout_execution",
+    "plan_management",
+    "analytics",
+    "knowledge_qa",
+    "general",
+]
 
-NATURAL_LANGUAGE_RECORD_VERBS: tuple[str, ...] = ("记录", "打卡", "练了", "完成了")
+Action = Literal["query", "create", "modify", "chat"]
 
-NATURAL_LANGUAGE_RECORD_FACT_MARKERS: tuple[str, ...] = (
-    "kg",
-    "公斤",
-    "次",
-    "组",
-    "秒",
-    "今天",
-    "昨天",
-)
+ExecutionType = Literal[
+    "schedule_query",
+    "form_record",
+    "natural_language_record",
+]
 
-VIEW_PROGRESS_PHRASES: tuple[str, ...] = (
-    "查看进步",
-    "训练进展",
-    "最近表现",
-    "个人最佳",
-    "PB",
-    "趋势",
-    "看板",
-)
+KnowledgeType = Literal["exercise_technique", "methodology"]
 
-GENERATE_PLAN_PHRASES: tuple[str, ...] = (
-    "生成计划",
-    "制定计划",
-    "新训练计划",
-    "做个训练计划",
-)
-
-ADJUST_PLAN_PHRASES: tuple[str, ...] = (
-    "调整计划",
-    "修改计划",
-    "改计划",
-    "调整训练安排",
-)
-
-ROUTER_INTENT_DEFINITIONS: tuple[tuple[Intent, str], ...] = (
-    ("form_record", "用户要用打卡表单记录训练：" + "／".join(FORM_RECORD_PHRASES)),
-    (
-        "natural_language_record",
-        "用户用自然语言报告一次训练事实，同时出现记录动词（"
-        + "／".join(NATURAL_LANGUAGE_RECORD_VERBS)
-        + "）与事实标记（"
-        + "／".join(NATURAL_LANGUAGE_RECORD_FACT_MARKERS)
-        + "）",
-    ),
-    (
-        "view_progress",
-        "用户要查看训练进展、个人最佳或趋势：" + "／".join(VIEW_PROGRESS_PHRASES),
-    ),
-    ("generate_plan", "用户要生成一份新的训练计划：" + "／".join(GENERATE_PLAN_PHRASES)),
-    ("adjust_plan", "用户要调整已有的训练安排：" + "／".join(ADJUST_PLAN_PHRASES)),
-)
-
-ROUTER_SYSTEM_PROMPT = (
-    "你是 Fit-Agent 的意图路由器，只做一次分类：不执行任何业务动作、不写库、不生成或修改计划、"
-    "不做安全判定。从下列五类 intent 中选出唯一一个，只输出一个 JSON 对象，字段与取值严格如下，"
-    '不输出解释文字、额外字段或其它取值：{"intent": "<五类之一>"}。\n'
-    "五类定义：\n"
-    + "\n".join(
-        f"- {intent}：{definition}"
-        for intent, definition in ROUTER_INTENT_DEFINITIONS
-    )
-)
+ScheduleDay = Literal["today", "tomorrow"]
 
 
-class RouterClassification(BaseModel):
+class RouteKey(NamedTuple):
+    """合法路由组合的键：只含判别字段，不含用户填写的动作名与查询日。"""
+
+    domain: Domain
+    action: Action
+    execution_type: ExecutionType | None
+    knowledge_type: KnowledgeType | None
+
+
+#: 合法组合 → 工作流分支的唯一真相：Schema 校验与下游映射都读这张表。
+WORKFLOW_INTENTS: Mapping[RouteKey, Intent] = {
+    RouteKey("workout_execution", "query", "schedule_query", None): "view_schedule",
+    RouteKey("workout_execution", "create", "form_record", None): "form_record",
+    RouteKey(
+        "workout_execution", "create", "natural_language_record", None
+    ): "natural_language_record",
+    RouteKey("plan_management", "create", None, None): "generate_plan",
+    RouteKey("plan_management", "modify", None, None): "adjust_plan",
+    RouteKey("analytics", "query", None, None): "view_progress",
+    RouteKey("knowledge_qa", "query", None, "exercise_technique"): "knowledge_qa",
+    RouteKey("knowledge_qa", "query", None, "methodology"): "knowledge_qa",
+    RouteKey("general", "chat", None, None): "general",
+}
+
+
+class FitnessIntent(BaseModel):
+    """路由结果：请求领域、动作与分支所需的判别参数。"""
+
     model_config = ConfigDict(extra="forbid")
 
-    intent: Intent
+    domain: Domain = Field(
+        description="请求所属领域，取值 workout_execution／plan_management／analytics／knowledge_qa／general 之一。"
+    )
+    action: Action = Field(
+        description="请求动作，取值 query／create／modify／chat 之一，必须与 domain 组成合法组合。"
+    )
+    execution_type: ExecutionType | None = Field(
+        default=None,
+        description="workout_execution 分支的执行形态，取值 schedule_query／form_record／natural_language_record；domain 不是 workout_execution 时必须为 null。",
+    )
+    knowledge_type: KnowledgeType | None = Field(
+        default=None,
+        description="knowledge_qa 分支的知识类别，取值 exercise_technique／methodology；domain 不是 knowledge_qa 时必须为 null。",
+    )
+    exercise_name: str | None = Field(
+        default=None,
+        description="动作名，仅当 domain=knowledge_qa 且 knowledge_type=exercise_technique 时填写；其余任何组合都必须为 null。",
+    )
+    schedule_day: ScheduleDay | None = Field(
+        default=None,
+        description="查询日，仅当 execution_type=schedule_query 时取值 today／tomorrow；其余任何组合都必须为 null。",
+    )
+
+    @field_validator("exercise_name")
+    @classmethod
+    def _strip_exercise_name(cls, value: str | None) -> str | None:
+        """动作名去掉首尾空白；空白串视为未给出。"""
+        if value is None:
+            return None
+        text = value.strip()
+        return text or None
+
+    @model_validator(mode="after")
+    def _require_legal_combination(self) -> "FitnessIntent":
+        """组合表外的组合与错位参数都在解析期明确失败。"""
+        key = route_key(self)
+        if key not in WORKFLOW_INTENTS:
+            raise ValueError(f"非法路由组合：{key}")
+        if self.domain != "knowledge_qa" and self.exercise_name is not None:
+            raise ValueError(f"exercise_name 只属于 knowledge_qa：{self.exercise_name!r}")
+        if self.knowledge_type == "exercise_technique" and self.exercise_name is None:
+            raise ValueError("knowledge_type=exercise_technique 必须给出 exercise_name")
+        if self.knowledge_type == "methodology" and self.exercise_name is not None:
+            raise ValueError("knowledge_type=methodology 不得给出 exercise_name")
+        if self.execution_type == "schedule_query" and self.schedule_day is None:
+            raise ValueError("execution_type=schedule_query 必须给出 schedule_day")
+        if self.schedule_day is not None and self.execution_type != "schedule_query":
+            raise ValueError(f"schedule_day 只属于 schedule_query：{self.schedule_day!r}")
+        return self
 
 
-def deterministic_intents(request: str) -> tuple[Intent, ...]:
-    """封闭词表命中的 intent，按五类固定顺序返回；空元组即零命中。"""
-    text = _normalized(request)
-    hits: list[Intent] = []
-    if _contains_any(text, FORM_RECORD_PHRASES):
-        hits.append("form_record")
-    if _contains_any(text, NATURAL_LANGUAGE_RECORD_VERBS) and _contains_any(
-        text, NATURAL_LANGUAGE_RECORD_FACT_MARKERS
-    ):
-        hits.append("natural_language_record")
-    if _contains_any(text, VIEW_PROGRESS_PHRASES):
-        hits.append("view_progress")
-    if _contains_any(text, GENERATE_PLAN_PHRASES):
-        hits.append("generate_plan")
-    if _contains_any(text, ADJUST_PLAN_PHRASES):
-        hits.append("adjust_plan")
-    return tuple(hits)
+def route_key(fitness: FitnessIntent) -> RouteKey:
+    """路由结果的组合键：判别字段之外的字段不参与分支选择。"""
+    return RouteKey(
+        fitness.domain, fitness.action, fitness.execution_type, fitness.knowledge_type
+    )
+
+
+def workflow_intent(fitness: FitnessIntent) -> Intent:
+    """FitnessIntent → 工作流分支的唯一纯映射；Schema 已拒绝表外组合。"""
+    return WORKFLOW_INTENTS[route_key(fitness)]
+
+
+ROUTER_SYSTEM_PROMPT = (
+    "你是 Fit-Agent 的请求路由器，只做一次分类：不执行任何业务动作、不写库、不生成或修改计划、"
+    "不做安全判定。只在下列合法组合里选一个，输出结构由 Schema 约束：\n"
+    "- workout_execution：本次训练的执行与当前日程。\n"
+    "  * action=query、execution_type=schedule_query：查询 active 计划中今天或明天练什么。"
+    "用户明确说“明天”时 schedule_day 取 tomorrow；明确说“今天”或未指明日期时取 today。\n"
+    "  * action=create、execution_type=form_record：用户要用打卡表单记录训练。\n"
+    "  * action=create、execution_type=natural_language_record：用户用自然语言报告一次训练事实，"
+    "同时出现记录动词与事实标记。\n"
+    "- plan_management：计划版本的管理。action=create 是生成一份新的训练计划；"
+    "action=modify 是调整、修改已有训练安排。\n"
+    "- analytics：action=query 是查看训练进展、个人最佳或趋势。\n"
+    "- knowledge_qa：action=query 是训练知识问答。具体动作规范、发力机制与轨迹归为 "
+    "knowledge_type=exercise_technique，exercise_name 必填；减载、渐进式超负荷、疲劳管理与分化思路归为 "
+    "knowledge_type=methodology，exercise_name 必须为空。\n"
+    "- general：action=chat 是闲聊与不属于上述业务的请求，包含删除数据、查询计划版本、复盘、"
+    "伤病判断等超出能力范围的请求。\n"
+    "组合表之外的组合一律非法：execution_type 只出现在 workout_execution，knowledge_type 与 "
+    "exercise_name 只出现在 knowledge_qa，schedule_day 只出现在 schedule_query。\n"
+    "strict Schema 要求输出全部字段：未用到的字段必须在输出里显式给出 null，不得省略。"
+    "每个字段的语义以 Schema 的字段描述为准，描述与本节规则一致。"
+)
 
 
 async def classify_intent(
-    request: str, *, model: ModelCall, budget: ModelRequestBudget
-) -> Intent:
-    """五类 intent 的唯一入口：单一确定性命中直接返回，零／多命中才调一次模型分类。"""
-    hits = deterministic_intents(request)
-    if len(hits) == 1:
-        return hits[0]
-    timeout = budget.begin_request()
-    async with asyncio.timeout(timeout):
-        text = await model(ROUTER_SYSTEM_PROMPT, request.strip())
-    return parse_model_json(text, RouterClassification).intent
-
-
-def _normalized(request: str) -> str:
-    return request.strip().casefold()
-
-
-def _contains_any(text: str, phrases: tuple[str, ...]) -> bool:
-    return any(phrase.casefold() in text for phrase in phrases)
+    request: str, *, model: ModelGateway, budget: ModelRequestBudget
+) -> FitnessIntent:
+    """路由的唯一入口：每个请求都调一次结构化分类，不设短语旁路。"""
+    return await request_structured_model(
+        model,
+        ROUTER_SYSTEM_PROMPT,
+        {"request": request.strip()},
+        budget,
+        FitnessIntent,
+    )

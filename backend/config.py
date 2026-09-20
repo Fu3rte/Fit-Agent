@@ -3,7 +3,6 @@ from pathlib import Path
 
 import platformdirs
 import tzlocal
-from dotenv import load_dotenv
 
 from business_time import require_iana_timezone
 
@@ -12,15 +11,10 @@ DATABASE_FILENAME = "fit_agent_langgraph.db"
 CHECKPOINT_DATABASE_FILENAME = "langgraph_checkpoints.db"
 PROVIDER_CONFIG_FILENAME = "provider.json"
 DATA_DIR_OVERRIDE_ENV = "FIT_AGENT_DATA_DIR"
-MODEL_API_KEY_ENV = "MODEL_API_KEY"
-MODEL_BASE_URL_ENV = "MODEL_BASE_URL"
-MODEL_MODEL_ENV = "MODEL_MODEL"
 
 MODEL_REQUEST_TIMEOUT_SECONDS = 60
 GRAPH_RUN_TIMEOUT_SECONDS = 180
 MAX_MODEL_REQUESTS_PER_RUN = 5
-
-load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
 
 def resolve_data_dir(override: str | os.PathLike[str] | None = None) -> Path:

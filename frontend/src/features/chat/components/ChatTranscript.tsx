@@ -37,10 +37,10 @@ export default function ChatTranscript({
       scrollPreviousItemPeek={64}
     >
       <MessageScroller className="min-h-0 flex-1">
-        <MessageScrollerViewport className="pt-4 pb-4">
+        <MessageScrollerViewport className="pt-10 pb-4">
           <MessageScrollerContent
             aria-busy={rounds.some((round) => !isSettled(round)) || undefined}
-            className="mx-auto w-full px-6"
+            className="mx-auto w-full max-w-4xl px-6"
           >
             {rounds.map((round) => {
               const messages = round.events.filter(

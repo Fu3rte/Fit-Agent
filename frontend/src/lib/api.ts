@@ -77,7 +77,7 @@ export const putProfile = (body: ProfileWriteBody) =>
 /** Provider 状态：has_api_key 表示是否已存 Key，响应不含 Key 本体 */
 export const getProvider = () => request<ProviderStatusWire>("/api/provider");
 
-/** 整份覆盖写入 Provider 配置：请求里未出现的字段后端写空串 */
+/** 写入 Provider 配置：api_key 空串时后端沿用已存值 */
 export const putProvider = (body: ProviderWriteBody) =>
   request<ProviderStatusWire>("/api/provider", {
     method: "PUT",
@@ -231,17 +231,7 @@ function parseAgentFrame(frame: string): AgentEventWire | null {
   return { event: name, data: JSON.parse(data.join("\n")) } as AgentEventWire;
 }
 
-/**
- * 消费 ``POST /api/agent/run`` 的 SSE 流（五类产品事件），每条事件先交给 ``onEvent``。
- *
- * - 原生 ``fetch`` ＋ ``ReadableStream``：帧可能被任意切分，用 ``TextDecoder`` 以 ``{ stream: true }``
- *   累积、结束时 flush，并按空行切帧（最后一帧可以没有结尾空行）；CR／LF／CRLF 都是 SSE 行终止符且可
- *   混用（``\r\n`` 只算一个终止符，``agentFrameBoundary`` 逐字符扫描两个相邻终止符），跨 chunk 拆开的
- *   ``\r\n`` 也不能漏掉帧边界：缓冲区保留原始字节，末尾孤立 ``\r`` 留到下一个 chunk 判定，因此落在
- *   CRLF 之间的 chunk 切点不会被误当成空行；
- * - 流内 ``error`` 事件在回调之后仍会抛错（message 即后端已脱敏的可见文本），调用方能提示失败；
- * - 非 2xx（请求形状或 UUID 非法等流建立前的错误）复用既有 JSON 错误形状，不进入帧解析。
- */
+
 export async function runAgentStream(
   body: AgentRunBody,
   onEvent: (event: AgentEventWire) => void,

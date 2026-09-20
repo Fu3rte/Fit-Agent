@@ -510,18 +510,30 @@ export type AgentEventWire =
   | AgentDoneEventWire
   | AgentErrorEventWire;
 
+/** 客户端 transport：只决定后端用哪个 Chat 客户端（与后端 APIS 同集合） */
+export type ProviderApiWire = "openai_compatible" | "anthropic_messages";
+
+/** 结构化输出机制：只决定 with_structured_output 的原生 kwargs（与后端 STRUCTURED_OUTPUTS 同集合） */
+export type ProviderStructuredOutputWire =
+  | "json_schema"
+  | "function_calling_strict";
+
 /** GET /api/provider 响应：后端不回传 api_key 本体，只给是否已配置的布尔 */
 export type ProviderStatusWire = {
   has_api_key: boolean;
   base_url: string;
   model: string;
+  api: ProviderApiWire;
+  structured_output: ProviderStructuredOutputWire;
 };
 
-/** PUT /api/provider 请求体：整份覆盖，未出现的字段由后端写空串 */
+/** PUT /api/provider 请求体：api_key 空串或省略时后端沿用已存值，api／structured_output 空串回落默认 */
 export type ProviderWriteBody = {
   api_key?: string;
   base_url?: string;
   model?: string;
+  api?: ProviderApiWire;
+  structured_output?: ProviderStructuredOutputWire;
 };
 
 /** POST /api/provider/test 响应：ok 为 false 时 latency_ms 为 null，message 为固定文案 */

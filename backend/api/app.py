@@ -40,15 +40,15 @@ from graph.checkpointer import open_checkpointer
 from graph.context import MemoryAssembler
 from graph.model import (
     MODEL_CALL_FAILED_MESSAGE,
-    ModelCall,
     ModelCallFailed,
-    ModelConfigurationError,
-    openai_compatible_model_call,
+    ModelGateway,
+    TModel,
+    build_model_gateway,
 )
 from graph.nodes import GeneratePlanDeps
 from graph.skills import SkillLoader
 from graph.workflow import AgentRunDeps, build_generate_plan_graph
-from provider_settings import provider_api_key_configured
+from provider_settings import ModelConfigurationError, provider_api_key_configured
 from storage.db import Database
 
 _LOOPBACK_HOSTNAMES = frozenset({"localhost", "127.0.0.1", "::1"})
@@ -169,12 +169,13 @@ def build_agent_runtime(
 ) -> routes_agent.AgentRuntime:
     """装配 Agent 三端点的生产依赖：一份 Planner／Evaluator 与唯一模型入口。"""
     model = _lazy_model_call(data_dir)
+    skills = SkillLoader()
     deps = GeneratePlanDeps(
         profiles=ProfileService(db),
         catalog=ExerciseRepo(db),
         stats=StatsRepo(db),
         assembler=MemoryAssembler(db),
-        skills=SkillLoader(),
+        skills=skills,
         persistence=PlanPersistenceService(db),
         plans=PlanRepo(db),
         activation=PlanActivationService(db),
@@ -191,23 +192,35 @@ def build_agent_runtime(
             persistence=deps.persistence,
             catalog=deps.catalog,
             records=WorkoutRecordsService(db),
+            skills=skills,
         ),
     )
 
 
-def _lazy_model_call(data_dir: Path) -> ModelCall:
-    """唯一模型入口：每次调用重新 resolve 配置；Provider 异常换成固定文本 ModelCallFailed。"""
+def _lazy_model_call(data_dir: Path) -> ModelGateway:
+    """唯一模型入口：每次调用重新 resolve 配置；配置错误原样抛出，调用异常换成固定文本 ModelCallFailed。"""
 
-    async def configured_call(system_prompt: str, user_payload: str) -> str:
+    async def text(system_prompt: str, user_payload: str) -> str:
         try:
-            call = openai_compatible_model_call(data_dir)
-            return await call(system_prompt, user_payload)
+            gateway = build_model_gateway(data_dir)
+            return await gateway.text(system_prompt, user_payload)
         except ModelConfigurationError:
             raise
         except Exception as exc:
             raise ModelCallFailed(MODEL_CALL_FAILED_MESSAGE) from exc
 
-    return configured_call
+    async def structured(
+        system_prompt: str, user_payload: str, schema: type[TModel]
+    ) -> TModel:
+        try:
+            gateway = build_model_gateway(data_dir)
+            return await gateway.structured(system_prompt, user_payload, schema)
+        except ModelConfigurationError:
+            raise
+        except Exception as exc:
+            raise ModelCallFailed(MODEL_CALL_FAILED_MESSAGE) from exc
+
+    return ModelGateway(text=text, structured=structured)
 
 
 def _install_frontend_static(app: FastAPI, dist_dir: Path) -> None:

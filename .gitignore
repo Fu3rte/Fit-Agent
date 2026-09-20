@@ -21,7 +21,6 @@ coverage/
 
 .env
 .env.*
-!.env.example
 
 *.log
 tmp/

@@ -1,25 +1,65 @@
 import json
 from collections.abc import Awaitable, Callable, Mapping
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, TypeVar
 
+from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 from config import MODEL_REQUEST_TIMEOUT_SECONDS
 from provider_settings import (
-    ModelConfigurationError as ModelConfigurationError,
+    API_ANTHROPIC_MESSAGES,
+    API_OPENAI_COMPATIBLE,
+    STRUCTURED_OUTPUT_FUNCTION_CALLING_STRICT,
+    STRUCTURED_OUTPUT_JSON_SCHEMA,
+    ProviderConfig,
+    resolve_provider_config,
 )
-from provider_settings import ProviderConfig, resolve_model_credentials
-
-ModelCall = Callable[[str, str], Awaitable[str]]
 
 TModel = TypeVar("TModel", bound=BaseModel)
 
+#: 文本形态模型调用：返回模型文本，供看板解释、打卡摘要与知识问答等无 Schema 的答复使用。
+ModelCall = Callable[[str, str], Awaitable[str]]
+
+#: 结构化形态模型调用：Schema 由所选结构化输出机制约束，直接返回 Pydantic 实例。
+StructuredModelCall = Callable[[str, str, type[TModel]], Awaitable[TModel]]
+
+#: 各 transport → 客户端类：只看 ``api``，base_url 原样传入，不改写任何端点。
+_APIS: dict[str, type] = {
+    API_OPENAI_COMPATIBLE: ChatOpenAI,
+    API_ANTHROPIC_MESSAGES: ChatAnthropic,
+}
+
+#: （api, structured_output）→ with_structured_output 原生 kwargs；组合合法性已在 resolve 阶段校验。
+# Anthropic 安装版只认 method 形参，额外 kwargs 被忽略，也没有 strict 形参。
+_STRUCTURED_KWARGS: dict[tuple[str, str], dict[str, Any]] = {
+    (API_OPENAI_COMPATIBLE, STRUCTURED_OUTPUT_JSON_SCHEMA): {
+        "method": "json_schema",
+        "strict": True,
+    },
+    (API_OPENAI_COMPATIBLE, STRUCTURED_OUTPUT_FUNCTION_CALLING_STRICT): {
+        "method": "function_calling",
+        "strict": True,
+    },
+    (API_ANTHROPIC_MESSAGES, STRUCTURED_OUTPUT_JSON_SCHEMA): {
+        "method": "json_schema",
+    },
+}
+
+
+@dataclass(frozen=True, slots=True)
+class ModelGateway:
+    """唯一模型入口的两个形态：每次调用都重新解析 Provider 配置。"""
+
+    text: ModelCall
+    structured: StructuredModelCall
+
 
 class InvalidModelResponse(ValueError):
-    """模型响应不是合法 JSON 或不符合目标 Schema。"""
+    """模型响应不是合法文本或不符合目标 Schema。"""
 
 
 class ModelCallFailed(ValueError):
@@ -33,24 +73,48 @@ PROBE_SYSTEM_PROMPT = "你是模型连通性检查助手。"
 PROBE_USER_PAYLOAD = "只回复 OK，不要输出其它内容。"
 
 
-def build_chat_model(
-    data_dir: Path, override: ProviderConfig | None = None
-) -> ChatOpenAI:
-    api_key, base_url, model = resolve_model_credentials(data_dir, override)
-    return ChatOpenAI(
-        api_key=api_key,
-        base_url=base_url,
-        model=model,
+class StructuredProbeDetail(BaseModel):
+    """探针的嵌套对象：nullable 与 extra=forbid 同时存在，Schema 变形会被拒。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    label: str
+
+
+class StructuredProbeResult(BaseModel):
+    """探针目标 Schema 的最小形式：一个必填字段、一个 nullable 字段、一个 extra=forbid 嵌套对象。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    ok: bool
+    note: str | None = None
+    detail: StructuredProbeDetail
+
+
+STRUCTURED_PROBE_SYSTEM_PROMPT = "你是模型结构化输出检查助手。"
+STRUCTURED_PROBE_USER_PAYLOAD = (
+    "按给定 Schema 返回 ok 为 true、note 为 null、detail.label 为 probe 的结果，不要输出其它内容。"
+)
+
+
+def build_chat_client(config: ProviderConfig) -> ChatOpenAI | ChatAnthropic:
+    """按 api 选客户端；base_url 原样传入，不改写任何端点、不追加路径。"""
+    return _APIS[config.api](
+        api_key=config.api_key,
+        base_url=config.base_url,
+        model=config.model,
         timeout=MODEL_REQUEST_TIMEOUT_SECONDS,
     )
 
 
-def openai_compatible_model_call(
+def build_model_gateway(
     data_dir: Path, override: ProviderConfig | None = None
-) -> ModelCall:
-    chat = build_chat_model(data_dir, override)
+) -> ModelGateway:
+    config = resolve_provider_config(data_dir, override)
+    chat = build_chat_client(config)
+    structured_kwargs = _STRUCTURED_KWARGS[(config.api, config.structured_output)]
 
-    async def call(system_prompt: str, user_payload: str) -> str:
+    async def text(system_prompt: str, user_payload: str) -> str:
         response = await chat.ainvoke(
             [
                 SystemMessage(content=system_prompt),
@@ -59,26 +123,41 @@ def openai_compatible_model_call(
         )
         content = response.content
         if not isinstance(content, str):
-            raise InvalidModelResponse("模型响应不是纯文本：无法解析为统一 Schema")
+            raise InvalidModelResponse("模型响应不是纯文本：无法作为可见文本使用")
         return content
 
-    return call
+    async def structured(
+        system_prompt: str, user_payload: str, schema: type[TModel]
+    ) -> TModel:
+        runnable = chat.with_structured_output(schema, **structured_kwargs)
+        return await runnable.ainvoke(
+            [
+                SystemMessage(content=system_prompt),
+                HumanMessage(content=user_payload),
+            ]
+        )
+
+    return ModelGateway(text=text, structured=structured)
 
 
 async def probe_model_call(
     data_dir: Path, override: ProviderConfig | None = None
 ) -> None:
-    call = openai_compatible_model_call(data_dir, override)
-    await call(PROBE_SYSTEM_PROMPT, PROBE_USER_PAYLOAD)
+    """连通性探针：一次普通文本调用（连接、鉴权与模型名）。"""
+    gateway = build_model_gateway(data_dir, override)
+    await gateway.text(PROBE_SYSTEM_PROMPT, PROBE_USER_PAYLOAD)
 
 
-def parse_model_json(text: str, model_type: type[TModel]) -> TModel:
-    try:
-        return model_type.model_validate_json(text)
-    except ValueError as exc:
-        raise InvalidModelResponse(
-            f"模型响应不是合法 {model_type.__name__}：{exc}"
-        ) from exc
+async def probe_structured_model_call(
+    data_dir: Path, override: ProviderConfig | None = None
+) -> None:
+    """结构化能力探针：用所选机制发一次真实结构化调用，Schema 变形与拒绝都在此暴露。"""
+    gateway = build_model_gateway(data_dir, override)
+    await gateway.structured(
+        STRUCTURED_PROBE_SYSTEM_PROMPT,
+        STRUCTURED_PROBE_USER_PAYLOAD,
+        StructuredProbeResult,
+    )
 
 
 def dump_model_payload(payload: Mapping[str, Any]) -> str:

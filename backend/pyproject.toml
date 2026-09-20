@@ -14,9 +14,9 @@ dependencies = [
     "platformdirs>=4.3",
     "tzlocal>=5",
     "tzdata>=2024.1",
-    "python-dotenv>=1,<2",
     "langchain>=1,<2",
     "langchain-openai>=1,<2",
+    "langchain-anthropic>=0.3",
     "langgraph>=1,<2",
     "langgraph-checkpoint-sqlite>=3,<4",
 ]
@@ -38,3 +38,4 @@ select = ["E4", "E7", "E9", "F", "I"]
 
 [tool.pytest.ini_options]
 norecursedirs = ["archive"]  # 归档的 pi 移植残留不参与收集
+anyio_mode = "auto"  # 全部协程测试函数交给 anyio 插件；后端固定 asyncio

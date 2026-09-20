@@ -29,7 +29,7 @@ from domain.plans.service import (
 from domain.records.service import WorkoutRecordsService
 from domain.stats.service import StatsService
 from graph.checkpointer import thread_config
-from graph.model import InvalidModelResponse, ModelCallFailed, ModelConfigurationError
+from graph.model import InvalidModelResponse, ModelCallFailed
 from graph.nodes import (
     ConfirmationConflict,
     GeneratePlanDeps,
@@ -44,6 +44,7 @@ from graph.workflow import (
     invoke_confirmation,
     stream_agent_run,
 )
+from provider_settings import ModelConfigurationError
 
 router = APIRouter()
 

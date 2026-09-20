@@ -3,7 +3,7 @@
 import sqlite3
 from collections.abc import Callable, Sequence
 from datetime import date
-from typing import Annotated, Any, cast
+from typing import Annotated, Any, Literal, cast
 from uuid import UUID
 
 from fastapi import FastAPI, Query, Request
@@ -41,6 +41,7 @@ from domain.stats.schema import (
     WorkoutFact,
     WorkoutGap,
 )
+from provider_settings import ModelConfigurationError
 
 ERROR_CODE_INVALID_REQUEST = "invalid_request"
 
@@ -174,6 +175,8 @@ class ProviderPutBody(BaseModel):
     api_key: str | None = None
     base_url: str | None = None
     model: str | None = None
+    api: Literal["openai_compatible", "anthropic_messages"] | None = None
+    structured_output: Literal["json_schema", "function_calling_strict"] | None = None
 
 
 # ---------- 请求体 → 领域对象 ----------
@@ -453,6 +456,7 @@ def _optional_iso(value: date | None) -> str | None:
 _ERROR_STATUS: tuple[tuple[type[Exception], int], ...] = (
     (RequestValidationError, 400),
     (InvalidRequestShape, 400),
+    (ModelConfigurationError, 400),
     (InvalidRecordFact, 422),
     (InvalidBodyMetric, 422),
     (InvalidProfile, 422),

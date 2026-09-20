@@ -1,7 +1,6 @@
 """生成计划子图的节点与一次 Run 的运行上下文。"""
 
 import asyncio
-import json
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import asdict, dataclass, field
@@ -45,7 +44,7 @@ from domain.profile.schema import Profile
 from domain.profile.service import ProfileService
 from domain.stats.repo import StatsRepo
 from graph.context import MemoryAssembler, MemoryContext
-from graph.model import ModelCall, dump_model_payload, parse_model_json
+from graph.model import ModelGateway, TModel, dump_model_payload
 from graph.skills import LoadedSkill, SkillLoader
 from graph.state import Intent, WorkflowState
 
@@ -57,13 +56,6 @@ ADJUST_PLAN_INTENT: Intent = "adjust_plan"
 
 CONFIRMATION_ACTIONS: tuple[str, ...] = ("confirm", "reject")
 
-_PLAN_SCHEMA_TEXT = json.dumps(
-    PlanDraft.model_json_schema(), ensure_ascii=False, sort_keys=True
-)
-_RUBRIC_SCHEMA_TEXT = json.dumps(
-    RubricResult.model_json_schema(), ensure_ascii=False, sort_keys=True
-)
-
 PLANNER_SYSTEM_PROMPT = (
     "你是 Fit-Agent 的训练计划 Planner。依据 payload 里的六类上下文、已加载 Skill 与确定性候选动作，"
     "生成一份待用户确认的七天训练计划草案。硬要求：\n"
@@ -72,9 +64,7 @@ PLANNER_SYSTEM_PROMPT = (
     "needs_calibration 时不得给出任何具体重量。\n"
     "3. 处方类型必须与目录记录口径一致：reps_weight→weighted_reps、"
     "reps_bodyweight→bodyweight_reps、time→timed；自重与计时处方不得携带负荷字段。\n"
-    "4. training_days 数量等于 weekly_frequency，日期落在 starts_on 起连续七天内且不重复。\n"
-    "5. 只输出一个 JSON 对象，字段与下方 Schema 完全一致，不输出任何解释文字或额外字段。\n"
-    "统一计划 Schema：" + _PLAN_SCHEMA_TEXT
+    "4. training_days 数量等于 weekly_frequency，日期落在 starts_on 起连续七天内且不重复。"
 )
 ADJUSTMENT_PLANNER_SYSTEM_PROMPT = (
     "你是 Fit-Agent 的训练计划 Planner，本次任务是在 payload.active_plan_draft（当前 active 计划）"
@@ -87,9 +77,7 @@ ADJUSTMENT_PLANNER_SYSTEM_PROMPT = (
     "动作（active 没有目标处方的动作）照抄候选动作的 starting_load。\n"
     "4. 处方类型必须与目录记录口径一致：reps_weight→weighted_reps、"
     "reps_bodyweight→bodyweight_reps、time→timed；自重与计时处方不得携带负荷字段。\n"
-    "5. training_days 数量等于 weekly_frequency，日期落在 starts_on 起连续七天内且不重复。\n"
-    "6. 只输出一个 JSON 对象，字段与下方 Schema 完全一致，不输出任何解释文字或额外字段。\n"
-    "统一计划 Schema：" + _PLAN_SCHEMA_TEXT
+    "5. training_days 数量等于 weekly_frequency，日期落在 starts_on 起连续七天内且不重复。"
 )
 EVALUATOR_SYSTEM_PROMPT = (
     "你是 Fit-Agent 的训练计划 Evaluator，只做判定、不改写计划、不重算业务事实。"
@@ -98,10 +86,7 @@ EVALUATOR_SYSTEM_PROMPT = (
     "- schedule_reasonableness：七天内的安排是否合理（硬门槛；不替代代码的频率／日期检查，"
     "不引入新的数值阈值）。\n"
     "- explanation_quality：计划解释是否说清安排依据（建议项）。\n"
-    "只输出一个 JSON 对象，字段与下方 Schema 完全一致：三个字段 goal_alignment、"
-    "schedule_reasonableness、explanation_quality，每个形如 {passed: bool, reason: str}；"
-    "不输出数值评分、维度权重或总分。\n"
-    "Rubric Schema：" + _RUBRIC_SCHEMA_TEXT
+    "每个维度只给布尔判定与理由，不给数值评分、维度权重或总分。"
 )
 
 
@@ -181,7 +166,7 @@ class GeneratePlanDeps:
     persistence: PlanPersistenceService
     plans: PlanRepo
     activation: PlanActivationService
-    model: ModelCall
+    model: ModelGateway
     now: Callable[[], datetime]
 
 
@@ -261,16 +246,14 @@ class GeneratePlanNodes:
         """首个候选：Planner 只接收六类上下文、已加载 Skill 与确定性候选动作。"""
         adjustment = _run(runtime).adjustment
         payload = await self._planner_payload(state, adjustment)
-        text = await request_model(
+        draft = await request_structured_model(
             self._deps.model,
             _planner_system_prompt(adjustment),
             payload,
             _run(runtime).budget,
+            PlanDraft,
         )
-        return {
-            "draft_plan": parse_model_json(text, PlanDraft),
-            "revision_count": 0,
-        }
+        return {"draft_plan": draft, "revision_count": 0}
 
     async def evaluator(
         self, state: WorkflowState, runtime: Runtime[GeneratePlanRun]
@@ -285,13 +268,11 @@ class GeneratePlanNodes:
         deterministic = DeterministicResult(passed=not failures, failures=failures)
         rubric_ran = deterministic.passed
         rubric = (
-            parse_model_json(
-                await request_model(
-                    self._deps.model,
-                    EVALUATOR_SYSTEM_PROMPT,
-                    self._evaluator_payload(context, draft),
-                    _run(runtime).budget,
-                ),
+            await request_structured_model(
+                self._deps.model,
+                EVALUATOR_SYSTEM_PROMPT,
+                self._evaluator_payload(context, draft),
+                _run(runtime).budget,
                 RubricResult,
             )
             if rubric_ran
@@ -314,13 +295,14 @@ class GeneratePlanNodes:
             "previous_plan": state["draft_plan"].model_dump(mode="json"),
             "evaluation": evaluation.model_dump(mode="json"),
         }
-        text = await request_model(
+        draft = await request_structured_model(
             self._deps.model,
             _planner_system_prompt(adjustment),
             payload,
             _run(runtime).budget,
+            PlanDraft,
         )
-        return {"draft_plan": parse_model_json(text, PlanDraft), "revision_count": 1}
+        return {"draft_plan": draft, "revision_count": 1}
 
     async def persist_draft(
         self, state: WorkflowState, runtime: Runtime[GeneratePlanRun]
@@ -563,15 +545,30 @@ def _planner_system_prompt(adjustment: AdjustmentContext | None) -> str:
 
 
 async def request_model(
-    model: ModelCall,
+    model: ModelGateway,
     system_prompt: str,
     payload: Mapping[str, Any],
     budget: ModelRequestBudget,
 ) -> str:
-    """一次模型请求：先扣请求预算，再在剩余时限内调用注入的 callable。"""
+    """一次文本模型请求：先扣请求预算，再在剩余时限内调用注入的 callable。"""
     timeout = budget.begin_request()
     async with asyncio.timeout(timeout):
-        return await model(system_prompt, dump_model_payload(payload))
+        return await model.text(system_prompt, dump_model_payload(payload))
+
+
+async def request_structured_model(
+    model: ModelGateway,
+    system_prompt: str,
+    payload: Mapping[str, Any],
+    budget: ModelRequestBudget,
+    schema: type[TModel],
+) -> TModel:
+    """一次结构化模型请求：与文本请求共享同一份预算与超时，Schema 由 Provider 约束。"""
+    timeout = budget.begin_request()
+    async with asyncio.timeout(timeout):
+        return await model.structured(
+            system_prompt, dump_model_payload(payload), schema
+        )
 
 
 def _rubric_not_run() -> RubricResult:

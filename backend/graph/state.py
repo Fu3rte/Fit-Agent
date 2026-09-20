@@ -6,6 +6,9 @@ Intent = Literal[
     "view_progress",
     "generate_plan",
     "adjust_plan",
+    "view_schedule",
+    "knowledge_qa",
+    "general",
 ]
 
 ConfirmationStatus = Literal["pending", "confirmed", "rejected"]

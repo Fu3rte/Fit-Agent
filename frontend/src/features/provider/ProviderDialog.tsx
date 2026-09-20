@@ -1,38 +1,106 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { X } from "lucide-react";
 import { toast } from "sonner";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import {
   deleteProvider,
   getProvider,
   putProvider,
   testProvider,
 } from "@/lib/api";
-import type { ProviderWriteBody } from "@/lib/contract";
+import type {
+  ProviderApiWire,
+  ProviderStructuredOutputWire,
+  ProviderWriteBody,
+} from "@/lib/contract";
 
-/** 模型配置弹层：入口在侧栏底部，承载 Base URL、模型名与 API Key 的整份覆盖读写 */
+/** 客户端 transport 的中文标签（value 与后端 APIS 同集合） */
+const API_LABELS: Record<ProviderApiWire, string> = {
+  openai_compatible: "OpenAI 兼容（ChatOpenAI）",
+  anthropic_messages: "Anthropic Messages（ChatAnthropic）",
+};
+
+const API_VALUES = Object.keys(API_LABELS) as ProviderApiWire[];
+
+/** 结构化输出机制的中文标签（value 与后端 STRUCTURED_OUTPUTS 同集合） */
+const STRUCTURED_OUTPUT_LABELS: Record<
+  ProviderStructuredOutputWire,
+  string
+> = {
+  json_schema: "JSON Schema",
+  function_calling_strict: "Function Calling（strict）",
+};
+
+/** 各 transport 允许的结构化输出机制：与后端 STRUCTURED_OUTPUTS_BY_API 同集合 */
+const STRUCTURED_OUTPUTS_BY_API: Record<
+  ProviderApiWire,
+  ProviderStructuredOutputWire[]
+> = {
+  openai_compatible: ["json_schema", "function_calling_strict"],
+  anthropic_messages: ["json_schema"],
+};
+
+const DEFAULT_API: ProviderApiWire = "openai_compatible";
+const DEFAULT_STRUCTURED_OUTPUT: ProviderStructuredOutputWire = "json_schema";
+
+const STRUCTURED_OUTPUT_VALUES = Object.keys(
+  STRUCTURED_OUTPUT_LABELS,
+) as ProviderStructuredOutputWire[];
+
+/** 线上两个协议字段可能缺字段或取未知值（旧后端响应）：只放行已知集合，其余回落服务端默认 */
+const asApi = (value: unknown): ProviderApiWire =>
+  API_VALUES.includes(value as ProviderApiWire)
+    ? (value as ProviderApiWire)
+    : DEFAULT_API;
+
+const asStructuredOutput = (value: unknown): ProviderStructuredOutputWire =>
+  STRUCTURED_OUTPUT_VALUES.includes(value as ProviderStructuredOutputWire)
+    ? (value as ProviderStructuredOutputWire)
+    : DEFAULT_STRUCTURED_OUTPUT;
+
+/** 模型配置弹层：入口在侧栏底部，承载 Base URL、模型名、transport、结构化输出与 API Key 的读写 */
 export function ProviderDialog({ onClose }: { onClose: () => void }) {
   const queryClient = useQueryClient();
-  const ref = useRef<HTMLDialogElement>(null);
   const provider = useQuery({ queryKey: ["provider"], queryFn: getProvider });
 
   const [baseUrl, setBaseUrl] = useState("");
   const [model, setModel] = useState("");
   const [apiKeyInput, setApiKeyInput] = useState("");
-
-  useEffect(() => {
-    ref.current?.showModal();
-  }, []);
+  const [api, setApi] = useState<ProviderApiWire>(DEFAULT_API);
+  const [structuredOutput, setStructuredOutput] =
+    useState<ProviderStructuredOutputWire>(DEFAULT_STRUCTURED_OUTPUT);
 
   // 只在服务端字段真的变化时回填：后台 refetch 与保存后的 setQueryData 不得清掉已输入的 Key
   useEffect(() => {
     if (!provider.data) return;
     setBaseUrl(provider.data.base_url);
     setModel(provider.data.model);
-  }, [provider.data?.base_url, provider.data?.model]);
+    setApi(asApi(provider.data.api));
+    setStructuredOutput(asStructuredOutput(provider.data.structured_output));
+  }, [
+    provider.data?.base_url,
+    provider.data?.model,
+    provider.data?.api,
+    provider.data?.structured_output,
+  ]);
+
+  // 换 transport 时把超出该 transport 能力的机制收回默认，避免提交后端必然拒绝的组合
+  const allowedStructuredOutputs = STRUCTURED_OUTPUTS_BY_API[api];
+  const effectiveStructuredOutput = allowedStructuredOutputs.includes(
+    structuredOutput,
+  )
+    ? structuredOutput
+    : DEFAULT_STRUCTURED_OUTPUT;
 
   const save = useMutation({
     mutationFn: (body: ProviderWriteBody) => putProvider(body),
@@ -71,40 +139,24 @@ export function ProviderDialog({ onClose }: { onClose: () => void }) {
     api_key: apiKeyInput,
     base_url: baseUrl.trim(),
     model: model.trim(),
+    api,
+    structured_output: effectiveStructuredOutput,
   });
 
   return (
-    <dialog
-      ref={ref}
-      aria-labelledby="provider-dialog-title"
-      onClose={onClose}
-      onClick={(event) => {
-        if (event.target === ref.current) ref.current.close();
-      }}
-      className="m-auto w-[min(34rem,calc(100vw-2rem))] rounded-xl border bg-card p-0 text-card-foreground backdrop:bg-black/60"
-    >
-      <div className="flex flex-col gap-4 p-5">
-        <div className="flex items-start justify-between gap-3">
-          <div className="min-w-0">
-            <h2
-              id="provider-dialog-title"
-              className="font-display text-lg font-medium tracking-tight"
-            >
-              模型配置
-            </h2>
-            <p className="text-xs text-muted-foreground">
-              LLM Provider 的 Base URL、模型名与 API Key；整份覆盖保存。
-            </p>
-          </div>
-          <Button
-            variant="outline"
-            size="icon"
-            className="size-7"
-            aria-label="关闭模型配置"
-            onClick={() => ref.current?.close()}
-          >
-            <X className="size-3.5" />
-          </Button>
+    <Dialog open onOpenChange={(open) => !open && onClose()}>
+      <DialogContent
+        aria-describedby={undefined}
+        className="w-[min(34rem,calc(100vw-2rem))] max-w-none gap-4 p-5"
+      >
+        <div className="min-w-0 pr-10">
+          <DialogTitle className="font-medium tracking-tight">
+            模型配置
+          </DialogTitle>
+          <p className="text-xs text-muted-foreground">
+            LLM Provider 的 Base URL、模型名、客户端 transport、结构化输出方式与
+            API Key；保存时 Api Key 留空则沿用已存的 Key，其余字段整份覆盖。
+          </p>
         </div>
 
         {provider.isLoading ? (
@@ -128,6 +180,61 @@ export function ProviderDialog({ onClose }: { onClose: () => void }) {
                 placeholder="例：https://api.example.com/v1"
                 onChange={(event) => setBaseUrl(event.target.value)}
               />
+            </div>
+
+            <div className="space-y-2">
+              <label htmlFor="provider-api" className="text-sm font-medium">
+                客户端 transport
+              </label>
+              <Select
+                value={api}
+                onValueChange={(value) => setApi(value as ProviderApiWire)}
+              >
+                <SelectTrigger
+                  id="provider-api"
+                  className="w-full"
+                  aria-label="客户端 transport"
+                >
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {API_VALUES.map((value) => (
+                    <SelectItem key={value} value={value}>
+                      {API_LABELS[value]}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+
+            <div className="space-y-2">
+              <label
+                htmlFor="provider-structured-output"
+                className="text-sm font-medium"
+              >
+                结构化输出方式
+              </label>
+              <Select
+                value={effectiveStructuredOutput}
+                onValueChange={(value) =>
+                  setStructuredOutput(value as ProviderStructuredOutputWire)
+                }
+              >
+                <SelectTrigger
+                  id="provider-structured-output"
+                  className="w-full"
+                  aria-label="结构化输出方式"
+                >
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {allowedStructuredOutputs.map((value) => (
+                    <SelectItem key={value} value={value}>
+                      {STRUCTURED_OUTPUT_LABELS[value]}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
             </div>
 
             <div className="space-y-2">
@@ -156,10 +263,9 @@ export function ProviderDialog({ onClose }: { onClose: () => void }) {
               </div>
               <Input
                 id="provider-api-key"
-                type="password"
-                autoComplete="new-password"
+                type="text"
                 value={apiKeyInput}
-                placeholder="输入新 Key 以写入"
+                placeholder="留空沿用已存的 Key"
                 onChange={(event) => setApiKeyInput(event.target.value)}
               />
             </div>
@@ -188,7 +294,7 @@ export function ProviderDialog({ onClose }: { onClose: () => void }) {
             </div>
           </>
         )}
-      </div>
-    </dialog>
+      </DialogContent>
+    </Dialog>
   );
 }
