@@ -22,7 +22,7 @@ dependencies = [
     "langgraph-checkpoint-sqlite>=3,<4",
 ]
 
-# 源码以 backend/ 下的顶层模块直接导入，不构建 Python 包。
+# 源码以 backend/ 下的 app 包直接导入，不构建 Python 包。
 [tool.uv]
 package = false
 

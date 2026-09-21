@@ -42,6 +42,10 @@ def frontend_dist_dir() -> Path:
     return Path(__file__).resolve().parent.parent / "frontend" / "dist"
 
 
+def skills_dir() -> Path:
+    return Path(__file__).resolve().parent / "skills"
+
+
 def local_timezone_name() -> str:
     name = tzlocal.get_localzone_name()
     if not name:

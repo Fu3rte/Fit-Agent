@@ -1,10 +1,10 @@
-"""进程入口：装配 api.app 并启动 Uvicorn（单 Worker、仅回环监听）。"""
+"""进程入口：装配 app.bootstrap 并启动 Uvicorn（单 Worker、仅回环监听）。"""
 
 import argparse
 
 import uvicorn
 
-from api.app import create_app
+from app.bootstrap import create_app
 
 _LOOPBACK_CHOICES = ("127.0.0.1", "localhost", "::1")
 

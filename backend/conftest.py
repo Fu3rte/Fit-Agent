@@ -1,4 +1,4 @@
-# 让 backend/ 成为 pytest 的 rootdir 锚点，使顶层包（storage/domain/app/runtime/api）在测试中可导入。
+# 让 backend/ 成为 pytest 的 rootdir 锚点，使 app 包与 tests 包在测试中可导入。
 
 import pytest
 
