@@ -1,13 +1,12 @@
 """组合根：具体 Repository、Application Service 与 Agent Runtime 的唯一构造点。"""
 
-from collections.abc import AsyncIterator, Mapping, Sequence
+from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
 from fastapi import FastAPI
-from langchain_core.tools import BaseTool
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.graph.state import CompiledStateGraph
 
@@ -19,11 +18,7 @@ from app.application.agent.contracts import (
     Intent,
 )
 from app.application.agent.harness.cache import ToolResultCache
-from app.application.agent.harness.graph import build_tool_harness
-from app.application.agent.harness.tools.training import (
-    PROGRESS_TOOLS,
-    SCHEDULE_TOOLS,
-)
+from app.application.agent.harness.tools.general import build_general_tool_harnesses
 from app.application.agent.memory import MemoryAssembler
 from app.application.agent.plan_graph import build_generate_plan_graph
 from app.application.ports import (
@@ -230,10 +225,9 @@ def build_agent_runtime(
     cache = ToolResultCache(
         revisions=repositories.tool_cache, schema_version=schema_version
     )
-    tool_harnesses: Mapping[Intent, CompiledStateGraph] = {
-        "view_schedule": _tool_harness(SCHEDULE_TOOLS, cache=cache),
-        "view_progress": _tool_harness(PROGRESS_TOOLS, cache=cache),
-    }
+    tool_harnesses: Mapping[Intent, CompiledStateGraph] = build_general_tool_harnesses(
+        timeout_seconds=TOOL_TIMEOUT_SECONDS, cache=cache
+    )
     deps = GeneratePlanDeps(
         profiles=services.profile,
         catalog=repositories.exercises,
@@ -264,15 +258,4 @@ def build_agent_runtime(
             skills=skills,
             tool_harnesses=tool_harnesses,
         ),
-    )
-
-
-def _tool_harness(
-    tools: Sequence[BaseTool], *, cache: ToolResultCache
-) -> CompiledStateGraph:
-    """只读工具 harness 的编译：无 checkpointer，工具超时、输出定界与缓存由装配方注入。"""
-    return build_tool_harness(
-        tools,
-        timeout_seconds=TOOL_TIMEOUT_SECONDS,
-        cache=cache,
     )

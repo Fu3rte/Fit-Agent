@@ -13,6 +13,7 @@ import httpx
 import pytest
 from fastapi import FastAPI
 from fastapi.responses import StreamingResponse
+from langchain_core.messages import AIMessage
 from langgraph.graph.state import CompiledStateGraph
 
 from app.api import routes_agent
@@ -154,8 +155,11 @@ async def _client(
     *,
     structured: Mapping[type, Sequence[Mapping[str, Any]]] | None = None,
     text: Mapping[str, Sequence[str]] | None = None,
+    harness: Sequence[AIMessage] = (),
 ) -> AsyncIterator[tuple[httpx.AsyncClient, ScriptedGateway, Database]]:
-    async with _harness(tmp_path, structured=structured, text=text) as harness:
+    async with _harness(
+        tmp_path, structured=structured, text=text, harness=harness
+    ) as harness:
         app = _app(harness.graph, harness.db, harness.model)
         transport = httpx.ASGITransport(app=app)
         async with httpx.AsyncClient(
@@ -183,6 +187,11 @@ def _general_scripts() -> dict[type, list[Mapping[str, Any]]]:
             {"domain": "general", "action": "chat"},
         ]
     }
+
+
+def _general_harness(answers: Sequence[str]) -> list[AIMessage]:
+    """``general`` 的 harness 脚本：每个请求一次不带工具调用的最终答复。"""
+    return [final_answer(answer) for answer in answers]
 
 
 def _natural_language_scripts() -> dict[type, list[Mapping[str, Any]]]:
@@ -383,8 +392,19 @@ async def test_agent_run_persists_entries_and_events_before_streaming(
             request=FIRST_REQUEST,
             client_request_id="request-1",
         )
-        assert [name for name, _ in frames] == ["node", "message", "done"]
-        assert frames[1][1] == {"text": FIRST_ANSWER}
+        assert [name for name, _ in frames] == [
+            "node",
+            "node",
+            "node",
+            "message",
+            "done",
+        ]
+        assert [data["name"] for _name, data in frames[:3]] == [
+            "safety_scan",
+            "router_node",
+            "general",
+        ]
+        assert frames[3][1] == {"text": FIRST_ANSWER}
 
         repo = ConversationRepo(db)
         runs = await repo.list_runs(chat_id)
@@ -392,8 +412,14 @@ async def test_agent_run_persists_entries_and_events_before_streaming(
         assert runs[0].client_request_id == "request-1"
         assert runs[0].thread_id == THREAD_1
         events = await repo.list_run_events(runs[0].id)
-        assert [event.event_type for event in events] == ["node", "message", "done"]
-        assert [event.sequence for event in events] == [1, 2, 3]
+        assert [event.event_type for event in events] == [
+            "node",
+            "node",
+            "node",
+            "message",
+            "done",
+        ]
+        assert [event.sequence for event in events] == [1, 2, 3, 4, 5]
         assistant_entry_id = runs[0].assistant_entry_id
         assert assistant_entry_id is not None
         entries = await repo.list_entries(chat_id)
@@ -405,6 +431,8 @@ async def test_agent_run_persists_entries_and_events_before_streaming(
         assert [round_["request"] for round_ in detail["rounds"]] == [FIRST_REQUEST]
         assert detail["rounds"][0]["assistants"][0]["content"] == FIRST_ANSWER
         assert [event["event"] for event in detail["rounds"][0]["events"]] == [
+            "node",
+            "node",
             "node",
             "message",
             "done",
@@ -447,12 +475,12 @@ async def test_second_round_receives_history_and_current_request_once(
             {"role": "user", "text": FIRST_REQUEST},
             {"role": "assistant", "text": FIRST_ANSWER},
         ]
-        general_payload = json.loads(
-            [payload for prompt, payload in model.calls if prompt == GENERAL_CHAT_SYSTEM_PROMPT][-1]
-        )
-        assert general_payload["conversation_messages"] == [
-            {"role": "user", "text": FIRST_REQUEST},
-            {"role": "assistant", "text": FIRST_ANSWER},
+        general_messages = model.harness_calls[-1].messages
+        assert general_messages[0].content == GENERAL_CHAT_SYSTEM_PROMPT
+        assert [message.content for message in general_messages[1:]] == [
+            FIRST_REQUEST,
+            FIRST_ANSWER,
+            SECOND_REQUEST,
         ]
 
 
@@ -490,6 +518,8 @@ async def test_replay_of_the_same_client_request_id_reuses_persisted_events(
         assert {"conversation_id", "request", "events"} <= set(round_)
         assert round_["conversation_id"] == THREAD_1
         assert [event["event"] for event in round_["events"]] == [
+            "node",
+            "node",
             "node",
             "message",
             "done",
@@ -565,12 +595,12 @@ async def test_concurrent_duplicate_requests_execute_the_model_once(
 
         assert first.status_code == second.status_code == 200
         assert FIRST_ANSWER in first.text + second.text
-        assert len(model.calls) == 2
+        assert [len(model.calls), len(model.harness_calls)] == [1, 1]
         repo = ConversationRepo(db)
         runs = await repo.list_runs(chat_id)
         assert len(runs) == 1
         assert len(await repo.list_entries(chat_id)) == 2
-        assert len(await repo.list_run_events(runs[0].id)) == 3
+        assert len(await repo.list_run_events(runs[0].id)) == 5
 
 
 async def test_transaction_race_replay_reuses_the_run_after_a_pre_read_miss(
@@ -914,17 +944,23 @@ async def test_disconnect_in_suspended_send_after_the_waiting_commit_keeps_waiti
                 client_request_id="request-1",
             )
         ).encode()
-        # 第三个分片是 waiting：它的 Event 与 Run ``waiting`` 先落库，send 才拿到这一帧。
+        # 第五个分片是 waiting：它的 Event 与 Run ``waiting`` 先落库，send 才拿到这一帧。
         chunks = await _call_with_disconnect(
             app,
             path="/api/agent/run",
             body=body,
-            disconnect_after=3,
+            disconnect_after=5,
             suspend_send=True,
         )
 
         frames = _frames("".join(chunks))
-        assert [name for name, _ in frames] == ["node", "message", "waiting"]
+        assert [name for name, _ in frames] == [
+            "node",
+            "node",
+            "node",
+            "message",
+            "waiting",
+        ]
         run = (await repo.list_runs(chat_id))[0]
         assert run.status == "waiting"
         assert run.error_code is None
@@ -1086,17 +1122,29 @@ async def test_model_backed_blank_answer_becomes_a_client_visible_error(
             request=FIRST_REQUEST,
             client_request_id="request-1",
         )
-        assert [name for name, _ in frames] == ["node", "message", "error"]
-        assert frames[1][1] == {"text": ""}
-        assert frames[2][1] == {"message": AGENT_RUN_ERROR_MESSAGE}
+        assert [name for name, _ in frames] == [
+            "node",
+            "node",
+            "node",
+            "message",
+            "error",
+        ]
+        assert frames[3][1] == {"text": ""}
+        assert frames[4][1] == {"message": AGENT_RUN_ERROR_MESSAGE}
 
         repo = ConversationRepo(db)
         runs = await repo.list_runs(chat_id)
         assert [run.status for run in runs] == ["failed"]
         assert runs[0].assistant_entry_id is None
         persisted = await repo.list_run_events(runs[0].id)
-        assert [event.event_type for event in persisted] == ["node", "message", "error"]
-        assert [event.sequence for event in persisted] == [1, 2, 3]
+        assert [event.event_type for event in persisted] == [
+            "node",
+            "node",
+            "node",
+            "message",
+            "error",
+        ]
+        assert [event.sequence for event in persisted] == [1, 2, 3, 4, 5]
         assert [entry.payload["role"] for entry in await repo.list_entries(chat_id)] == [
             "user"
         ]
@@ -1104,7 +1152,7 @@ async def test_model_backed_blank_answer_becomes_a_client_visible_error(
         detail = (await client.get(f"/api/conversations/{chat_id}")).json()
         assert [
             event["event"] for event in detail["rounds"][0]["events"]
-        ] == ["node", "message", "error"]
+        ] == ["node", "node", "node", "message", "error"]
 
 
 async def test_confirmation_binds_the_exact_waiting_run_when_a_newer_run_exists(
@@ -1290,7 +1338,14 @@ async def test_natural_language_record_waiting_run_stays_waiting(
             request=NL_REQUEST,
             client_request_id="request-1",
         )
-        assert [name for name, _ in frames] == ["node", "message", "waiting", "done"]
+        assert [name for name, _ in frames] == [
+            "node",
+            "node",
+            "node",
+            "message",
+            "waiting",
+            "done",
+        ]
 
         repo = ConversationRepo(db)
         run = (await repo.list_runs(chat_id))[0]
@@ -1300,12 +1355,14 @@ async def test_natural_language_record_waiting_run_stays_waiting(
         assert [entry.payload["role"] for entry in entries] == ["user"]
         assert [
             event.event_type for event in await repo.list_run_events(run.id)
-        ] == ["node", "message", "waiting", "done"]
+        ] == ["node", "node", "node", "message", "waiting", "done"]
         detail = (await client.get(f"/api/conversations/{chat_id}")).json()
         round_ = detail["rounds"][0]
         assert round_["status"] == "waiting"
         assert round_["assistants"] == []
         assert [event["event"] for event in round_["events"]] == [
+            "node",
+            "node",
             "node",
             "message",
             "waiting",
@@ -1378,9 +1435,9 @@ async def test_natural_language_record_prompts_receive_history_once(
             **_extraction_scripts(),
         },
         text={
-            GENERAL_CHAT_SYSTEM_PROMPT: [FIRST_ANSWER],
             NATURAL_LANGUAGE_RECORD_MESSAGE_PROMPT: [NL_SUMMARY],
         },
+        harness=_general_harness([FIRST_ANSWER]),
     ) as (client, model, _db):
         chat_id = await _create_conversation(client, "会话甲一")
         await _run(
@@ -1427,9 +1484,7 @@ async def test_progress_harness_and_general_prompt_receive_history_once(
                 {"domain": "general", "action": "chat"},
             ]
         },
-        text={
-            GENERAL_CHAT_SYSTEM_PROMPT: [FIRST_ANSWER, NL_SUMMARY],
-        },
+        harness=_general_harness([FIRST_ANSWER]),
     ) as (client, model, db):
         chat_id = await _create_conversation(client, "会话乙一")
         await _run(
@@ -1439,8 +1494,13 @@ async def test_progress_harness_and_general_prompt_receive_history_once(
             request=FIRST_REQUEST,
             client_request_id="request-1",
         )
+        # 第二轮的进展分支先调只读工具再答复，第三轮的知识问答只取一次最终答复。
         model.harness_scripts.extend(
-            [tool_call("read_progress"), final_answer(SECOND_ANSWER)]
+            [
+                tool_call("read_progress"),
+                final_answer(SECOND_ANSWER),
+                final_answer(NL_SUMMARY),
+            ]
         )
         frames = await _run(
             client,
@@ -1456,10 +1516,19 @@ async def test_progress_harness_and_general_prompt_receive_history_once(
             request=KNOWLEDGE_REQUEST,
             client_request_id="request-3",
         )
-        assert [name for name, _payload in frames] == ["node", "message", "done"]
-        assert frames[0][1] == {"name": "view_progress"}
-        assert frames[1][1] == {"text": SECOND_ANSWER}
-        progress_messages = model.harness_calls[0].messages
+        assert [name for name, _payload in frames] == [
+            "node",
+            "node",
+            "node",
+            "message",
+            "done",
+        ]
+        assert frames[0][1] == {"name": "safety_scan"}
+        assert frames[1][1] == {"name": "router_node"}
+        assert frames[2][1] == {"name": "view_progress"}
+        assert frames[3][1] == {"text": SECOND_ANSWER}
+        # 第 0 次 harness 调用是首轮一般对话：进展分支的首次循环调用才带历史与本次请求。
+        progress_messages = model.harness_calls[1].messages
         assert [type(message).__name__ for message in progress_messages] == [
             "SystemMessage",
             "HumanMessage",
@@ -1478,7 +1547,13 @@ async def test_progress_harness_and_general_prompt_receive_history_once(
         repo = ConversationRepo(db)
         runs = await repo.list_runs(chat_id)
         events = await repo.list_run_events(runs[1].id)
-        assert [event.event_type for event in events] == ["node", "message", "done"]
+        assert [event.event_type for event in events] == [
+            "node",
+            "node",
+            "node",
+            "message",
+            "done",
+        ]
         contents = [
             entry.payload.get("content")
             for entry in await repo.list_entries(chat_id)
@@ -1491,24 +1566,18 @@ async def test_progress_harness_and_general_prompt_receive_history_once(
             SECOND_ANSWER,
         ]
         assert len(contents) == 6
-        general = json.loads(
-            [
-                payload
-                for prompt, payload in model.calls
-                if prompt == GENERAL_CHAT_SYSTEM_PROMPT
-            ][-1]
-        )
-        assert general["request"] == KNOWLEDGE_REQUEST
-        assert general["conversation_messages"] == [
-            {"role": "user", "text": FIRST_REQUEST},
-            {"role": "assistant", "text": FIRST_ANSWER},
-            {"role": "user", "text": PROGRESS_REQUEST},
-            {"role": "assistant", "text": SECOND_ANSWER},
+        general_messages = model.harness_calls[-1].messages
+        assert general_messages[0].content == GENERAL_CHAT_SYSTEM_PROMPT
+        assert [message.content for message in general_messages[1:]] == [
+            FIRST_REQUEST,
+            FIRST_ANSWER,
+            PROGRESS_REQUEST,
+            SECOND_ANSWER,
+            KNOWLEDGE_REQUEST,
         ]
-        assert all(
-            message["text"] != KNOWLEDGE_REQUEST
-            for message in general["conversation_messages"]
-        )
+        assert [
+            message.content for message in general_messages
+        ].count(KNOWLEDGE_REQUEST) == 1
 
 
 async def test_planner_payload_carries_history_and_the_request_once(tmp_path: Any) -> None:
@@ -1654,8 +1723,8 @@ async def test_run_compacts_history_and_keeps_original_entries(
                 {"domain": "general", "action": "chat"},
             ]
         },
+        harness=_general_harness([FIRST_ANSWER, SECOND_ANSWER, THIRD_ANSWER]),
         text={
-            GENERAL_CHAT_SYSTEM_PROMPT: [FIRST_ANSWER, SECOND_ANSWER, THIRD_ANSWER],
             SUMMARIZATION_SYSTEM_PROMPT: [COMPACTION_SUMMARY],
         },
     ) as (client, model, db):
@@ -1746,8 +1815,8 @@ async def test_compaction_failure_keeps_the_run_running_without_compaction_entry
                 {"domain": "general", "action": "chat"},
             ]
         },
+        harness=_general_harness([FIRST_ANSWER, SECOND_ANSWER]),
         text={
-            GENERAL_CHAT_SYSTEM_PROMPT: [FIRST_ANSWER, SECOND_ANSWER],
             SUMMARIZATION_SYSTEM_PROMPT: ["   \n"],
         },
     ) as (client, model, db):
@@ -1770,8 +1839,14 @@ async def test_compaction_failure_keeps_the_run_running_without_compaction_entry
             client_request_id="request-2",
         )
 
-        assert [name for name, _payload in frames] == ["node", "message", "done"]
-        assert frames[1][1] == {"text": SECOND_ANSWER}
+        assert [name for name, _payload in frames] == [
+            "node",
+            "node",
+            "node",
+            "message",
+            "done",
+        ]
+        assert frames[3][1] == {"text": SECOND_ANSWER}
         # 本轮确实走到过摘要调用：失败路径不是“没触发压缩”造成的空过。
         assert SUMMARIZATION_SYSTEM_PROMPT in model.text_calls()
         runs = await repo.list_runs(chat_id)

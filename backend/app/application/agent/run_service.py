@@ -1,6 +1,5 @@
 import asyncio
 from collections.abc import AsyncIterator, Callable, Mapping, Sequence
-from dataclasses import dataclass
 from datetime import date
 from typing import Any, Literal, cast
 from uuid import uuid4
@@ -15,12 +14,10 @@ from langchain_core.messages import (
 from langchain_core.runnables import RunnableConfig
 from langgraph.graph.state import CompiledStateGraph
 from langgraph.types import Interrupt
-from pydantic import BaseModel, ConfigDict
 
 from app.application.agent.budget import (
     ModelRequestBudgetExceeded,
     request_model,
-    request_structured_model,
 )
 from app.application.agent.contracts import (
     ADJUST_PLAN_INTENT,
@@ -39,21 +36,27 @@ from app.application.agent.contracts import (
     WorkflowState,
     thread_config,
 )
+from app.application.agent.harness.tools.general import (
+    general_ui_actions,
+    prepare_workout_record_payload,
+    workout_confirmation_action,
+    workout_form_action,
+)
 from app.application.agent.harness.tools.training import TrainingHarnessContext
 from app.application.agent.prompts import (
-    FORM_RECORD_GUIDE,
     GENERAL_CHAT_SYSTEM_PROMPT,
-    NATURAL_LANGUAGE_RECORD_EXTRACTION_PROMPT,
     NATURAL_LANGUAGE_RECORD_MESSAGE_PROMPT,
     REJECT_DRAFT_MESSAGE,
     SAFETY_STOP_MESSAGE,
     TOOL_HARNESS_SYSTEM_PROMPT,
 )
-from app.application.agent.router import (
-    NON_PLAN_INTENTS,
-    TOOL_INTENTS,
-    classify_intent,
-    workflow_intent,
+from app.application.agent.router import NON_PLAN_INTENTS
+from app.application.agent.run_graph import (
+    GENERAL_NODE,
+    PLAN_NODE,
+    GeneralOutcome,
+    RunBranches,
+    build_agent_run_graph,
 )
 from app.application.ports import (
     Conversations,
@@ -70,7 +73,6 @@ from app.application.services.plans_service import (
     PlanRevalidationFailed,
 )
 from app.domain.actions.rules import RecordLoadMismatch, UnknownExercise
-from app.domain.actions.schema import Exercise, LoadConvention
 from app.domain.conversations.compaction import (
     DEFAULT_COMPACTION_SETTINGS,
     compact,
@@ -85,38 +87,12 @@ from app.domain.conversations.context import (
     history_payload,
 )
 from app.domain.conversations.schema import ConversationRun
-from app.domain.plans.schema import PlanSession
-from app.domain.profile.safety import message_red_flag_hits
 from app.domain.records.rules import InvalidRecordFact
-from app.domain.records.schema import SetType, WorkoutSetInput
 from app.infrastructure.database.connection import Database
 from app.infrastructure.database.repositories.conversations_repository import (
     ConversationRepo,
 )
 from config import MODEL_CONTEXT_WINDOW_TOKENS
-
-
-class ExtractedWorkoutSet(BaseModel):
-    """一组训练事实（模型提取结果）。"""
-
-    model_config = ConfigDict(extra="forbid")
-
-    exercise_id: str
-    set_no: int
-    set_type: SetType
-    reps: int | None = None
-    load_convention: LoadConvention | None = None
-    weight_kg: float | None = None
-    duration_seconds: int | None = None
-
-
-class ExtractedWorkout(BaseModel):
-    """一次自然语言打卡的结构化提取结果：业务自然日 ＋ 全部组。"""
-
-    model_config = ConfigDict(extra="forbid")
-
-    performed_on: date
-    sets: list[ExtractedWorkoutSet]
 
 
 def invalid_natural_language_record_message(error: Exception) -> str:
@@ -126,6 +102,47 @@ def invalid_natural_language_record_message(error: Exception) -> str:
 
 INTERRUPT_EVENT_KEY = "__interrupt__"
 
+#: 计划分支的非正常终止 → 可见文本；字面量与 ``plan_nodes`` 的写入侧同表，改名随 ST-04 一起落。
+_PLAN_TERMINATION_MESSAGES: Mapping[str, str] = {
+    "safety_stop": SAFETY_STOP_MESSAGE,
+    "reject_draft": REJECT_DRAFT_MESSAGE,
+}
+
+#: Intent → harness 系统提示词：一般对话用自己的对话提示词，其余工具 Intent 用工具循环提示词。
+HARNESS_SYSTEM_PROMPTS: Mapping[Intent, str] = {"general": GENERAL_CHAT_SYSTEM_PROMPT}
+
+
+def agent_run_graph(
+    plan_graph: CompiledStateGraph, deps: AgentRunDeps
+) -> CompiledStateGraph:
+    """顶层图的唯一构造点：计划子图只作为 ``plan`` 分支接线，checkpointer 沿用计划子图那一份。"""
+    return build_agent_run_graph(
+        plan_graph=plan_graph,
+        model=deps.model,
+        branches=RunBranches(
+            general=lambda intent, state, run: _general_branch(
+                intent, state, run, deps=deps
+            ),
+            plan_target=lambda intent, run: _plan_target(intent, run, deps=deps),
+        ),
+        checkpointer=plan_graph.checkpointer,
+    )
+
+
+def _node_frame_name(name: str, updates: Mapping[str, Any]) -> str:
+    """节点帧的阶段名：General 分支用它本次接下的 Intent，五项会话 Intent 因此在前端可见。"""
+    intent = updates.get("intent")
+    if name == GENERAL_NODE and isinstance(intent, str):
+        return intent
+    return name
+
+
+def _node_frame_visible(namespace: tuple[str, ...], name: str) -> bool:
+    """节点帧的可见域：顶层节点与计划子图内部节点；计划包装帧与 General 分支内部的工具节点不透出。"""
+    if namespace:
+        return namespace[0].startswith(f"{PLAN_NODE}:")
+    return name != PLAN_NODE
+
 
 async def stream_agent_run(
     graph: CompiledStateGraph,
@@ -134,59 +151,19 @@ async def stream_agent_run(
     run: GeneratePlanRun,
     deps: AgentRunDeps,
 ) -> AsyncIterator[AgentEvent]:
+    """一次 Agent Run 的事件流：节点事件逐个透出，终态由 State 的 ``final_result`` 收敛。
 
+    ``graph`` 是计划子图；安全扫描、路由与 General 分支都在顶层图上，计划子图的节点事件
+    （确认 interrupt 与 ``waiting`` 载荷）照旧透出，持久化顺序不变。
+    """
     async with asyncio.timeout(run.budget.remaining_run_seconds()):
-        intent: Intent | None = None
-        target = ExistingDraftTarget()
-        if not message_red_flag_hits(state["request"]):
-            route = await classify_intent(
-                state["request"],
-                model=deps.model,
-                budget=run.budget,
-                history=run.conversation_messages,
-            )
-            intent = workflow_intent(route)
-            if intent != ADJUST_PLAN_INTENT:
-                run.adjustment = None
-            if intent in NON_PLAN_INTENTS:
-                yield AgentEvent("node", {"name": intent})
-                if intent == "natural_language_record":
-                    outcome = await _natural_language_record(
-                        state["request"], run=run, deps=deps
-                    )
-                    yield AgentEvent("message", {"text": outcome.message})
-                    if outcome.waiting is not None:
-                        yield AgentEvent("waiting", outcome.waiting)
-                    yield _done_event(
-                        intent, termination_reason=None, draft_plan_id=None
-                    )
-                    return
-                text = (
-                    await _tool_answer(intent, state["request"], run=run, deps=deps)
-                    if intent in TOOL_INTENTS
-                    else await _non_plan_text(
-                        intent, state["request"], run=run, deps=deps
-                    )
-                )
-                yield AgentEvent("message", {"text": text})
-                yield _done_event(intent, termination_reason=None, draft_plan_id=None)
-                return
-            target = await _existing_draft_target(
-                intent, regenerate=run.regenerate, deps=deps
-            )
-            if target.reused is not None:
-                yield AgentEvent("waiting", {"draft_plan_id": target.reused.id})
-                yield _done_event(
-                    intent, termination_reason=None, draft_plan_id=target.reused.id
-                )
-                return
-
         updates: dict[str, Any] = {}
-        async for chunk in graph.astream(
-            {**state, "intent": intent, "draft_plan_id": target.replacement_id},
+        async for namespace, chunk in agent_run_graph(graph, deps).astream(
+            state,
             config,
             context=run,
             stream_mode="updates",
+            subgraphs=True,
         ):
             for name, update in chunk.items():
                 if name == INTERRUPT_EVENT_KEY:
@@ -198,16 +175,34 @@ async def stream_agent_run(
                     continue
                 if isinstance(update, Mapping):
                     updates.update(update)
-                yield AgentEvent("node", {"name": name})
-        termination_reason = updates.get("termination_reason")
-        if termination_reason == "safety_stop":
-            yield AgentEvent("message", {"text": SAFETY_STOP_MESSAGE})
-        elif termination_reason == "reject_draft":
-            yield AgentEvent("message", {"text": REJECT_DRAFT_MESSAGE})
+                if _node_frame_visible(namespace, name):
+                    yield AgentEvent(
+                        "node", {"name": _node_frame_name(name, updates)}
+                    )
+        final_result = updates.get("final_result")
+        if isinstance(final_result, AgentRunResult):
+            for text in final_result.messages:
+                yield AgentEvent("message", {"text": text})
+            for action in updates.get("ui_actions", ()):
+                # 只有 ``workout_confirmation`` 需要等用户；未标注 ``type`` 的既有计划动作照旧透出。
+                if action.get("type") in (None, "workout_confirmation"):
+                    yield AgentEvent("waiting", action)
+            yield _done_event(
+                final_result.intent,
+                termination_reason=final_result.termination_reason,
+                draft_plan_id=final_result.draft_plan_id,
+            )
+            return
+        if (
+            message := _PLAN_TERMINATION_MESSAGES.get(
+                updates.get("termination_reason")
+            )
+        ) is not None:
+            yield AgentEvent("message", {"text": message})
         yield _done_event(
-            intent,
-            termination_reason=termination_reason,
-            draft_plan_id=updates.get("draft_plan_id", target.replacement_id),
+            updates.get("intent"),
+            termination_reason=updates.get("termination_reason"),
+            draft_plan_id=updates.get("draft_plan_id"),
         )
 
 
@@ -267,6 +262,33 @@ def _waiting_event(payload: Any) -> AgentEvent | None:
     return None
 
 
+async def _general_branch(
+    intent: Intent, state: WorkflowState, run: GeneratePlanRun, *, deps: AgentRunDeps
+) -> GeneralOutcome:
+    """五项会话 Intent 的唯一分支：按 Intent 的只读白名单取事实，输出 message ＋ ui_actions。"""
+    request = state["request"]
+    if intent == "natural_language_record":
+        return await _natural_language_record(request, run=run, deps=deps)
+    if intent not in NON_PLAN_INTENTS:
+        raise ValueError(f"General 分支收到未登记的会话 Intent：{intent!r}")
+    messages = await _tool_messages(intent, request, run=run, deps=deps)
+    return GeneralOutcome(
+        message=harness_answer(messages),
+        actions=(
+            (workout_form_action(),)
+            if intent == "form_record"
+            else general_ui_actions(intent, messages)
+        ),
+    )
+
+
+async def _plan_target(
+    intent: Intent, run: GeneratePlanRun, *, deps: AgentRunDeps
+) -> ExistingDraftTarget:
+    """计划分支入口处置的既有实现：唯一 draft 的复用短路与替换身份判定。"""
+    return await _existing_draft_target(intent, regenerate=run.regenerate, deps=deps)
+
+
 async def _existing_draft_target(
     intent: Intent, *, regenerate: bool, deps: AgentRunDeps
 ) -> ExistingDraftTarget:
@@ -295,11 +317,9 @@ async def _existing_draft_target(
     return ExistingDraftTarget(replacement_id=draft.id)
 
 
-async def _tool_answer(
-    intent: Intent, request: str, *, run: GeneratePlanRun, deps: AgentRunDeps
-) -> str:
-    """``view_schedule``／``view_progress`` 的唯一实现：只读工具 harness 产出最终可见文本。"""
-    context = TrainingHarnessContext(
+def harness_context(run: GeneratePlanRun, *, deps: AgentRunDeps) -> TrainingHarnessContext:
+    """General 只读工具的运行上下文：业务日、共享预算与既有只读入口，身份不进模型参数。"""
+    return TrainingHarnessContext(
         model=deps.model,
         budget=run.budget,
         business_day=run.business_day,
@@ -308,28 +328,39 @@ async def _tool_answer(
         records=deps.records,
         stats=deps.stats,
     )
+
+
+async def _tool_messages(
+    intent: Intent, request: str, *, run: GeneratePlanRun, deps: AgentRunDeps
+) -> tuple[BaseMessage, ...]:
+    """工具类 Intent 的唯一实现：本次 Intent 白名单的 general_tools 出消息；调用由模型自选。"""
     result = await deps.tool_harnesses[intent].ainvoke(
         {
             "messages": harness_messages(
                 request,
                 business_day=run.business_day,
                 history=run.conversation_messages,
+                system_prompt=HARNESS_SYSTEM_PROMPTS.get(
+                    intent, TOOL_HARNESS_SYSTEM_PROMPT
+                ),
             )
         },
-        context=context,
+        context=harness_context(run, deps=deps),
     )
-    return harness_answer(result["messages"])
+    return tuple(result["messages"])
 
 
 def harness_messages(
-    request: str, *, business_day: date, history: Sequence[ContextMessage]
+    request: str,
+    *,
+    business_day: date,
+    history: Sequence[ContextMessage],
+    system_prompt: str = TOOL_HARNESS_SYSTEM_PROMPT,
 ) -> list[BaseMessage]:
     """harness 的消息序列：业务日 system ＋ 已重建历史 ＋ 当前请求（只出现一次）。"""
     return [
         SystemMessage(
-            content=TOOL_HARNESS_SYSTEM_PROMPT.format(
-                business_day=business_day.isoformat()
-            )
+            content=system_prompt.format(business_day=business_day.isoformat())
         ),
         *(
             HumanMessage(content=message.text)
@@ -358,58 +389,18 @@ def harness_answer(messages: Sequence[BaseMessage]) -> str:
     return final.content.strip()
 
 
-async def _non_plan_text(
-    intent: Intent,
-    request: str,
-    *,
-    run: GeneratePlanRun,
-    deps: AgentRunDeps,
-) -> str:
-    """非计划分支的可见文本：表单引导与一般对话。"""
-    if intent == "general":
-        return await _general_answer(request, run=run, deps=deps)
-    return FORM_RECORD_GUIDE
-
-
-@dataclass(frozen=True, slots=True)
-class NaturalLanguageRecordOutcome:
-    """自然语言打卡分支的一次结果：可见摘要 ＋ ``waiting`` 载荷。"""
-
-    message: str
-    waiting: dict[str, Any] | None
-
-
 async def _natural_language_record(
     request: str, *, run: GeneratePlanRun, deps: AgentRunDeps
-) -> NaturalLanguageRecordOutcome:
-    """自然语言打卡的唯一实现：提取 → 校验 → 候选日程 → 可读摘要。"""
-    catalog = await deps.catalog.list_all()
-    extraction = await request_structured_model(
-        deps.model,
-        NATURAL_LANGUAGE_RECORD_EXTRACTION_PROMPT,
-        {
-            "request": request,
-            **history_payload(run.conversation_messages),
-            "business_day": run.business_day.isoformat(),
-            "actions": [_action_payload(exercise) for exercise in catalog],
-        },
-        run.budget,
-        ExtractedWorkout,
-    )
+) -> GeneralOutcome:
+    """自然语言打卡的唯一实现：提取 → 校验 → 候选日程 → 可读摘要；确认前不写业务训练表。"""
     try:
-        day, facts = await deps.records.validate_record_facts(
-            extraction.performed_on,
-            tuple(_workout_set_input(item) for item in extraction.sets),
+        payload = await prepare_workout_record_payload(
+            harness_context(run, deps=deps),
+            request,
+            history=run.conversation_messages,
         )
     except (InvalidRecordFact, UnknownExercise, RecordLoadMismatch) as error:
-        return NaturalLanguageRecordOutcome(
-            message=invalid_natural_language_record_message(error), waiting=None
-        )
-    candidates = await deps.records.list_unfinished_plan_sessions(day)
-    workout = _workout_payload(day, facts)
-    candidate_payloads = [
-        _candidate_plan_session_payload(session) for session in candidates
-    ]
+        return GeneralOutcome(message=invalid_natural_language_record_message(error))
     message = (
         await request_model(
             deps.model,
@@ -417,88 +408,15 @@ async def _natural_language_record(
             {
                 "request": request,
                 **history_payload(run.conversation_messages),
-                "workout": workout,
-                "candidate_plan_sessions": candidate_payloads,
+                "workout": payload["workout"],
+                "candidate_plan_sessions": payload["candidate_plan_sessions"],
             },
             run.budget,
         )
     ).strip()
-    return NaturalLanguageRecordOutcome(
-        message=message,
-        waiting={
-            "workout": workout,
-            "candidate_plan_sessions": candidate_payloads,
-        },
+    return GeneralOutcome(
+        message=message, actions=(workout_confirmation_action(payload),)
     )
-
-
-def _workout_set_input(item: ExtractedWorkoutSet) -> WorkoutSetInput:
-    """提取结果的一条组 → 写入侧的组事实。"""
-    return WorkoutSetInput(
-        exercise_id=item.exercise_id,
-        set_no=item.set_no,
-        reps=item.reps,
-        set_type=item.set_type,
-        load_convention=item.load_convention,
-        weight_kg=item.weight_kg,
-        duration_seconds=item.duration_seconds,
-    )
-
-
-def _action_payload(exercise: Exercise) -> dict[str, Any]:
-    """可读动作目录的一行：模型据此把自然语言动作匹配为稳定 ``exercise_id``。"""
-    return {
-        "exercise_id": exercise.id,
-        "standard_name_zh": exercise.standard_name_zh,
-        "aliases": list(exercise.aliases),
-        "equipment_variant": exercise.equipment_variant,
-        "modes": list(exercise.modes),
-        "record_type": exercise.record_type,
-        "load_convention": exercise.load_convention,
-    }
-
-
-def _workout_payload(day: date, facts: Sequence[WorkoutSetInput]) -> dict[str, Any]:
-    """``waiting.workout``（前端确认 UI 的编辑数据源）：日期、组事实与关联日程默认值。"""
-    return {
-        "performed_on": day.isoformat(),
-        "sets": [
-            {
-                "exercise_id": fact.exercise_id,
-                "set_no": fact.set_no,
-                "set_type": fact.set_type,
-                "load_convention": fact.load_convention,
-                "weight_kg": fact.weight_kg,
-                "reps": fact.reps,
-                "duration_seconds": fact.duration_seconds,
-            }
-            for fact in facts
-        ],
-        "plan_session_id": None,
-        "auto_link": True,
-    }
-
-
-def _candidate_plan_session_payload(session: PlanSession) -> dict[str, Any]:
-    """``waiting.candidate_plan_sessions`` 的一行。"""
-    return {
-        "id": session.id,
-        "plan_id": session.plan_id,
-        "scheduled_on": session.scheduled_on.isoformat(),
-    }
-
-
-async def _general_answer(
-    request: str, *, run: GeneratePlanRun, deps: AgentRunDeps
-) -> str:
-    """``general`` 的唯一实现：一次文本模型调用，不写库、不进入计划子图。"""
-    text = await request_model(
-        deps.model,
-        GENERAL_CHAT_SYSTEM_PROMPT,
-        {"request": request, **history_payload(run.conversation_messages)},
-        run.budget,
-    )
-    return text.strip()
 
 
 async def run_events(

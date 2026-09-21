@@ -5,7 +5,7 @@
 import json
 from collections.abc import AsyncIterator, Mapping, Sequence
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from datetime import date
 from pathlib import Path
 from typing import Any
@@ -16,6 +16,7 @@ from langgraph.graph import START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 from langgraph.prebuilt import ToolNode
 
+from app.application.agent.contracts import ToolExecutionContext
 from app.application.agent.harness.declaration import HarnessState
 from app.application.agent.harness.tools.training import (
     PROGRESS_TOOLS,
@@ -505,7 +506,7 @@ async def test_read_training_calendar_rejects_undeclared_arguments(tmp_path: Pat
         assert "Extra inputs are not permitted" in message.content
 
 
-async def test_read_recent_workouts_defaults_to_four_sessions(tmp_path: Path) -> None:
+async def test_read_training_history_defaults_to_four_sessions(tmp_path: Path) -> None:
     """缺省取最近 4 次训练，最新在前，字段严格来自现有 Schema。"""
     async with _harness(tmp_path) as h:
         plan_id = await h.seed_plan(_plan_content())
@@ -517,7 +518,7 @@ async def test_read_recent_workouts_defaults_to_four_sessions(tmp_path: Path) ->
             date(2026, 5, 30), [_squat_set(), _plank_set()], plan_session_id=sessions[0].id
         )
 
-        workouts = await h.payload("read_recent_workouts", {})
+        workouts = await h.payload("read_training_history", {})
 
         assert isinstance(workouts, list)
         assert [workout["performed_on"] for workout in workouts] == [
@@ -547,25 +548,25 @@ async def test_read_recent_workouts_defaults_to_four_sessions(tmp_path: Path) ->
         }
 
 
-async def test_read_recent_workouts_accepts_limit_bounds(tmp_path: Path) -> None:
+async def test_read_training_history_accepts_limit_bounds(tmp_path: Path) -> None:
     """limit 的 1 与 20 端点合法，0 与 21 被 Schema 拦下。"""
     async with _harness(tmp_path) as h:
         for day in (26, 27, 28, 29, 30):
             await h.seed_workout(date(2026, 5, day), [_squat_set()])
 
-        assert len((await h.payload("read_recent_workouts", {"limit": 1}))) == 1
-        assert len((await h.payload("read_recent_workouts", {"limit": 20}))) == 5
+        assert len((await h.payload("read_training_history", {"limit": 1}))) == 1
+        assert len((await h.payload("read_training_history", {"limit": 20}))) == 5
         for limit in (0, 21):
-            message = await h.call("read_recent_workouts", {"limit": limit})
+            message = await h.call("read_training_history", {"limit": limit})
             assert message.status == "error", message.content
             assert "limit" in message.content
             assert "Extra inputs are not permitted" not in message.content
 
 
-async def test_read_recent_workouts_rejects_undeclared_arguments(tmp_path: Path) -> None:
+async def test_read_training_history_rejects_undeclared_arguments(tmp_path: Path) -> None:
     """最近训练工具同样拒绝未声明字段。"""
     async with _harness(tmp_path) as h:
-        message = await h.call("read_recent_workouts", {EXTRA_ARGUMENT: "2026-06-01"})
+        message = await h.call("read_training_history", {EXTRA_ARGUMENT: "2026-06-01"})
 
         assert message.status == "error"
         assert "Extra inputs are not permitted" in message.content
@@ -670,25 +671,28 @@ async def test_read_progress_rejects_undeclared_arguments(tmp_path: Path) -> Non
 
 
 def test_read_tool_schemas_forbid_undeclared_fields_and_hide_injected_context() -> None:
-    """四个 args_schema 都带 additionalProperties: false，注入的 runtime 不进模型可见 Schema。"""
+    """四个 args_schema 都带 additionalProperties: false；注入的 runtime、身份与 revision 不进模型可见 Schema。"""
     assert [tool.name for tool in SCHEDULE_TOOLS] == [
         "read_active_plan",
         "read_training_calendar",
     ]
     assert [tool.name for tool in PROGRESS_TOOLS] == [
-        "read_recent_workouts",
         "read_progress",
+        "read_training_history",
     ]
+    # 身份与 revision 由 Runtime 注入上下文，模型参数不得出现同名字段（ST-01）。
+    injected = {f.name for f in fields(ToolExecutionContext)} | {"revision"}
     visible: dict[str, set[str]] = {}
     for tool in (*SCHEDULE_TOOLS, *PROGRESS_TOOLS):
         assert tool.args_schema.model_json_schema()["additionalProperties"] is False
         properties = tool.tool_call_schema.model_json_schema()["properties"]
         assert "runtime" not in properties
+        assert injected.isdisjoint(properties)
         visible[tool.name] = set(properties)
     assert visible == {
         "read_active_plan": set(),
         "read_training_calendar": {"year", "month"},
-        "read_recent_workouts": {"limit"},
+        "read_training_history": {"limit"},
         "read_progress": set(),
     }
 
@@ -756,6 +760,6 @@ def _all_tool_calls() -> tuple[tuple[str, dict[str, Any]], ...]:
     return (
         ("read_active_plan", {}),
         ("read_training_calendar", {"year": 2026, "month": 6}),
-        ("read_recent_workouts", {}),
+        ("read_training_history", {}),
         ("read_progress", {}),
     )

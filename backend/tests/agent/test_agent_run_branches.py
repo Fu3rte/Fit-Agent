@@ -22,6 +22,7 @@ from app.application.agent.budget import (
     ModelRequestBudgetExceeded,
 )
 from app.application.agent.contracts import (
+    AgentEvent,
     AgentRunDeps,
     AgentRunResult,
     GeneratePlanDeps,
@@ -29,22 +30,24 @@ from app.application.agent.contracts import (
     Intent,
     thread_config,
 )
-from app.application.agent.harness.graph import build_tool_harness
-from app.application.agent.harness.tools.training import (
-    PROGRESS_TOOLS,
-    SCHEDULE_TOOLS,
+from app.application.agent.harness.tools.general import (
+    ExtractedWorkout,
+    build_general_tool_harnesses,
 )
 from app.application.agent.memory import MemoryAssembler
 from app.application.agent.plan_graph import build_generate_plan_graph
 from app.application.agent.prompts import (
     EVALUATOR_SYSTEM_PROMPT,
-    FORM_RECORD_GUIDE,
     GENERAL_CHAT_SYSTEM_PROMPT,
     NATURAL_LANGUAGE_RECORD_MESSAGE_PROMPT,
     PLANNER_SYSTEM_PROMPT,
+    SAFETY_STOP_MESSAGE,
 )
 from app.application.agent.router import ROUTER_SYSTEM_PROMPT, FitnessIntent
-from app.application.agent.run_service import ExtractedWorkout, invoke_agent_run
+from app.application.agent.run_service import (
+    invoke_agent_run,
+    stream_agent_run,
+)
 from app.bootstrap import SqliteHealthProbe, build_repositories, build_services
 from app.domain.conversations.context import ContextMessage
 from app.domain.plans.schema import PlanDraft, RubricResult
@@ -167,17 +170,8 @@ def final_answer(text: str) -> AIMessage:
 
 
 def _tool_harnesses() -> Mapping[Intent, CompiledStateGraph]:
-    """与 ``build_agent_runtime()`` 同形的测试装配：两个只读 intent 各一份无 checkpointer 的 harness。"""
-    return {
-        "view_schedule": build_tool_harness(
-            SCHEDULE_TOOLS,
-            timeout_seconds=TOOL_TIMEOUT_SECONDS,
-        ),
-        "view_progress": build_tool_harness(
-            PROGRESS_TOOLS,
-            timeout_seconds=TOOL_TIMEOUT_SECONDS,
-        ),
-    }
+    """与 ``build_agent_runtime()`` 同形的测试装配：五项会话 Intent 各一份按白名单固化的 harness。"""
+    return build_general_tool_harnesses(timeout_seconds=TOOL_TIMEOUT_SECONDS)
 
 
 @dataclass
@@ -204,6 +198,25 @@ class Harness:
             run,
             self.run_deps,
         )
+
+    async def stream(
+        self,
+        request: str,
+        *,
+        budget: ModelRequestBudget | None = None,
+    ) -> list[AgentEvent]:
+        """一次 Run 的完整产品事件序列：与 ``run_events`` 走同一个 ``stream_agent_run``。"""
+        run = self.run_context(budget=budget)
+        return [
+            event
+            async for event in stream_agent_run(
+                self.graph,
+                {"conversation_id": CONVERSATION_ID, "request": request},
+                thread_config(CONVERSATION_ID),
+                run,
+                self.run_deps,
+            )
+        ]
 
     def run_context(
         self,
@@ -458,7 +471,7 @@ async def _row_counts(db: Database) -> dict[str, int]:
 async def test_form_record_request_guides_to_the_form_without_writing(
     tmp_path: Path,
 ) -> None:
-    """``workout_execution/create/form_record``：只引导既有表单，不写库、不进计划子图。"""
+    """``workout_execution/create/form_record``：经 general_tools 取表单，不写库、不进计划子图。"""
     async with _harness(
         tmp_path,
         structured=_route(
@@ -466,13 +479,18 @@ async def test_form_record_request_guides_to_the_form_without_writing(
             action="create",
             execution_type="form_record",
         ),
+        harness=[
+            tool_call("get_workout_record_form"),
+            final_answer(ANSWER),
+        ],
     ) as h:
         before = await _row_counts(h.db)
         result = await h.invoke("打开打卡表单")
 
         assert result.intent == "form_record"
-        assert result.messages == (FORM_RECORD_GUIDE,)
+        assert result.messages == (ANSWER,)
         assert result.draft_plan_id is None
+        assert h.model.harness_calls[0].offered == ("get_workout_record_form",)
         assert h.model.text_calls() == []
         assert await _row_counts(h.db) == before
 
@@ -485,14 +503,14 @@ async def test_form_record_request_guides_to_the_form_without_writing(
         "新手一周练几次合适？",
     ],
 )
-async def test_general_chat_answers_with_one_text_call(
+async def test_general_chat_answers_with_one_harness_call(
     tmp_path: Path, request_text: str
 ) -> None:
-    """一般对话与训练知识类问法：一次文本调用，payload 仅 request 与 history，不写库、不进计划子图。"""
+    """一般对话与训练知识类问法：对话提示词作 harness system，白名单只读 Tool 已挂载、调用由模型自选。"""
     async with _harness(
         tmp_path,
         structured=_route(domain="general", action="chat"),
-        text={GENERAL_CHAT_SYSTEM_PROMPT: [ANSWER]},
+        harness=[final_answer(ANSWER)],
     ) as h:
         before = await _row_counts(h.db)
         result = await h.invoke(request_text)
@@ -500,10 +518,15 @@ async def test_general_chat_answers_with_one_text_call(
         assert result.intent == "general"
         assert result.messages == (ANSWER,)
         assert result.draft_plan_id is None
-        assert h.model.text_calls() == [GENERAL_CHAT_SYSTEM_PROMPT]
-        assert h.model.payload_for(GENERAL_CHAT_SYSTEM_PROMPT) == {
-            "request": request_text
-        }
+        call = h.model.harness_calls[0]
+        assert call.offered == (
+            "search_exercises",
+            "read_training_history",
+            "read_active_plan",
+        )
+        assert call.messages[0].content == GENERAL_CHAT_SYSTEM_PROMPT
+        assert [message.content for message in call.messages].count(request_text) == 1
+        assert h.model.text_calls() == []
         assert await _row_counts(h.db) == before
 
 
@@ -603,3 +626,86 @@ async def test_illegal_router_output_aborts_before_any_branch(
 
         assert await _row_counts(h.db) == before
         assert h.model.text_calls() == []
+
+
+async def test_safety_hit_streams_only_the_safety_nodes_without_a_model_call(
+    tmp_path: Path,
+) -> None:
+    """红旗词命中：节点序列只有 safety_scan 与 safety_stop，模型零调用、业务库零写入。"""
+    async with _harness(tmp_path) as h:
+        before = await _row_counts(h.db)
+        events = await h.stream("训练时胸部异常不适，我还能继续吗？")
+
+        assert [(event.event, event.data) for event in events] == [
+            ("node", {"name": "safety_scan"}),
+            ("node", {"name": "safety_stop"}),
+            ("message", {"text": SAFETY_STOP_MESSAGE}),
+            (
+                "done",
+                {
+                    "ok": True,
+                    "intent": None,
+                    "termination_reason": "safety_stop",
+                    "draft_plan_id": None,
+                },
+            ),
+        ]
+        assert h.model.calls == []
+        assert h.model.harness_calls == []
+        assert await _row_counts(h.db) == before
+
+
+async def test_conversation_intent_emits_its_branch_node_before_any_visible_text(
+    tmp_path: Path,
+) -> None:
+    """五项会话 Intent 的节点序列可观察：安全扫描、路由、General 依次先于可见文本。"""
+    async with _harness(
+        tmp_path,
+        structured={
+            FitnessIntent: [
+                {
+                    "domain": "workout_execution",
+                    "action": "create",
+                    "execution_type": "natural_language_record",
+                }
+            ],
+            **_extraction_scripts(),
+        },
+        text={NATURAL_LANGUAGE_RECORD_MESSAGE_PROMPT: [SUMMARY]},
+    ) as h:
+        events = await h.stream("记录今天做8个引体")
+
+        assert [event.event for event in events] == [
+            "node",
+            "node",
+            "node",
+            "message",
+            "waiting",
+            "done",
+        ]
+        assert [event.data["name"] for event in events[:3]] == [
+            "safety_scan",
+            "router_node",
+            "natural_language_record",
+        ]
+        assert events[4].data == {
+            "type": "workout_confirmation",
+            "workout": {
+                "performed_on": SCHEDULED_ON,
+                "sets": [
+                    {
+                        "exercise_id": PULL_UP,
+                        "set_no": 1,
+                        "set_type": "work",
+                        "load_convention": None,
+                        "weight_kg": None,
+                        "reps": 8,
+                        "duration_seconds": None,
+                    }
+                ],
+                "plan_session_id": None,
+                "auto_link": True,
+            },
+            "candidate_plan_sessions": [],
+        }
+        assert events[5].data["intent"] == "natural_language_record"

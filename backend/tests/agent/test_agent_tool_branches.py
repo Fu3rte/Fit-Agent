@@ -199,12 +199,12 @@ async def test_progress_query_offers_only_the_progress_tools(tmp_path: Path) -> 
 
 
 async def test_recent_workout_query_reads_the_written_session(tmp_path: Path) -> None:
-    """最近训练查询：read_recent_workouts 按给定 limit 读取既有训练事实。"""
+    """最近训练查询：read_training_history 按给定 limit 读取既有训练事实。"""
     async with _harness(
         tmp_path,
         structured=_route(domain="analytics", action="query"),
         harness=[
-            tool_call("read_recent_workouts", {"limit": 2}),
+            tool_call("read_training_history", {"limit": 2}),
             final_answer(ANSWER),
         ],
     ) as h:
@@ -321,10 +321,20 @@ async def test_streamed_frames_stay_in_the_closed_event_set(tmp_path: Path) -> N
             )
         ]
 
-        assert [event.event for event in events] == ["node", "message", "done"]
-        assert events[0].data == {"name": "view_schedule"}
-        assert events[1].data == {"text": ANSWER}
-        assert events[2].data == {
+        assert [event.event for event in events] == [
+            "node",
+            "node",
+            "node",
+            "message",
+            "done",
+        ]
+        assert [event.data for event in events[:3]] == [
+            {"name": "safety_scan"},
+            {"name": "router_node"},
+            {"name": "view_schedule"},
+        ]
+        assert events[3].data == {"text": ANSWER}
+        assert events[4].data == {
             "ok": True,
             "intent": "view_schedule",
             "termination_reason": None,

@@ -19,6 +19,7 @@ from config import database_path
 from tests.integration.test_conversation_routes import (
     _client,
     _create_conversation,
+    _general_harness,
     _run,
 )
 
@@ -199,7 +200,7 @@ async def test_interrupted_run_stays_visible_and_the_next_turn_excludes_the_frag
     async with _client(
         tmp_path,
         structured={FitnessIntent: [{"domain": "general", "action": "chat"}]},
-        text={GENERAL_CHAT_SYSTEM_PROMPT: [SECOND_ANSWER]},
+        harness=_general_harness([SECOND_ANSWER]),
     ) as (client, model, db):
         chat_id = await _create_conversation(client, "会话重启")
         await _crash_mid_stream(
@@ -240,13 +241,22 @@ async def test_interrupted_run_stays_visible_and_the_next_turn_excludes_the_frag
             client_request_id="request-next",
         )
         assert [name for name, _data in frames][-1] == "done"
-        for prompt in (ROUTER_SYSTEM_PROMPT, GENERAL_CHAT_SYSTEM_PROMPT):
-            payload = json.loads(
-                [text for name, text in model.calls if name == prompt][-1]
-            )
-            assert payload["conversation_messages"] == [
-                {"role": "user", "text": CRASH_REQUEST}
-            ]
+        router_payload = json.loads(
+            [
+                text
+                for name, text in model.calls
+                if name == ROUTER_SYSTEM_PROMPT
+            ][-1]
+        )
+        assert router_payload["conversation_messages"] == [
+            {"role": "user", "text": CRASH_REQUEST}
+        ]
+        general_messages = model.harness_calls[-1].messages
+        assert general_messages[0].content == GENERAL_CHAT_SYSTEM_PROMPT
+        assert [message.content for message in general_messages[1:]] == [
+            CRASH_REQUEST,
+            SECOND_REQUEST,
+        ]
 
         rounds = (await client.get(f"/api/conversations/{chat_id}")).json()["rounds"]
         assert [round_["status"] for round_ in rounds] == ["failed", "completed"]

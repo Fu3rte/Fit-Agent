@@ -89,9 +89,6 @@ NON_PLAN_INTENTS: tuple[Intent, ...] = (
     "general",
 )
 
-#: 走只读工具 harness 的两个 intent：最终文本仍回既有 ``message``／``done``。
-TOOL_INTENTS: tuple[Intent, ...] = ("view_schedule", "view_progress")
-
 
 ROUTER_SYSTEM_PROMPT = (
     "你是 Fit-Agent 的请求路由器，只做一次分类：不执行任何业务动作、不写库、不生成或修改计划、"

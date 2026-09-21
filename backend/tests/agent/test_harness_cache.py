@@ -215,11 +215,11 @@ async def test_changed_args_miss(tmp_path: Path) -> None:
         execute = RecordingExecute(lambda request: _message(request, "records"))
         wrapper = h.wrapper()
         await wrapper(
-            _request("read_recent_workouts", {"limit": 4}, call_id="call-1", context=h.context),
+            _request("read_training_history", {"limit": 4}, call_id="call-1", context=h.context),
             execute,
         )
         await wrapper(
-            _request("read_recent_workouts", {"limit": 5}, call_id="call-2", context=h.context),
+            _request("read_training_history", {"limit": 5}, call_id="call-2", context=h.context),
             execute,
         )
 
@@ -231,12 +231,12 @@ async def test_revision_bump_invalidates(tmp_path: Path) -> None:
         execute = RecordingExecute(lambda request: _message(request, "workouts"))
         wrapper = h.wrapper()
         await wrapper(
-            _request("read_recent_workouts", {"limit": 4}, call_id="call-1", context=h.context),
+            _request("read_training_history", {"limit": 4}, call_id="call-1", context=h.context),
             execute,
         )
         assert await h.bump("workouts") == 1
         await wrapper(
-            _request("read_recent_workouts", {"limit": 4}, call_id="call-2", context=h.context),
+            _request("read_training_history", {"limit": 4}, call_id="call-2", context=h.context),
             execute,
         )
 
@@ -263,7 +263,7 @@ async def test_business_day_dimension_only_applies_to_dependent_tools(tmp_path: 
 
         for name, args in (
             ("read_training_calendar", {"year": 2026, "month": 6}),
-            ("read_recent_workouts", {"limit": 4}),
+            ("read_training_history", {"limit": 4}),
         ):
             execute.calls = 0
             await wrapper(_request(name, args, call_id="call-1", context=h.context), execute)
@@ -278,7 +278,7 @@ async def test_schema_version_dimension_only_applies_to_catalog_dependents(tmp_p
         )
         plan = _request("read_active_plan", {}, call_id="call-1", context=h.context)
         recent = _request(
-            "read_recent_workouts", {"limit": 4}, call_id="call-2", context=h.context
+            "read_training_history", {"limit": 4}, call_id="call-2", context=h.context
         )
 
         assert await h.cache.key_for(plan) != await other.key_for(plan)
@@ -373,7 +373,7 @@ async def test_lru_capacity_is_bounded(tmp_path: Path) -> None:
         for index, limit in enumerate((1, 2, 3)):
             await wrapper(
                 _request(
-                    "read_recent_workouts",
+                    "read_training_history",
                     {"limit": limit},
                     call_id=f"call-{index}",
                     context=h.context,
@@ -383,7 +383,7 @@ async def test_lru_capacity_is_bounded(tmp_path: Path) -> None:
 
         assert len(h.cache) == 2
         await wrapper(
-            _request("read_recent_workouts", {"limit": 1}, call_id="call-9", context=h.context),
+            _request("read_training_history", {"limit": 1}, call_id="call-9", context=h.context),
             execute,
         )
         assert execute.calls == 4
@@ -439,13 +439,13 @@ async def test_key_comes_from_validated_args(tmp_path: Path) -> None:
     """键取工具公开参数 Schema 的校验结果：Schema 默认值补齐，类型归一。"""
     async with _harness(tmp_path) as h:
         empty = _request(
-            "read_recent_workouts", {}, call_id="call-1", context=h.context
+            "read_training_history", {}, call_id="call-1", context=h.context
         )
         explicit = _request(
-            "read_recent_workouts", {"limit": 4}, call_id="call-2", context=h.context
+            "read_training_history", {"limit": 4}, call_id="call-2", context=h.context
         )
         text = _request(
-            "read_recent_workouts", {"limit": "4"}, call_id="call-3", context=h.context
+            "read_training_history", {"limit": "4"}, call_id="call-3", context=h.context
         )
 
         assert await h.cache.key_for(empty) == await h.cache.key_for(explicit)

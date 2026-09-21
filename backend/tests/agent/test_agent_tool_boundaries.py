@@ -141,7 +141,7 @@ async def test_recent_workout_query_without_records_returns_an_empty_list(
     async with _harness(
         tmp_path,
         structured=_route(domain="analytics", action="query"),
-        harness=[tool_call("read_recent_workouts", {}), final_answer(ANSWER)],
+        harness=[tool_call("read_training_history", {}), final_answer(ANSWER)],
     ) as h:
         before = await _row_counts(h.db)
         result = await h.invoke(RECENT_WORKOUT_QUESTION)
