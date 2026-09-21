@@ -58,6 +58,7 @@ from graph.workflow import (
     AgentEvent,
     AgentEventName,
     AgentRunDeps,
+    AmbiguousExerciseName,
     invoke_confirmation,
     stream_agent_run,
 )
@@ -513,6 +514,7 @@ _FIXED_ERROR_MESSAGES: tuple[tuple[type[Exception], str], ...] = (
 )
 
 _PRODUCT_ERROR_TYPES: tuple[type[Exception], ...] = (
+    AmbiguousExerciseName,
     RequiredProfileMissing,
     RequiredActivePlanMissing,
     ConfirmationConflict,

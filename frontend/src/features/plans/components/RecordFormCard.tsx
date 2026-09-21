@@ -47,6 +47,8 @@ function todayIso(): string {
 
 interface SetRow {
   exerciseId: string;
+  /** 动作选择器的搜索词：只用于筛选候选，不参与提交（提交只看下面的字段） */
+  exerciseQuery: string;
   setType: SetTypeWire;
   reps: string;
   weight: string;
@@ -57,6 +59,7 @@ interface SetRow {
 function emptySetRow(): SetRow {
   return {
     exerciseId: "",
+    exerciseQuery: "",
     setType: "work",
     reps: "",
     weight: "",
@@ -68,6 +71,7 @@ function emptySetRow(): SetRow {
 function setRowsFromRecord(record: RecordWire): SetRow[] {
   return record.sets.map((set) => ({
     exerciseId: set.exercise_id,
+    exerciseQuery: "",
     setType: set.set_type,
     reps: set.reps === null ? "" : String(set.reps),
     weight: set.weight_kg === null ? "" : String(set.weight_kg),
@@ -138,6 +142,47 @@ function toSetInputs(
       duration_seconds: null,
     };
   });
+}
+
+/** 空搜索时默认只铺出前 20 个可推荐动作：110 条目录不一次性铺满页面 */
+const DEFAULT_EXERCISE_LIMIT = 20;
+
+/** 动作搜索命中：中文标准名、aliases、原始英文器械名、模式四项任一包含关键词即命中（大小写不敏感） */
+function matchesExercise(exercise: ExerciseWire, keyword: string): boolean {
+  const needle = keyword.trim().toLowerCase();
+  if (needle === "") return false;
+  return (
+    exercise.standard_name_zh.includes(needle) ||
+    exercise.aliases.some((alias) => alias.toLowerCase().includes(needle)) ||
+    exercise.equipment_variant.toLowerCase().includes(needle) ||
+    exercise.modes.some((mode) => mode.includes(needle))
+  );
+}
+
+/**
+ * 选择器候选：空搜索只给稳定排序（目录按 ID）的前 20 个 A 层动作，并提示继续输入；
+ * 搜索时给出全部命中的 A／B 层动作（B 层仅记录）。
+ */
+function exerciseOptions(
+  exercises: ExerciseWire[],
+  keyword: string,
+): { items: ExerciseWire[]; truncated: boolean } {
+  if (keyword.trim() === "") {
+    const recommendable = exercises.filter((exercise) => exercise.recommendable);
+    const items = recommendable.slice(0, DEFAULT_EXERCISE_LIMIT);
+    return { items, truncated: recommendable.length > items.length };
+  }
+  return {
+    items: exercises.filter((exercise) => matchesExercise(exercise, keyword)),
+    truncated: false,
+  };
+}
+
+/** 选项显示名：B 层动作明确标「仅记录」（记入训练记录但不进计划） */
+function exerciseLabel(exercise: ExerciseWire): string {
+  return exercise.recommendable
+    ? exercise.standard_name_zh
+    : `${exercise.standard_name_zh}（仅记录）`;
 }
 
 /**
@@ -311,6 +356,21 @@ export function RecordFormCard({
             const exercise = catalogue.get(row.exerciseId);
             const convention = exercise?.load_convention ?? null;
             const recordType = exercise?.record_type ?? null;
+            const searched = exerciseOptions(exercises, row.exerciseQuery);
+            /* 已是 B 层的当前值（编辑既有记录）必须保持可选，不能因默认只列 A 层而回落成占位符 */
+            const exerciseItems =
+              exercise !== undefined &&
+              !searched.items.some((item) => item.id === exercise.id)
+                ? [exercise, ...searched.items]
+                : searched.items;
+            const searchHint =
+              row.exerciseQuery.trim() === ""
+                ? searched.truncated
+                  ? `默认只列出前 ${DEFAULT_EXERCISE_LIMIT} 个可推荐动作：搜索可查全部 ${exercises.length} 个动作（含「仅记录」）。`
+                  : null
+                : searched.items.length === 0
+                  ? "没有匹配的动作：换中文名、别名、器械或模式再搜。"
+                  : null;
             return (
               <div
                 key={index}
@@ -319,11 +379,21 @@ export function RecordFormCard({
                 <div className="flex flex-wrap items-end gap-2">
                   <label className="flex flex-col gap-1 text-xs text-muted-foreground">
                     动作
+                    <Input
+                      value={row.exerciseQuery}
+                      onChange={(event) =>
+                        updateRow(index, { exerciseQuery: event.target.value })
+                      }
+                      placeholder="搜索动作（名称 / 别名 / 器械 / 模式）"
+                      aria-label={`第 ${index + 1} 组动作搜索`}
+                      className="h-9 w-56"
+                    />
                     <Select
                       value={row.exerciseId}
                       onValueChange={(value) =>
                         updateRow(index, {
                           exerciseId: value,
+                          exerciseQuery: "",
                           /* 切换动作后清除不再适用的旧值：重量、次数与秒数都不跨动作保留 */
                           reps: "",
                           weight: "",
@@ -336,13 +406,18 @@ export function RecordFormCard({
                       </SelectTrigger>
                       <SelectContent>
                         <SelectItem value="">请选择动作</SelectItem>
-                        {exercises.map((item) => (
+                        {exerciseItems.map((item) => (
                           <SelectItem key={item.id} value={item.id}>
-                            {item.standard_name_zh}
+                            {exerciseLabel(item)}
                           </SelectItem>
                         ))}
                       </SelectContent>
                     </Select>
+                    {searchHint !== null && (
+                      <p className="text-xs text-muted-foreground">
+                        {searchHint}
+                      </p>
+                    )}
                   </label>
                   <label className="flex flex-col gap-1 text-xs text-muted-foreground">
                     组类型

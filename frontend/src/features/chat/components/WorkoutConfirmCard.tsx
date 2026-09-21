@@ -88,9 +88,13 @@ export default function WorkoutConfirmCard({
       : available.length === 1
         ? "当天恰有一个未完成日程；保持「未手动选择」即由服务端关联它，也可以改选。"
         : `当天有 ${available.length} 个未完成日程：请选择本次训练对应的那个，或显式选择「额外训练」；保持「未手动选择」会被既有领域规则判为日程歧义。`;
+  const exerciseOf = (exerciseId: string) =>
+    exercises.data?.exercises.find((exercise) => exercise.id === exerciseId);
   const nameOf = (exerciseId: string) =>
-    exercises.data?.exercises.find((exercise) => exercise.id === exerciseId)
-      ?.standard_name_zh ?? exerciseId;
+    exerciseOf(exerciseId)?.standard_name_zh ?? exerciseId;
+  /** B 层（recommendable=false）动作只记入训练记录、不进计划：确认条目上明确标出 */
+  const isRecordOnly = (exerciseId: string) =>
+    exerciseOf(exerciseId)?.recommendable === false;
 
   const save = useMutation({
     mutationFn: () =>
@@ -194,7 +198,14 @@ export default function WorkoutConfirmCard({
               className="flex flex-col gap-1 rounded-md border border-border/60 p-3"
             >
               <div className="flex flex-wrap items-end gap-2">
-                <span className="text-sm">{nameOf(row.exercise_id)}</span>
+                <span className="text-sm">
+                  {nameOf(row.exercise_id)}
+                  {isRecordOnly(row.exercise_id) && (
+                    <span className="ml-2 text-xs text-muted-foreground">
+                      仅记录
+                    </span>
+                  )}
+                </span>
                 <label className="flex flex-col gap-1 text-xs text-muted-foreground">
                   组序号
                   <Input

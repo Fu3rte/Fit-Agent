@@ -24,6 +24,8 @@ export type LoadConvention =
 export interface ExerciseWire {
   id: string;
   standard_name_zh: string;
+  /** 常见别名：中文变式名与英文原名；自然语言匹配与搜索都命中它们 */
+  aliases: string[];
   equipment_variant: string;
   record_type: CatalogRecordType;
   load_convention: LoadConvention | null;

@@ -59,6 +59,14 @@ WAITING_CONFIRMATION_NODE = "wait_for_confirmation"
 
 ConfirmationAction = Literal["confirm", "reject"]
 
+
+class AmbiguousExerciseName(ValueError):
+    """动作名精确命中多个目录动作：不猜一个，交回调用方报歧义。"""
+
+    def __init__(self) -> None:
+        super().__init__("动作名称存在多个匹配，请使用更完整的动作名称")
+
+
 NODE_NAMES: tuple[str, ...] = (
     "safety_check",
     "safety_stop",
@@ -713,6 +721,9 @@ def _action_payload(exercise: Exercise) -> dict[str, Any]:
     return {
         "exercise_id": exercise.id,
         "standard_name_zh": exercise.standard_name_zh,
+        "aliases": list(exercise.aliases),
+        "equipment_variant": exercise.equipment_variant,
+        "modes": list(exercise.modes),
         "record_type": exercise.record_type,
         "load_convention": exercise.load_convention,
     }
@@ -761,11 +772,13 @@ async def _knowledge_answer(
         if methodology
         else []
     )
-    matched = (
-        None
-        if methodology
-        else _matched_exercise(await deps.catalog.list_all(), route.exercise_name)
-    )
+    matched: Exercise | None = None
+    if not methodology:
+        catalog = await deps.catalog.list_all()
+        matched = _matched_exercise(
+            tuple(exercise for exercise in catalog if exercise.recommendable),
+            route.exercise_name,
+        )
     text = await request_model(
         deps.model,
         KNOWLEDGE_QA_SYSTEM_PROMPT,
@@ -796,16 +809,35 @@ async def _general_answer(
 
 
 def _matched_exercise(catalog: Sequence[Exercise], name: str | None) -> Exercise | None:
-    """动作名归一化：精确匹配 ``standard_name_zh``，再取被名称完整包含的最长目录名；无命中即 None。"""
+    """动作名归一化：标准名精确 → alias 精确 → 标准名完整包含 → alias 完整包含；无命中即 None。
+
+    精确阶段命中多个候选立即报歧义，不自行挑选；包含阶段按级取最长名称，
+    标准名包含非空时不再看 alias 包含。
+    """
     if name is None:
         return None
     exact = [exercise for exercise in catalog if exercise.standard_name_zh == name]
+    if not exact:
+        exact = [exercise for exercise in catalog if name in exercise.aliases]
     if exact:
+        if len(exact) > 1:
+            raise AmbiguousExerciseName()
         return exact[0]
-    contained = [exercise for exercise in catalog if exercise.standard_name_zh in name]
-    return max(
-        contained, key=lambda exercise: len(exercise.standard_name_zh), default=None
-    )
+    contained: list[tuple[int, Exercise]] = [
+        (len(exercise.standard_name_zh), exercise)
+        for exercise in catalog
+        if exercise.standard_name_zh in name
+    ]
+    if not contained:
+        contained = [
+            (len(alias), exercise)
+            for exercise in catalog
+            for alias in exercise.aliases
+            if alias in name
+        ]
+    if not contained:
+        return None
+    return max(contained, key=lambda item: item[0])[1]
 
 
 def _skill_payload(skill: LoadedSkill) -> dict[str, Any]:

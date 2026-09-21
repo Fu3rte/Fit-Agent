@@ -7,7 +7,7 @@ from domain.actions.schema import Exercise
 from storage.db import Database
 
 _COLUMNS = (
-    "id, standard_name_zh, equipment_variant, record_type, load_convention,"
+    "id, standard_name_zh, aliases_json, equipment_variant, record_type, load_convention,"
     " min_load_increment_kg, recommendable, modes_json, source_ref, attribution"
 )
 

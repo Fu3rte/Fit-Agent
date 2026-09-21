@@ -22,14 +22,16 @@ class InvalidCatalogRow(ValueError):
 
 
 def _json_array(raw: object) -> tuple[str, ...]:
-    """解析 JSON 数组列；非法值视为目录数据损坏，不静默吞掉。"""
+    """解析 JSON 数组列；元素必须是非空字符串，否则视为目录数据损坏，不静默吞掉。"""
     try:
         values = json.loads(str(raw))
     except (TypeError, ValueError) as exc:
         raise InvalidCatalogRow(f"目录 JSON 列损坏: {raw!r}") from exc
     if not isinstance(values, list):
         raise InvalidCatalogRow(f"目录 JSON 列不是数组: {raw!r}")
-    return tuple(str(value) for value in values)
+    if not all(isinstance(value, str) and value for value in values):
+        raise InvalidCatalogRow(f"目录 JSON 列元素必须是非空字符串: {raw!r}")
+    return tuple(values)
 
 
 @dataclass(frozen=True, slots=True)
@@ -38,6 +40,7 @@ class Exercise:
 
     id: str
     standard_name_zh: str
+    aliases: tuple[str, ...]
     equipment_variant: str
     record_type: RecordType
     load_convention: LoadConvention | None
@@ -49,12 +52,13 @@ class Exercise:
 
     @classmethod
     def from_row(cls, row: Mapping[str, Any]) -> "Exercise":
-        """把 exercises 行映射为身份；``modes_json`` 在此反序列化（元素校验归 rules）。"""
+        """把 exercises 行映射为身份；``modes_json``／``aliases_json`` 在此反序列化（元素校验归 rules）。"""
         load_convention = row["load_convention"]
         increment = row["min_load_increment_kg"]
         return cls(
             id=str(row["id"]),
             standard_name_zh=str(row["standard_name_zh"]),
+            aliases=_json_array(row["aliases_json"]),
             equipment_variant=str(row["equipment_variant"]),
             record_type=cast(RecordType, row["record_type"]),
             load_convention=(

@@ -317,6 +317,7 @@ def exercise_dto(exercise: Exercise) -> dict[str, Any]:
     return {
         "id": exercise.id,
         "standard_name_zh": exercise.standard_name_zh,
+        "aliases": list(exercise.aliases),
         "equipment_variant": exercise.equipment_variant,
         "record_type": exercise.record_type,
         "load_convention": exercise.load_convention,

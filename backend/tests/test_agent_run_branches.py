@@ -64,6 +64,26 @@ CREATED_AT = "2026-06-01T08:00:00+00:00"
 BENCH_PRESS = "barbell-bench-press"
 PULL_UP = "pull-up"
 PLANK = "plank"
+BACK_SQUAT = "barbell-back-squat"
+# 知识问答注入给模型的目录实体：七个字段一律精确断言
+BARBELL_BENCH_PRESS_PAYLOAD = {
+    "exercise_id": BENCH_PRESS,
+    "standard_name_zh": "杠铃平板卧推",
+    "aliases": ["卧推", "杠铃卧推", "barbell bench press"],
+    "equipment_variant": "barbell",
+    "modes": ["水平推"],
+    "record_type": "reps_weight",
+    "load_convention": "barbell_includes_bar_total",
+}
+BARBELL_BACK_SQUAT_PAYLOAD = {
+    "exercise_id": BACK_SQUAT,
+    "standard_name_zh": "杠铃背蹲",
+    "aliases": ["深蹲", "杠铃深蹲", "barbell full squat"],
+    "equipment_variant": "barbell",
+    "modes": ["深蹲"],
+    "record_type": "reps_weight",
+    "load_convention": "barbell_includes_bar_total",
+}
 PROFILE_WEEKLY_FREQUENCY = 1
 ANSWER = "固定替身答复"
 SUMMARY = "固定替身摘要"
@@ -470,17 +490,19 @@ async def test_form_record_request_guides_to_the_form_without_writing(
 
 
 @pytest.mark.parametrize(
-    "exercise_name, expected_id",
+    "exercise_name, expected",
     [
-        ("杠铃平板卧推", BENCH_PRESS),
-        ("我想问杠铃平板卧推的技术要点", BENCH_PRESS),
-        ("跳跃深蹲", None),
+        ("杠铃平板卧推", BARBELL_BENCH_PRESS_PAYLOAD),
+        ("我想问杠铃平板卧推的技术要点", BARBELL_BENCH_PRESS_PAYLOAD),
+        # 通用别名「深蹲」只落在唯一默认动作杠铃背蹲上，故包含阶段命中它
+        ("跳跃深蹲", BARBELL_BACK_SQUAT_PAYLOAD),
+        ("波比跳", None),
     ],
 )
 async def test_knowledge_qa_exercise_technique_anchors_the_catalog_entity(
-    tmp_path: Path, exercise_name: str, expected_id: str | None
+    tmp_path: Path, exercise_name: str, expected: dict[str, Any] | None
 ) -> None:
-    """动作技术问答：动作名按目录名称归一化，命中即携带目录实体，未命中即不带目录事实。"""
+    """动作技术问答：动作名按目录名称／别名归一化（仅可推荐动作），未命中即不带目录事实。"""
     async with _harness(
         tmp_path,
         structured=_route(
@@ -500,16 +522,7 @@ async def test_knowledge_qa_exercise_technique_anchors_the_catalog_entity(
         assert payload["knowledge_type"] == "exercise_technique"
         assert payload["exercise_name"] == exercise_name
         assert payload["skills"] == []
-        matched = payload["catalog_exercise"]
-        if expected_id is None:
-            assert matched is None
-        else:
-            assert matched == {
-                "exercise_id": expected_id,
-                "standard_name_zh": "杠铃平板卧推",
-                "record_type": "reps_weight",
-                "load_convention": "barbell_includes_bar_total",
-            }
+        assert payload["catalog_exercise"] == expected
         assert await _row_counts(h.db) == before
 
 

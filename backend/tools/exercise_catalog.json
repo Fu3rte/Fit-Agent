@@ -1,0 +1,2095 @@
+[
+  {
+    "id": "barbell-back-squat",
+    "source_id": "0043",
+    "standard_name_zh": "杠铃背蹲",
+    "canonical_name_en": "barbell full squat",
+    "aliases": [
+      "深蹲",
+      "杠铃深蹲",
+      "barbell full squat"
+    ],
+    "equipment_variant": "barbell",
+    "record_type": "reps_weight",
+    "load_convention": "barbell_includes_bar_total",
+    "min_load_increment_kg": 2.5,
+    "recommendable": true,
+    "modes": [
+      "深蹲"
+    ]
+  },
+  {
+    "id": "barbell-deadlift",
+    "source_id": "0032",
+    "standard_name_zh": "杠铃传统硬拉",
+    "canonical_name_en": "barbell deadlift",
+    "aliases": [
+      "硬拉",
+      "杠铃硬拉",
+      "barbell deadlift"
+    ],
+    "equipment_variant": "barbell",
+    "record_type": "reps_weight",
+    "load_convention": "barbell_includes_bar_total",
+    "min_load_increment_kg": 2.5,
+    "recommendable": true,
+    "modes": [
+      "髋铰链"
+    ]
+  },
+  {
+    "id": "barbell-romanian-deadlift",
+    "source_id": "0085",
+    "standard_name_zh": "杠铃罗马尼亚硬拉",
+    "canonical_name_en": "barbell romanian deadlift",
+    "aliases": [
+      "罗马尼亚硬拉",
+      "杠铃RDL",
+      "barbell romanian deadlift"
+    ],
+    "equipment_variant": "barbell",
+    "record_type": "reps_weight",
+    "load_convention": "barbell_includes_bar_total",
+    "min_load_increment_kg": 2.5,
+    "recommendable": true,
+    "modes": [
+      "髋铰链"
+    ]
+  },
+  {
+    "id": "leg-press-45",
+    "source_id": "0739",
+    "standard_name_zh": "45°腿举",
+    "canonical_name_en": "sled 45° leg press",
+    "aliases": [
+      "腿举",
+      "器械腿举",
+      "sled 45° leg press"
+    ],
+    "equipment_variant": "sled_machine",
+    "record_type": "reps_weight",
+    "load_convention": "plate_loaded_total_excluding_empty",
+    "min_load_increment_kg": 2.5,
+    "recommendable": true,
+    "modes": [
+      "深蹲"
+    ]
+  },
+  {
+    "id": "bulgarian-split-squat",
+    "source_id": "0410",
+    "standard_name_zh": "保加利亚分腿蹲",
+    "canonical_name_en": "dumbbell single leg split squat",
+    "aliases": [
+      "分腿蹲",
+      "哑铃分腿蹲",
+      "dumbbell single leg split squat"
+    ],
+    "equipment_variant": "dumbbell",
+    "record_type": "reps_weight",
+    "load_convention": "dumbbell_per_hand",
+    "min_load_increment_kg": 2.5,
+    "recommendable": true,
+    "modes": [
+      "深蹲"
+    ]
+  },
+  {
+    "id": "barbell-bench-press",
+    "source_id": "0025",
+    "standard_name_zh": "杠铃平板卧推",
+    "canonical_name_en": "barbell bench press",
+    "aliases": [
+      "卧推",
+      "杠铃卧推",
+      "barbell bench press"
+    ],
+    "equipment_variant": "barbell",
+    "record_type": "reps_weight",
+    "load_convention": "barbell_includes_bar_total",
+    "min_load_increment_kg": 2.5,
+    "recommendable": true,
+    "modes": [
+      "水平推"
+    ]
+  },
+  {
+    "id": "dumbbell-bench-press",
+    "source_id": "0289",
+    "standard_name_zh": "哑铃平板卧推",
+    "canonical_name_en": "dumbbell bench press",
+    "aliases": [
+      "哑铃卧推",
+      "dumbbell bench press"
+    ],
+    "equipment_variant": "dumbbell",
+    "record_type": "reps_weight",
+    "load_convention": "dumbbell_per_hand",
+    "min_load_increment_kg": 2.5,
+    "recommendable": true,
+    "modes": [
+      "水平推"
+    ]
+  },
+  {
+    "id": "dumbbell-incline-bench-press",
+    "source_id": "0314",
+    "standard_name_zh": "哑铃上斜卧推",
+    "canonical_name_en": "dumbbell incline bench press",
+    "aliases": [
+      "上斜哑铃卧推",
+      "哑铃上斜推胸",
+      "dumbbell incline bench press"
+    ],
+    "equipment_variant": "dumbbell",
+    "record_type": "reps_weight",
+    "load_convention": "dumbbell_per_hand",
+    "min_load_increment_kg": 2.5,
+    "recommendable": true,
+    "modes": [
+      "水平推",
+      "垂直推"
+    ]
+  },
+  {
+    "id": "seated-dumbbell-shoulder-press",
+    "source_id": "0405",
+    "standard_name_zh": "坐姿哑铃肩推",
+    "canonical_name_en": "dumbbell seated shoulder press",
+    "aliases": [
+      "哑铃肩推",
+      "坐姿哑铃推举",
+      "dumbbell seated shoulder press"
+    ],
+    "equipment_variant": "dumbbell",
+    "record_type": "reps_weight",
+    "load_convention": "dumbbell_per_hand",
+    "min_load_increment_kg": 2.5,
+    "recommendable": true,
+    "modes": [
+      "垂直推"
+    ]
+  },
+  {
+    "id": "dumbbell-lateral-raise",
+    "source_id": "0334",
+    "standard_name_zh": "哑铃侧平举",
+    "canonical_name_en": "dumbbell lateral raise",
+    "aliases": [
+      "侧平举",
+      "哑铃侧举",
+      "dumbbell lateral raise"
+    ],
+    "equipment_variant": "dumbbell",
+    "record_type": "reps_weight",
+    "load_convention": "dumbbell_per_hand",
+    "min_load_increment_kg": 2.5,
+    "recommendable": true,
+    "modes": [
+      "肩孤立"
+    ]
+  },
+  {
+    "id": "dumbbell-reverse-fly",
+    "source_id": "0383",
+    "standard_name_zh": "哑铃反向飞鸟",
+    "canonical_name_en": "dumbbell reverse fly",
+    "aliases": [
+      "反向飞鸟",
+      "哑铃后束飞鸟",
+      "dumbbell reverse fly"
+    ],
+    "equipment_variant": "dumbbell",
+    "record_type": "reps_weight",
+    "load_convention": "dumbbell_per_hand",
+    "min_load_increment_kg": 2.5,
+    "recommendable": true,
+    "modes": [
+      "肩孤立"
+    ]
+  },
+  {
+    "id": "barbell-bent-over-row",
+    "source_id": "0027",
+    "standard_name_zh": "杠铃俯身划船",
+    "canonical_name_en": "barbell bent over row",
+    "aliases": [
+      "杠铃划船",
+      "俯身杠铃划船",
+      "barbell bent over row"
+    ],
+    "equipment_variant": "barbell",
+    "record_type": "reps_weight",
+    "load_convention": "barbell_includes_bar_total",
+    "min_load_increment_kg": 2.5,
+    "recommendable": true,
+    "modes": [
+      "水平拉"
+    ]
+  },
+  {
+    "id": "seated-cable-row",
+    "source_id": "0861",
+    "standard_name_zh": "坐姿绳索划船",
+    "canonical_name_en": "cable seated row",
+    "aliases": [
+      "划船",
+      "绳索划船",
+      "cable seated row"
+    ],
+    "equipment_variant": "cable",
+    "record_type": "reps_weight",
+    "load_convention": "machine_pin_displayed_value",
+    "min_load_increment_kg": 5.0,
+    "recommendable": true,
+    "modes": [
+      "水平拉"
+    ]
+  },
+  {
+    "id": "one-arm-dumbbell-row",
+    "source_id": "0292",
+    "standard_name_zh": "单臂哑铃划船",
+    "canonical_name_en": "dumbbell one arm bent-over row",
+    "aliases": [
+      "单臂划船",
+      "哑铃单臂划船",
+      "dumbbell one arm bent-over row"
+    ],
+    "equipment_variant": "dumbbell",
+    "record_type": "reps_weight",
+    "load_convention": "dumbbell_per_hand",
+    "min_load_increment_kg": 2.5,
+    "recommendable": true,
+    "modes": [
+      "水平拉"
+    ]
+  },
+  {
+    "id": "lat-pulldown",
+    "source_id": "0198",
+    "standard_name_zh": "高位下拉",
+    "canonical_name_en": "cable pulldown",
+    "aliases": [
+      "下拉",
+      "绳索下拉",
+      "cable pulldown"
+    ],
+    "equipment_variant": "cable",
+    "record_type": "reps_weight",
+    "load_convention": "machine_pin_displayed_value",
+    "min_load_increment_kg": 5.0,
+    "recommendable": true,
+    "modes": [
+      "垂直拉"
+    ]
+  },
+  {
+    "id": "pull-up",
+    "source_id": "0652",
+    "standard_name_zh": "自重引体向上",
+    "canonical_name_en": "pull-up",
+    "aliases": [
+      "引体向上",
+      "引体",
+      "pull-up"
+    ],
+    "equipment_variant": "bodyweight",
+    "record_type": "reps_bodyweight",
+    "load_convention": null,
+    "min_load_increment_kg": null,
+    "recommendable": true,
+    "modes": [
+      "垂直拉"
+    ]
+  },
+  {
+    "id": "seated-leg-curl",
+    "source_id": "0599",
+    "standard_name_zh": "坐姿腿弯举",
+    "canonical_name_en": "lever seated leg curl",
+    "aliases": [
+      "腿弯举",
+      "器械坐姿腿弯举",
+      "lever seated leg curl"
+    ],
+    "equipment_variant": "leverage_machine",
+    "record_type": "reps_weight",
+    "load_convention": "machine_pin_displayed_value",
+    "min_load_increment_kg": 5.0,
+    "recommendable": true,
+    "modes": [
+      "膝屈"
+    ]
+  },
+  {
+    "id": "leg-extension",
+    "source_id": "0585",
+    "standard_name_zh": "腿屈伸",
+    "canonical_name_en": "lever leg extension",
+    "aliases": [
+      "器械腿屈伸",
+      "坐姿腿屈伸",
+      "lever leg extension"
+    ],
+    "equipment_variant": "leverage_machine",
+    "record_type": "reps_weight",
+    "load_convention": "machine_pin_displayed_value",
+    "min_load_increment_kg": 5.0,
+    "recommendable": true,
+    "modes": [
+      "膝伸"
+    ]
+  },
+  {
+    "id": "machine-standing-calf-raise",
+    "source_id": "0605",
+    "standard_name_zh": "器械站姿提踵",
+    "canonical_name_en": "lever standing calf raise",
+    "aliases": [
+      "站姿提踵",
+      "器械提踵",
+      "lever standing calf raise"
+    ],
+    "equipment_variant": "leverage_machine",
+    "record_type": "reps_weight",
+    "load_convention": "machine_pin_displayed_value",
+    "min_load_increment_kg": 5.0,
+    "recommendable": true,
+    "modes": [
+      "小腿（踝跖屈）"
+    ]
+  },
+  {
+    "id": "dumbbell-biceps-curl",
+    "source_id": "0294",
+    "standard_name_zh": "哑铃弯举",
+    "canonical_name_en": "dumbbell biceps curl",
+    "aliases": [
+      "二头弯举",
+      "哑铃二头弯举",
+      "dumbbell biceps curl"
+    ],
+    "equipment_variant": "dumbbell",
+    "record_type": "reps_weight",
+    "load_convention": "dumbbell_per_hand",
+    "min_load_increment_kg": 2.5,
+    "recommendable": true,
+    "modes": [
+      "肘屈"
+    ]
+  },
+  {
+    "id": "cable-pushdown",
+    "source_id": "0201",
+    "standard_name_zh": "绳索下压",
+    "canonical_name_en": "cable pushdown",
+    "aliases": [
+      "三头下压",
+      "绳索三头下压",
+      "cable pushdown"
+    ],
+    "equipment_variant": "cable",
+    "record_type": "reps_weight",
+    "load_convention": "machine_pin_displayed_value",
+    "min_load_increment_kg": 5.0,
+    "recommendable": true,
+    "modes": [
+      "肘伸"
+    ]
+  },
+  {
+    "id": "cable-overhead-triceps-extension",
+    "source_id": "0194",
+    "standard_name_zh": "绳索过顶臂屈伸",
+    "canonical_name_en": "cable overhead triceps extension (rope attachment)",
+    "aliases": [
+      "过顶臂屈伸",
+      "绳索臂屈伸",
+      "cable overhead triceps extension (rope attachment)"
+    ],
+    "equipment_variant": "cable",
+    "record_type": "reps_weight",
+    "load_convention": "machine_pin_displayed_value",
+    "min_load_increment_kg": 5.0,
+    "recommendable": true,
+    "modes": [
+      "肘伸"
+    ]
+  },
+  {
+    "id": "parallel-bar-dip",
+    "source_id": "0251",
+    "standard_name_zh": "自重双杠臂屈伸",
+    "canonical_name_en": "chest dip",
+    "aliases": [
+      "双杠臂屈伸",
+      "自重臂屈伸",
+      "chest dip"
+    ],
+    "equipment_variant": "bodyweight",
+    "record_type": "reps_bodyweight",
+    "load_convention": null,
+    "min_load_increment_kg": null,
+    "recommendable": true,
+    "modes": [
+      "垂直推",
+      "肘伸"
+    ]
+  },
+  {
+    "id": "hanging-leg-raise",
+    "source_id": "0472",
+    "standard_name_zh": "悬垂举腿",
+    "canonical_name_en": "hanging leg raise",
+    "aliases": [
+      "悬挂举腿",
+      "单杠举腿",
+      "hanging leg raise"
+    ],
+    "equipment_variant": "bodyweight",
+    "record_type": "reps_bodyweight",
+    "load_convention": null,
+    "min_load_increment_kg": null,
+    "recommendable": true,
+    "modes": [
+      "核心"
+    ]
+  },
+  {
+    "id": "weighted-pull-up",
+    "source_id": "0841",
+    "standard_name_zh": "负重引体",
+    "canonical_name_en": "weighted pull-up",
+    "aliases": [
+      "负重引体向上",
+      "加重引体",
+      "weighted pull-up"
+    ],
+    "equipment_variant": "weighted",
+    "record_type": "reps_weight",
+    "load_convention": "external_added_weight",
+    "min_load_increment_kg": 5.0,
+    "recommendable": true,
+    "modes": [
+      "垂直拉"
+    ]
+  },
+  {
+    "id": "plank",
+    "source_id": null,
+    "standard_name_zh": "平板支撑",
+    "canonical_name_en": "plank",
+    "aliases": [
+      "平板",
+      "plank"
+    ],
+    "equipment_variant": "bodyweight",
+    "record_type": "reps_bodyweight",
+    "load_convention": null,
+    "min_load_increment_kg": null,
+    "recommendable": true,
+    "modes": [
+      "核心"
+    ]
+  },
+  {
+    "id": "front-lever",
+    "source_id": "3296",
+    "standard_name_zh": "前水平",
+    "canonical_name_en": "front lever",
+    "aliases": [
+      "前水平支撑",
+      "front lever"
+    ],
+    "equipment_variant": "bodyweight",
+    "record_type": "reps_bodyweight",
+    "load_convention": null,
+    "min_load_increment_kg": null,
+    "recommendable": true,
+    "modes": [
+      "核心"
+    ]
+  },
+  {
+    "id": "barbell-front-squat",
+    "source_id": "0042",
+    "standard_name_zh": "杠铃前蹲",
+    "canonical_name_en": "barbell front squat",
+    "aliases": [
+      "前蹲",
+      "杠铃颈前深蹲",
+      "barbell front squat"
+    ],
+    "equipment_variant": "barbell",
+    "record_type": "reps_weight",
+    "load_convention": "barbell_includes_bar_total",
+    "min_load_increment_kg": 2.5,
+    "recommendable": true,
+    "modes": [
+      "深蹲"
+    ]
+  },
+  {
+    "id": "barbell-incline-bench-press",
+    "source_id": "0047",
+    "standard_name_zh": "杠铃上斜卧推",
+    "canonical_name_en": "barbell incline bench press",
+    "aliases": [
+      "上斜卧推",
+      "杠铃上斜推胸",
+      "barbell incline bench press"
+    ],
+    "equipment_variant": "barbell",
+    "record_type": "reps_weight",
+    "load_convention": "barbell_includes_bar_total",
+    "min_load_increment_kg": 2.5,
+    "recommendable": true,
+    "modes": [
+      "水平推",
+      "垂直推"
+    ]
+  },
+  {
+    "id": "barbell-close-grip-bench-press",
+    "source_id": "0030",
+    "standard_name_zh": "杠铃窄距卧推",
+    "canonical_name_en": "barbell close-grip bench press",
+    "aliases": [
+      "窄距卧推",
+      "窄握卧推",
+      "barbell close-grip bench press"
+    ],
+    "equipment_variant": "barbell",
+    "record_type": "reps_weight",
+    "load_convention": "barbell_includes_bar_total",
+    "min_load_increment_kg": 2.5,
+    "recommendable": true,
+    "modes": [
+      "水平推",
+      "肘伸"
+    ]
+  },
+  {
+    "id": "barbell-seated-overhead-press",
+    "source_id": "0091",
+    "standard_name_zh": "杠铃坐姿肩推",
+    "canonical_name_en": "barbell seated overhead press",
+    "aliases": [
+      "杠铃肩推",
+      "坐姿杠铃推举",
+      "barbell seated overhead press"
+    ],
+    "equipment_variant": "barbell",
+    "record_type": "reps_weight",
+    "load_convention": "barbell_includes_bar_total",
+    "min_load_increment_kg": 2.5,
+    "recommendable": true,
+    "modes": [
+      "垂直推"
+    ]
+  },
+  {
+    "id": "barbell-sumo-deadlift",
+    "source_id": "0117",
+    "standard_name_zh": "杠铃相扑硬拉",
+    "canonical_name_en": "barbell sumo deadlift",
+    "aliases": [
+      "相扑硬拉",
+      "宽站距硬拉",
+      "barbell sumo deadlift"
+    ],
+    "equipment_variant": "barbell",
+    "record_type": "reps_weight",
+    "load_convention": "barbell_includes_bar_total",
+    "min_load_increment_kg": 2.5,
+    "recommendable": true,
+    "modes": [
+      "髋铰链"
+    ]
+  },
+  {
+    "id": "barbell-lunge",
+    "source_id": "0054",
+    "standard_name_zh": "杠铃箭步蹲",
+    "canonical_name_en": "barbell lunge",
+    "aliases": [
+      "杠铃弓步蹲",
+      "负重箭步蹲",
+      "barbell lunge"
+    ],
+    "equipment_variant": "barbell",
+    "record_type": "reps_weight",
+    "load_convention": "barbell_includes_bar_total",
+    "min_load_increment_kg": 2.5,
+    "recommendable": true,
+    "modes": [
+      "深蹲"
+    ]
+  },
+  {
+    "id": "barbell-shrug",
+    "source_id": "0095",
+    "standard_name_zh": "杠铃耸肩",
+    "canonical_name_en": "barbell shrug",
+    "aliases": [
+      "杠铃斜方耸肩",
+      "负重耸肩",
+      "barbell shrug"
+    ],
+    "equipment_variant": "barbell",
+    "record_type": "reps_weight",
+    "load_convention": "barbell_includes_bar_total",
+    "min_load_increment_kg": 2.5,
+    "recommendable": true,
+    "modes": [
+      "肩孤立"
+    ]
+  },
+  {
+    "id": "barbell-curl",
+    "source_id": "0031",
+    "standard_name_zh": "杠铃弯举",
+    "canonical_name_en": "barbell curl",
+    "aliases": [
+      "杠铃二头弯举",
+      "站姿杠铃弯举",
+      "barbell curl"
+    ],
+    "equipment_variant": "barbell",
+    "record_type": "reps_weight",
+    "load_convention": "barbell_includes_bar_total",
+    "min_load_increment_kg": 2.5,
+    "recommendable": true,
+    "modes": [
+      "肘屈"
+    ]
+  },
+  {
+    "id": "barbell-good-morning",
+    "source_id": "0044",
+    "standard_name_zh": "杠铃早安式",
+    "canonical_name_en": "barbell good morning",
+    "aliases": [
+      "杠铃早安式体前屈",
+      "杠铃体前屈",
+      "barbell good morning"
+    ],
+    "equipment_variant": "barbell",
+    "record_type": "reps_weight",
+    "load_convention": "barbell_includes_bar_total",
+    "min_load_increment_kg": 2.5,
+    "recommendable": true,
+    "modes": [
+      "髋铰链"
+    ]
+  },
+  {
+    "id": "barbell-decline-bench-press",
+    "source_id": "0033",
+    "standard_name_zh": "杠铃下斜卧推",
+    "canonical_name_en": "barbell decline bench press",
+    "aliases": [
+      "下斜卧推",
+      "杠铃下斜推胸",
+      "barbell decline bench press"
+    ],
+    "equipment_variant": "barbell",
+    "record_type": "reps_weight",
+    "load_convention": "barbell_includes_bar_total",
+    "min_load_increment_kg": 2.5,
+    "recommendable": true,
+    "modes": [
+      "水平推"
+    ]
+  },
+  {
+    "id": "barbell-upright-row",
+    "source_id": "0120",
+    "standard_name_zh": "杠铃直立划船",
+    "canonical_name_en": "barbell upright row",
+    "aliases": [
+      "直立划船",
+      "杠铃上提",
+      "barbell upright row"
+    ],
+    "equipment_variant": "barbell",
+    "record_type": "reps_weight",
+    "load_convention": "barbell_includes_bar_total",
+    "min_load_increment_kg": 2.5,
+    "recommendable": true,
+    "modes": [
+      "肩孤立"
+    ]
+  },
+  {
+    "id": "barbell-straight-leg-deadlift",
+    "source_id": "0116",
+    "standard_name_zh": "杠铃直腿硬拉",
+    "canonical_name_en": "barbell straight leg deadlift",
+    "aliases": [
+      "直腿硬拉",
+      "杠铃直腿拉",
+      "barbell straight leg deadlift"
+    ],
+    "equipment_variant": "barbell",
+    "record_type": "reps_weight",
+    "load_convention": "barbell_includes_bar_total",
+    "min_load_increment_kg": 2.5,
+    "recommendable": false,
+    "modes": [
+      "髋铰链"
+    ]
+  },
+  {
+    "id": "barbell-clean-and-press",
+    "source_id": "0028",
+    "standard_name_zh": "杠铃高翻推举",
+    "canonical_name_en": "barbell clean and press",
+    "aliases": [
+      "高翻推举",
+      "杠铃高翻上举",
+      "barbell clean and press"
+    ],
+    "equipment_variant": "barbell",
+    "record_type": "reps_weight",
+    "load_convention": "barbell_includes_bar_total",
+    "min_load_increment_kg": 2.5,
+    "recommendable": false,
+    "modes": [
+      "髋铰链",
+      "垂直推"
+    ]
+  },
+  {
+    "id": "barbell-step-up",
+    "source_id": "0114",
+    "standard_name_zh": "杠铃登台阶",
+    "canonical_name_en": "barbell step-up",
+    "aliases": [
+      "杠铃上台阶",
+      "负重登台阶",
+      "barbell step-up"
+    ],
+    "equipment_variant": "barbell",
+    "record_type": "reps_weight",
+    "load_convention": "barbell_includes_bar_total",
+    "min_load_increment_kg": 2.5,
+    "recommendable": false,
+    "modes": [
+      "深蹲"
+    ]
+  },
+  {
+    "id": "barbell-zercher-squat",
+    "source_id": "0127",
+    "standard_name_zh": "杠铃泽奇深蹲",
+    "canonical_name_en": "barbell zercher squat",
+    "aliases": [
+      "泽奇深蹲",
+      "杠铃抱胸深蹲",
+      "barbell zercher squat"
+    ],
+    "equipment_variant": "barbell",
+    "record_type": "reps_weight",
+    "load_convention": "barbell_includes_bar_total",
+    "min_load_increment_kg": 2.5,
+    "recommendable": false,
+    "modes": [
+      "深蹲"
+    ]
+  },
+  {
+    "id": "barbell-hack-squat",
+    "source_id": "0046",
+    "standard_name_zh": "杠铃哈克深蹲",
+    "canonical_name_en": "barbell hack squat",
+    "aliases": [
+      "哈克深蹲",
+      "杠铃哈克机深蹲",
+      "barbell hack squat"
+    ],
+    "equipment_variant": "barbell",
+    "record_type": "reps_weight",
+    "load_convention": "barbell_includes_bar_total",
+    "min_load_increment_kg": 2.5,
+    "recommendable": false,
+    "modes": [
+      "深蹲"
+    ]
+  },
+  {
+    "id": "barbell-overhead-squat",
+    "source_id": "0069",
+    "standard_name_zh": "杠铃过顶深蹲",
+    "canonical_name_en": "barbell overhead squat",
+    "aliases": [
+      "过顶深蹲",
+      "杠铃抓举深蹲",
+      "barbell overhead squat"
+    ],
+    "equipment_variant": "barbell",
+    "record_type": "reps_weight",
+    "load_convention": "barbell_includes_bar_total",
+    "min_load_increment_kg": 2.5,
+    "recommendable": false,
+    "modes": [
+      "深蹲"
+    ]
+  },
+  {
+    "id": "barbell-jump-squat",
+    "source_id": "0053",
+    "standard_name_zh": "杠铃跳跃深蹲",
+    "canonical_name_en": "barbell jump squat",
+    "aliases": [
+      "跳跃深蹲",
+      "杠铃跳跃蹲",
+      "barbell jump squat"
+    ],
+    "equipment_variant": "barbell",
+    "record_type": "reps_weight",
+    "load_convention": "barbell_includes_bar_total",
+    "min_load_increment_kg": 2.5,
+    "recommendable": false,
+    "modes": [
+      "深蹲"
+    ]
+  },
+  {
+    "id": "barbell-rack-pull",
+    "source_id": "0074",
+    "standard_name_zh": "杠铃架上拉",
+    "canonical_name_en": "barbell rack pull",
+    "aliases": [
+      "架上拉",
+      "杠铃架拉",
+      "barbell rack pull"
+    ],
+    "equipment_variant": "barbell",
+    "record_type": "reps_weight",
+    "load_convention": "barbell_includes_bar_total",
+    "min_load_increment_kg": 2.5,
+    "recommendable": false,
+    "modes": [
+      "髋铰链"
+    ]
+  },
+  {
+    "id": "barbell-bench-squat",
+    "source_id": "0026",
+    "standard_name_zh": "杠铃箱式深蹲",
+    "canonical_name_en": "barbell bench squat",
+    "aliases": [
+      "箱式深蹲",
+      "杠铃凳上深蹲",
+      "barbell bench squat"
+    ],
+    "equipment_variant": "barbell",
+    "record_type": "reps_weight",
+    "load_convention": "barbell_includes_bar_total",
+    "min_load_increment_kg": 2.5,
+    "recommendable": false,
+    "modes": [
+      "深蹲"
+    ]
+  },
+  {
+    "id": "barbell-single-leg-split-squat",
+    "source_id": "0099",
+    "standard_name_zh": "杠铃单腿分腿蹲",
+    "canonical_name_en": "barbell single leg split squat",
+    "aliases": [
+      "杠铃单腿蹲",
+      "杠铃分腿蹲",
+      "barbell single leg split squat"
+    ],
+    "equipment_variant": "barbell",
+    "record_type": "reps_weight",
+    "load_convention": "barbell_includes_bar_total",
+    "min_load_increment_kg": 2.5,
+    "recommendable": false,
+    "modes": [
+      "深蹲"
+    ]
+  },
+  {
+    "id": "barbell-preacher-curl",
+    "source_id": "0070",
+    "standard_name_zh": "杠铃牧师凳弯举",
+    "canonical_name_en": "barbell preacher curl",
+    "aliases": [
+      "杠铃牧师椅弯举",
+      "杠铃斜托弯举",
+      "barbell preacher curl"
+    ],
+    "equipment_variant": "barbell",
+    "record_type": "reps_weight",
+    "load_convention": "barbell_includes_bar_total",
+    "min_load_increment_kg": 2.5,
+    "recommendable": false,
+    "modes": [
+      "肘屈"
+    ]
+  },
+  {
+    "id": "barbell-lying-preacher-curl",
+    "source_id": "0059",
+    "standard_name_zh": "杠铃俯卧牧师凳弯举",
+    "canonical_name_en": "barbell lying preacher curl",
+    "aliases": [
+      "杠铃俯卧弯举",
+      "杠铃俯卧斜托弯举",
+      "barbell lying preacher curl"
+    ],
+    "equipment_variant": "barbell",
+    "record_type": "reps_weight",
+    "load_convention": "barbell_includes_bar_total",
+    "min_load_increment_kg": 2.5,
+    "recommendable": false,
+    "modes": [
+      "肘屈"
+    ]
+  },
+  {
+    "id": "barbell-rear-delt-row",
+    "source_id": "0076",
+    "standard_name_zh": "杠铃后束划船",
+    "canonical_name_en": "barbell rear delt row",
+    "aliases": [
+      "杠铃后三角划船",
+      "杠铃后肩划船",
+      "barbell rear delt row"
+    ],
+    "equipment_variant": "barbell",
+    "record_type": "reps_weight",
+    "load_convention": "barbell_includes_bar_total",
+    "min_load_increment_kg": 2.5,
+    "recommendable": false,
+    "modes": [
+      "水平拉"
+    ]
+  },
+  {
+    "id": "dumbbell-goblet-squat",
+    "source_id": "1760",
+    "standard_name_zh": "哑铃高脚杯深蹲",
+    "canonical_name_en": "dumbbell goblet squat",
+    "aliases": [
+      "高脚杯深蹲",
+      "杯式深蹲",
+      "dumbbell goblet squat"
+    ],
+    "equipment_variant": "dumbbell",
+    "record_type": "reps_weight",
+    "load_convention": "dumbbell_per_hand",
+    "min_load_increment_kg": 2.5,
+    "recommendable": true,
+    "modes": [
+      "深蹲"
+    ]
+  },
+  {
+    "id": "dumbbell-lunge",
+    "source_id": "0336",
+    "standard_name_zh": "哑铃箭步蹲",
+    "canonical_name_en": "dumbbell lunge",
+    "aliases": [
+      "哑铃弓步蹲",
+      "哑铃行走箭步",
+      "dumbbell lunge"
+    ],
+    "equipment_variant": "dumbbell",
+    "record_type": "reps_weight",
+    "load_convention": "dumbbell_per_hand",
+    "min_load_increment_kg": 2.5,
+    "recommendable": true,
+    "modes": [
+      "深蹲"
+    ]
+  },
+  {
+    "id": "dumbbell-fly",
+    "source_id": "0308",
+    "standard_name_zh": "哑铃飞鸟",
+    "canonical_name_en": "dumbbell fly",
+    "aliases": [
+      "哑铃平板飞鸟",
+      "哑铃扩胸",
+      "dumbbell fly"
+    ],
+    "equipment_variant": "dumbbell",
+    "record_type": "reps_weight",
+    "load_convention": "dumbbell_per_hand",
+    "min_load_increment_kg": 2.5,
+    "recommendable": true,
+    "modes": [
+      "水平推"
+    ]
+  },
+  {
+    "id": "dumbbell-arnold-press",
+    "source_id": "2137",
+    "standard_name_zh": "哑铃阿诺德推举",
+    "canonical_name_en": "dumbbell arnold press",
+    "aliases": [
+      "阿诺德推举",
+      "阿诺德肩推",
+      "dumbbell arnold press"
+    ],
+    "equipment_variant": "dumbbell",
+    "record_type": "reps_weight",
+    "load_convention": "dumbbell_per_hand",
+    "min_load_increment_kg": 2.5,
+    "recommendable": true,
+    "modes": [
+      "垂直推"
+    ]
+  },
+  {
+    "id": "dumbbell-romanian-deadlift",
+    "source_id": "1459",
+    "standard_name_zh": "哑铃罗马尼亚硬拉",
+    "canonical_name_en": "dumbbell romanian deadlift",
+    "aliases": [
+      "哑铃RDL",
+      "哑铃直腿硬拉",
+      "dumbbell romanian deadlift"
+    ],
+    "equipment_variant": "dumbbell",
+    "record_type": "reps_weight",
+    "load_convention": "dumbbell_per_hand",
+    "min_load_increment_kg": 2.5,
+    "recommendable": true,
+    "modes": [
+      "髋铰链"
+    ]
+  },
+  {
+    "id": "dumbbell-hammer-curl",
+    "source_id": "0313",
+    "standard_name_zh": "哑铃锤式弯举",
+    "canonical_name_en": "dumbbell hammer curl",
+    "aliases": [
+      "锤式弯举",
+      "哑铃垂式弯举",
+      "dumbbell hammer curl"
+    ],
+    "equipment_variant": "dumbbell",
+    "record_type": "reps_weight",
+    "load_convention": "dumbbell_per_hand",
+    "min_load_increment_kg": 2.5,
+    "recommendable": true,
+    "modes": [
+      "肘屈"
+    ]
+  },
+  {
+    "id": "dumbbell-shrug",
+    "source_id": "0406",
+    "standard_name_zh": "哑铃耸肩",
+    "canonical_name_en": "dumbbell shrug",
+    "aliases": [
+      "哑铃斜方耸肩",
+      "哑铃负重耸肩",
+      "dumbbell shrug"
+    ],
+    "equipment_variant": "dumbbell",
+    "record_type": "reps_weight",
+    "load_convention": "dumbbell_per_hand",
+    "min_load_increment_kg": 2.5,
+    "recommendable": true,
+    "modes": [
+      "肩孤立"
+    ]
+  },
+  {
+    "id": "dumbbell-front-raise",
+    "source_id": "0310",
+    "standard_name_zh": "哑铃前平举",
+    "canonical_name_en": "dumbbell front raise",
+    "aliases": [
+      "前平举",
+      "哑铃前举",
+      "dumbbell front raise"
+    ],
+    "equipment_variant": "dumbbell",
+    "record_type": "reps_weight",
+    "load_convention": "dumbbell_per_hand",
+    "min_load_increment_kg": 2.5,
+    "recommendable": true,
+    "modes": [
+      "肩孤立"
+    ]
+  },
+  {
+    "id": "dumbbell-single-leg-deadlift",
+    "source_id": "1757",
+    "standard_name_zh": "哑铃单腿硬拉",
+    "canonical_name_en": "dumbbell single leg deadlift",
+    "aliases": [
+      "单腿硬拉",
+      "哑铃单腿罗马尼亚硬拉",
+      "dumbbell single leg deadlift"
+    ],
+    "equipment_variant": "dumbbell",
+    "record_type": "reps_weight",
+    "load_convention": "dumbbell_per_hand",
+    "min_load_increment_kg": 2.5,
+    "recommendable": true,
+    "modes": [
+      "髋铰链"
+    ]
+  },
+  {
+    "id": "dumbbell-incline-curl",
+    "source_id": "0318",
+    "standard_name_zh": "哑铃上斜弯举",
+    "canonical_name_en": "dumbbell incline curl",
+    "aliases": [
+      "上斜哑铃弯举",
+      "哑铃斜凳弯举",
+      "dumbbell incline curl"
+    ],
+    "equipment_variant": "dumbbell",
+    "record_type": "reps_weight",
+    "load_convention": "dumbbell_per_hand",
+    "min_load_increment_kg": 2.5,
+    "recommendable": false,
+    "modes": [
+      "肘屈"
+    ]
+  },
+  {
+    "id": "dumbbell-concentration-curl",
+    "source_id": "0297",
+    "standard_name_zh": "哑铃集中弯举",
+    "canonical_name_en": "dumbbell concentration curl",
+    "aliases": [
+      "集中弯举",
+      "哑铃单臂集中弯举",
+      "dumbbell concentration curl"
+    ],
+    "equipment_variant": "dumbbell",
+    "record_type": "reps_weight",
+    "load_convention": "dumbbell_per_hand",
+    "min_load_increment_kg": 2.5,
+    "recommendable": false,
+    "modes": [
+      "肘屈"
+    ]
+  },
+  {
+    "id": "dumbbell-preacher-curl",
+    "source_id": "0372",
+    "standard_name_zh": "哑铃牧师凳弯举",
+    "canonical_name_en": "dumbbell preacher curl",
+    "aliases": [
+      "哑铃牧师椅弯举",
+      "哑铃斜托弯举",
+      "dumbbell preacher curl"
+    ],
+    "equipment_variant": "dumbbell",
+    "record_type": "reps_weight",
+    "load_convention": "dumbbell_per_hand",
+    "min_load_increment_kg": 2.5,
+    "recommendable": false,
+    "modes": [
+      "肘屈"
+    ]
+  },
+  {
+    "id": "dumbbell-preacher-hammer-curl",
+    "source_id": "0370",
+    "standard_name_zh": "哑铃牧师凳锤式弯举",
+    "canonical_name_en": "dumbbell preacher hammer curl",
+    "aliases": [
+      "哑铃牧师椅锤式弯举",
+      "哑铃斜托锤式弯举",
+      "dumbbell preacher hammer curl"
+    ],
+    "equipment_variant": "dumbbell",
+    "record_type": "reps_weight",
+    "load_convention": "dumbbell_per_hand",
+    "min_load_increment_kg": 2.5,
+    "recommendable": false,
+    "modes": [
+      "肘屈"
+    ]
+  },
+  {
+    "id": "dumbbell-reverse-grip-biceps-curl",
+    "source_id": "0382",
+    "standard_name_zh": "哑铃反握弯举",
+    "canonical_name_en": "dumbbell reverse grip biceps curl",
+    "aliases": [
+      "哑铃反握二头弯举",
+      "哑铃正握弯举",
+      "dumbbell reverse grip biceps curl"
+    ],
+    "equipment_variant": "dumbbell",
+    "record_type": "reps_weight",
+    "load_convention": "dumbbell_per_hand",
+    "min_load_increment_kg": 2.5,
+    "recommendable": false,
+    "modes": [
+      "肘屈"
+    ]
+  },
+  {
+    "id": "dumbbell-kickback",
+    "source_id": "0333",
+    "standard_name_zh": "哑铃臂后伸",
+    "canonical_name_en": "dumbbell kickback",
+    "aliases": [
+      "哑铃三头后伸",
+      "哑铃后撑",
+      "dumbbell kickback"
+    ],
+    "equipment_variant": "dumbbell",
+    "record_type": "reps_weight",
+    "load_convention": "dumbbell_per_hand",
+    "min_load_increment_kg": 2.5,
+    "recommendable": false,
+    "modes": [
+      "肘伸"
+    ]
+  },
+  {
+    "id": "dumbbell-lying-triceps-extension",
+    "source_id": "0351",
+    "standard_name_zh": "哑铃仰卧臂屈伸",
+    "canonical_name_en": "dumbbell lying triceps extension",
+    "aliases": [
+      "哑铃仰卧三头屈伸",
+      "哑铃碎颅者",
+      "dumbbell lying triceps extension"
+    ],
+    "equipment_variant": "dumbbell",
+    "record_type": "reps_weight",
+    "load_convention": "dumbbell_per_hand",
+    "min_load_increment_kg": 2.5,
+    "recommendable": false,
+    "modes": [
+      "肘伸"
+    ]
+  },
+  {
+    "id": "dumbbell-side-bend",
+    "source_id": "0407",
+    "standard_name_zh": "哑铃体侧屈",
+    "canonical_name_en": "dumbbell side bend",
+    "aliases": [
+      "哑铃侧屈",
+      "负重侧屈",
+      "dumbbell side bend"
+    ],
+    "equipment_variant": "dumbbell",
+    "record_type": "reps_weight",
+    "load_convention": "dumbbell_per_hand",
+    "min_load_increment_kg": 2.5,
+    "recommendable": false,
+    "modes": [
+      "核心"
+    ]
+  },
+  {
+    "id": "dumbbell-seated-calf-raise",
+    "source_id": "1379",
+    "standard_name_zh": "哑铃坐姿提踵",
+    "canonical_name_en": "dumbbell seated calf raise",
+    "aliases": [
+      "哑铃小腿提踵",
+      "坐姿哑铃负重提踵",
+      "dumbbell seated calf raise"
+    ],
+    "equipment_variant": "dumbbell",
+    "record_type": "reps_weight",
+    "load_convention": "dumbbell_per_hand",
+    "min_load_increment_kg": 2.5,
+    "recommendable": false,
+    "modes": [
+      "小腿（踝跖屈）"
+    ]
+  },
+  {
+    "id": "dumbbell-step-up",
+    "source_id": "0431",
+    "standard_name_zh": "哑铃登台阶",
+    "canonical_name_en": "dumbbell step-up",
+    "aliases": [
+      "哑铃上台阶",
+      "哑铃负重登台阶",
+      "dumbbell step-up"
+    ],
+    "equipment_variant": "dumbbell",
+    "record_type": "reps_weight",
+    "load_convention": "dumbbell_per_hand",
+    "min_load_increment_kg": 2.5,
+    "recommendable": false,
+    "modes": [
+      "深蹲"
+    ]
+  },
+  {
+    "id": "dumbbell-deadlift",
+    "source_id": "0300",
+    "standard_name_zh": "哑铃硬拉",
+    "canonical_name_en": "dumbbell deadlift",
+    "aliases": [
+      "哑铃传统硬拉",
+      "哑铃屈髋拉",
+      "dumbbell deadlift"
+    ],
+    "equipment_variant": "dumbbell",
+    "record_type": "reps_weight",
+    "load_convention": "dumbbell_per_hand",
+    "min_load_increment_kg": 2.5,
+    "recommendable": false,
+    "modes": [
+      "髋铰链"
+    ]
+  },
+  {
+    "id": "dumbbell-standing-overhead-press",
+    "source_id": "0426",
+    "standard_name_zh": "哑铃站姿肩推",
+    "canonical_name_en": "dumbbell standing overhead press",
+    "aliases": [
+      "哑铃站姿推举",
+      "哑铃站姿上推",
+      "dumbbell standing overhead press"
+    ],
+    "equipment_variant": "dumbbell",
+    "record_type": "reps_weight",
+    "load_convention": "dumbbell_per_hand",
+    "min_load_increment_kg": 2.5,
+    "recommendable": false,
+    "modes": [
+      "垂直推"
+    ]
+  },
+  {
+    "id": "dumbbell-incline-fly",
+    "source_id": "0319",
+    "standard_name_zh": "哑铃上斜飞鸟",
+    "canonical_name_en": "dumbbell incline fly",
+    "aliases": [
+      "上斜飞鸟",
+      "哑铃上斜扩胸",
+      "dumbbell incline fly"
+    ],
+    "equipment_variant": "dumbbell",
+    "record_type": "reps_weight",
+    "load_convention": "dumbbell_per_hand",
+    "min_load_increment_kg": 2.5,
+    "recommendable": false,
+    "modes": [
+      "水平推"
+    ]
+  },
+  {
+    "id": "dumbbell-squat",
+    "source_id": "0413",
+    "standard_name_zh": "哑铃深蹲",
+    "canonical_name_en": "dumbbell squat",
+    "aliases": [
+      "哑铃负重深蹲",
+      "双手哑铃深蹲",
+      "dumbbell squat"
+    ],
+    "equipment_variant": "dumbbell",
+    "record_type": "reps_weight",
+    "load_convention": "dumbbell_per_hand",
+    "min_load_increment_kg": 2.5,
+    "recommendable": false,
+    "modes": [
+      "深蹲"
+    ]
+  },
+  {
+    "id": "cable-curl",
+    "source_id": "0868",
+    "standard_name_zh": "绳索弯举",
+    "canonical_name_en": "cable curl",
+    "aliases": [
+      "绳索二头弯举",
+      "拉力器弯举",
+      "cable curl"
+    ],
+    "equipment_variant": "cable",
+    "record_type": "reps_weight",
+    "load_convention": "machine_pin_displayed_value",
+    "min_load_increment_kg": 5.0,
+    "recommendable": true,
+    "modes": [
+      "肘屈"
+    ]
+  },
+  {
+    "id": "cable-lateral-raise",
+    "source_id": "0178",
+    "standard_name_zh": "绳索侧平举",
+    "canonical_name_en": "cable lateral raise",
+    "aliases": [
+      "拉力器侧平举",
+      "绳索单臂侧平举",
+      "cable lateral raise"
+    ],
+    "equipment_variant": "cable",
+    "record_type": "reps_weight",
+    "load_convention": "machine_pin_displayed_value",
+    "min_load_increment_kg": 5.0,
+    "recommendable": true,
+    "modes": [
+      "肩孤立"
+    ]
+  },
+  {
+    "id": "cable-kickback",
+    "source_id": "0860",
+    "standard_name_zh": "绳索臂后伸",
+    "canonical_name_en": "cable kickback",
+    "aliases": [
+      "拉力器臂后伸",
+      "绳索三头后伸",
+      "cable kickback"
+    ],
+    "equipment_variant": "cable",
+    "record_type": "reps_weight",
+    "load_convention": "machine_pin_displayed_value",
+    "min_load_increment_kg": 5.0,
+    "recommendable": true,
+    "modes": [
+      "肘伸"
+    ]
+  },
+  {
+    "id": "cable-seated-crunch",
+    "source_id": "0212",
+    "standard_name_zh": "绳索坐姿卷腹",
+    "canonical_name_en": "cable seated crunch",
+    "aliases": [
+      "绳索卷腹",
+      "拉力器坐姿卷腹",
+      "cable seated crunch"
+    ],
+    "equipment_variant": "cable",
+    "record_type": "reps_weight",
+    "load_convention": "machine_pin_displayed_value",
+    "min_load_increment_kg": 5.0,
+    "recommendable": true,
+    "modes": [
+      "核心"
+    ]
+  },
+  {
+    "id": "cable-upright-row",
+    "source_id": "0246",
+    "standard_name_zh": "绳索直立划船",
+    "canonical_name_en": "cable upright row",
+    "aliases": [
+      "拉力器直立划船",
+      "绳索上提",
+      "cable upright row"
+    ],
+    "equipment_variant": "cable",
+    "record_type": "reps_weight",
+    "load_convention": "machine_pin_displayed_value",
+    "min_load_increment_kg": 5.0,
+    "recommendable": true,
+    "modes": [
+      "肩孤立"
+    ]
+  },
+  {
+    "id": "cable-incline-fly",
+    "source_id": "0171",
+    "standard_name_zh": "绳索上斜飞鸟",
+    "canonical_name_en": "cable incline fly",
+    "aliases": [
+      "绳索斜凳飞鸟",
+      "拉力器上斜飞鸟",
+      "cable incline fly"
+    ],
+    "equipment_variant": "cable",
+    "record_type": "reps_weight",
+    "load_convention": "machine_pin_displayed_value",
+    "min_load_increment_kg": 5.0,
+    "recommendable": true,
+    "modes": [
+      "水平推"
+    ]
+  },
+  {
+    "id": "cable-front-raise",
+    "source_id": "0162",
+    "standard_name_zh": "绳索前平举",
+    "canonical_name_en": "cable front raise",
+    "aliases": [
+      "拉力器前平举",
+      "绳索单臂前平举",
+      "cable front raise"
+    ],
+    "equipment_variant": "cable",
+    "record_type": "reps_weight",
+    "load_convention": "machine_pin_displayed_value",
+    "min_load_increment_kg": 5.0,
+    "recommendable": false,
+    "modes": [
+      "肩孤立"
+    ]
+  },
+  {
+    "id": "cable-standing-calf-raise",
+    "source_id": "1375",
+    "standard_name_zh": "绳索站姿提踵",
+    "canonical_name_en": "cable standing calf raise",
+    "aliases": [
+      "绳索提踵",
+      "拉力器站姿提踵",
+      "cable standing calf raise"
+    ],
+    "equipment_variant": "cable",
+    "record_type": "reps_weight",
+    "load_convention": "machine_pin_displayed_value",
+    "min_load_increment_kg": 5.0,
+    "recommendable": false,
+    "modes": [
+      "小腿（踝跖屈）"
+    ]
+  },
+  {
+    "id": "cable-seated-wide-grip-row",
+    "source_id": "0218",
+    "standard_name_zh": "绳索坐姿宽距划船",
+    "canonical_name_en": "cable seated wide-grip row",
+    "aliases": [
+      "绳索宽握划船",
+      "拉力器宽距划船",
+      "cable seated wide-grip row"
+    ],
+    "equipment_variant": "cable",
+    "record_type": "reps_weight",
+    "load_convention": "machine_pin_displayed_value",
+    "min_load_increment_kg": 5.0,
+    "recommendable": false,
+    "modes": [
+      "水平拉"
+    ]
+  },
+  {
+    "id": "cable-straight-arm-pulldown",
+    "source_id": "0238",
+    "standard_name_zh": "绳索直臂下拉",
+    "canonical_name_en": "cable straight arm pulldown",
+    "aliases": [
+      "直臂下拉",
+      "绳索直臂下压",
+      "cable straight arm pulldown"
+    ],
+    "equipment_variant": "cable",
+    "record_type": "reps_weight",
+    "load_convention": "machine_pin_displayed_value",
+    "min_load_increment_kg": 5.0,
+    "recommendable": false,
+    "modes": [
+      "垂直拉"
+    ]
+  },
+  {
+    "id": "cable-preacher-curl",
+    "source_id": "0195",
+    "standard_name_zh": "绳索牧师凳弯举",
+    "canonical_name_en": "cable preacher curl",
+    "aliases": [
+      "绳索牧师椅弯举",
+      "拉力器斜托弯举",
+      "cable preacher curl"
+    ],
+    "equipment_variant": "cable",
+    "record_type": "reps_weight",
+    "load_convention": "machine_pin_displayed_value",
+    "min_load_increment_kg": 5.0,
+    "recommendable": false,
+    "modes": [
+      "肘屈"
+    ]
+  },
+  {
+    "id": "cable-overhead-curl",
+    "source_id": "1636",
+    "standard_name_zh": "绳索过顶弯举",
+    "canonical_name_en": "cable overhead curl",
+    "aliases": [
+      "绳索过顶二头弯举",
+      "拉力器头顶弯举",
+      "cable overhead curl"
+    ],
+    "equipment_variant": "cable",
+    "record_type": "reps_weight",
+    "load_convention": "machine_pin_displayed_value",
+    "min_load_increment_kg": 5.0,
+    "recommendable": false,
+    "modes": [
+      "肘屈"
+    ]
+  },
+  {
+    "id": "cable-shrug",
+    "source_id": "0220",
+    "standard_name_zh": "绳索耸肩",
+    "canonical_name_en": "cable shrug",
+    "aliases": [
+      "拉力器耸肩",
+      "绳索斜方耸肩",
+      "cable shrug"
+    ],
+    "equipment_variant": "cable",
+    "record_type": "reps_weight",
+    "load_convention": "machine_pin_displayed_value",
+    "min_load_increment_kg": 5.0,
+    "recommendable": false,
+    "modes": [
+      "肩孤立"
+    ]
+  },
+  {
+    "id": "cable-seated-rear-lateral-raise",
+    "source_id": "0215",
+    "standard_name_zh": "绳索坐姿反式飞鸟",
+    "canonical_name_en": "cable seated rear lateral raise",
+    "aliases": [
+      "绳索坐姿后束飞鸟",
+      "拉力器反式飞鸟",
+      "cable seated rear lateral raise"
+    ],
+    "equipment_variant": "cable",
+    "record_type": "reps_weight",
+    "load_convention": "machine_pin_displayed_value",
+    "min_load_increment_kg": 5.0,
+    "recommendable": false,
+    "modes": [
+      "肩孤立"
+    ]
+  },
+  {
+    "id": "cable-kneeling-crunch",
+    "source_id": "0175",
+    "standard_name_zh": "绳索跪姿卷腹",
+    "canonical_name_en": "cable kneeling crunch",
+    "aliases": [
+      "绳索跪姿收腹",
+      "拉力器跪姿卷腹",
+      "cable kneeling crunch"
+    ],
+    "equipment_variant": "cable",
+    "record_type": "reps_weight",
+    "load_convention": "machine_pin_displayed_value",
+    "min_load_increment_kg": 5.0,
+    "recommendable": false,
+    "modes": [
+      "核心"
+    ]
+  },
+  {
+    "id": "cable-shoulder-press",
+    "source_id": "0219",
+    "standard_name_zh": "绳索站姿肩推",
+    "canonical_name_en": "cable shoulder press",
+    "aliases": [
+      "绳索肩推",
+      "拉力器肩推",
+      "cable shoulder press"
+    ],
+    "equipment_variant": "cable",
+    "record_type": "reps_weight",
+    "load_convention": "machine_pin_displayed_value",
+    "min_load_increment_kg": 5.0,
+    "recommendable": false,
+    "modes": [
+      "垂直推"
+    ]
+  },
+  {
+    "id": "cable-underhand-pulldown",
+    "source_id": "0245",
+    "standard_name_zh": "绳索反握下拉",
+    "canonical_name_en": "cable underhand pulldown",
+    "aliases": [
+      "绳索反握高位下拉",
+      "拉力器反握下拉",
+      "cable underhand pulldown"
+    ],
+    "equipment_variant": "cable",
+    "record_type": "reps_weight",
+    "load_convention": "machine_pin_displayed_value",
+    "min_load_increment_kg": 5.0,
+    "recommendable": false,
+    "modes": [
+      "垂直拉"
+    ]
+  },
+  {
+    "id": "push-up",
+    "source_id": "0662",
+    "standard_name_zh": "自重俯卧撑",
+    "canonical_name_en": "push-up",
+    "aliases": [
+      "俯卧撑",
+      "伏地挺身",
+      "push-up"
+    ],
+    "equipment_variant": "bodyweight",
+    "record_type": "reps_bodyweight",
+    "load_convention": null,
+    "min_load_increment_kg": null,
+    "recommendable": true,
+    "modes": [
+      "水平推"
+    ]
+  },
+  {
+    "id": "chin-up",
+    "source_id": "1326",
+    "standard_name_zh": "自重反手引体向上",
+    "canonical_name_en": "chin-up",
+    "aliases": [
+      "反手引体",
+      "反手引体向上",
+      "chin-up"
+    ],
+    "equipment_variant": "bodyweight",
+    "record_type": "reps_bodyweight",
+    "load_convention": null,
+    "min_load_increment_kg": null,
+    "recommendable": true,
+    "modes": [
+      "垂直拉"
+    ]
+  },
+  {
+    "id": "inverted-row",
+    "source_id": "0499",
+    "standard_name_zh": "自重反向划船",
+    "canonical_name_en": "inverted row",
+    "aliases": [
+      "反向划船",
+      "自重仰卧划船",
+      "inverted row"
+    ],
+    "equipment_variant": "bodyweight",
+    "record_type": "reps_bodyweight",
+    "load_convention": null,
+    "min_load_increment_kg": null,
+    "recommendable": true,
+    "modes": [
+      "水平拉"
+    ]
+  },
+  {
+    "id": "mountain-climber",
+    "source_id": "0630",
+    "standard_name_zh": "自重登山跑",
+    "canonical_name_en": "mountain climber",
+    "aliases": [
+      "登山跑",
+      "俯撑提膝",
+      "mountain climber"
+    ],
+    "equipment_variant": "bodyweight",
+    "record_type": "reps_bodyweight",
+    "load_convention": null,
+    "min_load_increment_kg": null,
+    "recommendable": true,
+    "modes": [
+      "核心"
+    ]
+  },
+  {
+    "id": "bench-dip-on-floor",
+    "source_id": "1399",
+    "standard_name_zh": "自重地面臂屈伸",
+    "canonical_name_en": "bench dip on floor",
+    "aliases": [
+      "地面臂屈伸",
+      "自重三头臂屈伸",
+      "bench dip on floor"
+    ],
+    "equipment_variant": "bodyweight",
+    "record_type": "reps_bodyweight",
+    "load_convention": null,
+    "min_load_increment_kg": null,
+    "recommendable": false,
+    "modes": [
+      "肘伸"
+    ]
+  },
+  {
+    "id": "wide-hand-push-up",
+    "source_id": "1311",
+    "standard_name_zh": "自重宽距俯卧撑",
+    "canonical_name_en": "wide hand push up",
+    "aliases": [
+      "宽距俯卧撑",
+      "宽手俯卧撑",
+      "wide hand push up"
+    ],
+    "equipment_variant": "bodyweight",
+    "record_type": "reps_bodyweight",
+    "load_convention": null,
+    "min_load_increment_kg": null,
+    "recommendable": false,
+    "modes": [
+      "水平推"
+    ]
+  },
+  {
+    "id": "hyperextension",
+    "source_id": "0489",
+    "standard_name_zh": "自重背部伸展",
+    "canonical_name_en": "hyperextension",
+    "aliases": [
+      "背部伸展",
+      "山羊挺身",
+      "hyperextension"
+    ],
+    "equipment_variant": "bodyweight",
+    "record_type": "reps_bodyweight",
+    "load_convention": null,
+    "min_load_increment_kg": null,
+    "recommendable": false,
+    "modes": [
+      "髋铰链"
+    ]
+  },
+  {
+    "id": "hanging-straight-leg-raise",
+    "source_id": "0475",
+    "standard_name_zh": "自重悬垂直腿举",
+    "canonical_name_en": "hanging straight leg raise",
+    "aliases": [
+      "悬垂直腿举",
+      "单杠直腿举",
+      "hanging straight leg raise"
+    ],
+    "equipment_variant": "bodyweight",
+    "record_type": "reps_bodyweight",
+    "load_convention": null,
+    "min_load_increment_kg": null,
+    "recommendable": false,
+    "modes": [
+      "核心"
+    ]
+  },
+  {
+    "id": "reverse-crunch",
+    "source_id": "0872",
+    "standard_name_zh": "自重反向卷腹",
+    "canonical_name_en": "reverse crunch",
+    "aliases": [
+      "反向卷腹",
+      "仰卧反向缩腹",
+      "reverse crunch"
+    ],
+    "equipment_variant": "bodyweight",
+    "record_type": "reps_bodyweight",
+    "load_convention": null,
+    "min_load_increment_kg": null,
+    "recommendable": false,
+    "modes": [
+      "核心"
+    ]
+  },
+  {
+    "id": "front-plank-with-twist",
+    "source_id": "0464",
+    "standard_name_zh": "自重转体平板支撑",
+    "canonical_name_en": "front plank with twist",
+    "aliases": [
+      "转体平板支撑",
+      "平板支撑转体",
+      "front plank with twist"
+    ],
+    "equipment_variant": "bodyweight",
+    "record_type": "time",
+    "load_convention": null,
+    "min_load_increment_kg": null,
+    "recommendable": false,
+    "modes": [
+      "核心"
+    ]
+  },
+  {
+    "id": "lever-chest-press",
+    "source_id": "0577",
+    "standard_name_zh": "器械坐姿推胸",
+    "canonical_name_en": "lever chest press",
+    "aliases": [
+      "器械推胸",
+      "坐姿推胸器",
+      "lever chest press"
+    ],
+    "equipment_variant": "leverage_machine",
+    "record_type": "reps_weight",
+    "load_convention": "machine_pin_displayed_value",
+    "min_load_increment_kg": 5.0,
+    "recommendable": true,
+    "modes": [
+      "水平推"
+    ]
+  },
+  {
+    "id": "lever-seated-row",
+    "source_id": "1350",
+    "standard_name_zh": "器械坐姿划船",
+    "canonical_name_en": "lever seated row",
+    "aliases": [
+      "器械划船",
+      "坐姿划船器",
+      "lever seated row"
+    ],
+    "equipment_variant": "leverage_machine",
+    "record_type": "reps_weight",
+    "load_convention": "machine_pin_displayed_value",
+    "min_load_increment_kg": 5.0,
+    "recommendable": true,
+    "modes": [
+      "水平拉"
+    ]
+  },
+  {
+    "id": "lever-shoulder-press",
+    "source_id": "0603",
+    "standard_name_zh": "器械坐姿肩推",
+    "canonical_name_en": "lever shoulder press",
+    "aliases": [
+      "器械肩推",
+      "坐姿推肩器",
+      "lever shoulder press"
+    ],
+    "equipment_variant": "leverage_machine",
+    "record_type": "reps_weight",
+    "load_convention": "machine_pin_displayed_value",
+    "min_load_increment_kg": 5.0,
+    "recommendable": false,
+    "modes": [
+      "垂直推"
+    ]
+  },
+  {
+    "id": "lever-lying-leg-curl",
+    "source_id": "0586",
+    "standard_name_zh": "器械俯卧腿弯举",
+    "canonical_name_en": "lever lying leg curl",
+    "aliases": [
+      "俯卧腿弯举",
+      "器械俯身腿弯举",
+      "lever lying leg curl"
+    ],
+    "equipment_variant": "leverage_machine",
+    "record_type": "reps_weight",
+    "load_convention": "machine_pin_displayed_value",
+    "min_load_increment_kg": 5.0,
+    "recommendable": false,
+    "modes": [
+      "膝屈"
+    ]
+  },
+  {
+    "id": "lever-seated-calf-raise",
+    "source_id": "0594",
+    "standard_name_zh": "器械坐姿提踵",
+    "canonical_name_en": "lever seated calf raise",
+    "aliases": [
+      "坐姿提踵",
+      "器械小腿提踵",
+      "lever seated calf raise"
+    ],
+    "equipment_variant": "leverage_machine",
+    "record_type": "reps_weight",
+    "load_convention": "machine_pin_displayed_value",
+    "min_load_increment_kg": 5.0,
+    "recommendable": false,
+    "modes": [
+      "小腿（踝跖屈）"
+    ]
+  },
+  {
+    "id": "lever-front-pulldown",
+    "source_id": "0579",
+    "standard_name_zh": "器械前置下拉",
+    "canonical_name_en": "lever front pulldown",
+    "aliases": [
+      "器械下拉",
+      "前置下拉器",
+      "lever front pulldown"
+    ],
+    "equipment_variant": "leverage_machine",
+    "record_type": "reps_weight",
+    "load_convention": "machine_pin_displayed_value",
+    "min_load_increment_kg": 5.0,
+    "recommendable": false,
+    "modes": [
+      "垂直拉"
+    ]
+  },
+  {
+    "id": "sled-45-calf-press",
+    "source_id": "0738",
+    "standard_name_zh": "器械45°提踵",
+    "canonical_name_en": "sled 45° calf press",
+    "aliases": [
+      "器械45度提踵",
+      "雪橇机提踵",
+      "sled 45° calf press"
+    ],
+    "equipment_variant": "sled_machine",
+    "record_type": "reps_weight",
+    "load_convention": "plate_loaded_total_excluding_empty",
+    "min_load_increment_kg": 2.5,
+    "recommendable": false,
+    "modes": [
+      "小腿（踝跖屈）"
+    ]
+  },
+  {
+    "id": "sled-hack-squat",
+    "source_id": "0743",
+    "standard_name_zh": "器械哈克深蹲",
+    "canonical_name_en": "sled hack squat",
+    "aliases": [
+      "器械哈克机深蹲",
+      "雪橇机哈克深蹲",
+      "sled hack squat"
+    ],
+    "equipment_variant": "sled_machine",
+    "record_type": "reps_weight",
+    "load_convention": "plate_loaded_total_excluding_empty",
+    "min_load_increment_kg": 2.5,
+    "recommendable": false,
+    "modes": [
+      "深蹲"
+    ]
+  },
+  {
+    "id": "weighted-straight-bar-dip",
+    "source_id": "3313",
+    "standard_name_zh": "负重直杠臂屈伸",
+    "canonical_name_en": "weighted straight bar dip",
+    "aliases": [
+      "负重直杠双杠臂屈伸",
+      "加重直杠臂屈伸",
+      "weighted straight bar dip"
+    ],
+    "equipment_variant": "weighted",
+    "record_type": "reps_weight",
+    "load_convention": "external_added_weight",
+    "min_load_increment_kg": 5.0,
+    "recommendable": true,
+    "modes": [
+      "垂直推",
+      "肘伸"
+    ]
+  }
+]
