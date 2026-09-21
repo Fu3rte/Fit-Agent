@@ -1,0 +1,109 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/hasaneyldrm/exercises-dataset/blob/main/data/actions.agent.schema.json",
+  "title": "Actions Agent Dataset",
+  "description": "Schema for data/actions.agent.json — a trimmed array of fitness exercise records with Chinese and English step-by-step instructions only.",
+  "type": "array",
+  "items": {
+    "$ref": "#/$defs/action"
+  },
+  "$defs": {
+    "steps": {
+      "type": "object",
+      "description": "Ordered step-by-step instructions keyed by ISO 639-1 language code.",
+      "properties": {
+        "zh": {
+          "type": "array",
+          "description": "Instruction steps in Chinese.",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "minItems": 1
+        },
+        "en": {
+          "type": "array",
+          "description": "Instruction steps in English.",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "minItems": 1
+        }
+      },
+      "required": [
+        "zh",
+        "en"
+      ],
+      "additionalProperties": false
+    },
+    "action": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Unique numeric identifier, zero-padded to 4 digits (e.g. \"0001\").",
+          "pattern": "^[0-9]{4}$"
+        },
+        "name": {
+          "type": "string",
+          "description": "Full exercise name (e.g. \"3/4 sit-up\").",
+          "minLength": 1
+        },
+        "body_part": {
+          "type": "string",
+          "description": "Body part targeted.",
+          "enum": [
+            "back",
+            "cardio",
+            "chest",
+            "lower arms",
+            "lower legs",
+            "neck",
+            "shoulders",
+            "upper arms",
+            "upper legs",
+            "waist"
+          ]
+        },
+        "equipment": {
+          "type": "string",
+          "description": "Required equipment (e.g. \"dumbbell\", \"body weight\").",
+          "minLength": 1
+        },
+        "target": {
+          "type": "string",
+          "description": "Primary target muscle (e.g. \"biceps\", \"pectorals\").",
+          "minLength": 1
+        },
+        "muscle_group": {
+          "type": "string",
+          "description": "Primary synergist muscle group.",
+          "minLength": 1
+        },
+        "secondary_muscles": {
+          "type": "array",
+          "description": "Additional muscles involved.",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "steps": {
+          "$ref": "#/$defs/steps"
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "body_part",
+        "equipment",
+        "target",
+        "muscle_group",
+        "secondary_muscles",
+        "steps"
+      ],
+      "additionalProperties": false
+    }
+  }
+}

@@ -14,8 +14,6 @@ from types import ModuleType
 import aiosqlite
 import pytest
 
-from app.application.agent.contracts import AmbiguousExerciseName
-from app.application.agent.run_service import _matched_exercise
 from app.bootstrap import SqliteHealthProbe, build_repositories, build_services
 from app.domain.actions.rules import MODE_VOCABULARY
 from app.domain.actions.schema import Exercise, InvalidCatalogRow
@@ -49,7 +47,6 @@ EXISTING_SOURCE_REFS = {
 # A 层与 B 层的代表动作（B 层仅记录：不进计划、但能写训练记录）。
 RECORD_ONLY_BODYWEIGHT = "wide-hand-push-up"
 RECORD_ONLY_TIMED = "front-plank-with-twist"
-RECORD_ONLY_CABLE = "cable-preacher-curl"
 
 
 def _builder_module() -> ModuleType:
@@ -287,92 +284,6 @@ async def test_record_only_actions_are_rejected_from_plan_drafts(tmp_path: Path)
             profile_weekly_frequency=1,
         )
         assert [failure.code for failure in failures] == ["exercise_not_recommendable"]
-
-
-@pytest.mark.parametrize(
-    "name, expected_id",
-    [
-        # 标准名精确命中
-        ("杠铃前蹲", "barbell-front-squat"),
-        # 中文 alias 精确命中
-        ("高脚杯深蹲", "dumbbell-goblet-squat"),
-        # 英文 canonical alias 精确命中
-        ("barbell front squat", "barbell-front-squat"),
-        # 标准名完整包含，取最长名称
-        ("我想问杠铃前蹲怎么做", "barbell-front-squat"),
-        # 无匹配
-        ("波比跳", None),
-    ],
-)
-async def test_matcher_resolves_names_by_the_fixed_priority(
-    tmp_path: Path, name: str, expected_id: str | None
-) -> None:
-    """名称匹配四级优先级：标准名精确 → alias 精确 → 标准名完整包含 → alias 完整包含（各级取最长名）。"""
-    async with _catalog(tmp_path) as (_db, catalog):
-        matched = _matched_exercise(catalog, name)
-        if expected_id is None:
-            assert matched is None
-        else:
-            assert matched is not None
-            assert matched.id == expected_id
-
-
-async def test_matcher_reports_ambiguity_instead_of_picking_one(tmp_path: Path) -> None:
-    """精确阶段命中多个候选时立即报歧义，不猜第一个。"""
-    async with _catalog(tmp_path) as (_db, catalog):
-        source = catalog[0]
-        duplicated = tuple(
-            Exercise(
-                id=f"{source.id}-copy",
-                standard_name_zh=source.standard_name_zh,
-                aliases=source.aliases,
-                equipment_variant=source.equipment_variant,
-                record_type=source.record_type,
-                load_convention=source.load_convention,
-                min_load_increment_kg=source.min_load_increment_kg,
-                recommendable=source.recommendable,
-                modes=source.modes,
-                source_ref=source.source_ref,
-                attribution=source.attribution,
-            )
-            for _ in range(2)
-        )
-        with pytest.raises(AmbiguousExerciseName):
-            _matched_exercise(duplicated, source.standard_name_zh)
-
-
-async def test_standard_name_containment_outranks_longer_alias_containment(
-    tmp_path: Path,
-) -> None:
-    """包含阶段分两级：标准名包含非空即定案，更长的 alias 包含不得越级抢中。"""
-    async with _catalog(tmp_path) as (_db, catalog):
-        cable = next(
-            exercise
-            for exercise in catalog
-            if exercise.id == "cable-seated-rear-lateral-raise"
-        )
-        assert "绳索坐姿后束飞鸟" in cable.aliases
-        assert len("绳索坐姿后束飞鸟") > len("自重俯卧撑")
-        matched = _matched_exercise(catalog, "今天练了自重俯卧撑和绳索坐姿后束飞鸟")
-        assert matched is not None
-        assert matched.id == "push-up"
-
-
-async def test_knowledge_qa_scope_is_recommendable_while_records_see_all(tmp_path: Path) -> None:
-    """知识问答只匹配 A 层；自然语言打卡携带全部 110 条，B 层动作仍可被匹配。"""
-    async with _catalog(tmp_path) as (_db, catalog):
-        record_only = next(
-            exercise for exercise in catalog if exercise.id == RECORD_ONLY_CABLE
-        )
-        assert record_only.recommendable is False
-        recommendable_only = tuple(
-            exercise for exercise in catalog if exercise.recommendable
-        )
-        assert _matched_exercise(recommendable_only, record_only.standard_name_zh) is None
-        assert (
-            _matched_exercise(catalog, record_only.standard_name_zh).id
-            == RECORD_ONLY_CABLE
-        )
 
 
 def test_builder_rejects_alias_that_collides_after_normalization() -> None:

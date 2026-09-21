@@ -24,19 +24,15 @@ from app.application.agent.budget import (
 )
 from app.application.agent.contracts import (
     ADJUST_PLAN_INTENT,
-    ADJUSTMENT_SKILL_NAME,
-    PLANNING_SKILL_NAME,
     AgentEvent,
     AgentEventName,
     AgentRunDeps,
     AgentRunResult,
     AgentRuntime,
-    AmbiguousExerciseName,
     ConfirmationConflict,
     ExistingDraftTarget,
     GeneratePlanRun,
     Intent,
-    LoadedSkill,
     RequiredActivePlanMissing,
     RequiredProfileMissing,
     TerminationReason,
@@ -47,7 +43,6 @@ from app.application.agent.harness.tools.training import TrainingHarnessContext
 from app.application.agent.prompts import (
     FORM_RECORD_GUIDE,
     GENERAL_CHAT_SYSTEM_PROMPT,
-    KNOWLEDGE_QA_SYSTEM_PROMPT,
     NATURAL_LANGUAGE_RECORD_EXTRACTION_PROMPT,
     NATURAL_LANGUAGE_RECORD_MESSAGE_PROMPT,
     REJECT_DRAFT_MESSAGE,
@@ -57,7 +52,6 @@ from app.application.agent.prompts import (
 from app.application.agent.router import (
     NON_PLAN_INTENTS,
     TOOL_INTENTS,
-    FitnessIntent,
     classify_intent,
     workflow_intent,
 )
@@ -171,7 +165,7 @@ async def stream_agent_run(
                     await _tool_answer(intent, state["request"], run=run, deps=deps)
                     if intent in TOOL_INTENTS
                     else await _non_plan_text(
-                        intent, route, state["request"], run=run, deps=deps
+                        intent, state["request"], run=run, deps=deps
                     )
                 )
                 yield AgentEvent("message", {"text": text})
@@ -366,15 +360,12 @@ def harness_answer(messages: Sequence[BaseMessage]) -> str:
 
 async def _non_plan_text(
     intent: Intent,
-    route: FitnessIntent,
     request: str,
     *,
     run: GeneratePlanRun,
     deps: AgentRunDeps,
 ) -> str:
-    """非计划分支的可见文本：表单引导、知识问答与一般对话。"""
-    if intent == "knowledge_qa":
-        return await _knowledge_answer(route, request, run=run, deps=deps)
+    """非计划分支的可见文本：表单引导与一般对话。"""
     if intent == "general":
         return await _general_answer(request, run=run, deps=deps)
     return FORM_RECORD_GUIDE
@@ -497,42 +488,6 @@ def _candidate_plan_session_payload(session: PlanSession) -> dict[str, Any]:
     }
 
 
-async def _knowledge_answer(
-    route: FitnessIntent, request: str, *, run: GeneratePlanRun, deps: AgentRunDeps
-) -> str:
-    """``knowledge_qa`` 的唯一实现：知识类型决定装配的知识源，模型只作答、不写库。"""
-    methodology = route.knowledge_type == "methodology"
-    skills = (
-        [
-            _skill_payload(deps.skills.load(name))
-            for name in (PLANNING_SKILL_NAME, ADJUSTMENT_SKILL_NAME)
-        ]
-        if methodology
-        else []
-    )
-    matched: Exercise | None = None
-    if not methodology:
-        catalog = await deps.catalog.list_all()
-        matched = _matched_exercise(
-            tuple(exercise for exercise in catalog if exercise.recommendable),
-            route.exercise_name,
-        )
-    text = await request_model(
-        deps.model,
-        KNOWLEDGE_QA_SYSTEM_PROMPT,
-        {
-            "request": request,
-            **history_payload(run.conversation_messages),
-            "knowledge_type": route.knowledge_type,
-            "exercise_name": route.exercise_name,
-            "catalog_exercise": None if matched is None else _action_payload(matched),
-            "skills": skills,
-        },
-        run.budget,
-    )
-    return text.strip()
-
-
 async def _general_answer(
     request: str, *, run: GeneratePlanRun, deps: AgentRunDeps
 ) -> str:
@@ -544,51 +499,6 @@ async def _general_answer(
         run.budget,
     )
     return text.strip()
-
-
-def _matched_exercise(catalog: Sequence[Exercise], name: str | None) -> Exercise | None:
-    """动作名归一化：标准名精确 → alias 精确 → 标准名完整包含 → alias 完整包含；无命中即 None。
-
-    精确阶段命中多个候选立即报歧义，不自行挑选；包含阶段按级取最长名称，
-    标准名包含非空时不再看 alias 包含。
-    """
-    if name is None:
-        return None
-    exact = [exercise for exercise in catalog if exercise.standard_name_zh == name]
-    if not exact:
-        exact = [exercise for exercise in catalog if name in exercise.aliases]
-    if exact:
-        if len(exact) > 1:
-            raise AmbiguousExerciseName()
-        return exact[0]
-    contained: list[tuple[int, Exercise]] = [
-        (len(exercise.standard_name_zh), exercise)
-        for exercise in catalog
-        if exercise.standard_name_zh in name
-    ]
-    if not contained:
-        contained = [
-            (len(alias), exercise)
-            for exercise in catalog
-            for alias in exercise.aliases
-            if alias in name
-        ]
-    if not contained:
-        return None
-    return max(contained, key=lambda item: item[0])[1]
-
-
-def _skill_payload(skill: LoadedSkill) -> dict[str, Any]:
-    """知识问答的知识源：Skill 名称、正文与它引用的 reference 原文。"""
-    return {
-        "name": skill.metadata.name,
-        "description": skill.metadata.description,
-        "body": skill.body,
-        "references": [
-            {"path": reference.path, "text": reference.text}
-            for reference in skill.references
-        ],
-    }
 
 
 async def run_events(
@@ -808,7 +718,6 @@ _FIXED_ERROR_MESSAGES: tuple[tuple[type[Exception], str], ...] = (
 )
 
 _PRODUCT_ERROR_TYPES: tuple[type[Exception], ...] = (
-    AmbiguousExerciseName,
     RequiredProfileMissing,
     RequiredActivePlanMissing,
     ConfirmationConflict,

@@ -32,7 +32,6 @@ Intent = Literal[
     "generate_plan",
     "adjust_plan",
     "view_schedule",
-    "knowledge_qa",
     "general",
 ]
 
@@ -88,13 +87,6 @@ ADJUST_PLAN_INTENT: Intent = "adjust_plan"
 CONFIRMATION_ACTIONS: tuple[str, ...] = ("confirm", "reject")
 
 AgentEventName = Literal["node", "message", "waiting", "done", "error"]
-
-
-class AmbiguousExerciseName(ValueError):
-    """动作名精确命中多个目录动作：不猜一个，交回调用方报歧义。"""
-
-    def __init__(self) -> None:
-        super().__init__("动作名称存在多个匹配，请使用更完整的动作名称")
 
 
 class RequiredProfileMissing(ValueError):

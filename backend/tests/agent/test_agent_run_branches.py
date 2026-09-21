@@ -1,4 +1,4 @@
-# 一次 Agent Run 的非工具分支行为：表单引导、自然语言打卡、知识问答、一般对话与计划链路的可见输出、
+# 一次 Agent Run 的非工具分支行为：表单引导、自然语言打卡、一般对话与计划链路的可见输出、
 # 只读边界与预算，非法路由组合在进入任何分支前失败。
 # 依据：本轮拍板的 FitnessIntent Schema；日程与进展两个只读工具分支在 test_agent_tool_branches.py。
 # 计划事实用 tmp_path 下的真实迁移库，模型是可脚本化的固定替身，不调真实模型。
@@ -40,7 +40,6 @@ from app.application.agent.prompts import (
     EVALUATOR_SYSTEM_PROMPT,
     FORM_RECORD_GUIDE,
     GENERAL_CHAT_SYSTEM_PROMPT,
-    KNOWLEDGE_QA_SYSTEM_PROMPT,
     NATURAL_LANGUAGE_RECORD_MESSAGE_PROMPT,
     PLANNER_SYSTEM_PROMPT,
 )
@@ -61,29 +60,8 @@ SCHEDULED_ON = "2026-06-01"
 NEXT_DAY = "2026-06-02"
 CONVERSATION_ID = "router-branch-conversation"
 CREATED_AT = "2026-06-01T08:00:00+00:00"
-BENCH_PRESS = "barbell-bench-press"
 PULL_UP = "pull-up"
 PLANK = "plank"
-BACK_SQUAT = "barbell-back-squat"
-# 知识问答注入给模型的目录实体：七个字段一律精确断言
-BARBELL_BENCH_PRESS_PAYLOAD = {
-    "exercise_id": BENCH_PRESS,
-    "standard_name_zh": "杠铃平板卧推",
-    "aliases": ["卧推", "杠铃卧推", "barbell bench press"],
-    "equipment_variant": "barbell",
-    "modes": ["水平推"],
-    "record_type": "reps_weight",
-    "load_convention": "barbell_includes_bar_total",
-}
-BARBELL_BACK_SQUAT_PAYLOAD = {
-    "exercise_id": BACK_SQUAT,
-    "standard_name_zh": "杠铃背蹲",
-    "aliases": ["深蹲", "杠铃深蹲", "barbell full squat"],
-    "equipment_variant": "barbell",
-    "modes": ["深蹲"],
-    "record_type": "reps_weight",
-    "load_convention": "barbell_includes_bar_total",
-}
 PROFILE_WEEKLY_FREQUENCY = 1
 ANSWER = "固定替身答复"
 SUMMARY = "固定替身摘要"
@@ -500,86 +478,32 @@ async def test_form_record_request_guides_to_the_form_without_writing(
 
 
 @pytest.mark.parametrize(
-    "exercise_name, expected",
+    "request_text",
     [
-        ("杠铃平板卧推", BARBELL_BENCH_PRESS_PAYLOAD),
-        ("我想问杠铃平板卧推的技术要点", BARBELL_BENCH_PRESS_PAYLOAD),
-        # 通用别名「深蹲」只落在唯一默认动作杠铃背蹲上，故包含阶段命中它
-        ("跳跃深蹲", BARBELL_BACK_SQUAT_PAYLOAD),
-        ("波比跳", None),
+        "你好",
+        "杠铃平板卧推的动作规范、发力机制与轨迹是什么？",
+        "新手一周练几次合适？",
     ],
 )
-async def test_knowledge_qa_exercise_technique_anchors_the_catalog_entity(
-    tmp_path: Path, exercise_name: str, expected: dict[str, Any] | None
+async def test_general_chat_answers_with_one_text_call(
+    tmp_path: Path, request_text: str
 ) -> None:
-    """动作技术问答：动作名按目录名称／别名归一化（仅可推荐动作），未命中即不带目录事实。"""
-    async with _harness(
-        tmp_path,
-        structured=_route(
-            domain="knowledge_qa",
-            action="query",
-            knowledge_type="exercise_technique",
-            exercise_name=exercise_name,
-        ),
-        text={KNOWLEDGE_QA_SYSTEM_PROMPT: [ANSWER]},
-    ) as h:
-        before = await _row_counts(h.db)
-        result = await h.invoke(f"{exercise_name}怎么做？")
-        payload = h.model.payload_for(KNOWLEDGE_QA_SYSTEM_PROMPT)
-
-        assert result.intent == "knowledge_qa"
-        assert result.messages == (ANSWER,)
-        assert payload["knowledge_type"] == "exercise_technique"
-        assert payload["exercise_name"] == exercise_name
-        assert payload["skills"] == []
-        assert payload["catalog_exercise"] == expected
-        assert await _row_counts(h.db) == before
-
-
-async def test_knowledge_qa_methodology_injects_the_existing_skills(
-    tmp_path: Path,
-) -> None:
-    """方法论问答：动作名必须为空，知识源是既有 Skill 正文与其引用文件。"""
-    async with _harness(
-        tmp_path,
-        structured=_route(
-            domain="knowledge_qa",
-            action="query",
-            knowledge_type="methodology",
-        ),
-        text={KNOWLEDGE_QA_SYSTEM_PROMPT: [ANSWER]},
-    ) as h:
-        result = await h.invoke("新手一周练几次合适？")
-        payload = h.model.payload_for(KNOWLEDGE_QA_SYSTEM_PROMPT)
-
-        assert result.intent == "knowledge_qa"
-        assert payload["exercise_name"] is None
-        assert payload["catalog_exercise"] is None
-        assert [skill["name"] for skill in payload["skills"]] == [
-            "workout-planning",
-            "plan-adjustment",
-        ]
-        assert payload["skills"][0]["body"].strip()
-        assert all(
-            reference["path"].startswith("references/")
-            for reference in payload["skills"][0]["references"]
-        )
-
-
-async def test_general_chat_answers_with_one_text_call(tmp_path: Path) -> None:
-    """一般对话：一次文本模型调用，不写库、不进入计划子图。"""
+    """一般对话与训练知识类问法：一次文本调用，payload 仅 request 与 history，不写库、不进计划子图。"""
     async with _harness(
         tmp_path,
         structured=_route(domain="general", action="chat"),
         text={GENERAL_CHAT_SYSTEM_PROMPT: [ANSWER]},
     ) as h:
         before = await _row_counts(h.db)
-        result = await h.invoke("你好")
+        result = await h.invoke(request_text)
 
         assert result.intent == "general"
         assert result.messages == (ANSWER,)
         assert result.draft_plan_id is None
-        assert h.model.payload_for(GENERAL_CHAT_SYSTEM_PROMPT) == {"request": "你好"}
+        assert h.model.text_calls() == [GENERAL_CHAT_SYSTEM_PROMPT]
+        assert h.model.payload_for(GENERAL_CHAT_SYSTEM_PROMPT) == {
+            "request": request_text
+        }
         assert await _row_counts(h.db) == before
 
 

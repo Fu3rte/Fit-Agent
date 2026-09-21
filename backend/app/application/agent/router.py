@@ -1,7 +1,7 @@
 from collections.abc import Mapping, Sequence
 from typing import Literal, NamedTuple
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.application.agent.budget import ModelRequestBudget, request_structured_model
 from app.application.agent.contracts import Intent
@@ -12,7 +12,6 @@ Domain = Literal[
     "workout_execution",
     "plan_management",
     "analytics",
-    "knowledge_qa",
     "general",
 ]
 
@@ -24,31 +23,26 @@ ExecutionType = Literal[
     "natural_language_record",
 ]
 
-KnowledgeType = Literal["exercise_technique", "methodology"]
-
 
 class RouteKey(NamedTuple):
-    """合法路由组合的键：只含判别字段，不含用户填写的动作名与查询日。"""
+    """合法路由组合的键：只含判别字段，不含用户填写的查询日。"""
 
     domain: Domain
     action: Action
     execution_type: ExecutionType | None
-    knowledge_type: KnowledgeType | None
 
 
 #: 合法组合 → 工作流分支的唯一真相：Schema 校验与下游映射都读这张表。
 WORKFLOW_INTENTS: Mapping[RouteKey, Intent] = {
-    RouteKey("workout_execution", "query", "schedule_query", None): "view_schedule",
-    RouteKey("workout_execution", "create", "form_record", None): "form_record",
+    RouteKey("workout_execution", "query", "schedule_query"): "view_schedule",
+    RouteKey("workout_execution", "create", "form_record"): "form_record",
     RouteKey(
-        "workout_execution", "create", "natural_language_record", None
+        "workout_execution", "create", "natural_language_record"
     ): "natural_language_record",
-    RouteKey("plan_management", "create", None, None): "generate_plan",
-    RouteKey("plan_management", "modify", None, None): "adjust_plan",
-    RouteKey("analytics", "query", None, None): "view_progress",
-    RouteKey("knowledge_qa", "query", None, "exercise_technique"): "knowledge_qa",
-    RouteKey("knowledge_qa", "query", None, "methodology"): "knowledge_qa",
-    RouteKey("general", "chat", None, None): "general",
+    RouteKey("plan_management", "create", None): "generate_plan",
+    RouteKey("plan_management", "modify", None): "adjust_plan",
+    RouteKey("analytics", "query", None): "view_progress",
+    RouteKey("general", "chat", None): "general",
 }
 
 
@@ -58,7 +52,7 @@ class FitnessIntent(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     domain: Domain = Field(
-        description="请求所属领域，取值 workout_execution／plan_management／analytics／knowledge_qa／general 之一。"
+        description="请求所属领域，取值 workout_execution／plan_management／analytics／general 之一。"
     )
     action: Action = Field(
         description="请求动作，取值 query／create／modify／chat 之一，必须与 domain 组成合法组合。"
@@ -67,44 +61,19 @@ class FitnessIntent(BaseModel):
         default=None,
         description="workout_execution 分支的执行形态，取值 schedule_query／form_record／natural_language_record；domain 不是 workout_execution 时必须为 null。",
     )
-    knowledge_type: KnowledgeType | None = Field(
-        default=None,
-        description="knowledge_qa 分支的知识类别，取值 exercise_technique／methodology；domain 不是 knowledge_qa 时必须为 null。",
-    )
-    exercise_name: str | None = Field(
-        default=None,
-        description="动作名，仅当 domain=knowledge_qa 且 knowledge_type=exercise_technique 时填写；其余任何组合都必须为 null。",
-    )
-
-    @field_validator("exercise_name")
-    @classmethod
-    def _strip_exercise_name(cls, value: str | None) -> str | None:
-        """动作名去掉首尾空白；空白串视为未给出。"""
-        if value is None:
-            return None
-        text = value.strip()
-        return text or None
 
     @model_validator(mode="after")
     def _require_legal_combination(self) -> "FitnessIntent":
-        """组合表外的组合与错位参数都在解析期明确失败。"""
+        """组合表外的组合在解析期明确失败。"""
         key = route_key(self)
         if key not in WORKFLOW_INTENTS:
             raise ValueError(f"非法路由组合：{key}")
-        if self.domain != "knowledge_qa" and self.exercise_name is not None:
-            raise ValueError(f"exercise_name 只属于 knowledge_qa：{self.exercise_name!r}")
-        if self.knowledge_type == "exercise_technique" and self.exercise_name is None:
-            raise ValueError("knowledge_type=exercise_technique 必须给出 exercise_name")
-        if self.knowledge_type == "methodology" and self.exercise_name is not None:
-            raise ValueError("knowledge_type=methodology 不得给出 exercise_name")
         return self
 
 
 def route_key(fitness: FitnessIntent) -> RouteKey:
     """路由结果的组合键：判别字段之外的字段不参与分支选择。"""
-    return RouteKey(
-        fitness.domain, fitness.action, fitness.execution_type, fitness.knowledge_type
-    )
+    return RouteKey(fitness.domain, fitness.action, fitness.execution_type)
 
 
 def workflow_intent(fitness: FitnessIntent) -> Intent:
@@ -117,7 +86,6 @@ NON_PLAN_INTENTS: tuple[Intent, ...] = (
     "natural_language_record",
     "view_progress",
     "view_schedule",
-    "knowledge_qa",
     "general",
 )
 
@@ -137,14 +105,12 @@ ROUTER_SYSTEM_PROMPT = (
     "- plan_management：计划版本的管理。action=create 是生成一份新的训练计划；"
     "action=modify 是调整、修改已有训练安排。\n"
     "- analytics：action=query 是查看训练进展，覆盖个人最佳、趋势、最近训练与历史训练内容。\n"
-    "- knowledge_qa：action=query 是训练知识问答。具体动作规范、发力机制与轨迹归为 "
-    "knowledge_type=exercise_technique，exercise_name 必填；减载、渐进式超负荷、疲劳管理与分化思路归为 "
-    "knowledge_type=methodology，exercise_name 必须为空。\n"
-    "- general：action=chat 是闲聊与不属于上述业务的请求，包含删除数据、查询计划版本、复盘、"
-    "伤病判断等超出能力范围的请求。\n"
-    "组合表之外的组合一律非法：execution_type 只出现在 workout_execution，knowledge_type 与 "
-    "exercise_name 只出现在 knowledge_qa。\n"
-    "strict Schema 要求输出全部字段：未用到的字段必须在输出里显式给出 null，不得省略。"
+    "- general：action=chat 是闲聊、训练知识问答与不属于上述业务的请求。训练知识问答包含具体动作"
+    "规范、发力机制与轨迹，以及减载、渐进式超负荷、疲劳管理与分化思路等问法；还包含删除数据、"
+    "查询计划版本、复盘、伤病判断等超出能力范围的请求。\n"
+    "组合表之外的组合一律非法：execution_type 只出现在 workout_execution。\n"
+    "strict Schema 只含 domain、action、execution_type 三个字段：未用到的 execution_type 必须在"
+    "输出里显式给出 null，不得省略。"
     "每个字段的语义以 Schema 的字段描述为准，描述与本节规则一致。"
 )
 

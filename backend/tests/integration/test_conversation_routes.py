@@ -31,7 +31,6 @@ from app.application.agent.memory import MemoryAssembler
 from app.application.agent.prompts import (
     EVALUATOR_SYSTEM_PROMPT,
     GENERAL_CHAT_SYSTEM_PROMPT,
-    KNOWLEDGE_QA_SYSTEM_PROMPT,
     NATURAL_LANGUAGE_RECORD_EXTRACTION_PROMPT,
     NATURAL_LANGUAGE_RECORD_MESSAGE_PROMPT,
     PLANNER_SYSTEM_PROMPT,
@@ -374,7 +373,7 @@ async def test_agent_run_persists_entries_and_events_before_streaming(
     async with _client(
         tmp_path,
         structured=_general_scripts(),
-        text={GENERAL_CHAT_SYSTEM_PROMPT: [FIRST_ANSWER]},
+        harness=_general_harness([FIRST_ANSWER]),
     ) as (client, _model, db):
         chat_id = await _create_conversation(client, "会话乙")
         frames = await _run(
@@ -418,7 +417,7 @@ async def test_second_round_receives_history_and_current_request_once(
     async with _client(
         tmp_path,
         structured=_general_scripts(),
-        text={GENERAL_CHAT_SYSTEM_PROMPT: [FIRST_ANSWER, SECOND_ANSWER]},
+        harness=_general_harness([FIRST_ANSWER, SECOND_ANSWER]),
     ) as (client, model, _db):
         chat_id = await _create_conversation(client, "会话丙")
         await _run(
@@ -463,7 +462,7 @@ async def test_replay_of_the_same_client_request_id_reuses_persisted_events(
     async with _client(
         tmp_path,
         structured=_general_scripts(),
-        text={GENERAL_CHAT_SYSTEM_PROMPT: [FIRST_ANSWER]},
+        harness=_general_harness([FIRST_ANSWER]),
     ) as (client, model, db):
         chat_id = await _create_conversation(client, "会话丁")
         first = await _run(
@@ -504,7 +503,7 @@ async def test_client_request_id_replay_rejects_another_chat_or_thread(
     async with _client(
         tmp_path,
         structured=_general_scripts(),
-        text={GENERAL_CHAT_SYSTEM_PROMPT: [FIRST_ANSWER]},
+        harness=_general_harness([FIRST_ANSWER]),
     ) as (client, model, db):
         chat_id = await _create_conversation(client, "会话子")
         other_chat_id = await _create_conversation(client, "会话丑")
@@ -550,7 +549,7 @@ async def test_concurrent_duplicate_requests_execute_the_model_once(
     async with _client(
         tmp_path,
         structured=_general_scripts(),
-        text={GENERAL_CHAT_SYSTEM_PROMPT: [FIRST_ANSWER]},
+        harness=_general_harness([FIRST_ANSWER]),
     ) as (client, model, db):
         chat_id = await _create_conversation(client, "会话寅")
         body = _run_body(
@@ -581,7 +580,7 @@ async def test_transaction_race_replay_reuses_the_run_after_a_pre_read_miss(
     async with _client(
         tmp_path,
         structured=_general_scripts(),
-        text={GENERAL_CHAT_SYSTEM_PROMPT: [FIRST_ANSWER]},
+        harness=_general_harness([FIRST_ANSWER]),
     ) as (client, model, db):
         chat_id = await _create_conversation(client, "会话卯")
         first = await _run(
@@ -805,7 +804,7 @@ async def test_client_disconnect_cancels_the_active_run(tmp_path: Any) -> None:
     async with _harness(
         tmp_path,
         structured=_general_scripts(),
-        text={GENERAL_CHAT_SYSTEM_PROMPT: [FIRST_ANSWER]},
+        harness=_general_harness([FIRST_ANSWER]),
     ) as harness:
         app = _app(harness.graph, harness.db, harness.model)
         async with httpx.AsyncClient(
@@ -1077,7 +1076,7 @@ async def test_model_backed_blank_answer_becomes_a_client_visible_error(
     async with _client(
         tmp_path,
         structured=_general_scripts(),
-        text={GENERAL_CHAT_SYSTEM_PROMPT: ["   "]},
+        harness=_general_harness(["   "]),
     ) as (client, _model, db):
         chat_id = await _create_conversation(client, "会话壬")
         frames = await _run(
@@ -1121,7 +1120,7 @@ async def test_confirmation_binds_the_exact_waiting_run_when_a_newer_run_exists(
             ],
             **_plan_scripts([True]),
         },
-        text={GENERAL_CHAT_SYSTEM_PROMPT: [SECOND_ANSWER]},
+        harness=_general_harness([SECOND_ANSWER]),
     ) as (client, _model, db):
         chat_id = await _create_conversation(client, "会话戊")
         plan_id = await _create_plan_round(
@@ -1415,26 +1414,21 @@ async def test_natural_language_record_prompts_receive_history_once(
             assert all(message["text"] != NL_REQUEST for message in history)
 
 
-async def test_progress_harness_and_knowledge_prompt_receive_history_once(
+async def test_progress_harness_and_general_prompt_receive_history_once(
     tmp_path: Any,
 ) -> None:
-    """进展工具分支与知识问答都带上历史，本轮请求在每个模型输入里只出现一次。"""
+    """进展工具分支与一般对话都带上历史，本轮请求在每个模型输入里只出现一次。"""
     async with _client(
         tmp_path,
         structured={
             FitnessIntent: [
                 {"domain": "general", "action": "chat"},
                 {"domain": "analytics", "action": "query"},
-                {
-                    "domain": "knowledge_qa",
-                    "action": "query",
-                    "knowledge_type": "methodology",
-                },
+                {"domain": "general", "action": "chat"},
             ]
         },
         text={
-            GENERAL_CHAT_SYSTEM_PROMPT: [FIRST_ANSWER],
-            KNOWLEDGE_QA_SYSTEM_PROMPT: [NL_SUMMARY],
+            GENERAL_CHAT_SYSTEM_PROMPT: [FIRST_ANSWER, NL_SUMMARY],
         },
     ) as (client, model, db):
         chat_id = await _create_conversation(client, "会话乙一")
@@ -1497,14 +1491,24 @@ async def test_progress_harness_and_knowledge_prompt_receive_history_once(
             SECOND_ANSWER,
         ]
         assert len(contents) == 6
-        knowledge = model.payload_for(KNOWLEDGE_QA_SYSTEM_PROMPT)
-        assert knowledge["request"] == KNOWLEDGE_REQUEST
-        assert knowledge["conversation_messages"] == [
+        general = json.loads(
+            [
+                payload
+                for prompt, payload in model.calls
+                if prompt == GENERAL_CHAT_SYSTEM_PROMPT
+            ][-1]
+        )
+        assert general["request"] == KNOWLEDGE_REQUEST
+        assert general["conversation_messages"] == [
             {"role": "user", "text": FIRST_REQUEST},
             {"role": "assistant", "text": FIRST_ANSWER},
             {"role": "user", "text": PROGRESS_REQUEST},
             {"role": "assistant", "text": SECOND_ANSWER},
         ]
+        assert all(
+            message["text"] != KNOWLEDGE_REQUEST
+            for message in general["conversation_messages"]
+        )
 
 
 async def test_planner_payload_carries_history_and_the_request_once(tmp_path: Any) -> None:
@@ -1518,7 +1522,7 @@ async def test_planner_payload_carries_history_and_the_request_once(tmp_path: An
             ],
             **_plan_scripts([True]),
         },
-        text={GENERAL_CHAT_SYSTEM_PROMPT: [FIRST_ANSWER]},
+        harness=_general_harness([FIRST_ANSWER]),
     ) as (client, model, _db):
         chat_id = await _create_conversation(client, "会话丙一")
         await _run(
@@ -1556,7 +1560,7 @@ async def test_evaluator_payload_carries_history_and_the_request_once(
             ],
             **_plan_scripts([True]),
         },
-        text={GENERAL_CHAT_SYSTEM_PROMPT: [FIRST_ANSWER]},
+        harness=_general_harness([FIRST_ANSWER]),
     ) as (client, model, _db):
         chat_id = await _create_conversation(client, "会话丙二")
         await _run(
