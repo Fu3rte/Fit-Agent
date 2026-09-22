@@ -1,0 +1,85 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/hasaneyldrm/exercises-dataset/blob/main/data/exercises.zh-en.schema.json",
+  "title": "Exercises Dataset (zh/en)",
+  "description": "Projected array of fitness exercise records: taxonomy fields plus single-段 instructions and step-by-step instructions in Chinese and English only. Media, other languages, and unneeded fields are dropped from data/exercises.json.",
+  "type": "array",
+  "items": {
+    "$ref": "#/$defs/exercise"
+  },
+  "$defs": {
+    "bilingual": {
+      "type": "object",
+      "description": "Text keyed by ISO 639-1 code, Chinese and English only.",
+      "properties": {
+        "zh": { "type": "string", "minLength": 1 },
+        "en": { "type": "string", "minLength": 1 }
+      },
+      "required": ["zh", "en"],
+      "additionalProperties": false
+    },
+    "bilingualSteps": {
+      "type": "object",
+      "description": "Ordered step arrays keyed by ISO 639-1 code, Chinese and English only.",
+      "properties": {
+        "zh": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 },
+          "minItems": 1
+        },
+        "en": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 },
+          "minItems": 1
+        }
+      },
+      "required": ["zh", "en"],
+      "additionalProperties": false
+    },
+    "exercise": {
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "pattern": "^[0-9]{4}$" },
+        "name": { "type": "string", "minLength": 1 },
+        "category": { "type": "string", "minLength": 1 },
+        "body_part": {
+          "type": "string",
+          "enum": [
+            "back",
+            "cardio",
+            "chest",
+            "lower arms",
+            "lower legs",
+            "neck",
+            "shoulders",
+            "upper arms",
+            "upper legs",
+            "waist"
+          ]
+        },
+        "equipment": { "type": "string", "minLength": 1 },
+        "target": { "type": "string", "minLength": 1 },
+        "muscle_group": { "type": "string", "minLength": 1 },
+        "secondary_muscles": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "instructions": { "$ref": "#/$defs/bilingual" },
+        "steps": { "$ref": "#/$defs/bilingualSteps" }
+      },
+      "required": [
+        "id",
+        "name",
+        "category",
+        "body_part",
+        "equipment",
+        "target",
+        "muscle_group",
+        "secondary_muscles",
+        "instructions",
+        "steps"
+      ],
+      "additionalProperties": false
+    }
+  }
+}

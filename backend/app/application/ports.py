@@ -8,6 +8,7 @@ from langchain_core.messages import AIMessage, BaseMessage
 from langchain_core.tools import BaseTool
 from pydantic import BaseModel
 
+from app.domain.actions.dataset import DatasetExercise
 from app.domain.actions.schema import Exercise
 from app.domain.body_metrics.schema import BodyMetric
 from app.domain.conversations.schema import (
@@ -106,6 +107,25 @@ class ExerciseCatalog(Protocol):
 
     async def list_all(self) -> tuple[Exercise, ...]:
         """动作目录全量。"""
+
+
+class ExerciseDataset(Protocol):
+    """动作数据集（exercises.zh-en.json）的只读检索端口：写库的动作目录才是可写入身份，本端口只做参考发现。"""
+
+    async def search(
+        self,
+        *,
+        text: str | None = None,
+        body_part: str | None = None,
+        equipment: str | None = None,
+        target: str | None = None,
+        muscle_group: str | None = None,
+        limit: int,
+    ) -> tuple[DatasetExercise, ...]:
+        """按文本与归一后的规范英文 facet 检索；命中上限为 limit，顺序确定。"""
+
+    async def get_detail(self, exercise_id: str) -> DatasetExercise | None:
+        """按数据集身份（数字串）取一行；不存在即 None。"""
 
 
 class Plans(Protocol):
