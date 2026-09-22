@@ -112,6 +112,7 @@ async def prepare_workout_record_payload(
     request: str,
     *,
     history: Sequence[ContextMessage] = (),
+    skill: SkillBundle | None = None,
 ) -> dict[str, Any]:
     """自然语言描述 → 已校验的打卡候选：日期、组事实与当天未完成计划日程，不入库。
 
@@ -127,6 +128,7 @@ async def prepare_workout_record_payload(
             **history_payload(history),
             "business_day": context.business_day.isoformat(),
             "actions": [_action_payload(exercise) for exercise in catalog],
+            **({"skill": skill.model_dump()} if skill is not None else {}),
         },
         context.budget,
         ExtractedWorkout,
@@ -169,17 +171,21 @@ GENERAL_INTENT_TOOLS: Mapping[Intent, tuple[BaseTool, ...]] = {
 if set(GENERAL_INTENT_TOOLS) != set(NON_PLAN_INTENTS):
     raise ValueError("General 白名单表与五项会话 Intent 集合不一致")
 
-#: General 行的固定 Skill 装载矩阵；专家库只作为知识层（references），不成为 Tool。
-GENERAL_SKILL_NAMES: tuple[str, ...] = (
-    "fitness-knowledge",
-    "exercise-guidance",
-    "strength-training",
-    "workout-logging",
-    "training-review",
-    "training-expert-library",
-)
+#: 会话 Intent 只装载本次需要的 Skill；空 tuple 表示该路径只需 Tool Contract。
+GENERAL_INTENT_SKILLS: Mapping[Intent, tuple[str, ...]] = {
+    "form_record": (),
+    "natural_language_record": ("workout-logging",),
+    "view_schedule": (),
+    "view_progress": ("strength-training",),
+    "general": ("fitness-knowledge", "exercise-guidance", "strength-training"),
+}
 
-KNOWLEDGE_ONLY_SKILL_NAMES: tuple[str, ...] = ("training-expert-library",)
+if set(GENERAL_INTENT_SKILLS) != set(NON_PLAN_INTENTS):
+    raise ValueError("General Skill 表与五项会话 Intent 集合不一致")
+
+GENERAL_SKILL_NAMES: tuple[str, ...] = tuple(
+    dict.fromkeys(name for names in GENERAL_INTENT_SKILLS.values() for name in names)
+)
 
 #: 五项会话 Intent 的标准 ``ui_actions`` 类型：前端按 ``type`` 分派渲染。
 GeneralUiActionType = Literal[
@@ -224,27 +230,25 @@ def general_ui_actions(
     return ({"type": action_type, "facts": facts},)
 
 
-def general_skill_bundle(skills: SkillSource) -> SkillBundle:
-    """General 分支的 SkillBundle：六个固定 Skill 全量装载，专家库只进 references 知识层。"""
+def general_skill_bundle(skills: SkillSource, intent: Intent) -> SkillBundle:
+    """按会话 Intent 装载模型指令与其明确引用的 reference。"""
     loaded: tuple[LoadedSkill, ...] = tuple(
-        skills.load(name) for name in GENERAL_SKILL_NAMES
-    )
-    knowledge = tuple(
-        item for item in loaded if item.metadata.name in KNOWLEDGE_ONLY_SKILL_NAMES
+        skills.load(name) for name in GENERAL_INTENT_SKILLS[intent]
     )
     return SkillBundle(
         names=tuple(item.metadata.name for item in loaded),
-        system_instructions="\n\n".join(
-            item.body
-            for item in loaded
-            if item.metadata.name not in KNOWLEDGE_ONLY_SKILL_NAMES
-        ),
+        system_instructions="\n\n".join(item.body for item in loaded),
         references=tuple(
-            reference.text for item in knowledge for reference in item.references
+            reference.text for item in loaded for reference in item.references
         ),
-        version=" | ".join(
-            item.metadata.description for item in loaded
-        ),
+        version=" | ".join(item.metadata.description for item in loaded),
+    )
+
+
+def general_system_prompt(base: str, bundle: SkillBundle) -> str:
+    """基础节点指令加本次 Intent 的 Skill 正文与 references。"""
+    return "\n\n".join(
+        part for part in (base, bundle.system_instructions, *bundle.references) if part
     )
 
 

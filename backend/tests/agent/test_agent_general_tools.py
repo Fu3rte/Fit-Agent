@@ -14,9 +14,9 @@ from app.application.agent.contracts import (
     SkillReference,
 )
 from app.application.agent.harness.tools.general import (
+    GENERAL_INTENT_SKILLS,
     GENERAL_INTENT_TOOLS,
     GENERAL_SKILL_NAMES,
-    KNOWLEDGE_ONLY_SKILL_NAMES,
     WORKOUT_FORM_FIELDS,
     general_skill_bundle,
 )
@@ -228,29 +228,34 @@ async def test_safety_hit_produces_no_ui_actions_and_no_tool_calls(tmp_path: Pat
         assert await _row_counts(h.db) == before
 
 
-def test_general_skill_bundle_keeps_the_expert_library_as_knowledge() -> None:
-    """Skill 装载矩阵的 General 行：六个 Skill 全量装载，专家库只进 references 知识层。"""
-    bundle = general_skill_bundle(_FakeSkillSource())
+def test_general_skill_bundle_is_scoped_by_intent() -> None:
+    """General 只装载本次 Intent 需要的 Skill 正文与 references。"""
+    source = _FakeSkillSource()
 
-    assert bundle.names == GENERAL_SKILL_NAMES
-    assert KNOWLEDGE_ONLY_SKILL_NAMES == ("training-expert-library",)
-    assert "expert-body" not in bundle.system_instructions
-    assert bundle.references == ("expert-reference",)
+    bundle = general_skill_bundle(source, "general")
+    assert bundle.names == GENERAL_INTENT_SKILLS["general"]
+    assert bundle.references == tuple(f"{name}-reference" for name in bundle.names)
+    assert all(f"{name}-body" in bundle.system_instructions for name in bundle.names)
+
+    logging = general_skill_bundle(source, "natural_language_record")
+    assert logging.names == ("workout-logging",)
+    assert GENERAL_SKILL_NAMES == (
+        "workout-logging",
+        "strength-training",
+        "fitness-knowledge",
+        "exercise-guidance",
+    )
 
 
 class _FakeSkillSource:
-    """Skill 来源替身：按名给出正文与一条 reference，专家库的正文只作知识层。"""
+    """Skill 来源替身：按名给出正文与一条 reference。"""
 
     def load(self, name: str) -> LoadedSkill:
         return LoadedSkill(
             metadata=SkillMetadata(name=name, description=f"{name}-description"),
             body=f"{name}-body",
             references=(
-                (
-                    SkillReference(path="references/x.md", text="expert-reference"),
-                )
-                if name in KNOWLEDGE_ONLY_SKILL_NAMES
-                else ()
+                SkillReference(path="references/x.md", text=f"{name}-reference"),
             ),
         )
 

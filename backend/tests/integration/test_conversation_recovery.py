@@ -252,7 +252,7 @@ async def test_interrupted_run_stays_visible_and_the_next_turn_excludes_the_frag
             {"role": "user", "text": CRASH_REQUEST}
         ]
         general_messages = model.harness_calls[-1].messages
-        assert general_messages[0].content == GENERAL_CHAT_SYSTEM_PROMPT
+        assert str(general_messages[0].content).startswith(GENERAL_CHAT_SYSTEM_PROMPT)
         assert [message.content for message in general_messages[1:]] == [
             CRASH_REQUEST,
             SECOND_REQUEST,

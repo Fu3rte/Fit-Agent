@@ -144,12 +144,12 @@ def resolve_progression(
     if len(linked) < 2:
         return ProgressionDecision("keep", target_load_kg)
     recent_two = linked[-2:]
-    if all(
-        assessment.at_reps_max and assessment.load_kg == target_load_kg
-        for assessment in recent_two
+    progressed_load = _shared_progressed_load(recent_two)
+    if progressed_load is not None and all(
+        assessment.at_reps_max for assessment in recent_two
     ):
         return ProgressionDecision(
-            "increase", round(target_load_kg + increment_kg, WEIGHT_KG_DECIMALS)
+            "increase", round(progressed_load + increment_kg, WEIGHT_KG_DECIMALS)
         )
     if all(assessment.failed for assessment in recent_two):
         fallback = next(
@@ -164,6 +164,16 @@ def resolve_progression(
             return ProgressionDecision("needs_calibration", None)
         return ProgressionDecision("regress", fallback.load_kg)
     return ProgressionDecision("keep", target_load_kg)
+
+
+def _shared_progressed_load(recent_two: Sequence["_TrainingAssessment"]) -> float | None:
+    """最近两次都完整完成且使用同一负荷时返回该负荷：加重锚定实际训练负荷，计划目标只作出发点。"""
+    if len(recent_two) != 2 or not all(
+        assessment.completed for assessment in recent_two
+    ):
+        return None
+    loads = {assessment.load_kg for assessment in recent_two}
+    return next(iter(loads)) if len(loads) == 1 else None
 
 
 @dataclass(frozen=True, slots=True)

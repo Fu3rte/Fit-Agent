@@ -450,6 +450,11 @@ def _planner_state(
         body="正文",
         references=(),
     )
+    state["evaluation_skill"] = LoadedSkill(
+        metadata=SkillMetadata(name="plan-evaluation", description="评审"),
+        body="正文",
+        references=(),
+    )
     state["planner_evidence"] = planner_evidence
     return state
 
@@ -546,6 +551,7 @@ async def test_planner_payload_facts_come_only_from_the_real_tool_loop() -> None
         "request",
         "plan",
         "business_day",
+        "skill",
         "facts",
     }
     assert [fact["tool"] for fact in rubric_payload["facts"]] == list(GENERATE_FACTS)

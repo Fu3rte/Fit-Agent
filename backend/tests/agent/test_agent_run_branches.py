@@ -623,7 +623,12 @@ async def test_general_chat_answers_with_one_harness_call(
             "read_training_history",
             "read_active_plan",
         )
-        assert call.messages[0].content == GENERAL_CHAT_SYSTEM_PROMPT
+        system_prompt = str(call.messages[0].content)
+        assert system_prompt.startswith(GENERAL_CHAT_SYSTEM_PROMPT)
+        assert all(
+            name in system_prompt
+            for name in ("fitness-knowledge", "exercise-guidance", "strength-training")
+        )
         assert [message.content for message in call.messages].count(request_text) == 1
         assert h.model.text_calls() == []
         assert await _row_counts(h.db) == before
@@ -653,6 +658,15 @@ async def test_natural_language_record_still_extracts_without_writing(
         assert result.intent == "natural_language_record"
         assert result.messages == (SUMMARY,)
         assert result.draft_plan_id is None
+        skill_payloads = [
+            json.loads(payload)["skill"]
+            for _, payload in h.model.calls
+            if "skill" in json.loads(payload)
+        ]
+        assert [payload["names"] for payload in skill_payloads] == [
+            ["workout-logging"],
+            ["workout-logging"],
+        ]
         assert await _row_counts(h.db) == before
 
 

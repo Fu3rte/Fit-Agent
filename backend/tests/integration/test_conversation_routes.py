@@ -538,7 +538,7 @@ async def test_second_round_receives_history_and_current_request_once(
             {"role": "assistant", "text": FIRST_ANSWER},
         ]
         general_messages = model.harness_calls[-1].messages
-        assert general_messages[0].content == GENERAL_CHAT_SYSTEM_PROMPT
+        assert str(general_messages[0].content).startswith(GENERAL_CHAT_SYSTEM_PROMPT)
         assert [message.content for message in general_messages[1:]] == [
             FIRST_REQUEST,
             FIRST_ANSWER,
@@ -1846,7 +1846,7 @@ async def test_progress_harness_and_general_prompt_receive_history_once(
         ]
         assert len(contents) == 6
         general_messages = model.harness_calls[-1].messages
-        assert general_messages[0].content == GENERAL_CHAT_SYSTEM_PROMPT
+        assert str(general_messages[0].content).startswith(GENERAL_CHAT_SYSTEM_PROMPT)
         assert [message.content for message in general_messages[1:]] == [
             FIRST_REQUEST,
             FIRST_ANSWER,
@@ -1936,6 +1936,7 @@ async def test_evaluator_payload_carries_history_and_the_request_once(
             "request",
             "plan",
             "business_day",
+            "skill",
             "facts",
             "conversation_messages",
         }

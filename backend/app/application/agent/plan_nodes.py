@@ -19,6 +19,7 @@ from app.application.agent.contracts import (
     ADJUSTMENT_SKILL_NAME,
     CONFIRMATION_ACTIONS,
     PLAN_CONFIRMATION_KIND,
+    PLAN_EVALUATION_SKILL_NAME,
     PLANNING_SKILL_NAME,
     AdjustmentContext,
     AgentRunResult,
@@ -103,13 +104,16 @@ async def load_skill(
     *,
     skills: SkillSource,
 ) -> WorkflowState:
-    """Skill 装载节点：只加载本次 intent 命中的那一份 Skill 正文；未命中即无 Skill。"""
+    """Skill 装载节点：一次装载本次 intent 命中的 Planner Skill 与 Evaluator 的固定评审 Skill。"""
     name = (
         ADJUSTMENT_SKILL_NAME
         if state.get("intent") == ADJUST_PLAN_INTENT
         else PLANNING_SKILL_NAME
     )
-    return {"loaded_skill": skills.load(name)}
+    return {
+        "loaded_skill": skills.load(name),
+        "evaluation_skill": skills.load(PLAN_EVALUATION_SKILL_NAME),
+    }
 
 
 class PlannerAgentNode:
@@ -425,14 +429,18 @@ def _planner_payload(
 def _evaluator_payload(
     state: WorkflowState, run: GeneratePlanRun, *, facts: Sequence[ToolCallRecord]
 ) -> dict[str, Any]:
-    """Rubric 输入：当前请求、候选计划、本次独立读到的工具事实与本次请求之前的对话历史。
+    """Rubric 输入：当前请求、候选计划、固定加载的评审 Skill、本次独立读到的工具事实与本次请求之前的对话历史。
 
     不含确定性失败项（未通过时根本不调用模型）；当前用户消息只在 ``request`` 出现一次。
     """
+    skill = state.get("evaluation_skill")
+    if skill is None:
+        raise ValueError("评审载荷缺少已装载的 plan-evaluation Skill")
     return {
         "request": state["request"],
         "plan": state["draft_plan"].model_dump(mode="json"),
         "business_day": run.business_day.isoformat(),
+        "skill": asdict(skill),
         "facts": _fact_payloads(facts),
         # 无历史时不出现该键：与 Router／Planner 的载荷形状一致。
         **history_payload(run.conversation_messages),

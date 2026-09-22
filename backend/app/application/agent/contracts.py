@@ -78,6 +78,8 @@ class WorkflowState(TypedDict, total=False):
     planner_evidence: tuple[ToolEvidence, ...]
     # 计划子图现行键：与 ``plan_draft``／``evaluation_result`` 同义；Run 入口节点会把它归零
     loaded_skill: "LoadedSkill"
+    #: Evaluator 的固定评审 Skill：与 ``loaded_skill`` 同一次装载写入，评审载荷按它给模型指令。
+    evaluation_skill: "LoadedSkill"
     draft_plan: PlanDraft
     deterministic_result: DeterministicResult | None
     evaluation: EvaluationResult | None
@@ -197,6 +199,9 @@ CONFIRMATION_ACTIONS: tuple[str, ...] = ("confirm", "reject")
 
 #: 确认 interrupt 的业务种类：等待载荷与恢复载荷都按它判别，不由调用方猜。
 PLAN_CONFIRMATION_KIND = "plan_confirmation"
+
+#: Evaluator 的固定评审 Skill：每次评审候选 ``PlanDraft`` 时随请求加载。
+PLAN_EVALUATION_SKILL_NAME = "plan-evaluation"
 
 AgentEventName = Literal["node", "message", "waiting", "done", "error"]
 

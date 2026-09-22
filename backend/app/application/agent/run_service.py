@@ -40,6 +40,8 @@ from app.application.agent.contracts import (
     thread_config,
 )
 from app.application.agent.harness.tools.general import (
+    general_skill_bundle,
+    general_system_prompt,
     general_ui_actions,
     prepare_workout_record_payload,
     workout_confirmation_action,
@@ -345,14 +347,17 @@ async def _tool_messages(
     intent: Intent, request: str, *, run: GeneratePlanRun, deps: AgentRunDeps
 ) -> tuple[BaseMessage, ...]:
     """工具类 Intent 的唯一实现：本次 Intent 白名单的 general_tools 出消息；调用由模型自选。"""
+    skill = general_skill_bundle(deps.skills, intent)
     result = await deps.tool_harnesses[intent].ainvoke(
         {
             "messages": harness_messages(
                 request,
-                business_day=run.business_day,
                 history=run.conversation_messages,
-                system_prompt=HARNESS_SYSTEM_PROMPTS.get(
-                    intent, TOOL_HARNESS_SYSTEM_PROMPT
+                system_prompt=general_system_prompt(
+                    HARNESS_SYSTEM_PROMPTS.get(intent, TOOL_HARNESS_SYSTEM_PROMPT).format(
+                        business_day=run.business_day.isoformat()
+                    ),
+                    skill,
                 ),
             )
         },
@@ -364,15 +369,12 @@ async def _tool_messages(
 def harness_messages(
     request: str,
     *,
-    business_day: date,
     history: Sequence[ContextMessage],
-    system_prompt: str = TOOL_HARNESS_SYSTEM_PROMPT,
+    system_prompt: str,
 ) -> list[BaseMessage]:
-    """harness 的消息序列：业务日 system ＋ 已重建历史 ＋ 当前请求（只出现一次）。"""
+    """harness 的消息序列：system ＋ 已重建历史 ＋ 当前请求（只出现一次）。"""
     return [
-        SystemMessage(
-            content=system_prompt.format(business_day=business_day.isoformat())
-        ),
+        SystemMessage(content=system_prompt),
         *(
             HumanMessage(content=message.text)
             if message.role == "user"
@@ -404,11 +406,13 @@ async def _natural_language_record(
     request: str, *, run: GeneratePlanRun, deps: AgentRunDeps
 ) -> GeneralOutcome:
     """自然语言打卡的唯一实现：提取 → 校验 → 候选日程 → 可读摘要；确认前不写业务训练表。"""
+    skill = general_skill_bundle(deps.skills, "natural_language_record")
     try:
         payload = await prepare_workout_record_payload(
             harness_context(run, deps=deps),
             request,
             history=run.conversation_messages,
+            skill=skill,
         )
     except (InvalidRecordFact, UnknownExercise, RecordLoadMismatch) as error:
         return GeneralOutcome(message=invalid_natural_language_record_message(error))
@@ -421,6 +425,7 @@ async def _natural_language_record(
                 **history_payload(run.conversation_messages),
                 "workout": payload["workout"],
                 "candidate_plan_sessions": payload["candidate_plan_sessions"],
+                "skill": skill.model_dump(),
             },
             run.budget,
         )
