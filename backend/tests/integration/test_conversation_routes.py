@@ -26,9 +26,16 @@ from app.application.agent.contracts import (
     AgentEvent,
     AgentRunDeps,
     AgentRuntime,
+    ConfirmationConflict,
     GeneratePlanDeps,
+    GeneratePlanRun,
+    PlanDeterministicDeps,
+    PlanLlmNodeDeps,
+    PlanWriteDeps,
+    thread_config,
 )
-from app.application.agent.memory import MemoryAssembler
+from app.application.agent.harness.tools.training import build_plan_tool_harnesses
+from app.application.agent.plan_graph import invoke_confirmation
 from app.application.agent.prompts import (
     EVALUATOR_SYSTEM_PROMPT,
     GENERAL_CHAT_SYSTEM_PROMPT,
@@ -37,8 +44,10 @@ from app.application.agent.prompts import (
     PLANNER_SYSTEM_PROMPT,
 )
 from app.application.agent.router import ROUTER_SYSTEM_PROMPT, FitnessIntent
+from app.application.agent.run_graph import PLAN_NODE
 from app.application.agent.run_service import (
     AGENT_RUN_ERROR_MESSAGE,
+    agent_run_graph,
     persisted_events,
 )
 from app.application.ports import MODEL_CALL_FAILED_MESSAGE, TransientModelError
@@ -64,11 +73,13 @@ from app.infrastructure.database.repositories.conversations_repository import (
 )
 from app.infrastructure.database.repositories.plans_repository import PlanRepo
 from app.infrastructure.skills.loader import SkillLoader
-from config import skills_dir
+from config import TOOL_TIMEOUT_SECONDS, skills_dir
 from tests.agent.test_agent_run_branches import (
     BUSINESS_DAY,
+    GENERATE_FACT_TOOLS,
     ScriptedGateway,
     _extraction_scripts,
+    _fact_loops,
     _harness,
     _plan_scripts,
     _tool_harnesses,
@@ -98,7 +109,9 @@ THREAD_3 = "44444444-4444-4444-4444-444444444444"
 THREAD_OTHER = "33333333-3333-3333-3333-333333333333"
 
 
-def _app(harness_graph: CompiledStateGraph, db: Database, model: ScriptedGateway) -> FastAPI:
+async def _app(
+    harness_graph: CompiledStateGraph, db: Database, model: ScriptedGateway
+) -> FastAPI:
     app = FastAPI(lifespan=None)
     install_error_handlers(app)
     app.include_router(routes_agent.router)
@@ -108,17 +121,21 @@ def _app(harness_graph: CompiledStateGraph, db: Database, model: ScriptedGateway
     services = build_services(
         repositories, db, SqliteHealthProbe(db, db.path.parent)
     )
+    user_version = await db.pragma_value("user_version")
+    if not isinstance(user_version, int):
+        raise RuntimeError(f"迁移后 user_version 不是整数：{user_version!r}")
     app.state.services = services
     app.state.agent_runtime = AgentRuntime(
         graph=harness_graph,
-        deps=_deps(repositories, services, model),
+        deps=_deps(repositories, services, model, user_version),
         run_deps=AgentRunDeps(
             model=model,
             stats=services.stats,
             plans=repositories.plans,
-            persistence=services.plan_persistence,
+            plan_writes=services.plan_writes,
             catalog=repositories.exercises,
             records=services.records,
+            profiles=repositories.profiles,
             skills=SkillLoader(skills_dir()),
             tool_harnesses=_tool_harnesses(),
         ),
@@ -127,25 +144,47 @@ def _app(harness_graph: CompiledStateGraph, db: Database, model: ScriptedGateway
     return app
 
 
-def _deps(
-    repositories: ReadRepositories, services: AppServices, model: ScriptedGateway
-) -> GeneratePlanDeps:
-    return GeneratePlanDeps(
-        profiles=services.profile,
+def _plan_llm_deps(model, repositories, services, schema_version, *, evaluation):
+    """一次 LLM Node 的构造期依赖：唯一模型入口 ＋ 该路径自己的 ToolNode 与只读端口。"""
+    harnesses = build_plan_tool_harnesses(timeout_seconds=TOOL_TIMEOUT_SECONDS)
+    return PlanLlmNodeDeps(
+        model=model,
+        harness=harnesses.evaluation if evaluation else harnesses.planning,
+        profiles=repositories.profiles,
+        records=services.records,
         catalog=repositories.exercises,
-        stats=repositories.stats,
-        assembler=MemoryAssembler(
+        plans=repositories.plans,
+        stats=services.stats,
+        revisions=repositories.tool_cache,
+        schema_version=schema_version,
+    )
+
+
+def _deps(
+    repositories: ReadRepositories,
+    services: AppServices,
+    model: ScriptedGateway,
+    schema_version: int,
+) -> GeneratePlanDeps:
+    now = lambda: datetime(2026, 6, 1, 9, 0, tzinfo=UTC)  # noqa: E731
+    return GeneratePlanDeps(
+        planner=_plan_llm_deps(
+            model, repositories, services, schema_version, evaluation=False
+        ),
+        evaluator=_plan_llm_deps(
+            model, repositories, services, schema_version, evaluation=True
+        ),
+        deterministic=PlanDeterministicDeps(
             profiles=repositories.profiles,
+            catalog=repositories.exercises,
             plans=repositories.plans,
-            records=services.records,
             stats=services.stats,
         ),
+        writes=PlanWriteDeps(
+            plans=services.plan_writes,
+            now=now,
+        ),
         skills=SkillLoader(skills_dir()),
-        persistence=services.plan_persistence,
-        plans=repositories.plans,
-        activation=services.plan_activation,
-        model=model,
-        now=lambda: datetime(2026, 6, 1, 9, 0, tzinfo=UTC),
     )
 
 
@@ -157,15 +196,30 @@ async def _client(
     text: Mapping[str, Sequence[str]] | None = None,
     harness: Sequence[AIMessage] = (),
 ) -> AsyncIterator[tuple[httpx.AsyncClient, ScriptedGateway, Database]]:
+    async with _client_with_runtime(
+        tmp_path, structured=structured, text=text, harness=harness
+    ) as (client, _runtime, model, db):
+        yield client, model, db
+
+
+@asynccontextmanager
+async def _client_with_runtime(
+    tmp_path: Any,
+    *,
+    structured: Mapping[type, Sequence[Mapping[str, Any]]] | None = None,
+    text: Mapping[str, Sequence[str]] | None = None,
+    harness: Sequence[AIMessage] = (),
+) -> AsyncIterator[tuple[httpx.AsyncClient, AgentRuntime, ScriptedGateway, Database]]:
+    """与 ``_client`` 同构，额外交出 app 上的 Agent 运行时：确认路径的 checkpoint 只有它能读到。"""
     async with _harness(
         tmp_path, structured=structured, text=text, harness=harness
-    ) as harness:
-        app = _app(harness.graph, harness.db, harness.model)
+    ) as harness_:
+        app = await _app(harness_.graph, harness_.db, harness_.model)
         transport = httpx.ASGITransport(app=app)
         async with httpx.AsyncClient(
             transport=transport, base_url="http://localhost"
         ) as client:
-            yield client, harness.model, harness.db
+            yield client, app.state.agent_runtime, harness_.model, harness_.db
 
 
 def _frames(body: str) -> list[tuple[str, dict[str, Any]]]:
@@ -192,6 +246,14 @@ def _general_scripts() -> dict[type, list[Mapping[str, Any]]]:
 def _general_harness(answers: Sequence[str]) -> list[AIMessage]:
     """``general`` 的 harness 脚本：每个请求一次不带工具调用的最终答复。"""
     return [final_answer(answer) for answer in answers]
+
+
+def _plan_harness(*, general_answers: Sequence[str] = ()) -> list[AIMessage]:
+    """一轮生成计划的事实采集 loop ＋ 可选的 general 答复：脚本按 Run 的真实顺序排列。"""
+    return [
+        *_fact_loops(2, *GENERATE_FACT_TOOLS),
+        *_general_harness(general_answers),
+    ]
 
 
 def _natural_language_scripts() -> dict[type, list[Mapping[str, Any]]]:
@@ -836,7 +898,7 @@ async def test_client_disconnect_cancels_the_active_run(tmp_path: Any) -> None:
         structured=_general_scripts(),
         harness=_general_harness([FIRST_ANSWER]),
     ) as harness:
-        app = _app(harness.graph, harness.db, harness.model)
+        app = await _app(harness.graph, harness.db, harness.model)
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app=app), base_url="http://localhost"
         ) as client:
@@ -883,7 +945,7 @@ async def test_disconnect_in_suspended_send_before_the_waiting_commit_cancels_th
         structured=_natural_language_scripts(),
         text={NATURAL_LANGUAGE_RECORD_MESSAGE_PROMPT: [NL_SUMMARY]},
     ) as harness:
-        app = _app(harness.graph, harness.db, harness.model)
+        app = await _app(harness.graph, harness.db, harness.model)
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app=app), base_url="http://localhost"
         ) as client:
@@ -930,7 +992,7 @@ async def test_disconnect_in_suspended_send_after_the_waiting_commit_keeps_waiti
         structured=_natural_language_scripts(),
         text={NATURAL_LANGUAGE_RECORD_MESSAGE_PROMPT: [NL_SUMMARY]},
     ) as harness:
-        app = _app(harness.graph, harness.db, harness.model)
+        app = await _app(harness.graph, harness.db, harness.model)
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app=app), base_url="http://localhost"
         ) as client:
@@ -1168,7 +1230,7 @@ async def test_confirmation_binds_the_exact_waiting_run_when_a_newer_run_exists(
             ],
             **_plan_scripts([True]),
         },
-        harness=_general_harness([SECOND_ANSWER]),
+        harness=_plan_harness(general_answers=[SECOND_ANSWER]),
     ) as (client, _model, db):
         chat_id = await _create_conversation(client, "会话戊")
         plan_id = await _create_plan_round(
@@ -1224,6 +1286,170 @@ async def test_confirmation_binds_the_exact_waiting_run_when_a_newer_run_exists(
         assert projected[-1].text == confirmations[0].payload["text"]
 
 
+async def test_one_plan_round_persists_and_sends_a_single_waiting(tmp_path: Any) -> None:
+    """同一 interrupt 会先后随子图与父图透出：确认等待只落库一次、只发一帧 waiting，序号仍严格递增。"""
+    async with _client(
+        tmp_path,
+        structured={
+            FitnessIntent: [{"domain": "plan_management", "action": "create"}],
+            **_plan_scripts([True]),
+        },
+        harness=_plan_harness(),
+    ) as (client, _model, db):
+        chat_id = await _create_conversation(client, "会话壬")
+        frames = await _run(
+            client,
+            chat_id=chat_id,
+            thread_id=THREAD_1,
+            request=PLAN_REQUEST,
+            client_request_id="request-1",
+        )
+        assert [name for name, _ in frames].count("waiting") == 1
+        assert [name for name, _ in frames][-1] == "done"
+
+        repo = ConversationRepo(db)
+        run = (await repo.list_runs(chat_id))[0]
+        assert run.status == "waiting"
+        events = await repo.list_run_events(run.id)
+        assert [event.event_type for event in events].count("waiting") == 1
+        assert [event.sequence for event in events] == list(range(1, len(events) + 1))
+        waiting = next(event for event in events if event.event_type == "waiting")
+        assert waiting.payload == {"draft_plan_id": _waiting_draft_plan_id(frames)}
+
+
+async def test_plan_confirmation_resumes_the_waiting_checkpoint(tmp_path: Any) -> None:
+    """确认走 checkpoint 恢复：载荷稳定、身份不符图外快失败、恢复由图内 ``activate_plan`` 节点完成。
+
+    兜底路径不碰 thread 上的 checkpoint：“等待任务被消费”与“``confirmation`` 改写为 ``confirmed``”
+    两条断言只有真正恢复等待子图才成立。
+    """
+    async with _client_with_runtime(
+        tmp_path,
+        structured={
+            FitnessIntent: [{"domain": "plan_management", "action": "create"}],
+            **_plan_scripts([True]),
+        },
+        harness=_plan_harness(),
+    ) as (client, runtime, _model, db):
+        chat_id = await _create_conversation(client, "会话戌")
+        plan_id = await _create_plan_round(
+            client, chat_id=chat_id, thread_id=THREAD_1, client_request_id="request-1"
+        )
+        run = (await ConversationRepo(db).list_runs(chat_id))[0]
+        graph = agent_run_graph(runtime.graph, runtime.run_deps)
+        waiting = await graph.aget_state(thread_config(THREAD_1))
+        assert PLAN_NODE in waiting.next
+        assert [pending.value for pending in waiting.interrupts] == [
+            {"kind": "plan_confirmation", "run_id": run.id, "draft_plan_id": plan_id}
+        ]
+
+        with pytest.raises(ConfirmationConflict):
+            await invoke_confirmation(
+                graph,
+                conversation_id=THREAD_1,
+                run_id=run.id,
+                plan_id=plan_id + 1,
+                action="confirm",
+                run=GeneratePlanRun(business_day=BUSINESS_DAY),
+                deps=runtime.deps,
+            )
+        still_waiting = await graph.aget_state(thread_config(THREAD_1))
+        assert still_waiting.interrupts != ()
+        assert (await PlanRepo(db).read_by_id(plan_id)).status == "draft"
+        assert await PlanRepo(db).read_active() is None
+
+        confirmed = await _confirm(
+            client, chat_id=chat_id, thread_id=THREAD_1, plan_id=plan_id
+        )
+        assert confirmed.status_code == 200
+        assert confirmed.json()["plan"]["status"] == "active"
+        resumed = await graph.aget_state(thread_config(THREAD_1))
+        assert resumed.next == ()
+        assert resumed.interrupts == ()
+        assert resumed.values["confirmation"] == "confirmed"
+
+        replayed = await _confirm(
+            client, chat_id=chat_id, thread_id=THREAD_1, plan_id=plan_id
+        )
+        assert replayed.status_code == 200
+        assert replayed.json() == confirmed.json()
+        confirmations = [
+            entry
+            for entry in await ConversationRepo(db).list_entries(chat_id)
+            if entry.entry_type == "confirmation"
+        ]
+        assert [entry.payload["action"] for entry in confirmations] == [
+            "plan_confirmed"
+        ]
+
+
+async def test_confirmation_resume_rejects_a_foreign_run_id(tmp_path: Any) -> None:
+    """恢复载荷的来源 Run 必须是产出 interrupt 的那一轮：不符即图内快失败，业务零写入。"""
+    async with _client_with_runtime(
+        tmp_path,
+        structured={
+            FitnessIntent: [{"domain": "plan_management", "action": "create"}],
+            **_plan_scripts([True]),
+        },
+        harness=_plan_harness(),
+    ) as (client, runtime, _model, db):
+        chat_id = await _create_conversation(client, "会话亥")
+        plan_id = await _create_plan_round(
+            client, chat_id=chat_id, thread_id=THREAD_1, client_request_id="request-1"
+        )
+        graph = agent_run_graph(runtime.graph, runtime.run_deps)
+        with pytest.raises(ConfirmationConflict):
+            await invoke_confirmation(
+                graph,
+                conversation_id=THREAD_1,
+                run_id="foreign-run",
+                plan_id=plan_id,
+                action="confirm",
+                run=GeneratePlanRun(business_day=BUSINESS_DAY),
+                deps=runtime.deps,
+            )
+        assert (await PlanRepo(db).read_by_id(plan_id)).status == "draft"
+        assert await PlanRepo(db).read_active() is None
+
+
+async def test_plan_reject_resumes_the_waiting_checkpoint(tmp_path: Any) -> None:
+    """拒绝也走 checkpoint 恢复：归档由图内 ``archive_draft`` 完成，等待任务被消费，原 active 不变。"""
+    async with _client_with_runtime(
+        tmp_path,
+        structured={
+            FitnessIntent: [{"domain": "plan_management", "action": "create"}],
+            **_plan_scripts([True]),
+        },
+        harness=_plan_harness(),
+    ) as (client, runtime, _model, db):
+        chat_id = await _create_conversation(client, "会话酉")
+        plan_id = await _create_plan_round(
+            client, chat_id=chat_id, thread_id=THREAD_1, client_request_id="request-1"
+        )
+        graph = agent_run_graph(runtime.graph, runtime.run_deps)
+        waiting = await graph.aget_state(thread_config(THREAD_1))
+        assert PLAN_NODE in waiting.next
+
+        rejected = await _reject(
+            client, chat_id=chat_id, thread_id=THREAD_1, plan_id=plan_id
+        )
+        assert rejected.status_code == 200
+        assert rejected.json()["plan"]["status"] == "archived"
+        resumed = await graph.aget_state(thread_config(THREAD_1))
+        assert resumed.next == ()
+        assert resumed.interrupts == ()
+        assert resumed.values["confirmation"] == "rejected"
+        assert await PlanRepo(db).read_active() is None
+        confirmations = [
+            entry
+            for entry in await ConversationRepo(db).list_entries(chat_id)
+            if entry.entry_type == "confirmation"
+        ]
+        assert [entry.payload["action"] for entry in confirmations] == [
+            "plan_rejected"
+        ]
+
+
 async def test_repeated_plan_reject_appends_one_entry(tmp_path: Any) -> None:
     """拒绝重放：draft 归档一次，确认 Entry 只追加一条，不产生 active。"""
     async with _client(
@@ -1232,6 +1458,7 @@ async def test_repeated_plan_reject_appends_one_entry(tmp_path: Any) -> None:
             FitnessIntent: [{"domain": "plan_management", "action": "create"}],
             **_plan_scripts([True]),
         },
+        harness=_plan_harness(),
     ) as (client, _model, db):
         chat_id = await _create_conversation(client, "会话己")
         plan_id = await _create_plan_round(
@@ -1269,6 +1496,7 @@ async def test_confirmation_mismatch_performs_zero_business_writes(
             FitnessIntent: [{"domain": "plan_management", "action": "create"}],
             **_plan_scripts([True]),
         },
+        harness=_plan_harness(),
     ) as (client, model, db):
         chat_id = await _create_conversation(client, "会话庚")
         other_chat_id = await _create_conversation(client, "会话辛")
@@ -1415,6 +1643,57 @@ async def test_workout_confirmation_replay_does_not_write_twice(tmp_path: Any) -
         confirmations = await repo.read_confirmations(run.id, "workout_confirmed")
         assert len(confirmations) == 1
         assert confirmations[0].payload["workout_session_id"] == written[0].id
+
+
+async def test_concurrent_workout_confirmation_writes_one_session(tmp_path: Any) -> None:
+    """并发重复确认：幂等判定与写入同事务，两次请求只产生一条训练记录与一条确认 Entry。"""
+    async with _client(
+        tmp_path,
+        structured=_natural_language_scripts(),
+        text={NATURAL_LANGUAGE_RECORD_MESSAGE_PROMPT: [NL_SUMMARY]},
+    ) as (client, _model, db):
+        chat_id = await _create_conversation(client, "会话壬")
+        frames = await _run(
+            client,
+            chat_id=chat_id,
+            thread_id=THREAD_1,
+            request=NL_REQUEST,
+            client_request_id="request-1",
+        )
+        waiting = [data for name, data in frames if name == "waiting"][0]
+        body = {
+            "chat_id": chat_id,
+            "conversation_id": THREAD_1,
+            "performed_on": waiting["workout"]["performed_on"],
+            "sets": waiting["workout"]["sets"],
+            "plan_session_id": None,
+            "auto_link": False,
+        }
+
+        first, second = await asyncio.gather(
+            client.post("/api/agent/confirm-workout", json=body),
+            client.post("/api/agent/confirm-workout", json=body),
+        )
+
+        assert first.status_code == 200
+        assert second.status_code == 200
+        assert second.json() == first.json()
+        services = build_services(
+            build_repositories(db),
+            db,
+            SqliteHealthProbe(db, db.path.parent),
+        )
+        written = await services.records.list_all()
+        assert [session.id for session in written] == [
+            first.json()["workout_session"]["id"]
+        ]
+        run = (await ConversationRepo(db).list_runs(chat_id))[0]
+        confirmations = await ConversationRepo(db).read_confirmations(
+            run.id, "workout_confirmed"
+        )
+        assert [entry.payload["workout_session_id"] for entry in confirmations] == [
+            written[0].id
+        ]
 
 
 async def test_natural_language_record_prompts_receive_history_once(
@@ -1591,7 +1870,10 @@ async def test_planner_payload_carries_history_and_the_request_once(tmp_path: An
             ],
             **_plan_scripts([True]),
         },
-        harness=_general_harness([FIRST_ANSWER]),
+        harness=[
+            *_general_harness([FIRST_ANSWER]),
+            *_plan_harness(),
+        ],
     ) as (client, model, _db):
         chat_id = await _create_conversation(client, "会话丙一")
         await _run(
@@ -1629,7 +1911,10 @@ async def test_evaluator_payload_carries_history_and_the_request_once(
             ],
             **_plan_scripts([True]),
         },
-        harness=_general_harness([FIRST_ANSWER]),
+        harness=[
+            *_general_harness([FIRST_ANSWER]),
+            *_plan_harness(),
+        ],
     ) as (client, model, _db):
         chat_id = await _create_conversation(client, "会话丙二")
         await _run(
@@ -1649,9 +1934,9 @@ async def test_evaluator_payload_carries_history_and_the_request_once(
         evaluator = model.payload_for(EVALUATOR_SYSTEM_PROMPT)
         assert set(evaluator) == {
             "request",
-            "profile",
             "plan",
             "business_day",
+            "facts",
             "conversation_messages",
         }
         assert evaluator["request"] == PLAN_REQUEST

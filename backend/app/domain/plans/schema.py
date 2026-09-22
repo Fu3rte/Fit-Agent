@@ -218,6 +218,20 @@ class DeterministicResult(PlanSchemaModel):
     failures: tuple[RuleFailure, ...] = Field(strict=False)
 
 
+ToolRevisionDomain = Literal["profile", "workouts", "plans", "catalog"]
+
+#: 候选与评审读取的同一 Run 事实快照不一致时的阻断失败码。
+SNAPSHOT_MISMATCH_CODE = "snapshot_mismatch"
+
+
+class ToolEvidence(PlanSchemaModel):
+    """一条只读事实读取的 revision：同 Run 的候选与评审按它核对快照一致性。"""
+
+    tool_name: str
+    revision_domain: ToolRevisionDomain
+    revision: int = Field(ge=0)
+
+
 class RubricVerdict(PlanSchemaModel):
     """一个模型 Rubric 维度的布尔判定与理由；不使用数值评分或权重。"""
 
@@ -242,6 +256,8 @@ class EvaluationResult(PlanSchemaModel):
     blocking_failures: tuple[str, ...] = Field(strict=False)
     warnings: tuple[str, ...] = Field(strict=False)
     revision_count: int = Field(ge=0)
+    #: 评审自己读到的事实 revision：与候选证据逐条比对，不一致即阻断。
+    evidence: tuple[ToolEvidence, ...] = Field(strict=False, default=())
 
     @model_validator(mode="after")
     def _require_passed_matches_hard_gates(self) -> "EvaluationResult":

@@ -132,10 +132,10 @@ async def _drive_to(
         )
 
 
-async def test_fresh_database_migrates_to_version_six(tmp_path: Path) -> None:
-    """全新库迁移到 v6；四张对话表与 entries 时间序索引就位。"""
+async def test_fresh_database_migrates_to_version_seven(tmp_path: Path) -> None:
+    """全新库迁移到 v7；四张对话表与 entries 时间序索引就位。"""
     async with _harness(tmp_path) as (db, _repo):
-        assert await db.pragma_value("user_version") == 6
+        assert await db.pragma_value("user_version") == 7
 
         async def op(conn: aiosqlite.Connection) -> tuple[list[str], list[str]]:
             async with conn.execute(
@@ -153,16 +153,16 @@ async def test_fresh_database_migrates_to_version_six(tmp_path: Path) -> None:
 
 
 def test_migration_files_are_contiguous() -> None:
-    """006 归入连续编号清单（编号即 user_version，不跳号）。"""
+    """007 归入连续编号清单（编号即 user_version，不跳号）。"""
     migrations = load_migrations(MIGRATIONS_DIR)
-    assert [version for version, _name, _sql in migrations] == [1, 2, 3, 4, 5, 6]
-    assert migrations[-1][1] == "006_expand_exercise_catalog.sql"
+    assert [version for version, _name, _sql in migrations] == [1, 2, 3, 4, 5, 6, 7]
+    assert migrations[-1][1] == "007_profile_revision_namespace.sql"
 
 
 async def test_version_three_database_upgrades_without_business_data_loss(
     tmp_path: Path,
 ) -> None:
-    """真实 v3 库（含业务数据）升级到 v6：业务行原样保留。"""
+    """真实 v3 库（含业务数据）升级到 v7：业务行原样保留。"""
     v3_dir = tmp_path / "v3"
     v3_dir.mkdir()
     for name in ("001_initial.sql", "002_timed_sets_and_new_actions.sql", "003_rejected_plan_status.sql"):
@@ -209,8 +209,8 @@ async def test_version_three_database_upgrades_without_business_data_loss(
         before = await legacy_db.under_lock(business_rows)
 
     async with _open_db(db_path) as upgraded_db:
-        assert await upgraded_db.migrate() == 6
-        assert await upgraded_db.pragma_value("user_version") == 6
+        assert await upgraded_db.migrate() == 7
+        assert await upgraded_db.pragma_value("user_version") == 7
         after = await upgraded_db.under_lock(business_rows)
         repo = ConversationRepo(upgraded_db)
         conversation = await repo.create_conversation(

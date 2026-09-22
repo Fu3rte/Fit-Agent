@@ -16,6 +16,8 @@ MODEL_REQUEST_TIMEOUT_SECONDS = 60
 GRAPH_RUN_TIMEOUT_SECONDS = 180
 MAX_MODEL_REQUESTS_PER_RUN = 5
 MAX_TOOL_CALLS_PER_RUN = 4
+#: 计划路径单个 ToolNode loop 的工具调用上限：调整场景强制 6 项事实，外加少量重试余量。
+MAX_PLAN_TOOL_CALLS_PER_LOOP = 8
 TOOL_TIMEOUT_SECONDS = 30.0
 
 #: 上下文压缩阈值用的模型上下文窗口（Provider 无关的应用级常量）。

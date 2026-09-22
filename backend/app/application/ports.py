@@ -8,7 +8,6 @@ from langchain_core.messages import AIMessage, BaseMessage
 from langchain_core.tools import BaseTool
 from pydantic import BaseModel
 
-from app.domain.actions.dataset import DatasetExercise
 from app.domain.actions.schema import Exercise
 from app.domain.body_metrics.schema import BodyMetric
 from app.domain.conversations.schema import (
@@ -80,20 +79,24 @@ def dump_model_payload(payload: Mapping[str, Any]) -> str:
     return json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)
 
 
-CacheNamespace = Literal["plans", "workouts", "metrics"]
+CacheNamespace = Literal["plans", "workouts", "metrics", "profile"]
 
-#: 首批 namespace 与四个只读工具实际读取的业务表一一对应（exercises 由 schema_version 承担）。
-CACHE_NAMESPACES: tuple[CacheNamespace, ...] = ("plans", "workouts", "metrics")
+#: namespace 与只读工具实际读取的业务表一一对应（exercises 由 schema_version 承担）。
+CACHE_NAMESPACES: tuple[CacheNamespace, ...] = ("plans", "workouts", "metrics", "profile")
 
 
 # ---------- 只读 Repository 端口 ----------
 
 
-class Profiles(Protocol):
-    """画像的读写端口。"""
+class ProfileReads(Protocol):
+    """画像只读端口：交给只读事实工具与计划子图的那一份，不含 ``write``。"""
 
     async def read(self) -> Profile | None:
         """当前画像；未建档即 None。"""
+
+
+class Profiles(ProfileReads, Protocol):
+    """画像的读写端口。"""
 
     async def write(self, profile: Profile) -> None:
         """整份覆盖写入画像。"""
@@ -107,25 +110,6 @@ class ExerciseCatalog(Protocol):
 
     async def list_all(self) -> tuple[Exercise, ...]:
         """动作目录全量。"""
-
-
-class ExerciseDataset(Protocol):
-    """动作数据集（exercises.zh-en.json）的只读检索端口：写库的动作目录才是可写入身份，本端口只做参考发现。"""
-
-    async def search(
-        self,
-        *,
-        text: str | None = None,
-        body_part: str | None = None,
-        equipment: str | None = None,
-        target: str | None = None,
-        muscle_group: str | None = None,
-        limit: int,
-    ) -> tuple[DatasetExercise, ...]:
-        """按文本与归一后的规范英文 facet 检索；命中上限为 limit，顺序确定。"""
-
-    async def get_detail(self, exercise_id: str) -> DatasetExercise | None:
-        """按数据集身份（数字串）取一行；不存在即 None。"""
 
 
 class Plans(Protocol):

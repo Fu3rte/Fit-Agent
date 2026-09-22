@@ -287,6 +287,13 @@ class ConversationRepo:
             lambda conn: _read_confirmations_in_transaction(conn, run_id, action)
         )
 
+    async def read_confirmations_in_transaction(
+        self, conn: aiosqlite.Connection, run_id: str, action: str
+    ) -> tuple[ConversationEntry, ...]:
+        """事务内版本：与紧随其后的写入同一份快照，确认幂等判定因此原子。"""
+        require_outer_transaction(conn, "确认 Entry 事务内读取")
+        return await _read_confirmations_in_transaction(conn, run_id, action)
+
     async def list_run_events(self, run_id: str) -> tuple[RunEvent, ...]:
         """某 Run 的全部事件（按 ``sequence`` 升序）。"""
 

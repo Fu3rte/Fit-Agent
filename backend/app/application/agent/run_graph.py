@@ -80,6 +80,25 @@ def _intent(state: WorkflowState) -> Intent:
     return intent
 
 
+def _fresh_plan_channels() -> WorkflowState:
+    """计划路径每个 Run 的通道起点：修订预算、候选证据与本轮确定性／评估结果一律归零。
+
+    同一 ``conversation_id`` 复用 thread 时 checkpoint 会保留这些键；不在这里归零，新 Run 的首次
+    候选会带入上一 Run 的 ``revision_count`` 与修订理由，并在首次失败时直接丢弃。计划路径读的通道是
+    ``deterministic_result`` 与 ``evaluation``（``evaluation_result`` 是顶层共用键）；终态一并归零，
+    上一 Run 的 ``termination_reason`` 不跨 Run 残留。
+    """
+    return {
+        "termination_reason": None,
+        "revision_count": 0,
+        "revision_feedback": (),
+        "deterministic_result": None,
+        "evaluation": None,
+        "evaluation_result": None,
+        "planner_evidence": (),
+    }
+
+
 class RunGraphNodes:
     def __init__(self, *, model: ModelGateway, branches: RunBranches) -> None:
         self._model = model
@@ -138,11 +157,13 @@ class RunGraphNodes:
     async def prepare_plan(
         self, state: WorkflowState, runtime: Runtime[GeneratePlanRun]
     ) -> WorkflowState:
-        """计划分支入口：唯一 draft 的复用短路或替换身份，冲突在模型调用前失败。"""
+        """计划分支入口：归零上一 Run 的修订／评估通道，再复用唯一 draft 或替换身份，冲突在模型调用前失败。"""
         intent = _intent(state)
         target = await self._branches.plan_target(intent, _run(runtime))
+        fresh = _fresh_plan_channels()
         if target.reused is not None:
             return {
+                **fresh,
                 "draft_plan_id": target.reused.id,
                 "ui_actions": ({"draft_plan_id": target.reused.id},),
                 "final_result": AgentRunResult(
@@ -152,7 +173,7 @@ class RunGraphNodes:
                     draft_plan_id=target.reused.id,
                 ),
             }
-        return {"draft_plan_id": target.replacement_id}
+        return {**fresh, "draft_plan_id": target.replacement_id}
 
 
 def _route_after_safety_scan(

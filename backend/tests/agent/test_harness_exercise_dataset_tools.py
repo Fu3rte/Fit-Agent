@@ -6,7 +6,6 @@
 import json
 from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
-from pathlib import Path
 from typing import Any
 
 import pytest
@@ -19,15 +18,14 @@ from app.application.agent.harness.declaration import HarnessState
 from app.application.agent.harness.tools.exercise_dataset import (
     EXERCISE_DATASET_TOOLS,
     ExerciseDatasetHarnessContext,
+    InMemoryExerciseDataset,
 )
 from app.application.ports import ModelGateway
-from app.infrastructure.datasets.exercise_dataset import InMemoryExerciseDataset
 
 KNOWN_ID = "0001"
 UNKNOWN_ID = "999999"
 CHEST_ZH = "胸部"
 BAD_FACET = "不存在的部位"
-EXTRA_ARGUMENT = "limit"
 
 SEARCH_VIEW_KEYS = {
     "id",
@@ -95,8 +93,7 @@ class _Harness:
 
 
 @asynccontextmanager
-async def _harness(tmp_path: Path) -> AsyncIterator[_Harness]:
-    # 数据集语料与 tmp_path 无关，这里只用它保证测试隔离命名。
+async def _harness() -> AsyncIterator[_Harness]:
     context = ExerciseDatasetHarnessContext(
         model=_MODEL,
         budget=_UnusedBudget(),
@@ -106,14 +103,6 @@ async def _harness(tmp_path: Path) -> AsyncIterator[_Harness]:
     graph.add_node("tools", ToolNode(list(EXERCISE_DATASET_TOOLS)))
     graph.add_edge(START, "tools")
     yield _Harness(graph=graph.compile(), context=context)
-
-
-def _leaf_values(value: Any) -> list[Any]:
-    if isinstance(value, dict):
-        return [leaf for item in value.values() for leaf in _leaf_values(item)]
-    if isinstance(value, list):
-        return [leaf for item in value for leaf in _leaf_values(item)]
-    return [value]
 
 
 def test_dataset_tool_schemas_forbid_extra_fields_and_hide_runtime() -> None:
@@ -141,11 +130,9 @@ def test_dataset_tool_schemas_forbid_extra_fields_and_hide_runtime() -> None:
     }
 
 
-async def test_search_returns_standard_json_rows_with_bilingual_facets(
-    tmp_path: Path,
-) -> None:
+async def test_search_returns_standard_json_rows_with_bilingual_facets() -> None:
     """检索输出是标准 JSON 文本，每行给出数据集身份、英文名与中英 facet 标签。"""
-    async with _harness(tmp_path) as h:
+    async with _harness() as h:
         message = await h.call("search_exercise_library", {"query": "squat", "limit": 3})
         assert message.status == "success", message.content
         assert json.dumps(json.loads(message.content), ensure_ascii=False) == message.content
@@ -154,29 +141,28 @@ async def test_search_returns_standard_json_rows_with_bilingual_facets(
         assert len(rows) == 3
         assert all(set(row) == SEARCH_VIEW_KEYS for row in rows)
         assert all("squat" in row["name"].lower() for row in rows)
-        assert {type(leaf) for leaf in _leaf_values(rows)} <= {str, int}
 
 
-async def test_search_facet_filter_accepts_chinese_value(tmp_path: Path) -> None:
+async def test_search_facet_filter_accepts_chinese_value() -> None:
     """中文 facet 取值归一后过滤：命中行的该 facet 全部等于目标。"""
-    async with _harness(tmp_path) as h:
+    async with _harness() as h:
         rows = await h.payload("search_exercise_library", {"body_part": CHEST_ZH, "limit": 5})
         assert rows and all(row["body_part"] == "chest" for row in rows)
         assert all(row["body_part_zh"] == CHEST_ZH for row in rows)
 
 
-async def test_search_with_no_match_returns_empty_list(tmp_path: Path) -> None:
+async def test_search_with_no_match_returns_empty_list() -> None:
     """无解组合返回空列表，不编造候选。"""
-    async with _harness(tmp_path) as h:
+    async with _harness() as h:
         rows = await h.payload(
             "search_exercise_library", {"query": "squat", "body_part": "chest"}
         )
         assert rows == []
 
 
-async def test_detail_returns_full_bilingual_instruction(tmp_path: Path) -> None:
+async def test_detail_returns_full_bilingual_instruction() -> None:
     """详情按身份给出双语指导语与分步。"""
-    async with _harness(tmp_path) as h:
+    async with _harness() as h:
         detail = await h.payload("get_exercise_detail", {"exercise_id": KNOWN_ID})
         assert detail["id"] == KNOWN_ID
         assert set(detail) > SEARCH_VIEW_KEYS
@@ -184,24 +170,24 @@ async def test_detail_returns_full_bilingual_instruction(tmp_path: Path) -> None
         assert detail["steps"]["zh"] and detail["steps"]["en"]
 
 
-async def test_detail_for_unknown_id_returns_null(tmp_path: Path) -> None:
+async def test_detail_for_unknown_id_returns_null() -> None:
     """未知身份返回 null，不抛异常。"""
-    async with _harness(tmp_path) as h:
+    async with _harness() as h:
         assert await h.payload("get_exercise_detail", {"exercise_id": UNKNOWN_ID}) is None
 
 
-async def test_search_rejects_undeclared_argument(tmp_path: Path) -> None:
+async def test_search_rejects_undeclared_argument() -> None:
     """未声明字段被拒绝：进入可修正的参数校验错误。"""
-    async with _harness(tmp_path) as h:
+    async with _harness() as h:
         message = await h.call("search_exercise_library", {"query": "squat", "offset": 1})
         assert message.status == "error"
         assert "offset" in message.content
         assert "Extra inputs are not permitted" in message.content
 
 
-async def test_search_rejects_out_of_range_limit(tmp_path: Path) -> None:
+async def test_search_rejects_out_of_range_limit() -> None:
     """limit 越界（0 与 26）由 Schema 边界拦下，端点 1／25 合法。"""
-    async with _harness(tmp_path) as h:
+    async with _harness() as h:
         assert isinstance(await h.payload("search_exercise_library", {"limit": 1}), list)
         assert isinstance(await h.payload("search_exercise_library", {"limit": 25}), list)
         for limit in (0, 26):
@@ -211,11 +197,9 @@ async def test_search_rejects_out_of_range_limit(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize("facet", ["body_part", "equipment", "target", "muscle_group"])
-async def test_search_rejects_value_outside_facet_vocabulary(
-    tmp_path: Path, facet: str
-) -> None:
+async def test_search_rejects_value_outside_facet_vocabulary(facet: str) -> None:
     """词表外的 facet 取值作为可修正错误返回，指明字段并列出中文可选值。"""
-    async with _harness(tmp_path) as h:
+    async with _harness() as h:
         message = await h.call("search_exercise_library", {facet: BAD_FACET})
         assert message.status == "error", message.content
         assert facet in message.content

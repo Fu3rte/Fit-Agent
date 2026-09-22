@@ -119,7 +119,7 @@ class WorkoutGap:
 class TrendSummary:
     """确定性趋势摘要（讨论总结 §3.3／§6.4）：只含体重变化、体脂变化与停训天数。
 
-    不含训练容量、计划完成率，也不评价进步、退步或停滞；供看板与 Stage 3 MemoryAssembler 复用。
+    不含训练容量、计划完成率，也不评价进步、退步或停滞；供看板与只读进展工具复用。
     """
 
     weight_change: MetricChange

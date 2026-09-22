@@ -16,10 +16,13 @@ from app.application.agent.contracts import (
     AgentRuntime,
     GeneratePlanDeps,
     Intent,
+    PlanDeterministicDeps,
+    PlanLlmNodeDeps,
+    PlanWriteDeps,
 )
 from app.application.agent.harness.cache import ToolResultCache
 from app.application.agent.harness.tools.general import build_general_tool_harnesses
-from app.application.agent.memory import MemoryAssembler
+from app.application.agent.harness.tools.training import build_plan_tool_harnesses
 from app.application.agent.plan_graph import build_generate_plan_graph
 from app.application.ports import (
     Conversations,
@@ -32,12 +35,9 @@ from app.application.services.conversation_service import (
     INTERRUPTED_RUN_ERROR_CODE,
     ConversationService,
 )
-from app.application.services.plans_service import (
-    PlanActivationService,
-    PlanPersistenceService,
-)
+from app.application.services.plans_service import PlansService
 from app.application.services.profile_service import ProfileService
-from app.application.services.records_service import WorkoutRecordsService
+from app.application.services.records_service import RecordsService
 from app.application.services.stats_service import StatsService
 from app.infrastructure.database.connection import Database
 from app.infrastructure.database.repositories.actions_repository import ExerciseRepo
@@ -104,9 +104,8 @@ class AppServices:
 
     profile: ProfileService
     body_metrics: BodyMetricsService
-    records: WorkoutRecordsService
-    plan_persistence: PlanPersistenceService
-    plan_activation: PlanActivationService
+    records: RecordsService
+    plan_writes: PlansService
     stats: StatsService
     conversations: ConversationService
     plans: Plans
@@ -163,14 +162,15 @@ def create_app(
 
 def build_repositories(db: Database) -> ReadRepositories:
     """Repository 的唯一构造点：数据库连接只在组合根进入 Repository。"""
+    tool_cache = ToolCacheRevisionsRepo(db)
     return ReadRepositories(
-        profiles=ProfileRepo(db),
+        profiles=ProfileRepo(db, tool_cache),
         exercises=ExerciseRepo(db),
         plans=PlanRepo(db),
         records=WorkoutRecordsRepo(db),
         body_metrics=BodyMetricsRepo(db),
         stats=StatsRepo(db),
-        tool_cache=ToolCacheRevisionsRepo(db),
+        tool_cache=tool_cache,
         conversations=ConversationRepo(db),
     )
 
@@ -184,16 +184,14 @@ def build_services(
         body_metrics=BodyMetricsService(
             repositories.body_metrics, repositories.tool_cache, db
         ),
-        records=WorkoutRecordsService(
+        records=RecordsService(
             repositories.records,
             repositories.exercises,
             repositories.tool_cache,
+            repositories.conversations,
             db,
         ),
-        plan_persistence=PlanPersistenceService(
-            repositories.plans, repositories.tool_cache, db
-        ),
-        plan_activation=PlanActivationService(
+        plan_writes=PlansService(
             repositories.plans,
             repositories.profiles,
             repositories.exercises,
@@ -228,22 +226,43 @@ def build_agent_runtime(
     tool_harnesses: Mapping[Intent, CompiledStateGraph] = build_general_tool_harnesses(
         timeout_seconds=TOOL_TIMEOUT_SECONDS, cache=cache
     )
+    plan_harnesses = build_plan_tool_harnesses(
+        timeout_seconds=TOOL_TIMEOUT_SECONDS, cache=cache
+    )
     deps = GeneratePlanDeps(
-        profiles=services.profile,
-        catalog=repositories.exercises,
-        stats=repositories.stats,
-        assembler=MemoryAssembler(
+        planner=PlanLlmNodeDeps(
+            model=model,
+            harness=plan_harnesses.planning,
             profiles=repositories.profiles,
+            records=repositories.records,
+            catalog=repositories.exercises,
             plans=repositories.plans,
-            records=services.records,
+            stats=services.stats,
+            revisions=repositories.tool_cache,
+            schema_version=schema_version,
+        ),
+        evaluator=PlanLlmNodeDeps(
+            model=model,
+            harness=plan_harnesses.evaluation,
+            profiles=repositories.profiles,
+            records=repositories.records,
+            catalog=repositories.exercises,
+            plans=repositories.plans,
+            stats=services.stats,
+            revisions=repositories.tool_cache,
+            schema_version=schema_version,
+        ),
+        deterministic=PlanDeterministicDeps(
+            profiles=repositories.profiles,
+            catalog=repositories.exercises,
+            plans=repositories.plans,
             stats=services.stats,
         ),
+        writes=PlanWriteDeps(
+            plans=services.plan_writes,
+            now=lambda: datetime.now(UTC),
+        ),
         skills=skills,
-        persistence=services.plan_persistence,
-        plans=repositories.plans,
-        activation=services.plan_activation,
-        model=model,
-        now=lambda: datetime.now(UTC),
     )
     return AgentRuntime(
         graph=build_generate_plan_graph(deps, checkpointer=checkpointer),
@@ -251,10 +270,11 @@ def build_agent_runtime(
         run_deps=AgentRunDeps(
             model=model,
             stats=services.stats,
-            plans=deps.plans,
-            persistence=deps.persistence,
-            catalog=deps.catalog,
+            plans=repositories.plans,
+            plan_writes=services.plan_writes,
+            catalog=repositories.exercises,
             records=services.records,
+            profiles=repositories.profiles,
             skills=skills,
             tool_harnesses=tool_harnesses,
         ),

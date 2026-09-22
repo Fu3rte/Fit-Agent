@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from langchain_core.messages import AIMessage, BaseMessage
+from langchain_core.messages import AIMessage, BaseMessage, ToolMessage
 from langchain_core.tools import BaseTool
 from langgraph.graph.state import CompiledStateGraph
 from pydantic import BaseModel, ValidationError
@@ -22,19 +22,31 @@ from app.application.agent.budget import (
     ModelRequestBudgetExceeded,
 )
 from app.application.agent.contracts import (
+    LOCAL_USER_ID,
     AgentEvent,
     AgentRunDeps,
     AgentRunResult,
     GeneratePlanDeps,
     GeneratePlanRun,
     Intent,
+    PlanDeterministicDeps,
+    PlanLlmNodeDeps,
+    PlanWriteDeps,
+    WorkflowState,
+    initial_workflow_state,
     thread_config,
 )
 from app.application.agent.harness.tools.general import (
     ExtractedWorkout,
     build_general_tool_harnesses,
 )
-from app.application.agent.memory import MemoryAssembler
+from app.application.agent.harness.tools.training import (
+    EVALUATION_TOOLS,
+    PLANNING_TOOLS,
+    MissingPlanFacts,
+    UnregisteredCandidateExercise,
+    build_plan_tool_harnesses,
+)
 from app.application.agent.plan_graph import build_generate_plan_graph
 from app.application.agent.prompts import (
     EVALUATOR_SYSTEM_PROMPT,
@@ -62,12 +74,24 @@ BUSINESS_DAY = date(2026, 6, 1)
 SCHEDULED_ON = "2026-06-01"
 NEXT_DAY = "2026-06-02"
 CONVERSATION_ID = "router-branch-conversation"
+RUN_ID = "router-branch-run"
+CLIENT_REQUEST_ID = "router-branch-client-request"
 CREATED_AT = "2026-06-01T08:00:00+00:00"
 PULL_UP = "pull-up"
 PLANK = "plank"
 PROFILE_WEEKLY_FREQUENCY = 1
 ANSWER = "固定替身答复"
 SUMMARY = "固定替身摘要"
+FACTS_READ = "事实已读完"
+
+#: 计划路径的事实采集脚本：必需工具与 production 的 ``PLAN_REQUIRED_FACTS`` 同集。
+GENERATE_FACT_TOOLS = (
+    "read_user_profile",
+    "read_training_history",
+    "read_progress",
+    "search_exercises",
+)
+ADJUST_FACT_TOOLS = (*GENERATE_FACT_TOOLS, "read_active_plan", "read_training_calendar")
 
 #: 三个分支共用的业务库行数快照口径：任何一张业务表变化即失败。
 COUNTED_TABLES = (
@@ -169,6 +193,48 @@ def final_answer(text: str) -> AIMessage:
     return AIMessage(content=text)
 
 
+def _fact_args(name: str, *, query: str) -> dict[str, Any]:
+    """一次只读工具调用的参数：与目标工具的模型可见 Schema 一致。"""
+    if name == "search_exercises":
+        return {"query": query}
+    if name == "read_training_calendar":
+        return {"year": BUSINESS_DAY.year, "month": BUSINESS_DAY.month}
+    return {}
+
+
+def _fact_loop(*tools: str, query: str = "引体") -> list[AIMessage]:
+    """一次事实采集 loop 的脚本：一条并行工具调用 ＋ 一句收尾；工具结果来自真实 ToolNode。"""
+    return [
+        AIMessage(
+            content="",
+            tool_calls=[
+                {
+                    "name": name,
+                    "args": _fact_args(name, query=query),
+                    "id": f"call-{index}",
+                    "type": "tool_call",
+                }
+                for index, name in enumerate(tools)
+            ],
+        ),
+        final_answer(FACTS_READ),
+    ]
+
+
+def _fact_loops(count: int, *tools: str) -> list[AIMessage]:
+    """同一条事实采集 loop 重复若干次：修订路径上 Planner 与 Evaluator 各跑一遍。"""
+    return [message for _ in range(count) for message in _fact_loop(*tools)]
+
+
+def executed_tools(call: HarnessCall) -> tuple[str, ...]:
+    """一次 harness 调用消息序列里已执行的工具名：只取 ToolNode 实际返回的 ToolMessage。"""
+    return tuple(
+        message.name
+        for message in call.messages
+        if isinstance(message, ToolMessage) and message.name is not None
+    )
+
+
 def _tool_harnesses() -> Mapping[Intent, CompiledStateGraph]:
     """与 ``build_agent_runtime()`` 同形的测试装配：五项会话 Intent 各一份按白名单固化的 harness。"""
     return build_general_tool_harnesses(timeout_seconds=TOOL_TIMEOUT_SECONDS)
@@ -183,6 +249,17 @@ class Harness:
     model: ScriptedGateway
     run_deps: AgentRunDeps
 
+    def run_state(self, request: str) -> WorkflowState:
+        """与 ``run_events`` 相同的 Run 初始状态：身份与业务日由 API 边界注入。"""
+        return initial_workflow_state(
+            run_id=RUN_ID,
+            conversation_id=CONVERSATION_ID,
+            user_id=LOCAL_USER_ID,
+            client_request_id=CLIENT_REQUEST_ID,
+            business_day=BUSINESS_DAY,
+            request=request,
+        )
+
     async def invoke(
         self,
         request: str,
@@ -193,7 +270,7 @@ class Harness:
         run = self.run_context(budget=budget, history=history)
         return await invoke_agent_run(
             self.graph,
-            {"conversation_id": CONVERSATION_ID, "request": request},
+            self.run_state(request),
             thread_config(CONVERSATION_ID),
             run,
             self.run_deps,
@@ -211,7 +288,7 @@ class Harness:
             event
             async for event in stream_agent_run(
                 self.graph,
-                {"conversation_id": CONVERSATION_ID, "request": request},
+                self.run_state(request),
                 thread_config(CONVERSATION_ID),
                 run,
                 self.run_deps,
@@ -232,6 +309,22 @@ class Harness:
         )
 
 
+def _plan_llm_deps(model, repositories, services, schema_version, *, evaluation):
+    """一次 LLM Node 的构造期依赖：唯一模型入口 ＋ 该路径自己的 ToolNode 与只读端口。"""
+    harnesses = build_plan_tool_harnesses(timeout_seconds=TOOL_TIMEOUT_SECONDS)
+    return PlanLlmNodeDeps(
+        model=model,
+        harness=harnesses.evaluation if evaluation else harnesses.planning,
+        profiles=repositories.profiles,
+        records=services.records,
+        catalog=repositories.exercises,
+        plans=repositories.plans,
+        stats=services.stats,
+        revisions=repositories.tool_cache,
+        schema_version=schema_version,
+    )
+
+
 @asynccontextmanager
 async def _harness(
     tmp_path: Path,
@@ -250,6 +343,9 @@ async def _harness(
         )
         skills = SkillLoader(skills_dir())
         await services.profile.update(_profile())
+        user_version = await db.pragma_value("user_version")
+        if not isinstance(user_version, int):
+            raise RuntimeError(f"迁移后 user_version 不是整数：{user_version!r}")
         model = ScriptedGateway(
             structured_scripts={
                 schema: [dict(row) for row in rows]
@@ -261,21 +357,23 @@ async def _harness(
             harness_scripts=list(harness),
         )
         deps = GeneratePlanDeps(
-            profiles=services.profile,
-            catalog=repositories.exercises,
-            stats=repositories.stats,
-            assembler=MemoryAssembler(
+            planner=_plan_llm_deps(
+                model, repositories, services, user_version, evaluation=False
+            ),
+            evaluator=_plan_llm_deps(
+                model, repositories, services, user_version, evaluation=True
+            ),
+            deterministic=PlanDeterministicDeps(
                 profiles=repositories.profiles,
+                catalog=repositories.exercises,
                 plans=repositories.plans,
-                records=services.records,
                 stats=services.stats,
             ),
+            writes=PlanWriteDeps(
+                plans=services.plan_writes,
+                now=lambda: datetime(2026, 6, 1, 9, 0, tzinfo=UTC),
+            ),
             skills=skills,
-            persistence=services.plan_persistence,
-            plans=repositories.plans,
-            activation=services.plan_activation,
-            model=model,
-            now=lambda: datetime(2026, 6, 1, 9, 0, tzinfo=UTC),
         )
         async with open_checkpointer(tmp_path / "checkpoints.db") as saver:
             yield Harness(
@@ -286,9 +384,10 @@ async def _harness(
                     model=model,
                     stats=services.stats,
                     plans=repositories.plans,
-                    persistence=services.plan_persistence,
+                    plan_writes=services.plan_writes,
                     catalog=repositories.exercises,
                     records=services.records,
+                    profiles=repositories.profiles,
                     skills=skills,
                     tool_harnesses=_tool_harnesses(),
                 ),
@@ -560,7 +659,10 @@ async def test_natural_language_record_still_extracts_without_writing(
 async def test_generate_plan_keeps_the_plan_chain_and_the_run_budget(
     tmp_path: Path,
 ) -> None:
-    """回归：生成计划仍走计划子图；最坏路径（路由＋两次规划＋两次 Rubric）恰用满 5 次预算。"""
+    """回归：生成计划仍走计划子图；最坏路径（路由 ＋ 两次规划 ＋ 两次 Rubric）恰用满 5 次 Run 预算。
+
+    计划路径的两个 ToolNode loop 各有自己的事实预算，不占用这 5 次；工具结果来自真实迁移库。
+    """
     budget = ModelRequestBudget()
     async with _harness(
         tmp_path,
@@ -568,6 +670,7 @@ async def test_generate_plan_keeps_the_plan_chain_and_the_run_budget(
             FitnessIntent: [{"domain": "plan_management", "action": "create"}],
             **(_plan_scripts(goal_alignment=[False, True])),
         },
+        harness=_fact_loops(4, *GENERATE_FACT_TOOLS),
     ) as h:
         result = await h.invoke("帮我生成一份训练计划", budget=budget)
 
@@ -579,6 +682,7 @@ async def test_generate_plan_keeps_the_plan_chain_and_the_run_budget(
             EVALUATOR_SYSTEM_PROMPT,
         ]
         assert budget.used == MAX_MODEL_REQUESTS_PER_RUN
+        assert budget.tool_calls == 0
         assert result.intent == "generate_plan"
         assert result.draft_plan_id is not None
         written = await PlanRepo(h.db).read_by_id(result.draft_plan_id)
@@ -588,14 +692,93 @@ async def test_generate_plan_keeps_the_plan_chain_and_the_run_budget(
         budget.begin_request()
 
 
-async def test_adjust_plan_still_reads_the_active_plan(tmp_path: Path) -> None:
-    """回归：调整计划仍以当前 active 为来源，新 draft 的 ``source_plan_id`` 等于该 active。"""
+async def test_plan_path_runs_two_independent_tool_loops(tmp_path: Path) -> None:
+    """Planner 与 Evaluator 各跑一个独立 ToolNode loop：白名单、节点名与调用轨迹各自独立。"""
+    async with _harness(
+        tmp_path,
+        structured={
+            FitnessIntent: [{"domain": "plan_management", "action": "create"}],
+            **_plan_scripts(goal_alignment=[True]),
+        },
+        harness=_fact_loops(2, *GENERATE_FACT_TOOLS),
+    ) as h:
+        result = await h.invoke("帮我生成一份训练计划")
+
+        assert result.draft_plan_id is not None
+        planner_call, planner_answer, evaluator_call, evaluator_answer = (
+            h.model.harness_calls
+        )
+        assert planner_call.offered == tuple(tool.name for tool in PLANNING_TOOLS)
+        assert planner_answer.offered == planner_call.offered
+        assert evaluator_call.offered == tuple(tool.name for tool in EVALUATION_TOOLS)
+        assert evaluator_answer.offered == evaluator_call.offered
+        # 两个 loop 的真实轨迹都来自实际完成的调用，且都是本次 Intent 的必需事实集。
+        assert executed_tools(planner_answer) == GENERATE_FACT_TOOLS
+        assert executed_tools(evaluator_answer) == GENERATE_FACT_TOOLS
+        assert "user-1" not in planner_call.messages[0].content
+
+    harnesses = build_plan_tool_harnesses(timeout_seconds=TOOL_TIMEOUT_SECONDS)
+    assert "planning_tools" in harnesses.planning.get_graph().nodes
+    assert "evaluation_tools" in harnesses.evaluation.get_graph().nodes
+    assert "planning_tools" not in harnesses.evaluation.get_graph().nodes
+
+
+async def test_adjust_plan_fast_fails_without_active_plan_and_calendar_facts(
+    tmp_path: Path,
+) -> None:
+    """调整场景未真实调 active 计划与日历：必需事实缺项即明确失败，不写计划行。"""
     async with _harness(
         tmp_path,
         structured={
             FitnessIntent: [{"domain": "plan_management", "action": "modify"}],
             **_plan_scripts(goal_alignment=[True]),
         },
+        harness=_fact_loop(*GENERATE_FACT_TOOLS),
+    ) as h:
+        await _insert_active_plan(h.db, _bodyweight_plan_content())
+        before = await _row_counts(h.db)
+
+        with pytest.raises(MissingPlanFacts) as failure:
+            await h.invoke("调整我的训练计划")
+
+        assert "read_active_plan" in str(failure.value)
+        assert "read_training_calendar" in str(failure.value)
+        assert await _row_counts(h.db) == before
+
+
+async def test_candidate_outside_the_real_search_results_fast_fails(
+    tmp_path: Path,
+) -> None:
+    """真实 search_exercises 没返回候选动作：越界候选明确失败，不写计划行。"""
+    async with _harness(
+        tmp_path,
+        structured={
+            FitnessIntent: [{"domain": "plan_management", "action": "create"}],
+            **_plan_scripts(goal_alignment=[True]),
+        },
+        harness=_fact_loop(*GENERATE_FACT_TOOLS, query="zzzz"),
+    ) as h:
+        before = await _row_counts(h.db)
+
+        with pytest.raises(UnregisteredCandidateExercise) as failure:
+            await h.invoke("帮我检索一个不存在的动作并生成计划")
+
+        assert "pull-up" in str(failure.value)
+        assert await _row_counts(h.db) == before
+
+
+async def test_adjust_plan_still_reads_the_active_plan(tmp_path: Path) -> None:
+    """回归：调整计划仍以当前 active 为来源，新 draft 的 ``source_plan_id`` 等于该 active；
+
+    调整的 ToolNode loop 真实调用 active 计划与训练日历两项追加事实。
+    """
+    async with _harness(
+        tmp_path,
+        structured={
+            FitnessIntent: [{"domain": "plan_management", "action": "modify"}],
+            **_plan_scripts(goal_alignment=[True]),
+        },
+        harness=_fact_loops(2, *ADJUST_FACT_TOOLS),
     ) as h:
         active_id = await _insert_active_plan(h.db, _bodyweight_plan_content())
         result = await h.invoke("调整我的训练计划")
@@ -604,6 +787,7 @@ async def test_adjust_plan_still_reads_the_active_plan(tmp_path: Path) -> None:
         assert result.draft_plan_id is not None
         adjusted = await PlanRepo(h.db).read_by_id(result.draft_plan_id)
         assert adjusted is not None and adjusted.source_plan_id == active_id
+        assert executed_tools(h.model.harness_calls[1]) == ADJUST_FACT_TOOLS
 
 
 @pytest.mark.parametrize(

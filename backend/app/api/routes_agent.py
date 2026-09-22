@@ -21,19 +21,17 @@ from app.api.streaming import AgentRunStream, stream_frames
 from app.application.agent.contracts import AgentRuntime, GeneratePlanRun
 from app.application.agent.plan_graph import invoke_confirmation
 from app.application.agent.run_service import (
+    agent_run_graph,
     append_confirmation,
     persisted_events,
     replay_events,
     run_events,
 )
 from app.application.ports import ConversationNotFound
-from app.application.services.records_service import (
-    WorkoutRecordNotFound,
-    WorkoutRecordsService,
-)
 from app.application.services.stats_service import StatsService
 from app.domain.conversations.schema import ConversationRun
 from app.domain.plans.schema import Plan
+from app.domain.records.schema import WorkoutSession
 
 router = APIRouter()
 
@@ -119,7 +117,9 @@ async def confirm_plan(
 ) -> dict[str, Any]:
     """用户确认：激活 draft，返回落库后的计划行（幂等已 active 时返回既有行，§3.2／§3.3）。"""
     source_run = await _confirmation_source_run(body, request)
-    plan = await _confirmation(body, request, "confirm", business_day)
+    plan = await _confirmation(
+        body, request, "confirm", business_day, source_run=source_run
+    )
     await _append_confirmation(
         request,
         source_run=source_run,
@@ -138,7 +138,9 @@ async def reject_plan(
 ) -> dict[str, Any]:
     """用户拒绝：把 draft 归档，返回落库后的计划行（原 active 不变，永不写 ``rejected``，§3.2）。"""
     source_run = await _confirmation_source_run(body, request)
-    plan = await _confirmation(body, request, "reject", business_day)
+    plan = await _confirmation(
+        body, request, "reject", business_day, source_run=source_run
+    )
     await _append_confirmation(
         request,
         source_run=source_run,
@@ -153,36 +155,18 @@ async def reject_plan(
 async def confirm_workout(
     body: ConfirmWorkoutBody, request: Request
 ) -> dict[str, Any]:
-    """自然语言打卡确认写入：复用表单写入服务；同一来源 Run 的重放返回已写入的记录与 PB。"""
+    """自然语言打卡确认写入：单事务内以来源 Run 的 ``workout_confirmed`` 幂等，重复确认返回既有记录。"""
     services = app_services(request)
     source_run = await _confirmation_source_run(body, request)
-    existing = await services.conversations_repo.read_confirmations(
-        source_run.id, "workout_confirmed"
-    )
-    if existing:
-        # 重放：来源 Run 已确认过一次，不再写第二条训练记录，也不再追加确认 Entry。
-        return await _confirmed_workout_response(
-            services.records,
-            services.stats,
-            int(existing[0].payload["workout_session_id"]),
-        )
-    session = await services.records.create(
+    session = await services.records.commit_workout(
+        source_run,
         body.performed_on,
         workout_set_inputs_from_dto(body.sets),
         plan_session_id=body.plan_session_id,
         auto_link=body.auto_link,
+        now=iso_now,
     )
-    await _append_confirmation(
-        request,
-        source_run=source_run,
-        action="workout_confirmed",
-        workout_session_id=session.id,
-        text=(
-            f"用户已确认写入训练记录：记录 ID {session.id}，"
-            f"训练日期 {body.performed_on.isoformat()}。"
-        ),
-    )
-    return await _confirmed_workout_response(services.records, services.stats, session.id)
+    return await _confirmed_workout_response(services.stats, session)
 
 
 def _runtime(request: Request) -> AgentRuntime:
@@ -200,12 +184,19 @@ async def _confirmation(
     request: Request,
     action: Literal["confirm", "reject"],
     business_day: date,
+    *,
+    source_run: ConversationRun,
 ) -> Plan:
-    """两条确认路径共用唯一确认入口：checkpoint 优先 ＋ 唯一 draft 兜底 ＋ 领域幂等。"""
+    """两条确认路径共用唯一确认入口：checkpoint 优先 ＋ 唯一 draft 兜底 ＋ 领域幂等。
+
+    恢复载荷带上来源 Run 身份：图内确认节点据此校验确认来自产出 interrupt 的那一轮。
+    确认 interrupt 落在计划子图的命名空间，恢复因此从 ``agent_run_graph`` 构造的顶层图发出。
+    """
     runtime = _runtime(request)
     return await invoke_confirmation(
-        runtime.graph,
+        agent_run_graph(runtime.graph, runtime.run_deps),
         conversation_id=str(body.conversation_id),
+        run_id=source_run.id,
         plan_id=body.plan_id,
         action=action,
         run=GeneratePlanRun(business_day=business_day),
@@ -233,12 +224,9 @@ async def _confirmation_source_run(
 
 
 async def _confirmed_workout_response(
-    records: WorkoutRecordsService, stats: StatsService, session_id: int
+    stats: StatsService, session: WorkoutSession
 ) -> dict[str, Any]:
-    """确认写入的响应：按身份读回既有训练记录 ＋ 既有 Stats 现算 PB；记录已删除即领域 404。"""
-    session = await records.get(session_id)
-    if session is None:
-        raise WorkoutRecordNotFound(f"训练记录不存在：{session_id}")
+    """确认写入的响应：返回本次（或重放时既有的）训练记录 ＋ Stats 现算 PB。"""
     bests = await stats.list_personal_bests()
     return {
         "workout_session": record_dto(session),
@@ -250,10 +238,9 @@ async def _append_confirmation(
     request: Request,
     *,
     source_run: ConversationRun,
-    action: Literal["plan_confirmed", "plan_rejected", "workout_confirmed"],
+    action: Literal["plan_confirmed", "plan_rejected"],
     text: str,
     draft_plan_id: int | None = None,
-    workout_session_id: int | None = None,
 ) -> None:
     """业务事务成功后的确认 Entry：绑定精确来源 Run；同一 Run／动作／业务身份只写一次。"""
     services = app_services(request)
@@ -264,7 +251,6 @@ async def _append_confirmation(
         action=action,
         text=text,
         draft_plan_id=draft_plan_id,
-        workout_session_id=workout_session_id,
         now=iso_now,
     )
 

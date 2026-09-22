@@ -9,24 +9,28 @@ from langgraph.graph.state import CompiledStateGraph
 from pydantic import BaseModel, ConfigDict
 
 from app.application.agent.budget import ModelRequestBudget
-from app.application.agent.memory import MemoryAssembler, MemoryContext
 from app.application.ports import (
     ExerciseCatalog,
     ModelGateway,
     Plans,
+    ProfileReads,
     SkillSource,
-    Stats,
+    ToolCacheRevisions,
     WorkoutRecords,
 )
 from app.application.services.plans_service import (
     PlanActivationError,
-    PlanActivationService,
-    PlanPersistenceService,
+    PlansService,
 )
-from app.application.services.profile_service import ProfileService
 from app.application.services.stats_service import StatsService
 from app.domain.conversations.context import ContextMessage
-from app.domain.plans.schema import EvaluationResult, Plan, PlanDraft
+from app.domain.plans.schema import (
+    DeterministicResult,
+    EvaluationResult,
+    Plan,
+    PlanDraft,
+    ToolEvidence,
+)
 
 Intent = Literal[
     "form_record",
@@ -37,6 +41,9 @@ Intent = Literal[
     "view_schedule",
     "general",
 ]
+
+#: 本产品的稳定单用户身份：由 API／Runtime 边界注入，不由模型参数与库内列推导。
+LOCAL_USER_ID = "local-user"
 
 ConfirmationStatus = Literal["pending", "confirmed", "rejected"]
 
@@ -67,12 +74,13 @@ class WorkflowState(TypedDict, total=False):
     evaluation_result: EvaluationResult | None
     revision_count: Literal[0, 1]
     revision_feedback: tuple[str, ...]
-
-    # 计划子图现行键：与 ``plan_draft``／``evaluation_result`` 同义，读取方假定存在
-    context: MemoryContext
+    #: Planner 生成候选时读到的事实 revision：Evaluator 按它核对同一 Run 的快照。
+    planner_evidence: tuple[ToolEvidence, ...]
+    # 计划子图现行键：与 ``plan_draft``／``evaluation_result`` 同义；Run 入口节点会把它归零
     loaded_skill: "LoadedSkill"
     draft_plan: PlanDraft
-    evaluation: EvaluationResult
+    deterministic_result: DeterministicResult | None
+    evaluation: EvaluationResult | None
 
     # 持久化衔接：``draft_plan_id`` 只由 ``persist_draft`` 写入
     draft_plan_id: int | None
@@ -106,6 +114,7 @@ def initial_workflow_state(
         "evaluation_result": None,
         "revision_count": 0,
         "revision_feedback": (),
+        "planner_evidence": (),
         "draft_plan_id": None,
         "confirmation": None,
         "termination_reason": None,
@@ -148,7 +157,12 @@ class SkillBundle(BaseModel):
     version: str
 
 
-ToolRevisionDomain = Literal["profile", "workouts", "plans", "catalog"]
+@dataclass(frozen=True, slots=True)
+class PlanToolHarnesses:
+    """计划路径两个 ToolNode 的装配结果：各自独立的白名单元组、节点名、预算与调用轨迹。"""
+
+    planning: CompiledStateGraph
+    evaluation: CompiledStateGraph
 
 
 @dataclass(frozen=True, slots=True)
@@ -162,16 +176,6 @@ class ToolExecutionContext:
     workouts_revision: int
     plans_revision: int
     catalog_revision: int
-
-
-class ToolEvidence(BaseModel):
-    """一条 ToolResult 读取的事实域 revision：同 Run 的候选与评审按它核对快照一致性。"""
-
-    model_config = ConfigDict(extra="forbid")
-
-    tool_name: str
-    revision_domain: ToolRevisionDomain
-    revision: int
 
 
 class ToolResult[T](BaseModel):
@@ -190,6 +194,9 @@ ADJUSTMENT_SKILL_NAME = "plan-adjustment"
 ADJUST_PLAN_INTENT: Intent = "adjust_plan"
 
 CONFIRMATION_ACTIONS: tuple[str, ...] = ("confirm", "reject")
+
+#: 确认 interrupt 的业务种类：等待载荷与恢复载荷都按它判别，不由调用方猜。
+PLAN_CONFIRMATION_KIND = "plan_confirmation"
 
 AgentEventName = Literal["node", "message", "waiting", "done", "error"]
 
@@ -229,9 +236,10 @@ class AgentRunDeps:
     model: ModelGateway
     stats: StatsService
     plans: Plans
-    persistence: PlanPersistenceService
+    plan_writes: PlansService
     catalog: ExerciseCatalog
     records: WorkoutRecords
+    profiles: ProfileReads
     skills: SkillSource
     tool_harnesses: Mapping[Intent, CompiledStateGraph]
 
@@ -268,19 +276,52 @@ class GeneratePlanRun:
 
 
 @dataclass(frozen=True, slots=True)
-class GeneratePlanDeps:
-    """生成计划子图的构造期依赖：领域服务、Skill 来源、注入的模型 callable 与时钟。"""
+class PlanLlmNodeDeps:
+    """Planner／Evaluator LLM Node 的构造期依赖：唯一模型入口 ＋ 各自的只读事实边界。
 
-    profiles: ProfileService
-    catalog: ExerciseCatalog
-    stats: Stats
-    assembler: MemoryAssembler
-    skills: SkillSource
-    persistence: PlanPersistenceService
-    plans: Plans
-    activation: PlanActivationService
+    只读事实边界是该路径自己的 ToolNode ＋ 调用它所需的只读端口与事实快照来源；不含 Repository
+    写入口、数据库连接、事务对象、业务写 Service 与 ``MemoryAssembler``，事实只经 ``harness``
+    的真实调用返回。
+    """
+
     model: ModelGateway
+    harness: CompiledStateGraph
+    profiles: ProfileReads
+    records: WorkoutRecords
+    catalog: ExerciseCatalog
+    plans: Plans
+    stats: StatsService
+    revisions: ToolCacheRevisions
+    schema_version: int
+
+
+@dataclass(frozen=True, slots=True)
+class PlanDeterministicDeps:
+    """确定性节点的只读事实边界：领域规则与画像前置需要的只读端口，无写入能力。"""
+
+    profiles: ProfileReads
+    catalog: ExerciseCatalog
+    plans: Plans
+    stats: StatsService
+
+
+@dataclass(frozen=True, slots=True)
+class PlanWriteDeps:
+    """计划写入边界的业务写依赖：确认端点与图内确认节点共用的计划写服务、注入的业务时钟。"""
+
+    plans: PlansService
     now: Callable[[], datetime]
+
+
+@dataclass(frozen=True, slots=True)
+class GeneratePlanDeps:
+    """生成计划子图的构造期依赖：按节点职责拆分的四个边界 ＋ Skill 正文来源。"""
+
+    planner: PlanLlmNodeDeps
+    evaluator: PlanLlmNodeDeps
+    deterministic: PlanDeterministicDeps
+    writes: PlanWriteDeps
+    skills: SkillSource
 
 
 @dataclass(frozen=True, slots=True)

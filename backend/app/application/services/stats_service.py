@@ -18,6 +18,8 @@ from app.domain.stats.schema import (
     PersonalBest,
     TrendReport,
     TrendSummary,
+    ValidWorkSet,
+    WorkoutFact,
 )
 
 
@@ -27,6 +29,14 @@ class StatsService:
     def __init__(self, stats: Stats, plans: Plans) -> None:
         self._stats = stats
         self._plans = plans
+
+    async def list_valid_work_sets(self) -> tuple[ValidWorkSet, ...]:
+        """有效工作组事实：确定性计划规则与 PB／趋势现算共用同一口径的只读输入。"""
+        return await self._stats.list_valid_work_sets()
+
+    async def list_linked_workouts(self) -> tuple[WorkoutFact, ...]:
+        """已关联计划日程的训练事实：计划调整的关联口径与月历完成事实共用。"""
+        return await self._stats.list_linked_workouts()
 
     async def list_personal_bests(self) -> tuple[PersonalBest, ...]:
         """按当前有效训练组现算全部三类 PB。"""

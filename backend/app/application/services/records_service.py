@@ -1,9 +1,11 @@
-"""records 用例编排：训练记录的新增、查询、修改与删除。"""
+"""records 用例编排：训练记录的新增、查询、修改与删除，与确认写入的事务入口。"""
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from datetime import date
+from uuid import uuid4
 
 from app.domain.actions.rules import UnknownExercise, validate_record_against_exercise
+from app.domain.conversations.schema import ConversationRun
 from app.domain.plans.schema import PlanSession
 from app.domain.records.rules import (
     validate_performed_on,
@@ -13,6 +15,9 @@ from app.domain.records.rules import (
 from app.domain.records.schema import WorkoutSession, WorkoutSetInput
 from app.infrastructure.database.connection import Database
 from app.infrastructure.database.repositories.actions_repository import ExerciseRepo
+from app.infrastructure.database.repositories.conversations_repository import (
+    ConversationRepo,
+)
 from app.infrastructure.database.repositories.records_repository import (
     WorkoutRecordsRepo,
 )
@@ -33,19 +38,21 @@ class PlanSessionLinkAmbiguous(ValueError):
     """自动关联时当天未完成日程不是恰好一个（零个或多个）：不猜，要求用户选择或保持额外训练。"""
 
 
-class WorkoutRecordsService:
-    """训练记录 CRUD（写入前统一校验事实、目录口径与关联日程）。"""
+class RecordsService:
+    """训练记录用例：表单写入与确认写入共用同一套事实校验，确认写入额外承担幂等。"""
 
     def __init__(
         self,
         records: WorkoutRecordsRepo,
         exercises: ExerciseRepo,
         revisions: ToolCacheRevisionsRepo,
+        conversations: ConversationRepo,
         db: Database,
     ) -> None:
         self._records = records
         self._exercises = exercises
         self._revisions = revisions
+        self._conversations = conversations
         self._db = db
 
     async def validate_record_facts(
@@ -65,15 +72,58 @@ class WorkoutRecordsService:
         plan_session_id: int | None = None,
         auto_link: bool = False,
     ) -> WorkoutSession:
-        """新增一次训练（连同全部组，原子写入）；``plan_session_id`` 为 None 即额外训练。"""
+        """表单新增一次训练（连同全部组，原子写入）；``plan_session_id`` 为 None 即额外训练。"""
         day, facts = await self.validate_record_facts(performed_on, sets)
         async with self._db.transaction() as conn:
-            link = await self._resolve_link_in_transaction(
-                conn, day, plan_session_id, auto_link, exclude_session_id=None
+            return await self._write_in_transaction(
+                conn, day, facts, plan_session_id, auto_link
             )
-            record = await self._records.create_in_transaction(conn, day, link, facts)
-            await self._revisions.bump_in_transaction(conn, "workouts")
-            return record
+
+    async def commit_workout(
+        self,
+        source_run: ConversationRun,
+        performed_on: date,
+        sets: Sequence[WorkoutSetInput],
+        *,
+        plan_session_id: int | None = None,
+        auto_link: bool = False,
+        now: Callable[[], str],
+    ) -> WorkoutSession:
+        """确认端点写入一次训练：幂等键 ``source_run.id + action=workout_confirmed``。
+
+        读取确认 Entry、写训练行与组行、递增 workouts revision、写确认 Entry 全在同一事务内：唯一连接
+        加唯一锁串行化事务（app/infrastructure/database/connection.py），因此并发重复确认只有先到的
+        那一个写入，后到的在同一事务里读到既有确认并返回既有记录，不写第二行、不重复递增 revision。
+        """
+        day, facts = await self.validate_record_facts(performed_on, sets)
+        async with self._db.transaction() as conn:
+            confirmed = await self._conversations.read_confirmations_in_transaction(
+                conn, source_run.id, "workout_confirmed"
+            )
+            if confirmed:
+                session_id = int(confirmed[0].payload["workout_session_id"])
+            else:
+                written = await self._write_in_transaction(
+                    conn, day, facts, plan_session_id, auto_link
+                )
+                await self._conversations.append_confirmation_once_in_transaction(
+                    conn,
+                    conversation_id=source_run.conversation_id,
+                    run_id=source_run.id,
+                    entry_id=str(uuid4()),
+                    action="workout_confirmed",
+                    text=(
+                        f"用户已确认写入训练记录：记录 ID {written.id}，"
+                        f"训练日期 {day.isoformat()}。"
+                    ),
+                    workout_session_id=written.id,
+                    created_at=now(),
+                )
+                session_id = written.id
+        record = await self._records.read(session_id)
+        if record is None:
+            raise WorkoutRecordNotFound(f"训练记录不存在：{session_id}")
+        return record
 
     async def get(self, session_id: int) -> WorkoutSession | None:
         """按身份读取一次训练及其全部组；不存在即 None。"""
@@ -116,6 +166,22 @@ class WorkoutRecordsService:
             if not await self._records.delete_in_transaction(conn, session_id):
                 raise WorkoutRecordNotFound(f"训练记录不存在：{session_id}")
             await self._revisions.bump_in_transaction(conn, "workouts")
+
+    async def _write_in_transaction(
+        self,
+        conn,
+        day: date,
+        facts: tuple[WorkoutSetInput, ...],
+        plan_session_id: int | None,
+        auto_link: bool,
+    ) -> WorkoutSession:
+        """事务内写一次训练并递增 workouts revision；关联日程也在同一份快照里定下。"""
+        link = await self._resolve_link_in_transaction(
+            conn, day, plan_session_id, auto_link, exclude_session_id=None
+        )
+        record = await self._records.create_in_transaction(conn, day, link, facts)
+        await self._revisions.bump_in_transaction(conn, "workouts")
+        return record
 
     async def list_unfinished_plan_sessions(
         self, performed_on: date

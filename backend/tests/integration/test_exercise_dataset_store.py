@@ -1,20 +1,18 @@
 # 内存数据集仓储的集成测试：对已入库的真实语料 exercises.zh-en.json 直接检索，验证文本匹配、
-# facet 过滤（含折叠长名的等价召回）、命中排序与 limit、详情按身份读取与缺失返回 None，以及领域
-# 词表对数据集实际取值的完整覆盖（词表漂移会在此失败）。不 mock 仓储、不伪造行。
+# facet 过滤（含折叠长名的等价召回）、命中排序与 limit、详情按身份读取与缺失返回 None，以及词表
+# 对数据集实际取值的完整覆盖（词表漂移会在此失败）。不 mock 仓储、不伪造行。
 
-from pathlib import Path
-
-from app.domain.actions.dataset import (
+from app.application.agent.harness.tools.exercise_dataset.store import (
+    DEFAULT_DATASET_PATH,
+    InMemoryExerciseDataset,
+)
+from app.application.agent.harness.tools.exercise_dataset.vocab import (
     BODY_PART_VALUES,
     EQUIPMENT_VALUES,
     MUSCLE_GROUP_ALIASES,
     MUSCLE_GROUP_VALUES,
     TARGET_VALUES,
     DatasetExercise,
-)
-from app.infrastructure.datasets.exercise_dataset import (
-    DEFAULT_DATASET_PATH,
-    InMemoryExerciseDataset,
 )
 
 CHEST_TOTAL = 163
@@ -28,12 +26,11 @@ def _dataset() -> InMemoryExerciseDataset:
 
 
 def _all_rows() -> tuple[DatasetExercise, ...]:
-    return _dataset()._ensure_loaded()
+    return _dataset()._rows
 
 
 async def test_default_path_points_at_the_committed_corpus() -> None:
     """默认路径就是仓库里已提交的数据集，规模稳定。"""
-    assert DEFAULT_DATASET_PATH == Path(DEFAULT_DATASET_PATH)
     assert DEFAULT_DATASET_PATH.is_file()
     assert len(_all_rows()) == 1324
 
@@ -88,7 +85,7 @@ async def test_get_detail_returns_full_bilingual_row_or_none() -> None:
 
 
 async def test_facet_vocabularies_cover_every_dataset_value() -> None:
-    """领域词表覆盖数据集全部实际取值：简单 facet 精确相等，muscle_group 允许折叠长名。"""
+    """词表覆盖数据集全部实际取值：简单 facet 精确相等，muscle_group 允许折叠长名。"""
     rows = _all_rows()
 
     assert {row.body_part for row in rows} == set(BODY_PART_VALUES)

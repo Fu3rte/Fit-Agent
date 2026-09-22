@@ -4,19 +4,22 @@
 # facet 取值在校验阶段就归一为规范英文：中文或英文都收，越界值走 args_schema 的参数校验错误路径。
 
 from dataclasses import dataclass
-from typing import Annotated
+from typing import Annotated, Any
 
 from langchain_core.tools import tool
 from langgraph.prebuilt.tool_node import ToolRuntime
 from pydantic import BeforeValidator, Field
 
 from app.application.agent.harness.declaration import HarnessContext, HarnessState
+from app.application.agent.harness.tools.exercise_dataset.store import ExerciseDataset
+from app.application.agent.harness.tools.exercise_dataset.vocab import (
+    facet_options_zh,
+    normalize_facet,
+)
 from app.application.agent.harness.tools.training import (
     HarnessToolArgs,
     dump_tool_payload,
 )
-from app.application.ports import ExerciseDataset
-from app.domain.actions.dataset import facet_options_zh, normalize_facet
 
 
 @dataclass(frozen=True, slots=True)
@@ -26,32 +29,30 @@ class ExerciseDatasetHarnessContext(HarnessContext):
     dataset: ExerciseDataset
 
 
-def _facet(field: str) -> BeforeValidator:
-    """facet 参数在校验期归一：留空即 None，取值按中英词表折成数据集规范英文，越界即校验错误。"""
+def _facet_param(field: str) -> Any:
+    """facet 参数类型：描述里列出中文可选值，校验期按中英词表折成规范英文，越界即校验错误。"""
 
     def normalize(value: object) -> object:
         return value if value is None else normalize_facet(field, str(value))
 
-    return BeforeValidator(normalize)
-
-
-def _facet_field(field: str) -> Field:
-    return Field(
-        default=None,
-        description=f"中文或英文。可选：{'、'.join(facet_options_zh(field))}",
-    )
+    return Annotated[
+        str | None,
+        Field(
+            default=None,
+            description=f"中文或英文。可选：{'、'.join(facet_options_zh(field))}",
+        ),
+        BeforeValidator(normalize),
+    ]
 
 
 class SearchExerciseLibraryArgs(HarnessToolArgs):
     """动作检索参数：文本用英文动作名子串，facet 接受中文或英文取值，命中上限 limit 有界。"""
 
     query: Annotated[str | None, Field(default=None, min_length=1)] = None
-    body_part: Annotated[str | None, _facet_field("body_part"), _facet("body_part")] = None
-    equipment: Annotated[str | None, _facet_field("equipment"), _facet("equipment")] = None
-    target: Annotated[str | None, _facet_field("target"), _facet("target")] = None
-    muscle_group: Annotated[
-        str | None, _facet_field("muscle_group"), _facet("muscle_group")
-    ] = None
+    body_part: _facet_param("body_part") = None
+    equipment: _facet_param("equipment") = None
+    target: _facet_param("target") = None
+    muscle_group: _facet_param("muscle_group") = None
     limit: int = Field(default=8, ge=1, le=25)
 
 

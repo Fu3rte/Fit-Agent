@@ -4,6 +4,9 @@ import aiosqlite
 
 from app.domain.profile.schema import Profile, profile_from_json, profile_to_json
 from app.infrastructure.database.connection import Database
+from app.infrastructure.database.repositories.tool_cache_repository import (
+    ToolCacheRevisionsRepo,
+)
 
 
 async def _read_profile(conn: aiosqlite.Connection) -> Profile | None:
@@ -20,18 +23,21 @@ async def _read_profile(conn: aiosqlite.Connection) -> Profile | None:
 class ProfileRepo:
     """``athlete_profile`` 单例行的读取与整份覆盖写入。"""
 
-    def __init__(self, db: Database):
+    def __init__(self, db: Database, revisions: ToolCacheRevisionsRepo):
         self._db = db
+        self._revisions = revisions
 
     async def read(self) -> Profile | None:
         """读取画像；``profile_json`` 为 NULL（未建档）时返回 None。"""
         return await self._db.under_lock(_read_profile)
 
     async def write(self, profile: Profile) -> None:
-        """整份覆盖写入画像七字段（一条 UPDATE，单语句写入不另开事务）。"""
+        """整份覆盖写入画像七字段：画像行与 ``profile`` revision 同一事务提交或一起回滚。"""
         payload = profile_to_json(profile)
 
-        async def op(conn: aiosqlite.Connection) -> None:
+        async with self._db.transaction() as conn:
+            # 先 bump 再写行：单例行缺失等写入失败必须把 revision 一起带走，不能虚报新版本。
+            await self._revisions.bump_in_transaction(conn, "profile")
             cursor = await conn.execute(
                 "UPDATE athlete_profile SET profile_json = ? WHERE id = 1",
                 (payload,),
@@ -43,5 +49,3 @@ class ProfileRepo:
                     )
             finally:
                 await cursor.close()
-
-        await self._db.under_lock(op)

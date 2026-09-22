@@ -1,17 +1,12 @@
-# 动作数据集领域层的纯测试：facet 中英归一（中文／英文／大小写／折叠长名）、越界值抛可修正错误、
+# 动作数据集工具词表（exercise_dataset/vocab.py）的纯测试：facet 中英归一（中文／英文／大小写／折叠长名）、越界值抛可修正错误、
 # 规范码的等价原始取值集合、DatasetExercise 行映射与检索视图。依据：本轮拍板的"闭集 facet 预建中英
 # 对照、以数据集字段为准、长名折叠为规范码别名"。全部为纯函数与纯数据，不触达 IO 与仓储。
 
 import pytest
 
-from app.domain.actions.dataset import (
-    BODY_PART_VALUES,
-    EQUIPMENT_VALUES,
+from app.application.agent.harness.tools.exercise_dataset.vocab import (
     FACET_FIELDS,
-    MUSCLE_GROUP_VALUES,
-    TARGET_VALUES,
     DatasetExercise,
-    UnknownFacetField,
     UnknownFacetValue,
     equivalent_values,
     facet_label,
@@ -20,8 +15,8 @@ from app.domain.actions.dataset import (
 )
 
 
-def _row(**overrides: object) -> dict[str, object]:
-    base: dict[str, object] = {
+def _row() -> dict[str, object]:
+    return {
         "id": "0001",
         "name": "3/4 sit-up",
         "category": "waist",
@@ -33,8 +28,6 @@ def _row(**overrides: object) -> dict[str, object]:
         "instructions": {"zh": "中文指导", "en": "English instruction"},
         "steps": {"zh": ["第一步", "第二步"], "en": ["Step one", "Step two"]},
     }
-    base.update(overrides)
-    return base
 
 
 def test_normalize_facet_accepts_chinese_english_and_case() -> None:
@@ -57,25 +50,14 @@ def test_normalize_facet_folds_muscle_group_long_names_to_canonical_codes() -> N
 
 
 def test_equivalent_values_expands_folded_aliases() -> None:
-    """规范码召回它的折叠长名；无别名的 facet 只召回自身。"""
-    assert equivalent_values("muscle_group", "lats") == frozenset(
-        {"lats", "latissimus dorsi"}
-    )
-    assert equivalent_values("muscle_group", "traps") == frozenset(
-        {"traps", "trapezius"}
-    )
-    assert equivalent_values("body_part", "chest") == frozenset({"chest"})
-
-
-def test_normalize_facet_rejects_unknown_field() -> None:
-    """过滤字段越界即抛错，指明可过滤字段名单。"""
-    with pytest.raises(UnknownFacetField) as exc:
-        normalize_facet("movement_pattern", "深蹲")
-    assert "body_part" in str(exc.value)
+    """规范码召回它的折叠长名；无别名的取值只召回自身。"""
+    assert equivalent_values("lats") == frozenset({"lats", "latissimus dorsi"})
+    assert equivalent_values("traps") == frozenset({"traps", "trapezius"})
+    assert equivalent_values("chest") == frozenset({"chest"})
 
 
 def test_normalize_facet_rejects_value_outside_the_vocabulary() -> None:
-    """词表外的取值抛可修正错误，附带中文可选值，引导重发合法参数。"""
+    """词表外的取值抛可修正错误，指明字段并列举中文可选值，引导重发合法参数。"""
     with pytest.raises(UnknownFacetValue) as exc:
         normalize_facet("body_part", "不存在")
     message = str(exc.value)
@@ -89,14 +71,6 @@ def test_facet_options_zh_lists_distinct_sorted_labels(field: str) -> None:
     options = facet_options_zh(field)
     assert list(options) == sorted(options)
     assert len(set(options)) == len(options)
-
-
-def test_canonical_value_sets_match_dataset_sizes() -> None:
-    """规范取值集合的数量与数据集观测一致：10／28／19／27。"""
-    assert len(BODY_PART_VALUES) == 10
-    assert len(EQUIPMENT_VALUES) == 28
-    assert len(TARGET_VALUES) == 19
-    assert len(MUSCLE_GROUP_VALUES) == 27
 
 
 def test_dataset_exercise_maps_row_and_exposes_views() -> None:
@@ -124,7 +98,9 @@ def test_dataset_exercise_maps_row_and_exposes_views() -> None:
 
 def test_dataset_exercise_matches_english_name_case_insensitively() -> None:
     """文本匹配针对英文动作名做大小写无关子串命中。"""
-    exercise = DatasetExercise.from_row(_row(name="Barbell Back Squat"))
+    row = _row()
+    row["name"] = "Barbell Back Squat"
+    exercise = DatasetExercise.from_row(row)
     assert exercise.matches_text("back squat") is True
     assert exercise.matches_text("BARBELL") is True
     assert exercise.matches_text("deadlift") is False

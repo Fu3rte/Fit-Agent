@@ -136,23 +136,6 @@ class PlanRepo:
             source_plan_id=source_plan_id,
         )
 
-    async def write_rejected_in_transaction(
-        self,
-        conn: aiosqlite.Connection,
-        *,
-        structured_content_json: str,
-        evaluator_result_json: str,
-        created_at: str,
-    ) -> Plan:
-        """二次阻断失败且无原 draft：插入一条 rejected 终态（``confirmed_at``／``archived_at`` 为 NULL）。"""
-        return await self._append_new_version_in_transaction(
-            conn,
-            status="rejected",
-            structured_content_json=structured_content_json,
-            evaluator_result_json=evaluator_result_json,
-            created_at=created_at,
-        )
-
     async def replace_draft_in_transaction(
         self,
         conn: aiosqlite.Connection,

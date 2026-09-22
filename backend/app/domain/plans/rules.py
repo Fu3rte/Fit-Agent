@@ -6,11 +6,13 @@ from typing import Literal
 
 from app.domain.actions.schema import Exercise, RecordType
 from app.domain.plans.schema import (
+    SNAPSHOT_MISMATCH_CODE,
     KnownLoad,
     NeedsCalibration,
     PlanDraft,
     PlannedExercise,
     RuleFailure,
+    ToolEvidence,
     WeightedRepsPrescription,
 )
 from app.domain.profile.schema import Profile
@@ -40,14 +42,6 @@ def known_forbidden_exercise_ids(profile: Profile) -> tuple[str, ...]:
     """画像明确给出的禁用动作 ID：只取 ``known`` 值。"""
     fact = profile.forbidden_exercise_ids
     return fact.value if fact.is_known and fact.value is not None else ()
-
-
-def filter_forbidden_exercises(
-    candidates: Sequence[Exercise], *, forbidden_exercise_ids: Collection[str]
-) -> tuple[Exercise, ...]:
-    """Planner 前的确定性硬过滤：从候选动作中删除禁用 ID，保持目录顺序（顺序即确定性）。"""
-    forbidden = set(forbidden_exercise_ids)
-    return tuple(exercise for exercise in candidates if exercise.id not in forbidden)
 
 
 def resolve_starting_load(
@@ -245,6 +239,28 @@ def _prescription_failures(
             )
         )
     return failures
+
+
+def snapshot_mismatch_failures(
+    candidate: Collection[ToolEvidence],
+    evaluation: Collection[ToolEvidence],
+) -> tuple[RuleFailure, ...]:
+    """候选与评审的 revision 证据核对：同一工具读到的事实域 revision 不同即阻断失败。"""
+    evaluated = {
+        (item.tool_name, item.revision_domain): item.revision for item in evaluation
+    }
+    return tuple(
+        RuleFailure(
+            code=SNAPSHOT_MISMATCH_CODE,
+            message=(
+                f"候选读取的 {item.revision_domain} revision 已不再是评审读到的值："
+                f"{item.tool_name} {item.revision} != "
+                f"{evaluated.get((item.tool_name, item.revision_domain))}"
+            ),
+        )
+        for item in candidate
+        if evaluated.get((item.tool_name, item.revision_domain)) != item.revision
+    )
 
 
 def validate_plan_draft(

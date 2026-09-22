@@ -31,8 +31,10 @@ from app.application.agent.run_graph import (
     SAFETY_STOP_NODE,
     GeneralOutcome,
     RunBranches,
+    RunGraphNodes,
     build_agent_run_graph,
 )
+from app.domain.plans.schema import DeterministicResult, EvaluationResult
 
 BUSINESS_DAY = date(2026, 6, 1)
 PLAN_MARKER_NODE = "plan_marker"
@@ -122,6 +124,13 @@ def _plan_marker_graph() -> CompiledStateGraph:
     builder.add_edge(START, PLAN_MARKER_NODE)
     builder.add_edge(PLAN_MARKER_NODE, END)
     return builder.compile(checkpointer=InMemorySaver())
+
+
+@dataclass
+class _Runtime:
+    """节点直调时的运行上下文外壳：``RunGraphNodes`` 只读 ``context``。"""
+
+    context: GeneratePlanRun
 
 
 def _graph(
@@ -227,6 +236,47 @@ async def test_each_legal_intent_reaches_its_branch_with_one_router_call(
         assert names[2:] == [PREPARE_PLAN_NODE, PLAN_MARKER_NODE, PLAN_NODE]
         assert branches.plan_intents == [intent]
         assert branches.general_intents == []
+
+
+async def test_plan_entry_resets_the_previous_runs_channels() -> None:
+    """同一 thread 的新 Run 进计划分支时，上一 Run 的修订／评估／证据／终态通道必须归零。"""
+    stale: WorkflowState = {
+        **_state("给我一份计划"),
+        "intent": "generate_plan",
+        "revision_count": 1,
+        "revision_feedback": ("goal_alignment: 目标不匹配",),
+        "deterministic_result": DeterministicResult(passed=False, failures=()),
+        "evaluation": EvaluationResult.model_validate({
+            "passed": False,
+            "deterministic": {"passed": True, "failures": []},
+            "rubric": {
+                "goal_alignment": {"passed": False, "reason": "目标不匹配"},
+                "schedule_reasonableness": {"passed": True, "reason": "合理"},
+                "explanation_quality": {"passed": True, "reason": "清楚"},
+            },
+            "blocking_failures": ["goal_alignment: 目标不匹配"],
+            "warnings": [],
+            "revision_count": 1,
+        }),
+        "termination_reason": "discard_failed_candidate",
+    }
+    nodes = RunGraphNodes(
+        model=RoutingModel(), branches=RecordingBranches().as_run_branches()
+    )
+    runtime: Any = _Runtime(GeneratePlanRun(business_day=BUSINESS_DAY))
+
+    update = await nodes.prepare_plan(stale, runtime)
+
+    assert update == {
+        "termination_reason": None,
+        "revision_count": 0,
+        "revision_feedback": (),
+        "deterministic_result": None,
+        "evaluation": None,
+        "evaluation_result": None,
+        "planner_evidence": (),
+        "draft_plan_id": None,
+    }
 
 
 async def test_safety_hit_stops_before_router_with_zero_model_and_branch_calls() -> None:

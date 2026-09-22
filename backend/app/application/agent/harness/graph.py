@@ -19,12 +19,14 @@ def build_tool_harness(
     *,
     timeout_seconds: float,
     cache: ToolResultCache | None = None,
+    tools_node_name: str = "tools",
 ) -> CompiledStateGraph:
     """构建 model → tools → model 的 Harness agent loop。
 
     工具固化为一个 tuple，model node 与 ToolNode 共用。循环由 LangGraph 表达，node 内无 while；
     预算与超时是权威终止边界，耗尽或异常一律向上抛出交给外层 Run 错误处理；不配置 checkpointer。
     ``cache`` 由装配方一次性创建并注入；为 None 时工具调用不查缓存、不写缓存。
+    ``tools_node_name`` 由装配方给出，同一 Run 内多个 ToolNode 各自独立命名。
     """
     offered = tuple(tools)
 
@@ -43,7 +45,7 @@ def build_tool_harness(
     graph = StateGraph(HarnessState, context_schema=HarnessContext)
     graph.add_node("model", model)
     graph.add_node(
-        "tools",
+        tools_node_name,
         ToolNode(
             offered,
             awrap_tool_call=build_tool_call_wrapper(
@@ -53,6 +55,8 @@ def build_tool_harness(
         ),
     )
     graph.add_edge(START, "model")
-    graph.add_conditional_edges("model", tools_condition, {"tools": "tools", END: END})
-    graph.add_edge("tools", "model")
+    graph.add_conditional_edges(
+        "model", tools_condition, {"tools": tools_node_name, END: END}
+    )
+    graph.add_edge(tools_node_name, "model")
     return graph.compile()

@@ -19,6 +19,10 @@ from langgraph.prebuilt import ToolNode
 from app.application.agent.contracts import ToolExecutionContext
 from app.application.agent.harness.declaration import HarnessState
 from app.application.agent.harness.tools.training import (
+    EVALUATION_TOOLS,
+    PLAN_REQUIRED_FACTS,
+    PLANNING_TOOLS,
+    PROFILE_TOOLS,
     PROGRESS_TOOLS,
     SCHEDULE_TOOLS,
     TrainingHarnessContext,
@@ -26,6 +30,7 @@ from app.application.agent.harness.tools.training import (
 from app.application.ports import ModelGateway
 from app.bootstrap import SqliteHealthProbe, build_repositories, build_services
 from app.domain.plans.schema import PlanSession
+from app.domain.profile.schema import Fact, Profile
 from app.domain.records.schema import WorkoutSetInput
 from app.infrastructure.database.connection import Database
 from app.infrastructure.database.repositories.actions_repository import ExerciseRepo
@@ -157,7 +162,7 @@ class ReadHarness:
         *,
         plan_session_id: int | None = None,
     ) -> int:
-        """写入一次训练（真实 WorkoutRecordsService），返回训练身份。"""
+        """写入一次训练（真实 RecordsService），返回训练身份。"""
         services = build_services(
             build_repositories(self.db),
             self.db,
@@ -170,13 +175,17 @@ class ReadHarness:
 
 
 @asynccontextmanager
-async def _harness(tmp_path: Path) -> AsyncIterator[ReadHarness]:
+async def _harness(
+    tmp_path: Path,
+    tools: Sequence[Any] = (*SCHEDULE_TOOLS, *PROGRESS_TOOLS),
+) -> AsyncIterator[ReadHarness]:
     db = Database(tmp_path / "fit_agent.db")
     await db.open()
     await db.migrate()
     try:
+        repositories = build_repositories(db)
         services = build_services(
-            build_repositories(db),
+            repositories,
             db,
             SqliteHealthProbe(db, db.path.parent),
         )
@@ -184,13 +193,14 @@ async def _harness(tmp_path: Path) -> AsyncIterator[ReadHarness]:
             model=_MODEL,
             budget=_UnusedBudget(),
             business_day=BUSINESS_DAY,
+            profiles=repositories.profiles,
             plans=PlanRepo(db),
             catalog=ExerciseRepo(db),
             records=services.records,
             stats=services.stats,
         )
         graph = StateGraph(HarnessState, context_schema=TrainingHarnessContext)
-        graph.add_node("tools", ToolNode([*SCHEDULE_TOOLS, *PROGRESS_TOOLS]))
+        graph.add_node("tools", ToolNode(list(tools)))
         graph.add_edge(START, "tools")
         yield ReadHarness(db=db, graph=graph.compile(), context=context)
     finally:
@@ -304,13 +314,17 @@ def _leaf_values(value: Any) -> list[Any]:
 
 
 async def test_read_active_plan_returns_null_without_active_plan(tmp_path: Path) -> None:
-    """没有 active 计划：只回业务日与 null，不编造计划。"""
+    """没有 active 计划：只回业务日、null 与空渐进决策，不编造计划。"""
     async with _harness(tmp_path) as h:
         before = await h.counts()
 
         payload = await h.payload("read_active_plan", {})
 
-        assert payload == {"business_day": "2026-06-01", "active_plan": None}
+        assert payload == {
+            "business_day": "2026-06-01",
+            "active_plan": None,
+            "progression_decisions": [],
+        }
         assert await h.counts() == before
 
 
@@ -328,6 +342,7 @@ async def test_read_active_plan_reports_window_and_expands_catalog_names(
             "version",
             "coverage",
             "goal",
+            "explanation",
             "weekly_frequency",
             "training_days",
         }
@@ -338,6 +353,7 @@ async def test_read_active_plan_reports_window_and_expands_catalog_names(
             "ends_on": "2026-06-07",
         }
         assert plan["goal"] == "增肌"
+        assert plan["explanation"] == "每周三练"
         assert plan["weekly_frequency"] == 3
         assert [day["scheduled_on"] for day in plan["training_days"]] == [
             "2026-06-01",
@@ -371,12 +387,77 @@ async def test_read_active_plan_returns_null_name_for_missing_catalog_entry(
             "version",
             "coverage",
             "goal",
+            "explanation",
             "weekly_frequency",
             "training_days",
         }
         assert missing["exercise_id"] == "not-in-catalog"
         assert missing["exercise_name"] is None
         assert present["exercise_name"] == "平板支撑"
+
+
+async def test_read_active_plan_reports_the_progression_decisions_of_weighted_targets(
+    tmp_path: Path,
+) -> None:
+    """带目标处方的负重动作给出渐进决策：关联训练由该计划的日程身份界定，决策取自 10B／10B-1 规则。"""
+    async with _harness(tmp_path) as h:
+        plan_id = await h.seed_plan(_plan_content())
+        await h.seed_sessions(plan_id, [date(2026, 6, 1)])
+        sessions = await h.plan_sessions(plan_id)
+        await h.seed_workout(
+            date(2026, 5, 30), [_squat_set()], plan_session_id=sessions[0].id
+        )
+
+        decisions = (await h.payload("read_active_plan", {}))[
+            "progression_decisions"
+        ]
+
+        assert decisions == [
+            {
+                "exercise_id": BARBELL_BACK_SQUAT,
+                "sets": 3,
+                "reps_min": 5,
+                "reps_max": 8,
+                "target_load_kg": 60.0,
+                "decision": {"action": "keep", "load_kg": 60.0},
+            }
+        ]
+
+
+async def test_read_active_plan_skips_targets_without_a_catalog_increment(
+    tmp_path: Path,
+) -> None:
+    """目录没有增重单位的动作不产生渐进决策：只有能被规则判定的目标才出现在事实里。"""
+    async with _harness(tmp_path) as h:
+        await h.seed_plan(_plan_content(squat_id=PULL_UP))
+
+        plan = await h.payload("read_active_plan", {})
+
+        assert plan["progression_decisions"] == []
+
+
+async def test_search_exercises_returns_the_candidate_facts_with_the_starting_load(
+    tmp_path: Path,
+) -> None:
+    """检索结果带可推荐、增重单位与起始负荷：起始负荷取自该动作最近一次有效工作组。"""
+    async with _harness(tmp_path, tools=PLANNING_TOOLS) as h:
+        no_history = await h.payload("search_exercises", {"query": "杠铃背蹲"})
+
+        assert [hit["exercise_id"] for hit in no_history] == [BARBELL_BACK_SQUAT]
+        assert no_history[0]["recommendable"] is True
+        assert no_history[0]["min_load_increment_kg"] == 2.5
+        assert no_history[0]["starting_load"] == {"status": "needs_calibration"}
+
+        workout_id = await h.seed_workout(date(2026, 5, 30), [_squat_set()])
+
+        known = (await h.payload("search_exercises", {"query": "杠铃背蹲"}))[0]
+
+        assert known["starting_load"] == {
+            "status": "known",
+            "weight_kg": 60.0,
+            "source_workout_session_id": workout_id,
+            "source_set_no": 1,
+        }
 
 
 async def test_read_active_plan_rejects_undeclared_arguments(tmp_path: Path) -> None:
@@ -671,7 +752,7 @@ async def test_read_progress_rejects_undeclared_arguments(tmp_path: Path) -> Non
 
 
 def test_read_tool_schemas_forbid_undeclared_fields_and_hide_injected_context() -> None:
-    """四个 args_schema 都带 additionalProperties: false；注入的 runtime、身份与 revision 不进模型可见 Schema。"""
+    """六个计划只读 Tool 都带 additionalProperties: false；runtime、身份与 revision 不进模型可见 Schema。"""
     assert [tool.name for tool in SCHEDULE_TOOLS] == [
         "read_active_plan",
         "read_training_calendar",
@@ -683,17 +764,19 @@ def test_read_tool_schemas_forbid_undeclared_fields_and_hide_injected_context() 
     # 身份与 revision 由 Runtime 注入上下文，模型参数不得出现同名字段（ST-01）。
     injected = {f.name for f in fields(ToolExecutionContext)} | {"revision"}
     visible: dict[str, set[str]] = {}
-    for tool in (*SCHEDULE_TOOLS, *PROGRESS_TOOLS):
+    for tool in PLANNING_TOOLS:
         assert tool.args_schema.model_json_schema()["additionalProperties"] is False
         properties = tool.tool_call_schema.model_json_schema()["properties"]
         assert "runtime" not in properties
         assert injected.isdisjoint(properties)
         visible[tool.name] = set(properties)
     assert visible == {
+        "read_user_profile": set(),
         "read_active_plan": set(),
         "read_training_calendar": {"year", "month"},
         "read_training_history": {"limit"},
         "read_progress": set(),
+        "search_exercises": {"query"},
     }
 
 
@@ -763,3 +846,42 @@ def _all_tool_calls() -> tuple[tuple[str, dict[str, Any]], ...]:
         ("read_training_history", {}),
         ("read_progress", {}),
     )
+
+
+async def test_read_user_profile_returns_the_profile_facts(tmp_path: Path) -> None:
+    """画像 Tool 只读三态事实；未建档时明确返回 null，不编造字段。"""
+    async with _harness(tmp_path, tools=PROFILE_TOOLS) as h:
+        assert await h.payload("read_user_profile") == {"profile": None}
+        services = build_services(
+            build_repositories(h.db),
+            h.db,
+            SqliteHealthProbe(h.db, h.db.path.parent),
+        )
+        await services.profile.update(
+            Profile(weekly_frequency=Fact.known(3), training_goal=Fact.known("增肌"))
+        )
+        payload = await h.payload("read_user_profile")
+        assert payload["profile"]["weekly_frequency"] == {
+            "state": "known",
+            "value": 3,
+        }
+
+
+def test_plan_tool_whitelists_cover_the_required_facts() -> None:
+    """两个计划 Node 共用同一只读 Registry：白名单六项，必备事实是白名单子集且调整场景多两项。"""
+    names = tuple(tool.name for tool in PLANNING_TOOLS)
+    assert names == (
+        "read_user_profile",
+        "read_active_plan",
+        "read_training_calendar",
+        "read_training_history",
+        "read_progress",
+        "search_exercises",
+    )
+    assert tuple(tool.name for tool in EVALUATION_TOOLS) == names
+    assert tuple(tool.name for tool in PROFILE_TOOLS) == ("read_user_profile",)
+    generate = set(PLAN_REQUIRED_FACTS["generate_plan"])
+    adjust = set(PLAN_REQUIRED_FACTS["adjust_plan"])
+    assert generate < adjust
+    assert adjust - generate == {"read_active_plan", "read_training_calendar"}
+    assert adjust <= set(names)

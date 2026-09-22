@@ -21,6 +21,8 @@ from app.application.agent.budget import (
 )
 from app.application.agent.contracts import (
     ADJUST_PLAN_INTENT,
+    LOCAL_USER_ID,
+    PLAN_CONFIRMATION_KIND,
     AgentEvent,
     AgentEventName,
     AgentRunDeps,
@@ -34,6 +36,7 @@ from app.application.agent.contracts import (
     RequiredProfileMissing,
     TerminationReason,
     WorkflowState,
+    initial_workflow_state,
     thread_config,
 )
 from app.application.agent.harness.tools.general import (
@@ -44,10 +47,9 @@ from app.application.agent.harness.tools.general import (
 )
 from app.application.agent.harness.tools.training import TrainingHarnessContext
 from app.application.agent.prompts import (
+    DISCARD_FAILED_CANDIDATE_MESSAGE,
     GENERAL_CHAT_SYSTEM_PROMPT,
     NATURAL_LANGUAGE_RECORD_MESSAGE_PROMPT,
-    REJECT_DRAFT_MESSAGE,
-    SAFETY_STOP_MESSAGE,
     TOOL_HARNESS_SYSTEM_PROMPT,
 )
 from app.application.agent.router import NON_PLAN_INTENTS
@@ -102,10 +104,9 @@ def invalid_natural_language_record_message(error: Exception) -> str:
 
 INTERRUPT_EVENT_KEY = "__interrupt__"
 
-#: 计划分支的非正常终止 → 可见文本；字面量与 ``plan_nodes`` 的写入侧同表，改名随 ST-04 一起落。
+#: 计划分支的非正常终止 → 可见文本。
 _PLAN_TERMINATION_MESSAGES: Mapping[str, str] = {
-    "safety_stop": SAFETY_STOP_MESSAGE,
-    "reject_draft": REJECT_DRAFT_MESSAGE,
+    "discard_failed_candidate": DISCARD_FAILED_CANDIDATE_MESSAGE,
 }
 
 #: Intent → harness 系统提示词：一般对话用自己的对话提示词，其余工具 Intent 用工具循环提示词。
@@ -153,11 +154,13 @@ async def stream_agent_run(
 ) -> AsyncIterator[AgentEvent]:
     """一次 Agent Run 的事件流：节点事件逐个透出，终态由 State 的 ``final_result`` 收敛。
 
-    ``graph`` 是计划子图；安全扫描、路由与 General 分支都在顶层图上，计划子图的节点事件
-    （确认 interrupt 与 ``waiting`` 载荷）照旧透出，持久化顺序不变。
+    ``graph`` 是计划子图：安全扫描、路由、General 分支与作为 ``plan`` 节点接线的它本身都在
+    ``agent_run_graph`` 构造的顶层图上，计划子图的节点事件（确认 interrupt 与 ``waiting`` 载荷）照旧透出。
     """
     async with asyncio.timeout(run.budget.remaining_run_seconds()):
         updates: dict[str, Any] = {}
+        #: 同一 interrupt 会先随子图、再随父图各透出一次：按 interrupt 身份去重，只发一次 waiting。
+        emitted_interrupts: set[str] = set()
         async for namespace, chunk in agent_run_graph(graph, deps).astream(
             state,
             config,
@@ -170,6 +173,9 @@ async def stream_agent_run(
                     for pending in update:
                         if not isinstance(pending, Interrupt):
                             continue
+                        if pending.id in emitted_interrupts:
+                            continue
+                        emitted_interrupts.add(pending.id)
                         if (event := _waiting_event(pending.value)) is not None:
                             yield event
                     continue
@@ -256,8 +262,12 @@ def _done_event(
 
 
 def _waiting_event(payload: Any) -> AgentEvent | None:
-    """``waiting`` 事件：只取 interrupt 载荷里的 ``draft_plan_id``（§3.8）；形状不符就不发。"""
-    if isinstance(payload, Mapping) and isinstance(payload.get("draft_plan_id"), int):
+    """``waiting`` 事件：只取计划确认 interrupt 载荷里的 ``draft_plan_id``（§3.8）；形状不符就不发。"""
+    if (
+        isinstance(payload, Mapping)
+        and payload.get("kind") == PLAN_CONFIRMATION_KIND
+        and isinstance(payload.get("draft_plan_id"), int)
+    ):
         return AgentEvent("waiting", {"draft_plan_id": payload["draft_plan_id"]})
     return None
 
@@ -293,7 +303,7 @@ async def _existing_draft_target(
     intent: Intent, *, regenerate: bool, deps: AgentRunDeps
 ) -> ExistingDraftTarget:
     """判定已有唯一 draft 的处置；冲突即 :class:`PlanDraftConflict`，不调模型、不写入。"""
-    draft = await deps.persistence.get_unique_draft()
+    draft = await deps.plan_writes.get_unique_draft()
     if draft is None:
         return ExistingDraftTarget()
     is_adjust_draft = draft.source_plan_id is not None
@@ -323,6 +333,7 @@ def harness_context(run: GeneratePlanRun, *, deps: AgentRunDeps) -> TrainingHarn
         model=deps.model,
         budget=run.budget,
         business_day=run.business_day,
+        profiles=deps.profiles,
         plans=deps.plans,
         catalog=deps.catalog,
         records=deps.records,
@@ -476,7 +487,14 @@ async def run_events(
         )
     async for event in stream_agent_run(
         runtime.graph,
-        {"conversation_id": run.thread_id, "request": request},
+        initial_workflow_state(
+            run_id=run.id,
+            conversation_id=run.conversation_id,
+            user_id=LOCAL_USER_ID,
+            client_request_id=run.client_request_id,
+            business_day=business_day,
+            request=request,
+        ),
         thread_config(run.thread_id),
         GeneratePlanRun(
             business_day=business_day,

@@ -4,12 +4,49 @@
 
 import ast
 from pathlib import Path
+from typing import get_type_hints
+
+from app.application.agent.contracts import PlanLlmNodeDeps
+from app.application.agent.plan_nodes import EvaluatorAgentNode, PlannerAgentNode
 
 BACKEND_DIR = Path(__file__).resolve().parents[2]
 APP_DIR = BACKEND_DIR / "app"
 
 #: 已删除的旧顶层包：任何 app 模块再引用它们都是迁移残留。
 LEGACY_ROOTS = ("api", "domain", "graph", "harness", "storage", "provider_settings")
+
+#: LLM Node 依赖里一律不得出现的类型名：Repository、事务对象、业务写 Service 与事实装配器。
+FORBIDDEN_LLM_DEPENDENCY_TYPES: tuple[str, ...] = (
+    "PlansService",
+    "MemoryAssembler",
+    "MemoryContext",
+    "Database",
+    "Connection",
+    "Transaction",
+)
+
+#: LLM Node 依赖里一律不得出现的模块前缀：数据库基础设施（Repository 实现）与组合根。
+FORBIDDEN_LLM_DEPENDENCY_MODULES: tuple[str, ...] = (
+    "app.infrastructure",
+    "app.bootstrap",
+)
+
+
+def _type_names(dataclass_type: type) -> set[str]:
+    """一个 dataclass 的字段注解的完全限定名（未注解名的可调用类型回退到 ``str``）。"""
+    return {
+        f"{getattr(hint, '__module__', '')}.{getattr(hint, '__name__', hint)}"
+        for hint in get_type_hints(dataclass_type).values()
+    }
+
+
+def _forbidden_dependency_hits(type_names: set[str]) -> list[str]:
+    return sorted(
+        name
+        for name in type_names
+        if name.rpartition(".")[2] in FORBIDDEN_LLM_DEPENDENCY_TYPES
+        or name.startswith(FORBIDDEN_LLM_DEPENDENCY_MODULES)
+    )
 
 
 def _module_files(*parts: str) -> tuple[Path, ...]:
@@ -91,4 +128,18 @@ def test_no_module_imports_the_removed_legacy_layers() -> None:
     assert found == []
     for root in LEGACY_ROOTS:
         assert not (BACKEND_DIR / root).exists(), f"旧层残留：{root}"
+
+
+def test_planner_and_evaluator_nodes_have_no_write_dependency() -> None:
+    """两个 LLM Node 只拿 ``PlanLlmNodeDeps``（模型 ＋ 只读事实边界）：不含 Repository、数据库／事务对象、
+    业务写 Service 与 ``MemoryAssembler``。"""
+    for node in (PlannerAgentNode, EvaluatorAgentNode):
+        assert get_type_hints(node.__init__)["deps"] is PlanLlmNodeDeps
+
+    assert _forbidden_dependency_hits(_type_names(PlanLlmNodeDeps)) == []
+
+
+def test_memory_assembler_is_no_longer_a_plan_fact_source() -> None:
+    """事实装配器已删除：Planner／Evaluator 的事实只经各自的 ToolNode 返回。"""
+    assert not (APP_DIR / "application" / "agent" / "memory.py").exists()
 

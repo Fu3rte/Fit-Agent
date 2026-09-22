@@ -1,4 +1,4 @@
-"""plans 用例编排：计划持久化与确认／拒绝事务。"""
+"""plans 用例编排：计划草案落库与确认／归档事务。"""
 
 from datetime import date
 
@@ -30,126 +30,12 @@ class PlanDraftConflict(ValueError):
     """条件更新未命中，或原 draft 已不存在或不再是 draft。"""
 
 
-class PlanPersistenceService:
-    """计划持久化：draft／rejected 最小写路径与原 active 保护。"""
-
-    def __init__(
-        self,
-        plans: PlanRepo,
-        revisions: ToolCacheRevisionsRepo,
-        db: Database,
-    ) -> None:
-        self._plans = plans
-        self._revisions = revisions
-        self._db = db
-
-    async def get_unique_draft(self) -> Plan | None:
-        """当前唯一可确认 draft；没有即 None。"""
-        return await self._plans.read_draft()
-
-    async def persist_plan_result(
-        self,
-        draft: PlanDraft,
-        evaluation: EvaluationResult,
-        *,
-        existing_draft_id: int | None,
-        created_at: str,
-        source_plan_id: int | None = None,
-    ) -> Plan:
-        """落到唯一正确的业务写入，返回写入（或保持不变的）计划行。"""
-        content_json = plan_draft_to_json(draft)
-        result_json = evaluation_result_to_json(evaluation)
-        if evaluation.passed:
-            return await self._persist_passing(
-                content_json,
-                result_json,
-                existing_draft_id=existing_draft_id,
-                created_at=created_at,
-                source_plan_id=source_plan_id,
-            )
-        return await self._persist_blocking_failure(
-            content_json,
-            result_json,
-            existing_draft_id=existing_draft_id,
-            created_at=created_at,
-        )
-
-    async def _persist_passing(
-        self,
-        content_json: str,
-        result_json: str,
-        *,
-        existing_draft_id: int | None,
-        created_at: str,
-        source_plan_id: int | None,
-    ) -> Plan:
-        """通过路径：无原 draft 则插入，有原 draft 则条件替换同一 id/version。"""
-        async with self._db.transaction() as conn:
-            before = await self._plans.read_active_snapshot_in_transaction(conn)
-            if existing_draft_id is None:
-                written = await self._plans.write_draft_in_transaction(
-                    conn,
-                    structured_content_json=content_json,
-                    evaluator_result_json=result_json,
-                    created_at=created_at,
-                    source_plan_id=source_plan_id,
-                )
-            else:
-                written = await self._plans.replace_draft_in_transaction(
-                    conn,
-                    existing_draft_id,
-                    structured_content_json=content_json,
-                    evaluator_result_json=result_json,
-                )
-                if written is None:
-                    raise PlanDraftConflict(
-                        f"draft 已变化（不存在或不再是 draft），不覆盖：{existing_draft_id}"
-                    )
-            await self._require_active_unchanged(conn, before)
-            await self._revisions.bump_in_transaction(conn, "plans")
-            return written
-
-    async def _persist_blocking_failure(
-        self,
-        content_json: str,
-        result_json: str,
-        *,
-        existing_draft_id: int | None,
-        created_at: str,
-    ) -> Plan:
-        """阻断失败路径：无原 draft 写 rejected；有原 draft 则保持原 draft，不写任何行。"""
-        if existing_draft_id is not None:
-            existing = await self._plans.read_by_id(existing_draft_id)
-            if existing is None or existing.status != "draft":
-                raise PlanDraftConflict(
-                    f"原 draft 不存在或不再是 draft：{existing_draft_id}"
-                )
-            return existing
-        async with self._db.transaction() as conn:
-            before = await self._plans.read_active_snapshot_in_transaction(conn)
-            written = await self._plans.write_rejected_in_transaction(
-                conn,
-                structured_content_json=content_json,
-                evaluator_result_json=result_json,
-                created_at=created_at,
-            )
-            await self._require_active_unchanged(conn, before)
-            await self._revisions.bump_in_transaction(conn, "plans")
-            return written
-
-    async def _require_active_unchanged(
-        self, conn, before: ActivePlanSnapshot
-    ) -> None:
-        """写路径结束时原 active 必须逐字段不变：变了即回滚并大声失败。"""
-        after = await self._plans.read_active_snapshot_in_transaction(conn)
-        if after != before:
-            raise RuntimeError(
-                f"写路径修改了原 active 计划（stage4.md §9.2）：{before!r} -> {after!r}"
-            )
+class EvaluationNotPassed(ValueError):
+    """``persist_draft`` 收到未通过评估的结果：不写任何行（§7.1）。"""
 
 
 class PlanActivationError(ValueError):
-    """确认／拒绝事务的明确错误：不写任何行，draft 保持可确认（stage5.md §3.1、§8）。"""
+    """确认／归档事务的明确错误：不写任何行，draft 保持可确认（stage5.md §3.1、§8）。"""
 
 
 class PlanNotFound(PlanActivationError):
@@ -174,17 +60,12 @@ class PlanRevalidationFailed(PlanActivationError):
         self.failures = failures
 
 
-class PlanActivationService:
-    """Stage 5 唯一的确认／拒绝事务入口：§3.1 激活事务、§3.2 ``archive_draft`` 与四态幂等。
+class PlansService:
+    """计划用例的唯一写入口：``persist_draft``／``activate_plan``／``archive_draft``。
 
-    无模型：模型调用不在业务事务内，本服务不导入任何模型／Graph SDK。全部写入在一个短事务里，
-    任一步失败整体回滚、draft 保持可确认；``idx_plans_single_active``／``idx_plans_single_draft``
-    是最后防线。数据库部分唯一索引与条件更新一起保证重复确认不会产生第二条 active。
-
-    再校验所需的只读事实（画像、目录、有效工作组、关联日程训练）在事务外经只读端口读取：
-    ``Database`` 的唯一锁不可重入，读事实不能与写事务同时持锁
-    （app/infrastructure/database/connection.py）。事务内只做带来源状态条件的写入，因此并发变化
-    只会让条件更新未命中而整体回滚，不会写出部分状态。
+    无模型：模型调用不在业务事务内，本服务不导入任何模型／Graph SDK。每个方法各自在单个数据库事务
+    内完成全部写入，任一步失败整体回滚。``idx_plans_single_active``／``idx_plans_single_draft`` 是
+    最后防线：数据库部分唯一索引与条件更新一起保证重复确认不会产生第二条 active。
     """
 
     def __init__(
@@ -203,7 +84,70 @@ class PlanActivationService:
         self._revisions = revisions
         self._db = db
 
-    async def activate(
+    #: 只读 revision 端口：计划路径据此填 ``ToolExecutionContext`` 的事实快照键。
+    @property
+    def revisions(self) -> ToolCacheRevisionsRepo:
+        return self._revisions
+
+    async def get_unique_draft(self) -> Plan | None:
+        """当前唯一可确认 draft；没有即 None。"""
+        return await self._plans.read_draft()
+
+    async def persist_draft(
+        self,
+        draft: PlanDraft,
+        evaluation: EvaluationResult,
+        *,
+        existing_draft_id: int | None,
+        created_at: str,
+        source_plan_id: int | None = None,
+    ) -> Plan:
+        """通过路径：无原 draft 则插入，有原 draft 则条件替换同一 id／version，返回写入行。
+
+        只接受 ``evaluation.passed=True``；未通过评估即就地快速失败，``plans`` 行数与 revision 均不变。
+        """
+        if not evaluation.passed:
+            raise EvaluationNotPassed(
+                "persist_draft 只接受通过评估的草案，未通过评估的计划不落库"
+            )
+        async with self._db.transaction() as conn:
+            before = await self._plans.read_active_snapshot_in_transaction(conn)
+            if existing_draft_id is None:
+                written = await self._plans.write_draft_in_transaction(
+                    conn,
+                    structured_content_json=plan_draft_to_json(draft),
+                    evaluator_result_json=evaluation_result_to_json(evaluation),
+                    created_at=created_at,
+                    source_plan_id=source_plan_id,
+                )
+            else:
+                written = await self._plans.replace_draft_in_transaction(
+                    conn,
+                    existing_draft_id,
+                    structured_content_json=plan_draft_to_json(draft),
+                    evaluator_result_json=evaluation_result_to_json(evaluation),
+                )
+                if written is None:
+                    raise PlanDraftConflict(
+                        f"draft 已变化（不存在或不再是 draft），不覆盖：{existing_draft_id}"
+                    )
+            await self._require_active_unchanged(conn, before)
+            await self._revisions.bump_in_transaction(conn, "plans")
+            return written
+
+    async def _require_active_unchanged(
+        self, conn, before: ActivePlanSnapshot
+    ) -> None:
+        """写路径结束时原 active 必须逐字段不变：变了即回滚并大声失败。"""
+        after = await self._plans.read_active_snapshot_in_transaction(conn)
+        if after != before:
+            raise RuntimeError(
+                f"写路径修改了原 active 计划（stage4.md §9.2）：{before!r} -> {after!r}"
+            )
+
+    # ---------- 确认端点的事务入口 ----------
+
+    async def activate_plan(
         self,
         plan_id: int,
         *,
@@ -218,7 +162,7 @@ class PlanActivationService:
 
         - 同一 id 已是 active：幂等返回当前行，不再写任何行；
         - ``archived``／``rejected``：拒绝重新激活；``rejected`` 永不改回 draft；
-        - ``starts_on < business_day``、再校验失败或缺少再校验事实：不归档、不改 draft 状态；
+        - ``starts_on < business_day``、再校验失败或缺少再校验事实：不归档、不改 draft 状态。
         """
         plan = await self._plans.read_by_id(plan_id)
         if plan is None:
@@ -271,7 +215,7 @@ class PlanActivationService:
             await self._revisions.bump_in_transaction(conn, "plans")
             return activated
 
-    async def reject(self, plan_id: int, *, archived_at: str) -> Plan:
+    async def archive_draft(self, plan_id: int, *, archived_at: str) -> Plan:
         """用户拒绝：``draft -> archived``＋``archived_at``，原 active 不变，不写 ``rejected``。"""
         plan = await self._plans.read_by_id(plan_id)
         if plan is None:
@@ -280,7 +224,7 @@ class PlanActivationService:
             return plan
         if plan.status != "draft":
             raise PlanActivationConflict(
-                f"计划不是可拒绝的 draft：{plan_id}（{plan.status}）"
+                f"计划不是可归档的 draft：{plan_id}（{plan.status}）"
             )
         async with self._db.transaction() as conn:
             archived = await self._plans.archive_draft_in_transaction(
@@ -298,7 +242,12 @@ class PlanActivationService:
         source_plan_id: int | None,
         active: Plan | None,
     ) -> tuple[RuleFailure, ...]:
-        """按当前目录、画像与有效工作组再跑一次确定性校验（不调模型 Rubric）。"""
+        """按当前目录、画像与有效工作组再跑一次确定性校验（不调模型 Rubric）。
+
+        再校验所需的只读事实在事务外经只读端口读取：``Database`` 的唯一锁不可重入，读事实不能与写
+        事务同时持锁（app/infrastructure/database/connection.py）。事务内只做带来源状态条件的写入，
+        因此并发变化只会让条件更新未命中而整体回滚，不会写出部分状态。
+        """
         adjustment_active: Plan | None = None
         if source_plan_id is not None:
             if active is None or active.id != source_plan_id:

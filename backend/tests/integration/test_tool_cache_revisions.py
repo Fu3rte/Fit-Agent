@@ -7,11 +7,14 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
+from shutil import copy
 
+import aiosqlite
 import pytest
 
 from app.application.ports import CACHE_NAMESPACES
 from app.application.services.body_metrics_service import BodyMetricNotFound
+from app.application.services.plans_service import EvaluationNotPassed
 from app.application.services.records_service import WorkoutRecordNotFound
 from app.bootstrap import (
     AppServices,
@@ -29,10 +32,13 @@ from app.domain.plans.schema import (
 )
 from app.domain.records.schema import WorkoutSetInput
 from app.infrastructure.database.connection import Database
+from app.infrastructure.database.migrations import DEFAULT_MIGRATIONS_DIR
 from app.infrastructure.database.repositories.tool_cache_repository import (
     ToolCacheRevisionsRepo,
 )
-from tests.agent.test_agent_run_branches import BUSINESS_DAY, _profile
+from tests.agent.test_agent_run_branches import BUSINESS_DAY, _profile, _row_counts
+
+MIGRATIONS_DIR = DEFAULT_MIGRATIONS_DIR
 
 BARBELL_BACK_SQUAT = "barbell-back-squat"
 CREATED_AT = "2026-06-01T08:00:00+00:00"
@@ -134,12 +140,62 @@ def _draft_content() -> dict:
     }
 
 
-async def test_fresh_migration_seeds_three_namespaces_at_zero(tmp_path: Path) -> None:
-    async with _harness(tmp_path) as h:
-        assert await h.revisions.read_all() == {
+async def test_fresh_migration_seeds_four_namespaces_at_zero(tmp_path: Path) -> None:
+    """迁移后四个域都在位且从 0 起（建档前的原始基线，不经 harness 写入）。"""
+    db = Database(tmp_path / "fresh.db")
+    await db.open()
+    try:
+        await db.migrate()
+        assert await ToolCacheRevisionsRepo(db).read_all() == {
             "plans": 0,
             "workouts": 0,
             "metrics": 0,
+            "profile": 0,
+        }
+    finally:
+        await db.close()
+
+
+@asynccontextmanager
+async def _open_db(
+    path: Path, migrations_dir: Path | None = None
+) -> AsyncIterator[Database]:
+    db = Database(path, migrations_dir)
+    await db.open()
+    try:
+        yield db
+    finally:
+        await db.close()
+
+
+async def test_upgrade_keeps_existing_revisions_and_adds_profile_at_zero(
+    tmp_path: Path,
+) -> None:
+    """v6 库升级到 v7：三域已推进的 revision 原样保留，profile 从 0 起。"""
+    v6_dir = tmp_path / "v6"
+    v6_dir.mkdir()
+    for name in sorted(MIGRATIONS_DIR.glob("00[1-6]_*.sql")):
+        copy(name, v6_dir / name.name)
+
+    db_path = tmp_path / "legacy.db"
+    async with _open_db(db_path, v6_dir) as legacy:
+        assert await legacy.migrate() == 6
+
+        async def advance(conn: aiosqlite.Connection) -> None:
+            cursor = await conn.execute(
+                "UPDATE tool_cache_revisions SET revision = 7 WHERE namespace = 'plans'"
+            )
+            await cursor.close()
+
+        await legacy.under_lock(advance)
+
+    async with _open_db(db_path) as upgraded:
+        assert await upgraded.migrate() == 7
+        assert await ToolCacheRevisionsRepo(upgraded).read_all() == {
+            "plans": 7,
+            "workouts": 0,
+            "metrics": 0,
+            "profile": 0,
         }
 
 
@@ -209,12 +265,37 @@ async def test_metrics_rollback_leaves_revision_unchanged(tmp_path: Path) -> Non
         assert await h.read("metrics") == before
 
 
-async def test_plan_persistence_paths_bump_plans_once_each(tmp_path: Path) -> None:
+async def _drop_singleton_profile_row(conn: aiosqlite.Connection) -> None:
+    """制造画像写入失败：单例行缺失时 ``UPDATE`` 影响 0 行。"""
+    cursor = await conn.execute("DELETE FROM athlete_profile WHERE id = 1")
+    await cursor.close()
+
+
+async def test_profile_write_bumps_profile_once_and_rolls_it_back_with_the_row(
+    tmp_path: Path,
+) -> None:
     async with _harness(tmp_path) as h:
-        persistence = _services(h.db).plan_persistence
+        assert await h.read("profile") == 1  # harness 建档一次
+
+        await _services(h.db).profile.update(_profile())
+        assert await h.read("profile") == 2
+
+        # 单例行缺失：画像写入在同一事务内失败，已 bump 的 revision 必须一起回滚。
+        await h.db.under_lock(_drop_singleton_profile_row)
+        with pytest.raises(RuntimeError):
+            await _services(h.db).profile.update(_profile())
+        assert await h.read("profile") == 2
+
+
+async def test_persist_draft_writes_once_and_rejects_unpassed_evaluation(
+    tmp_path: Path,
+) -> None:
+    """persist_draft 只在评估通过时写一行并递增 revision；未通过就地失败，不碰任何行与 revision。"""
+    async with _harness(tmp_path) as h:
+        plans = _services(h.db).plan_writes
         draft = PlanDraft.model_validate(_draft_content())
 
-        written = await persistence.persist_plan_result(
+        written = await plans.persist_draft(
             draft,
             _evaluation(passed=True),
             existing_draft_id=None,
@@ -222,7 +303,7 @@ async def test_plan_persistence_paths_bump_plans_once_each(tmp_path: Path) -> No
         )
         assert await h.read("plans") == 1
 
-        await persistence.persist_plan_result(
+        await plans.persist_draft(
             draft,
             _evaluation(passed=True),
             existing_draft_id=written.id,
@@ -230,38 +311,39 @@ async def test_plan_persistence_paths_bump_plans_once_each(tmp_path: Path) -> No
         )
         assert await h.read("plans") == 2
 
-        rejected = await persistence.persist_plan_result(
-            draft,
-            _evaluation(passed=False),
-            existing_draft_id=None,
-            created_at=CREATED_AT,
-        )
-        assert rejected.status == "rejected"
-        assert await h.read("plans") == 3
+        with pytest.raises(EvaluationNotPassed):
+            await plans.persist_draft(
+                draft,
+                _evaluation(passed=False),
+                existing_draft_id=None,
+                created_at=CREATED_AT,
+            )
+        assert await h.read("plans") == 2
+        assert (await _row_counts(h.db))["plans"] == 1
+        assert (await _row_counts(h.db))["plan_sessions"] == 0
 
 
-async def test_plan_reject_and_activate_bump_plans_once_each(tmp_path: Path) -> None:
+async def test_plan_archive_and_activate_bump_plans_once_each(tmp_path: Path) -> None:
     async with _harness(tmp_path) as h:
-        persistence = _services(h.db).plan_persistence
-        activation = _services(h.db).plan_activation
+        plans = _services(h.db).plan_writes
         draft = PlanDraft.model_validate(_draft_content())
 
-        rejected_draft = await persistence.persist_plan_result(
+        archived_draft = await plans.persist_draft(
             draft,
             _evaluation(passed=True),
             existing_draft_id=None,
             created_at=CREATED_AT,
         )
-        await activation.reject(rejected_draft.id, archived_at=CREATED_AT)
+        await plans.archive_draft(archived_draft.id, archived_at=CREATED_AT)
         assert await h.read("plans") == 2
 
-        activatable = await persistence.persist_plan_result(
+        activatable = await plans.persist_draft(
             draft,
             _evaluation(passed=True),
             existing_draft_id=None,
             created_at=CREATED_AT,
         )
-        await activation.activate(
+        await plans.activate_plan(
             activatable.id,
             business_day=BUSINESS_DAY,
             confirmed_at=CREATED_AT,

@@ -156,13 +156,13 @@ async def test_recent_workout_query_without_records_returns_an_empty_list(
 async def test_second_open_draft_is_rejected_by_the_database(tmp_path: Path) -> None:
     """draft 唯一性：已有 draft 时再次插入新 draft 被库级部分唯一索引拒绝，旧 draft 原样保留。"""
     async with _plan_harness(tmp_path) as h:
-        persistence = build_services(
+        plans = build_services(
             build_repositories(h.db),
             h.db,
             SqliteHealthProbe(h.db, h.db.path.parent),
-        ).plan_persistence
+        ).plan_writes
         draft = PlanDraft.model_validate(_draft_content())
-        first = await persistence.persist_plan_result(
+        first = await plans.persist_draft(
             draft,
             _evaluation(passed=True),
             existing_draft_id=None,
@@ -170,7 +170,7 @@ async def test_second_open_draft_is_rejected_by_the_database(tmp_path: Path) -> 
         )
 
         with pytest.raises(sqlite3.IntegrityError):
-            await persistence.persist_plan_result(
+            await plans.persist_draft(
                 draft,
                 _evaluation(passed=True),
                 existing_draft_id=None,
@@ -178,6 +178,6 @@ async def test_second_open_draft_is_rejected_by_the_database(tmp_path: Path) -> 
             )
 
         assert (await _row_counts(h.db))["plans"] == 1
-        kept = await persistence.get_unique_draft()
+        kept = await plans.get_unique_draft()
         assert kept is not None and kept.id == first.id
         assert kept.version == first.version
