@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { renderToStaticMarkup } from "react-dom/server";
 import { createServer } from "vite";
 
 // 消息列的失败提示行为：页面在途轮次与恢复历史都渲染同一条已脱敏的 error Event 文本，
@@ -86,9 +87,38 @@ try {
     assert.equal(interruptedNotice(round(overrides)), expected, name);
   }
 
+  const { default: ChatTranscript } = await server.ssrLoadModule(
+    "/src/features/chat/components/ChatTranscript.tsx",
+  );
+  const rendered = renderToStaticMarkup(
+    ChatTranscript({
+      rounds: [
+        round({
+          request: "用户 **纯文本**",
+          assistants: entry(
+            5,
+            "complete",
+            "重点 **加粗**\n\n<script>alert(1)</script> [危险](javascript:alert(1))",
+          ),
+          run_status: "completed",
+        }),
+      ],
+    }),
+  );
+  assert.match(rendered, /<strong>加粗<\/strong>/);
+  assert.match(rendered, /&lt;script&gt;alert\(1\)&lt;\/script&gt;/);
+  assert.doesNotMatch(rendered, /<script|href="javascript:/i);
+  assert.match(rendered, /用户 \*\*纯文本\*\*/);
+
+  const streamed = renderToStaticMarkup(
+    ChatTranscript({
+      rounds: [round({ events: [messageEvent("**流式重点**")] })],
+    }),
+  );
+  assert.match(streamed, /<strong>流式重点<\/strong>/);
+
   console.log(
-    `消息列失败提示验证通过：在途／恢复共用 error 事件文本 · 取消 ${INTERRUPTED} · ` +
-      `部分 ${PARTIAL} · 正常轮次无提示（chat=${CHAT_ID} thread=${THREAD_ID}）`,
+    `消息列验证通过：失败提示、助手 Markdown 安全渲染与用户纯文本（chat=${CHAT_ID} thread=${THREAD_ID}）`,
   );
 } finally {
   await server.close();

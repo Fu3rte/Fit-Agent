@@ -1,5 +1,6 @@
 import { Fragment, type ReactNode } from "react";
 import { Loader2 } from "lucide-react";
+import ReactMarkdown from "react-markdown";
 import { Bubble, BubbleContent } from "@/components/ui/bubble";
 import { Message, MessageContent } from "@/components/ui/message";
 import {
@@ -97,7 +98,12 @@ export default function ChatTranscript({
                             <Bubble variant="secondary" align="start">
                               <BubbleContent className="flex flex-col gap-1">
                                 {assistantLines.map((line, lineIndex) => (
-                                  <p key={lineIndex}>{line}</p>
+                                  <div
+                                    key={lineIndex}
+                                    className="min-w-0 max-w-full [&>*:first-child]:mt-0 [&>*:last-child]:mb-0 [&_p]:my-1 [&_ul]:my-1 [&_ol]:my-1 [&_ul]:list-disc [&_ol]:list-decimal [&_ul]:pl-5 [&_ol]:pl-5 [&_pre]:my-2 [&_pre]:max-w-full [&_pre]:overflow-x-auto [&_pre]:rounded [&_pre]:bg-muted [&_pre]:p-3 [&_code]:break-words [&_a]:underline"
+                                  >
+                                    <ReactMarkdown>{line}</ReactMarkdown>
+                                  </div>
                                 ))}
                               </BubbleContent>
                             </Bubble>

@@ -68,8 +68,7 @@ async def prepare_workout_record_payload(
 ) -> WorkoutConfirmationPayload:
     """自然语言描述 → 已校验的打卡候选：日期、组事实与当天未完成计划日程，不入库。
 
-    提取用的模型请求与本次 Run 共用同一份预算；``history`` 由直接调用方给出，经 harness 驱动时
-    历史已在消息序列里。
+    提取用的模型请求与本次 Run 共用同一份预算；``history`` 由直接调用方给出，经 harness 驱动时历史已在消息序列里。
     """
     catalog = await context.catalog.list_all()
     if not catalog:
