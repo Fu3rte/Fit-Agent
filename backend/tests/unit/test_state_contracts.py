@@ -10,7 +10,6 @@ import pytest
 from pydantic import ValidationError
 
 from app.application.agent.contracts import (
-    SkillBundle,
     TerminationReason,
     ToolEvidence,
     ToolExecutionContext,
@@ -124,32 +123,4 @@ def test_tool_result_carries_the_revision_it_read() -> None:
     with pytest.raises(ValidationError):
         ToolResult[dict[str, int]].model_validate(
             {"data": {}, "evidence": [], "unexpected": 1}
-        )
-
-
-def test_skill_bundle_exposes_only_the_node_facing_interface() -> None:
-    """SkillBundle 只有四个 Node 可见字段：名称集合、指令、参考材料与版本。"""
-    bundle = SkillBundle(
-        names=("workout-planning",),
-        system_instructions="按七天窗口生成计划",
-        references=("strength-training",),
-        version="2026-06-01",
-    )
-
-    assert bundle.names == ("workout-planning",)
-    assert set(SkillBundle.model_fields) == {
-        "names",
-        "system_instructions",
-        "references",
-        "version",
-    }
-    with pytest.raises(ValidationError):
-        SkillBundle.model_validate(
-            {
-                "names": [],
-                "system_instructions": "x",
-                "references": [],
-                "version": "1",
-                "tools": ["read_progress"],
-            }
         )

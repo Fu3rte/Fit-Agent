@@ -78,8 +78,6 @@ class WorkflowState(TypedDict, total=False):
     planner_evidence: tuple[ToolEvidence, ...]
     # 计划子图现行键：与 ``plan_draft``／``evaluation_result`` 同义；Run 入口节点会把它归零
     loaded_skill: "LoadedSkill"
-    #: Evaluator 的固定评审 Skill：与 ``loaded_skill`` 同一次装载写入，评审载荷按它给模型指令。
-    evaluation_skill: "LoadedSkill"
     draft_plan: PlanDraft
     deterministic_result: DeterministicResult | None
     evaluation: EvaluationResult | None
@@ -146,17 +144,6 @@ class LoadedSkill:
     metadata: SkillMetadata
     body: str
     references: tuple[SkillReference, ...]
-
-
-class SkillBundle(BaseModel):
-    """Node 可依赖的 Skill 接口：指令与参考材料；不含用户事实、Repository 与写入能力。"""
-
-    model_config = ConfigDict(extra="forbid")
-
-    names: tuple[str, ...]
-    system_instructions: str
-    references: tuple[str, ...]
-    version: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -326,7 +313,7 @@ class PlanWriteDeps:
 
 @dataclass(frozen=True, slots=True)
 class GeneratePlanDeps:
-    """生成计划子图的构造期依赖：按节点职责拆分的四个边界 ＋ Skill 正文来源。"""
+    """生成计划子图的构造期依赖：按节点职责拆分的四个边界 ＋ 统一 SkillSource。"""
 
     planner: PlanLlmNodeDeps
     evaluator: PlanLlmNodeDeps

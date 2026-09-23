@@ -11,14 +11,11 @@ from langchain_core.messages import ToolMessage
 
 from app.application.agent.contracts import (
     LOCAL_USER_ID,
-    LoadedSkill,
-    SkillMetadata,
-    SkillReference,
 )
 from app.application.agent.harness.registry import (
     GENERAL_INTENT_SKILLS,
     GENERAL_INTENT_TOOLS,
-    general_skill_bundle,
+    general_skill_metadata,
 )
 from app.application.agent.harness.tools.common import WORKOUT_FORM_FIELDS
 from app.application.agent.harness.tools.prepare_workout_record import (
@@ -35,6 +32,8 @@ from app.application.agent.run_service import (
     _general_branch,
     agent_run_error_message,
 )
+from app.infrastructure.skills.loader import SkillLoader
+from config import skills_dir
 from tests.agent.test_agent_run_branches import (
     ANSWER,
     PULL_UP,
@@ -183,11 +182,18 @@ async def test_general_chat_answers_without_ui_actions_or_writes(tmp_path: Path)
             "message",
             "done",
         ]
-        assert h.model.harness_calls[0].offered == (
+        call = h.model.harness_calls[0]
+        assert call.offered[:3] == (
             "search_exercises",
             "read_training_history",
             "read_active_plan",
         )
+        prompt = str(call.messages[0].content)
+        assert "fitness-knowledge:" in prompt
+        assert "exercise-guidance:" in prompt
+        assert "strength-training:" in prompt
+        assert "# fitness-knowledge：一般训练知识 Skill" not in prompt
+        assert "## 职责" not in prompt
         assert await _row_counts(h.db) == before
 
 
@@ -198,6 +204,42 @@ def _record_route() -> dict[type, list[Mapping[str, Any]]]:
         action="create",
         execution_type="natural_language_record",
     )
+
+
+async def test_general_reads_skill_body_and_requested_reference_on_demand(
+    tmp_path: Path,
+) -> None:
+    body = SkillLoader(skills_dir()).read_skill("fitness-knowledge")
+    reference = SkillLoader(skills_dir()).read_reference(
+        "fitness-knowledge", "references/knowledge-boundaries.md"
+    ).text
+    async with _harness(
+        tmp_path,
+        structured=_route(domain="general", action="chat"),
+        harness=[
+            tool_call("read_skill", {"skill_name": "fitness-knowledge"}),
+            tool_call(
+                "read_skill_reference",
+                {
+                    "skill_name": "fitness-knowledge",
+                    "relative_path": "references/knowledge-boundaries.md",
+                },
+                call_id="call-2",
+            ),
+            final_answer(ANSWER),
+        ],
+    ) as h:
+        result = await h.invoke(REQUEST_TEXTS["general"])
+
+        assert result.messages == (ANSWER,)
+        assert len(h.model.harness_calls) == 3
+        for index, expected in ((1, body), (2, reference)):
+            messages = h.model.harness_calls[index].messages
+            assert expected not in str(messages[0].content)
+            assert sum(expected in str(message.content) for message in messages) == 1
+        final_history = h.model.harness_calls[-1].messages
+        assert sum(body in str(message.content) for message in final_history) == 1
+        assert sum(reference in str(message.content) for message in final_history) == 1
 
 
 async def test_natural_language_record_waits_for_confirmation_before_any_write(
@@ -231,7 +273,8 @@ async def test_natural_language_record_waits_for_confirmation_before_any_write(
         assert [
             event.data["text"] for event in events if event.event == "message"
         ] == [SUMMARY]
-        assert call.offered == ("prepare_workout_record", "search_exercises")
+        assert call.offered[:2] == ("prepare_workout_record", "search_exercises")
+        assert call.offered[2:] == ("read_skill", "read_skill_reference")
         system_prompt = str(call.messages[0].content)
         assert system_prompt.startswith(
             NATURAL_LANGUAGE_RECORD_SYSTEM_PROMPT.format(business_day=SCHEDULED_ON)
@@ -330,17 +373,15 @@ async def test_safety_hit_produces_no_ui_actions_and_no_tool_calls(tmp_path: Pat
         assert await _row_counts(h.db) == before
 
 
-def test_general_skill_bundle_is_scoped_by_intent() -> None:
-    """General 只装载本次 Intent 需要的 Skill 正文与 references。"""
-    source = _FakeSkillSource()
+def test_general_skill_metadata_is_scoped_by_intent() -> None:
+    """General 每次只呈现当前 Intent 授权的 Skill 元数据。"""
+    source = SkillLoader(skills_dir())
 
-    bundle = general_skill_bundle(source, "general")
-    assert bundle.names == GENERAL_INTENT_SKILLS["general"]
-    assert bundle.references == tuple(f"{name}-reference" for name in bundle.names)
-    assert all(f"{name}-body" in bundle.system_instructions for name in bundle.names)
-
-    logging = general_skill_bundle(source, "natural_language_record")
-    assert logging.names == ("workout-logging",)
+    general = general_skill_metadata(source, "general")
+    assert tuple(item.name for item in general) == GENERAL_INTENT_SKILLS["general"]
+    assert all(item.description for item in general)
+    logging = general_skill_metadata(source, "natural_language_record")
+    assert tuple(item.name for item in logging) == ("workout-logging",)
     names = {name for names in GENERAL_INTENT_SKILLS.values() for name in names}
     assert names == {
         "workout-logging",
@@ -348,19 +389,6 @@ def test_general_skill_bundle_is_scoped_by_intent() -> None:
         "fitness-knowledge",
         "exercise-guidance",
     }
-
-
-class _FakeSkillSource:
-    """Skill 来源替身：按名给出正文与一条 reference。"""
-
-    def load(self, name: str) -> LoadedSkill:
-        return LoadedSkill(
-            metadata=SkillMetadata(name=name, description=f"{name}-description"),
-            body=f"{name}-body",
-            references=(
-                SkillReference(path="references/x.md", text=f"{name}-reference"),
-            ),
-        )
 
 
 def _single_action(outcome: Any) -> dict:

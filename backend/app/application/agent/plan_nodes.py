@@ -1,7 +1,7 @@
 """生成计划子图的节点与一次 Run 的运行上下文。
 
-节点按职责持有各自的强类型依赖边界：Planner／Evaluator 只拿模型与 ``planning_tools``／``evaluation_tools``
-的只读事实边界，事实一律来自本次真实工具调用；确定性节点只拿领域规则需要的只读端口；写入节点只拿业务写服务。
+节点按职责持有各自的强类型依赖边界：Planner 持有本次 Skill 的只读来源与 ``planning_tools`` 事实边界，Evaluator
+持有固定 SkillSource 与 ``evaluation_tools`` 事实边界；两者的业务事实均来自真实工具调用。确定性节点只拿领域规则需要的只读端口；写入节点只拿业务写服务。
 """
 
 from collections.abc import Mapping, Sequence
@@ -25,6 +25,7 @@ from app.application.agent.contracts import (
     AgentRunResult,
     ConfirmationConflict,
     GeneratePlanRun,
+    LoadedSkill,
     PlanDeterministicDeps,
     PlanLlmNodeDeps,
     PlanWriteDeps,
@@ -83,6 +84,13 @@ READ_USER_PROFILE_TOOL = "read_user_profile"
 
 READ_ACTIVE_PLAN_TOOL = "read_active_plan"
 
+_PLANNER_SKILLS = {
+    "generate_plan": (PLANNING_SKILL_NAME, "references/planning-rules.md"),
+    ADJUST_PLAN_INTENT: (ADJUSTMENT_SKILL_NAME, "references/adjustment-rules.md"),
+}
+_SKILL_EXAMPLES_PATH = "references/few-shots.md"
+_EVALUATION_RULES_PATH = "references/evaluation-rubric.md"
+
 
 def require_profile(profile: Profile | None) -> Profile:
     """画像未建档即明确失败。"""
@@ -110,23 +118,33 @@ async def load_skill(
     *,
     skills: SkillSource,
 ) -> WorkflowState:
-    """Skill 装载节点：一次装载本次 intent 命中的 Planner Skill 与 Evaluator 的固定评审 Skill。"""
-    name = (
-        ADJUSTMENT_SKILL_NAME
-        if state.get("intent") == ADJUST_PLAN_INTENT
-        else PLANNING_SKILL_NAME
+    """按计划 Intent 读取唯一 Planner Skill 与必需规则 reference。"""
+    intent = state.get("intent")
+    name, rules_path = _planner_skill_spec(intent)
+    metadata = {item.name: item for item in skills.list_metadata()}.get(name)
+    if metadata is None:
+        raise ValueError(f"Skill 元数据中缺少 Planner Skill：{name}")
+    planner_skill = LoadedSkill(
+        metadata=metadata,
+        body=skills.read_skill(name),
+        references=(skills.read_reference(name, rules_path),),
     )
-    return {
-        "loaded_skill": skills.load(name),
-        "evaluation_skill": skills.load(PLAN_EVALUATION_SKILL_NAME),
-    }
+    return {"loaded_skill": planner_skill}
+
+
+def _planner_skill_spec(intent: str | None) -> tuple[str, str]:
+    selected = _PLANNER_SKILLS.get(intent or "")
+    if selected is None:
+        raise ValueError(f"未登记的 Planner Intent：{intent!r}")
+    return selected
 
 
 class PlannerAgentNode:
-    """Planner LLM Node：唯一模型入口 ＋ ``planning_tools`` 只读事实边界。"""
+    """Planner LLM Node：结构化模型入口、统一只读 SkillSource 与 ``planning_tools`` 事实边界。"""
 
-    def __init__(self, deps: PlanLlmNodeDeps) -> None:
+    def __init__(self, deps: PlanLlmNodeDeps, *, skills: SkillSource) -> None:
         self._deps = deps
+        self._skills = skills
 
     async def planner_agent(
         self, state: WorkflowState, runtime: Runtime[GeneratePlanRun]
@@ -142,11 +160,21 @@ class PlannerAgentNode:
         snapshot, facts = await _read_plan_facts(self._deps, state=state, run=run)
         evidence = plan_fact_evidence(intent, snapshot=snapshot, tool_calls=facts)
         payload = await _planner_payload(state, run, facts=facts, deps=self._deps)
+        skill_name, _ = _planner_skill_spec(intent)
         revision_count = state.get("revision_count") or 0
         if revision_count:
+            previous_plan = state.get("draft_plan")
+            if previous_plan is None:
+                raise ValueError("Planner 修订状态缺少上一版计划")
             payload["revision"] = {
-                "previous_plan": state["draft_plan"].model_dump(mode="json"),
+                "previous_plan": previous_plan.model_dump(mode="json"),
                 "failures": list(state.get("revision_feedback") or ()),
+            }
+        if _needs_planner_examples(intent, payload):
+            example = self._skills.read_reference(skill_name, _SKILL_EXAMPLES_PATH)
+            payload["skill_examples"] = {
+                "path": example.path,
+                "text": example.text,
             }
         draft = await request_structured_model(
             self._deps.model,
@@ -164,10 +192,11 @@ class PlannerAgentNode:
 
 
 class EvaluatorAgentNode:
-    """Evaluator LLM Node：唯一模型入口 ＋ ``evaluation_tools`` 只读事实边界。"""
+    """Evaluator LLM Node：统一只读 SkillSource、唯一模型入口与 ``evaluation_tools`` 事实边界。"""
 
-    def __init__(self, deps: PlanLlmNodeDeps) -> None:
+    def __init__(self, deps: PlanLlmNodeDeps, *, skills: SkillSource) -> None:
         self._deps = deps
+        self._skills = skills
 
     async def evaluator_agent(
         self, state: WorkflowState, runtime: Runtime[GeneratePlanRun]
@@ -183,10 +212,29 @@ class EvaluatorAgentNode:
         evidence = plan_fact_evidence(
             state.get("intent"), snapshot=snapshot, tool_calls=facts
         )
+        metadata = next(
+            (
+                item
+                for item in self._skills.list_metadata()
+                if item.name == PLAN_EVALUATION_SKILL_NAME
+            ),
+            None,
+        )
+        if metadata is None:
+            raise ValueError(
+                f"Skill 元数据中缺少 Evaluator Skill：{PLAN_EVALUATION_SKILL_NAME}"
+            )
+        skill = {
+            "name": metadata.name,
+            "instructions": self._skills.read_skill(metadata.name),
+            "rules_reference": self._skills.read_reference(
+                metadata.name, _EVALUATION_RULES_PATH
+            ).text,
+        }
         rubric = await request_structured_model(
             self._deps.model,
             EVALUATOR_SYSTEM_PROMPT,
-            _evaluator_payload(state, run, facts=facts),
+            _evaluator_payload(state, run, facts=facts, skill=skill),
             run.budget,
             RubricResult,
         )
@@ -402,12 +450,29 @@ async def _planner_payload(
     facts: Sequence[ToolCallRecord],
     deps: PlanLlmNodeDeps,
 ) -> dict[str, Any]:
-    """Planner 输入：请求与业务日 ＋ 已加载 Skill ＋ 本次 ``planning_tools`` 的真实工具事实与候选动作。"""
+    """Planner 输入：选定 Skill 的指令与规则、本次真实工具事实、候选动作及请求上下文。"""
+    intent = state.get("intent")
+    skill_name, rules_path = _planner_skill_spec(intent)
+    skill = state.get("loaded_skill")
+    if skill is None:
+        raise ValueError("Planner 状态缺少已装载 Skill")
+    if skill.metadata.name != skill_name:
+        raise ValueError(f"Planner Skill 与 Intent 不一致：{skill.metadata.name!r}")
+    rules = next(
+        (reference for reference in skill.references if reference.path == rules_path),
+        None,
+    )
+    if rules is None:
+        raise ValueError(f"Planner Skill 缺少必需规则 reference：{rules_path}")
     payload: dict[str, Any] = {
         "request": state["request"],
-        "intent": state.get("intent"),
+        "intent": intent,
         "business_day": run.business_day.isoformat(),
-        "skill": asdict(state["loaded_skill"]),
+        "skill": {
+            "name": skill.metadata.name,
+            "instructions": skill.body,
+            "rules_reference": rules.text,
+        },
         "facts": _fact_payloads(facts),
         "candidate_actions": await _candidate_actions(facts, deps),
         # 无历史时不出现该键：与 Router／Evaluator 的载荷形状一致。
@@ -428,21 +493,42 @@ async def _planner_payload(
     return payload
 
 
-def _evaluator_payload(
-    state: WorkflowState, run: GeneratePlanRun, *, facts: Sequence[ToolCallRecord]
-) -> dict[str, Any]:
-    """Rubric 输入：当前请求、候选计划、固定加载的评审 Skill、本次独立读到的工具事实与本次请求之前的对话历史。
+def _needs_planner_examples(intent: str | None, payload: Mapping[str, Any]) -> bool:
+    """空候选／待校准负荷触发示例；修订按相关失败码触发。"""
+    if "revision" in payload:
+        failures = payload["revision"]["failures"]
+        codes = {failure.partition(":")[0] for failure in failures}
+        return "load_source_mismatch" in codes or (
+            intent == "generate_plan" and "unknown_exercise" in codes
+        )
+    if intent == "generate_plan":
+        candidates = payload["candidate_actions"]
+        return not candidates or any(
+            item["record_type"] == "reps_weight"
+            and item["starting_load"]["status"] == "needs_calibration"
+            for item in candidates
+        )
+    if intent == ADJUST_PLAN_INTENT:
+        return any(
+            item["decision"]["action"] == "needs_calibration"
+            for item in payload["progression_decisions"]
+        )
+    raise ValueError(f"未登记的 Planner Intent：{intent!r}")
 
-    不含确定性失败项（未通过时根本不调用模型）；当前用户消息只在 ``request`` 出现一次。
-    """
-    skill = state.get("evaluation_skill")
-    if skill is None:
-        raise ValueError("评审载荷缺少已装载的 plan-evaluation Skill")
+
+def _evaluator_payload(
+    state: WorkflowState,
+    run: GeneratePlanRun,
+    *,
+    facts: Sequence[ToolCallRecord],
+    skill: dict[str, str],
+) -> dict[str, Any]:
+    """Rubric 输入：固定 Skill 的指令与规则、本次工具事实及请求历史。"""
     return {
         "request": state["request"],
         "plan": state["draft_plan"].model_dump(mode="json"),
         "business_day": run.business_day.isoformat(),
-        "skill": asdict(skill),
+        "skill": skill,
         "facts": _fact_payloads(facts),
         # 无历史时不出现该键：与 Router／Planner 的载荷形状一致。
         **history_payload(run.conversation_messages),

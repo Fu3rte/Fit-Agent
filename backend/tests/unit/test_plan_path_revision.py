@@ -1,7 +1,7 @@
 # ST-04 计划路径的确定性节点、有界修订与两个 ToolNode loop：结构校验与评估共用一条
 # 「首版 → 修订一次 → 丢弃」路径，丢弃候选不写任何计划行，修订只接受 revision_count == 0；
 # Planner 与 Evaluator 各自跑一次真实 ToolNode loop，证据只来自真实完成的工具调用。
-# 本文件只驱动节点与路由本身，不经过 Skill 装载（那一段由 agent 分支测试覆盖）。
+# 本文件驱动计划节点、路由与 Planner／Evaluator Skill 的按需读取行为。
 
 import json
 from collections.abc import Collection
@@ -12,6 +12,7 @@ from typing import Any, cast
 
 import pytest
 from langchain_core.messages import AIMessage
+from langgraph.runtime import Runtime
 
 from app.application.agent.contracts import (
     AdjustmentContext,
@@ -24,6 +25,7 @@ from app.application.agent.contracts import (
     PlanToolHarnesses,
     PlanWriteDeps,
     SkillMetadata,
+    SkillReference,
     ToolEvidence,
     WorkflowState,
 )
@@ -50,10 +52,11 @@ from app.application.agent.plan_nodes import (
     EvaluatorAgentNode,
     PlanDeterministicNodes,
     PlannerAgentNode,
+    _needs_planner_examples,
     _require_confirmation_action,
+    load_skill,
 )
 from app.application.agent.prompts import DISCARD_FAILED_CANDIDATE_MESSAGE
-from app.application.ports import SkillSource
 from app.domain.actions.schema import Exercise
 from app.domain.plans.schema import (
     DeterministicResult,
@@ -69,10 +72,10 @@ from config import TOOL_TIMEOUT_SECONDS
 BUSINESS_DAY = date(2026, 6, 1)
 
 
-def _profile() -> Profile:
+def _profile(weekly_frequency: int = 1) -> Profile:
     return Profile(
         training_goal=Fact.known("增肌"),
-        weekly_frequency=Fact.known(1),
+        weekly_frequency=Fact.known(weekly_frequency),
         available_equipment=Fact.denied(),
         explicit_preferences=Fact.denied(),
         current_level=Fact.known("中级"),
@@ -279,6 +282,27 @@ ADJUST_FACTS = (*GENERATE_FACTS, "read_active_plan", "read_training_calendar")
 
 
 @dataclass
+class _Skills:
+    metadata_reads: int = 0
+    body_reads: list[str] = field(default_factory=list)
+    reference_reads: list[tuple[str, str]] = field(default_factory=list)
+
+    def list_metadata(self) -> tuple[SkillMetadata, ...]:
+        self.metadata_reads += 1
+        return tuple(
+            SkillMetadata(name=name, description=f"发现描述：{name}")
+            for name in ("workout-planning", "plan-adjustment", "plan-evaluation", "fitness-knowledge")
+        )
+
+    def read_skill(self, name: str) -> str:
+        self.body_reads.append(name)
+        return f"专属指令：{name}"
+
+    def read_reference(self, name: str, relative_path: str) -> SkillReference:
+        self.reference_reads.append((name, relative_path))
+        return SkillReference(path=relative_path, text=f"专属 reference：{name}:{relative_path}")
+
+@dataclass
 class _Deps:
     catalog: _Catalog
     stats: _Stats
@@ -288,6 +312,7 @@ class _Deps:
     plans: _Plans = field(default_factory=_Plans)
     records: _Records = field(default_factory=_Records)
     model: _Model = field(default_factory=_Model)
+    skills: _Skills = field(default_factory=_Skills)
     plan_harnesses: PlanToolHarnesses = field(
         default_factory=lambda: build_plan_tool_harnesses(
             timeout_seconds=TOOL_TIMEOUT_SECONDS
@@ -318,11 +343,11 @@ def _read_deps(deps: _Deps, *, evaluation: bool) -> PlanLlmNodeDeps:
 
 
 def _planner(deps: _Deps) -> PlannerAgentNode:
-    return PlannerAgentNode(_read_deps(deps, evaluation=False))
+    return PlannerAgentNode(_read_deps(deps, evaluation=False), skills=deps.skills)
 
 
 def _evaluator(deps: _Deps) -> EvaluatorAgentNode:
-    return EvaluatorAgentNode(_read_deps(deps, evaluation=True))
+    return EvaluatorAgentNode(_read_deps(deps, evaluation=True), skills=deps.skills)
 
 
 def _deterministic(deps: _Deps) -> PlanDeterministicNodes:
@@ -347,6 +372,10 @@ class _Runtime:
     context: GeneratePlanRun
 
 
+def _runtime_context(run: GeneratePlanRun) -> Runtime[GeneratePlanRun]:
+    return cast("Runtime[GeneratePlanRun]", _Runtime(run))
+
+
 def _deps() -> _Deps:
     return _Deps(catalog=_catalog(), stats=_Stats(), persistence=_Persistence())
 
@@ -363,7 +392,7 @@ def _generate_deps(deps: _Deps) -> GeneratePlanDeps:
             stats=deps.stats,
         ),
         writes=cast(PlanWriteDeps, object()),
-        skills=cast(SkillSource, object()),
+        skills=deps.skills,
     )
 
 
@@ -491,18 +520,43 @@ def _planner_state(
     state["user_id"] = "user-1"
     state["run_id"] = "run-1"
     state["business_day"] = BUSINESS_DAY
-    state["loaded_skill"] = LoadedSkill(
-        metadata=SkillMetadata(name="workout-planning", description="计划"),
-        body="正文",
-        references=(),
+    skill_name = "plan-adjustment" if intent == "adjust_plan" else "workout-planning"
+    rules_path = (
+        "references/adjustment-rules.md"
+        if intent == "adjust_plan"
+        else "references/planning-rules.md"
     )
-    state["evaluation_skill"] = LoadedSkill(
-        metadata=SkillMetadata(name="plan-evaluation", description="评审"),
-        body="正文",
-        references=(),
+    state["loaded_skill"] = LoadedSkill(
+        metadata=SkillMetadata(name=skill_name, description="发现描述"),
+        body=f"专属指令：{skill_name}",
+        references=(SkillReference(path=rules_path, text=f"专属规则：{skill_name}"),),
     )
     state["planner_evidence"] = planner_evidence
     return state
+
+
+async def test_graph_skips_evaluator_when_deterministic_validation_fails() -> None:
+    profile = _profile(weekly_frequency=2)
+    deps = _Deps(
+        catalog=_catalog(),
+        stats=_Stats(),
+        persistence=_Persistence(),
+        profiles=_Profiles(profile),
+        model=_Model(tool_loops=[GENERATE_FACTS, GENERATE_FACTS]),
+    )
+    run = GeneratePlanRun(BUSINESS_DAY)
+
+    graph = cast(Any, build_generate_plan_graph(_generate_deps(deps)))
+    result = await graph.ainvoke(_planner_state(), context=run)
+
+    assert result["deterministic_result"].passed is False
+    assert "evaluation" not in result
+    assert deps.skills.body_reads == ["workout-planning"]
+    assert deps.skills.reference_reads == [
+        ("workout-planning", "references/planning-rules.md")
+    ]
+    assert deps.model.payloads and len(deps.model.payloads) == 2
+    assert run.budget.used == 2
 
 
 async def test_planner_and_evaluator_consume_one_candidate_snapshot() -> None:
@@ -582,6 +636,16 @@ async def test_planner_payload_facts_come_only_from_the_real_tool_loop() -> None
             "starting_load": {"status": "needs_calibration"},
         }
     ]
+    assert payload["skill"] == {
+        "name": "workout-planning",
+        "instructions": "专属指令：workout-planning",
+        "rules_reference": "专属规则：workout-planning",
+    }
+    assert "skill_examples" not in payload
+    assert "plan-adjustment" not in deps.model.payloads[0]
+    assert "fitness-knowledge" not in deps.model.payloads[0]
+    assert "发现描述" not in deps.model.payloads[0]
+    assert deps.skills.reference_reads == []
 
     evaluated = await _evaluator(deps).evaluator_agent(
         {
@@ -600,6 +664,15 @@ async def test_planner_payload_facts_come_only_from_the_real_tool_loop() -> None
         "facts",
     }
     assert [fact["tool"] for fact in rubric_payload["facts"]] == list(GENERATE_FACTS)
+    assert rubric_payload["skill"] == {
+        "name": "plan-evaluation",
+        "instructions": "专属指令：plan-evaluation",
+        "rules_reference": "专属 reference：plan-evaluation:references/evaluation-rubric.md",
+    }
+    assert deps.skills.body_reads == ["plan-evaluation"]
+    assert deps.skills.reference_reads == [
+        ("plan-evaluation", "references/evaluation-rubric.md"),
+    ]
     assert evaluated["evaluation"].evidence
 
 
@@ -629,6 +702,195 @@ async def test_candidate_actions_drop_the_actions_the_profile_forbids() -> None:
     payload = json.loads(deps.model.payloads[0])
     assert payload["candidate_actions"] == []
     assert [fact["tool"] for fact in payload["facts"]] == list(GENERATE_FACTS)
+    assert payload["skill_examples"] == {
+        "path": "references/few-shots.md",
+        "text": "专属 reference：workout-planning:references/few-shots.md",
+    }
+    assert deps.skills.reference_reads == [
+        ("workout-planning", "references/few-shots.md")
+    ]
+
+
+async def test_adjust_planner_and_evaluator_use_their_selected_skills() -> None:
+    deps = _Deps(
+        catalog=_catalog(),
+        stats=_Stats(),
+        persistence=_Persistence(),
+        model=_Model(tool_loops=[ADJUST_FACTS, ADJUST_FACTS]),
+    )
+    state = _planner_state(intent="adjust_plan")
+    run = GeneratePlanRun(
+        BUSINESS_DAY,
+        adjustment=AdjustmentContext(
+            plan_id=1, active_draft=_draft(), linked_workout_session_ids=()
+        ),
+    )
+
+    written = await _planner(deps).planner_agent(state, _runtime_context(run))
+    planner_payload = json.loads(deps.model.payloads[0])
+    assert planner_payload["skill"] == {
+        "name": "plan-adjustment",
+        "instructions": "专属指令：plan-adjustment",
+        "rules_reference": "专属规则：plan-adjustment",
+    }
+    assert "plan-evaluation" not in deps.model.payloads[0]
+    assert deps.skills.reference_reads == []
+
+    await _evaluator(deps).evaluator_agent(
+        {
+            **state,
+            **written,
+            "deterministic_result": DeterministicResult(passed=True, failures=()),
+        },
+        _runtime_context(run),
+    )
+    evaluator_payload = json.loads(deps.model.payloads[1])
+
+    assert evaluator_payload["skill"] == {
+        "name": "plan-evaluation",
+        "instructions": "专属指令：plan-evaluation",
+        "rules_reference": "专属 reference：plan-evaluation:references/evaluation-rubric.md",
+    }
+    assert set(evaluator_payload) == {
+        "request", "plan", "business_day", "skill", "facts"
+    }
+    assert "发现描述" not in deps.model.payloads[1]
+    assert deps.skills.body_reads == ["plan-evaluation"]
+    assert deps.skills.reference_reads == [
+        ("plan-evaluation", "references/evaluation-rubric.md"),
+    ]
+
+
+def test_planner_few_shots_conditions_follow_current_candidate_and_revision_issue() -> None:
+    candidates = {
+        "candidate_actions": [
+            {
+                "record_type": "reps_weight",
+                "starting_load": {"status": "needs_calibration"},
+            }
+        ]
+    }
+    assert _needs_planner_examples("generate_plan", {"candidate_actions": []})
+    assert _needs_planner_examples("generate_plan", candidates)
+    assert not _needs_planner_examples(
+        "generate_plan",
+        {
+            "candidate_actions": [
+                {
+                    "record_type": "reps_bodyweight",
+                    "starting_load": {"status": "needs_calibration"},
+                }
+            ]
+        },
+    )
+    assert not _needs_planner_examples(
+        "adjust_plan",
+        {"progression_decisions": [{"decision": {"action": "keep"}}]},
+    )
+    assert _needs_planner_examples(
+        "adjust_plan",
+        {"progression_decisions": [{"decision": {"action": "needs_calibration"}}]},
+    )
+    assert not _needs_planner_examples(
+        "adjust_plan",
+        {"progression_decisions": [{"decision": {"action": "increase"}}]},
+    )
+    assert _needs_planner_examples(
+        "generate_plan", {"revision": {"failures": ["unknown_exercise: 未收录"]}}
+    )
+    assert not _needs_planner_examples(
+        "generate_plan", {"revision": {"failures": ["weekly_frequency_mismatch: 频率"]}}
+    )
+    assert _needs_planner_examples(
+        "adjust_plan", {"revision": {"failures": ["load_source_mismatch: 负荷"]}}
+    )
+    assert not _needs_planner_examples(
+        "adjust_plan", {"revision": {"failures": ["goal_alignment: 目标"]}}
+    )
+
+
+async def test_planner_reuses_selected_skill_for_the_single_revision() -> None:
+    deps = _Deps(
+        catalog=_catalog(),
+        stats=_Stats(),
+        persistence=_Persistence(),
+        model=_Model(tool_loops=[GENERATE_FACTS, GENERATE_FACTS]),
+    )
+    run = GeneratePlanRun(BUSINESS_DAY)
+    state = _planner_state()
+    state.update(await load_skill(state, _runtime_context(run), skills=deps.skills))
+    planner = _planner(deps)
+
+    first = await planner.planner_agent(state, _runtime_context(run))
+    revised = await planner.planner_agent(
+        {
+            **state,
+            **first,
+            "revision_count": 1,
+            "revision_feedback": ("goal_alignment: 目标不匹配",),
+        },
+        _runtime_context(run),
+    )
+
+    assert deps.skills.metadata_reads == 1
+    assert deps.skills.body_reads == ["workout-planning"]
+    assert deps.skills.reference_reads == [
+        ("workout-planning", "references/planning-rules.md")
+    ]
+    first_payload, revision_payload = map(json.loads, deps.model.payloads)
+    assert first_payload["skill"] == revision_payload["skill"]
+    assert "skill_examples" not in first_payload
+    assert "skill_examples" not in revision_payload
+    assert revision_payload["revision"]["failures"] == [
+        "goal_alignment: 目标不匹配"
+    ]
+    assert "loaded_skill" not in revised
+    assert run.budget.used == 2
+
+
+async def test_planner_loads_few_shots_only_for_a_relevant_revision() -> None:
+    profile = Profile(
+        training_goal=Fact.known("增肌"),
+        weekly_frequency=Fact.known(1),
+        available_equipment=Fact.denied(),
+        explicit_preferences=Fact.denied(),
+        current_level=Fact.known("中级"),
+        known_injuries=Fact.denied(),
+        forbidden_exercise_ids=Fact.known(("pull-up",)),
+    )
+    deps = _Deps(
+        catalog=_catalog(),
+        stats=_Stats(),
+        persistence=_Persistence(),
+        profiles=_Profiles(profile),
+        model=_Model(tool_loops=[GENERATE_FACTS, GENERATE_FACTS]),
+    )
+    run = GeneratePlanRun(BUSINESS_DAY)
+    state = _planner_state()
+    state.update(await load_skill(state, _runtime_context(run), skills=deps.skills))
+    planner = _planner(deps)
+
+    first = await planner.planner_agent(state, _runtime_context(run))
+    revised = await planner.planner_agent(
+        {
+            **state,
+            **first,
+            "revision_count": 1,
+            "revision_feedback": ("unknown_exercise: 动作不在候选中",),
+        },
+        _runtime_context(run),
+    )
+    first_payload, revision_payload = map(json.loads, deps.model.payloads)
+
+    assert first_payload["candidate_actions"] == []
+    assert first_payload["skill_examples"] == revision_payload["skill_examples"]
+    assert deps.skills.reference_reads == [
+        ("workout-planning", "references/planning-rules.md"),
+        ("workout-planning", "references/few-shots.md"),
+        ("workout-planning", "references/few-shots.md"),
+    ]
+    assert "loaded_skill" not in revised
+
 
 async def test_evaluator_blocks_with_snapshot_mismatch_when_a_revision_moved() -> None:
     """候选读取后事实域 revision 变化：评审以 ``snapshot_mismatch`` 阻断，并自报读到的证据。"""

@@ -10,11 +10,15 @@ REFERENCE_PATHS: tuple[str, ...] = (
 )
 
 
-def test_plan_adjustment_loads_both_references() -> None:
-    loaded = SkillLoader(skills_dir()).load(SKILL_NAME)
+def test_plan_adjustment_reads_both_references_by_path() -> None:
+    loader = SkillLoader(skills_dir())
+    metadata = next(item for item in loader.list_metadata() if item.name == SKILL_NAME)
+    body = loader.read_skill(SKILL_NAME)
+    references = tuple(
+        loader.read_reference(SKILL_NAME, path) for path in REFERENCE_PATHS
+    )
 
-    assert loaded.metadata.name == SKILL_NAME
-    assert loaded.metadata.description
-    assert loaded.body.strip()
-    assert tuple(reference.path for reference in loaded.references) == REFERENCE_PATHS
-    assert all(reference.text.strip() for reference in loaded.references)
+    assert metadata.description
+    assert body.strip()
+    assert tuple(reference.path for reference in references) == REFERENCE_PATHS
+    assert all(reference.text.strip() for reference in references)

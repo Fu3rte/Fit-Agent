@@ -5,12 +5,7 @@ from langchain_core.messages import BaseMessage
 from langchain_core.tools import BaseTool
 from langgraph.graph.state import CompiledStateGraph
 
-from app.application.agent.contracts import (
-    Intent,
-    LoadedSkill,
-    PlanToolHarnesses,
-    SkillBundle,
-)
+from app.application.agent.contracts import Intent, PlanToolHarnesses, SkillMetadata
 from app.application.agent.harness.cache import ToolResultCache
 from app.application.agent.harness.graph import build_tool_harness
 from app.application.agent.harness.tools import (
@@ -28,6 +23,7 @@ from app.application.agent.harness.tools.common import (
     TrainingHarnessContext,
     tool_call_records,
 )
+from app.application.agent.harness.tools.read_skill import skill_reading_tools
 from app.application.agent.router import NON_PLAN_INTENTS
 from app.application.ports import SkillSource
 from app.domain.plans.schema import PlanDraft
@@ -104,38 +100,43 @@ def general_ui_actions(
     return ({"type": action_type, "facts": facts},)
 
 
-def general_skill_bundle(skills: SkillSource, intent: Intent) -> SkillBundle:
-    """按会话 Intent 装载模型指令与其明确引用的 reference。"""
-    loaded: tuple[LoadedSkill, ...] = tuple(
-        skills.load(name) for name in GENERAL_INTENT_SKILLS[intent]
-    )
-    return SkillBundle(
-        names=tuple(item.metadata.name for item in loaded),
-        system_instructions="\n\n".join(item.body for item in loaded),
-        references=tuple(
-            reference.text for item in loaded for reference in item.references
-        ),
-        version=" | ".join(item.metadata.description for item in loaded),
-    )
+def general_skill_metadata(
+    skills: SkillSource, intent: Intent
+) -> tuple[SkillMetadata, ...]:
+    """返回本次 Intent 白名单内的 Skill 元数据。"""
+    scanned = {item.name: item for item in skills.list_metadata()}
+    return tuple(scanned[name] for name in GENERAL_INTENT_SKILLS[intent])
 
 
-def general_system_prompt(base: str, bundle: SkillBundle) -> str:
-    """基础节点指令加本次 Intent 的 Skill 正文与 references。"""
-    return "\n\n".join(
-        part for part in (base, bundle.system_instructions, *bundle.references) if part
+def general_system_prompt(base: str, allowed: tuple[SkillMetadata, ...]) -> str:
+    """提示当前 Intent 可用 Skill 元数据与按需读取方式，不包含正文。"""
+    if not allowed:
+        return base
+    listing = "\n".join(f"- {item.name}: {item.description}" for item in allowed)
+    return (
+        f"{base}\n\n可用 Skill（仅当前 Intent 白名单）：\n{listing}\n"
+        "任务匹配时调用 read_skill(skill_name) 读取 SKILL.md；正文引用的 references/*.md "
+        "仅在任务需要时调用 read_skill_reference(skill_name, relative_path) 单独读取。"
     )
 
 
 def build_general_tool_harnesses(
-    *, timeout_seconds: float, cache: ToolResultCache | None = None
+    *,
+    skills: SkillSource,
+    timeout_seconds: float,
+    cache: ToolResultCache | None = None,
 ) -> Mapping[Intent, CompiledStateGraph]:
-    """按白名单固化五项会话 Intent 的 ``general_tools`` ToolNode：一 Intent 一图，不共享工具集合。"""
-    return {
-        intent: build_tool_harness(
-            tools, timeout_seconds=timeout_seconds, cache=cache
+    """按 Intent 固化业务 Tool 与 Skill 读取工具；读取工具仅挂载于有 Skill 权限的分支。"""
+    metadata = {item.name: item for item in skills.list_metadata()}
+    harnesses: dict[Intent, CompiledStateGraph] = {}
+    for intent, tools in GENERAL_INTENT_TOOLS.items():
+        names = GENERAL_INTENT_SKILLS[intent]
+        allowed = tuple(metadata[name] for name in names)
+        offered = (*tools, *skill_reading_tools(skills, allowed)) if allowed else tools
+        harnesses[intent] = build_tool_harness(
+            offered, timeout_seconds=timeout_seconds, cache=cache
         )
-        for intent, tools in GENERAL_INTENT_TOOLS.items()
-    }
+    return harnesses
 
 
 def build_plan_tool_harnesses(

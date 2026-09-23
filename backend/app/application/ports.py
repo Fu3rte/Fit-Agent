@@ -22,7 +22,7 @@ from app.domain.records.schema import WorkoutSession, WorkoutSetInput
 from app.domain.stats.schema import ValidWorkSet, WorkoutFact
 
 if TYPE_CHECKING:
-    from app.application.agent.contracts import LoadedSkill
+    from app.application.agent.contracts import SkillMetadata, SkillReference
 
 TModel = TypeVar("TModel", bound=BaseModel)
 
@@ -251,10 +251,19 @@ class ToolCacheRevisions(Protocol):
 
 
 class SkillSource(Protocol):
-    """Skill 正文来源端口：只暴露按名加载。"""
+    """共享 Skill 端口：启动时枚举元数据，正文与 reference 按需独立读取。"""
 
-    def load(self, name: str) -> "LoadedSkill":
-        """按名加载命中的 Skill 正文与它明确引用的 reference 文件。"""
+    def list_metadata(self) -> tuple["SkillMetadata", ...]:
+        """返回扫描到的 Skill 元数据与内部可解析位置。"""
+        ...
+
+    def read_skill(self, name: str) -> str:
+        """按已扫描名称读取 SKILL.md 正文。"""
+        ...
+
+    def read_reference(self, name: str, relative_path: str) -> "SkillReference":
+        """按 Skill 名与明确相对路径读取单个 reference。"""
+        ...
 
 
 class WorkoutRecords(Protocol):

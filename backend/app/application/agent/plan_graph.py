@@ -98,8 +98,8 @@ def build_generate_plan_graph(
 ) -> CompiledStateGraph:
     """按上述拓扑编译生成计划子图；节点构造时按职责注入各自的依赖边界。"""
     deterministic = PlanDeterministicNodes(deps.deterministic)
-    planner = PlannerAgentNode(deps.planner)
-    evaluator = EvaluatorAgentNode(deps.evaluator)
+    planner = PlannerAgentNode(deps.planner, skills=deps.skills)
+    evaluator = EvaluatorAgentNode(deps.evaluator, skills=deps.skills)
     writes = PlanWriteNodes(deps.writes)
     builder = StateGraph(WorkflowState, context_schema=GeneratePlanRun)
     builder.add_node("require_active_plan", deterministic.require_active_plan)

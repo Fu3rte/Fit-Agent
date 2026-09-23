@@ -238,7 +238,9 @@ def executed_tools(call: HarnessCall) -> tuple[str, ...]:
 
 def _tool_harnesses() -> Mapping[Intent, CompiledStateGraph]:
     """与 ``build_agent_runtime()`` 同形的测试装配：五项会话 Intent 各一份按白名单固化的 harness。"""
-    return build_general_tool_harnesses(timeout_seconds=TOOL_TIMEOUT_SECONDS)
+    return build_general_tool_harnesses(
+        skills=SkillLoader(skills_dir()), timeout_seconds=TOOL_TIMEOUT_SECONDS
+    )
 
 
 @dataclass
@@ -628,11 +630,12 @@ async def test_general_chat_answers_with_one_harness_call(
         assert result.messages == (ANSWER,)
         assert result.draft_plan_id is None
         call = h.model.harness_calls[0]
-        assert call.offered == (
+        assert call.offered[:3] == (
             "search_exercises",
             "read_training_history",
             "read_active_plan",
         )
+        assert call.offered[3:] == ("read_skill", "read_skill_reference")
         system_prompt = str(call.messages[0].content)
         assert system_prompt.startswith(GENERAL_CHAT_SYSTEM_PROMPT)
         assert all(
@@ -672,7 +675,8 @@ async def test_natural_language_record_still_extracts_without_writing(
         assert result.messages == (SUMMARY,)
         assert result.draft_plan_id is None
         call = h.model.harness_calls[0]
-        assert call.offered == ("prepare_workout_record", "search_exercises")
+        assert call.offered[:2] == ("prepare_workout_record", "search_exercises")
+        assert call.offered[2:] == ("read_skill", "read_skill_reference")
         system_prompt = str(call.messages[0].content)
         assert system_prompt.startswith(
             NATURAL_LANGUAGE_RECORD_SYSTEM_PROMPT.format(business_day=SCHEDULED_ON)
@@ -760,6 +764,17 @@ async def test_generate_plan_keeps_the_plan_chain_and_the_run_budget(
             PLANNER_SYSTEM_PROMPT,
             EVALUATOR_SYSTEM_PROMPT,
         ]
+        evaluator_skills = [
+            json.loads(payload)["skill"]
+            for prompt, payload in h.model.calls
+            if prompt == EVALUATOR_SYSTEM_PROMPT
+        ]
+        assert len(evaluator_skills) == 2
+        assert evaluator_skills[0] == evaluator_skills[1]
+        assert evaluator_skills[0]["name"] == "plan-evaluation"
+        assert set(evaluator_skills[0]) == {
+            "name", "instructions", "rules_reference"
+        }
         assert budget.used == MAX_MODEL_REQUESTS_PER_RUN
         assert budget.tool_calls == 0
         assert result.intent == "generate_plan"

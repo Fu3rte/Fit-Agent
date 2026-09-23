@@ -16,13 +16,17 @@ SKILL_NAME = "workout-logging"
 REFERENCE_PATHS = ("references/logging-contract.md", "references/few-shots.md")
 
 
-def test_workout_logging_skill_loads_with_its_references() -> None:
-    skill = SkillLoader(skills_dir()).load(SKILL_NAME)
+def test_workout_logging_skill_reads_its_declared_references() -> None:
+    loader = SkillLoader(skills_dir())
+    metadata = next(item for item in loader.list_metadata() if item.name == SKILL_NAME)
+    references = tuple(
+        loader.read_reference(SKILL_NAME, path) for path in REFERENCE_PATHS
+    )
 
     names = [name for names in GENERAL_INTENT_SKILLS.values() for name in names]
     assert SKILL_NAME in names
-    assert skill.metadata.name == SKILL_NAME
-    assert tuple(reference.path for reference in skill.references) == REFERENCE_PATHS
+    assert metadata.description
+    assert tuple(reference.path for reference in references) == REFERENCE_PATHS
     assert tuple(
         tool.name for tool in GENERAL_INTENT_TOOLS["natural_language_record"]
     ) == ("prepare_workout_record", "search_exercises")
@@ -56,7 +60,9 @@ def test_few_shot_fields_map_to_the_current_record_contract() -> None:
     })
     facts = validate_session_sets(tuple(_workout_set_input(row) for row in workout.sets))
     payload = _workout_payload(workout.performed_on, facts)
-    few_shots = SkillLoader(skills_dir()).load(SKILL_NAME).references[1].text
+    few_shots = SkillLoader(skills_dir()).read_reference(
+        SKILL_NAME, REFERENCE_PATHS[1]
+    ).text
 
     assert set(payload) | {"chat_id", "conversation_id"} == set(
         ConfirmWorkoutBody.model_fields

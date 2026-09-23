@@ -179,7 +179,7 @@ async def test_progress_query_offers_only_the_progress_tools(tmp_path: Path) -> 
 
         assert result.intent == "view_progress"
         assert [call.offered for call in h.model.harness_calls] == [
-            PROGRESS_TOOL_NAMES
+            (*PROGRESS_TOOL_NAMES, "read_skill", "read_skill_reference")
         ] * 2
         payload = json.loads(_tool_message(h.model.harness_calls[1]).content)
         assert set(payload) == {

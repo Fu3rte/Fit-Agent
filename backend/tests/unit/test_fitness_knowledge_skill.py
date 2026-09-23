@@ -1,6 +1,6 @@
 # ST-04 fitness-knowledge Skill：真实 SkillLoader 校验正文、两个 reference 与 General 装载名称。
 
-from app.application.agent.contracts import LoadedSkill
+from app.application.agent.contracts import SkillReference
 from app.application.agent.harness.registry import (
     GENERAL_INTENT_SKILLS,
     GENERAL_INTENT_TOOLS,
@@ -13,27 +13,35 @@ REFERENCE_PATHS = ("references/knowledge-boundaries.md", "references/few-shots.m
 GENERAL_TOOLS = ("read_active_plan", "read_training_history", "search_exercises")
 
 
-def _load() -> LoadedSkill:
-    """生产装配使用的同一份 Skill 根目录与同一个加载器。"""
-    return SkillLoader(skills_dir()).load(SKILL_NAME)
+def _load() -> tuple[str, tuple[SkillReference, ...]]:
+    """通过按需读取接口读取该 Skill 正文与声明的 reference。"""
+    loader = SkillLoader(skills_dir())
+    body = loader.read_skill(SKILL_NAME)
+    references = tuple(
+        loader.read_reference(SKILL_NAME, path) for path in REFERENCE_PATHS
+    )
+    return body, references
 
 
 def test_metadata_and_both_references_load_through_the_real_loader() -> None:
     """General 装载矩阵里的名称唯一，真实加载器按该名命中正文与两个 reference。"""
-    skill = _load()
+    loader = SkillLoader(skills_dir())
+    metadata = next(item for item in loader.list_metadata() if item.name == SKILL_NAME)
+    body, references = _load()
 
-    assert skill.metadata.name == SKILL_NAME and skill.metadata.description.strip()
+    assert metadata.description.strip()
     names = [name for names in GENERAL_INTENT_SKILLS.values() for name in names]
     assert SKILL_NAME in names
-    assert tuple(ref.path for ref in skill.references) == REFERENCE_PATHS
-    assert all(ref.text.strip() for ref in skill.references)
+    assert tuple(reference.path for reference in references) == REFERENCE_PATHS
+    assert all(reference.text.strip() for reference in references)
+    assert body.strip()
 
 
 def test_skill_text_names_only_the_general_intent_tools() -> None:
     """正文与 reference 只点名本 Intent 可见的三项只读 Tool。"""
     assert {tool.name for tool in GENERAL_INTENT_TOOLS["general"]} == set(GENERAL_TOOLS)
-    skill = _load()
-    text = "\n".join((skill.body, *(ref.text for ref in skill.references)))
+    body, references = _load()
+    text = "\n".join((body, *(reference.text for reference in references)))
     invisible = {
         tool.name for tools in GENERAL_INTENT_TOOLS.values() for tool in tools
     } - set(GENERAL_TOOLS)

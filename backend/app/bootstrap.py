@@ -232,7 +232,7 @@ async def build_agent_runtime(
         await repositories.exercises.list_all(), catalog_revision=schema_version
     )
     tool_harnesses: Mapping[Intent, CompiledStateGraph] = build_general_tool_harnesses(
-        timeout_seconds=TOOL_TIMEOUT_SECONDS, cache=cache
+        skills=skills, timeout_seconds=TOOL_TIMEOUT_SECONDS, cache=cache
     )
     plan_harnesses = build_plan_tool_harnesses(
         timeout_seconds=TOOL_TIMEOUT_SECONDS, cache=cache

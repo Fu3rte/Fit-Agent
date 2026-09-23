@@ -1,17 +1,9 @@
-import re
-from collections.abc import Iterator
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import TextIO
 
-from app.application.agent.contracts import (
-    LoadedSkill,
-    SkillMetadata,
-    SkillReference,
-)
+from app.application.agent.contracts import SkillMetadata, SkillReference
 
 SKILL_FILE_NAME = "SKILL.md"
-
-_REFERENCE_PATTERN = re.compile(r"(?<![\w./-])references/[0-9A-Za-z._\-/]*\.md")
 
 
 class SkillError(ValueError):
@@ -23,7 +15,7 @@ class UnknownSkillError(SkillError):
 
 
 class MissingSkillFileError(SkillError):
-    """Skill 目录缺少 ``SKILL.md``，或正文引用的 reference 文件不存在。"""
+    """Skill 目录缺少 ``SKILL.md``，或明确请求的文件不存在。"""
 
 
 class InvalidSkillMetadataError(SkillError):
@@ -35,20 +27,44 @@ class SkillLoader:
         self._root = Path(root)
         self._scanned: dict[str, tuple[SkillMetadata, Path]] | None = None
 
-    def load(self, name: str) -> LoadedSkill:
-        """按名加载命中的 Skill 正文与它明确引用的 reference 文件。"""
-        scanned = self._scan()
-        entry = scanned.get(name)
+    def list_metadata(self) -> tuple[SkillMetadata, ...]:
+        """启动扫描得到名称、描述与可解析的 Skill 位置。"""
+        return tuple(entry[0] for entry in self._scan().values())
+
+    def read_skill(self, name: str) -> str:
+        """按已扫描名称读取 SKILL.md 正文，不读取 references。"""
+        return _read_body(self._entry(name)[1])
+
+    def read_reference(self, name: str, relative_path: str) -> SkillReference:
+        """按 Skill 名与明确相对路径读取单个 reference。"""
+        skill_file = self._entry(name)[1]
+        relative = PurePosixPath(relative_path)
+        if (
+            relative.is_absolute()
+            or "\\" in relative_path
+            or not relative_path.startswith("references/")
+            or any(part in ("", ".", "..") for part in relative.parts)
+            or relative.suffix != ".md"
+        ):
+            raise ValueError(f"非法 Skill reference 相对路径：{relative_path!r}")
+        skill_dir = skill_file.parent.resolve(strict=True)
+        target = (skill_dir / Path(*relative.parts)).resolve(strict=True)
+        if not target.is_relative_to(skill_dir) or not target.is_file():
+            raise ValueError(f"Skill reference 路径越界或不是文件：{relative_path!r}")
+        try:
+            text = target.read_text(encoding="utf-8")
+        except FileNotFoundError as error:
+            raise MissingSkillFileError(
+                f"Skill {name!r} 的 reference 不存在：{relative_path}"
+            ) from error
+        return SkillReference(path=relative_path, text=text)
+
+    def _entry(self, name: str) -> tuple[SkillMetadata, Path]:
+        entry = self._scan().get(name)
         if entry is None:
-            known = "、".join(sorted(scanned)) or "（无）"
+            known = "、".join(sorted(self._scan())) or "（无）"
             raise UnknownSkillError(f"未知 Skill：{name!r}；已扫描到的 Skill：{known}")
-        metadata, skill_file = entry
-        body = _read_body(skill_file)
-        return LoadedSkill(
-            metadata=metadata,
-            body=body,
-            references=tuple(_load_references(skill_file.parent, body)),
-        )
+        return entry
 
     def _scan(self) -> dict[str, tuple[SkillMetadata, Path]]:
         if self._scanned is None:
@@ -59,10 +75,17 @@ class SkillLoader:
         if not self._root.is_dir():
             raise MissingSkillFileError(f"Skill 根目录不存在：{self._root}")
         scanned: dict[str, tuple[SkillMetadata, Path]] = {}
-        for directory in sorted(path for path in self._root.iterdir() if path.is_dir()):
+        root = self._root.resolve(strict=True)
+        for entry in sorted(path for path in root.iterdir() if path.is_dir()):
+            directory = entry.resolve(strict=True)
+            if not directory.is_relative_to(root):
+                raise InvalidSkillMetadataError(f"Skill 目录越界：{entry}")
             skill_file = directory / SKILL_FILE_NAME
             if not skill_file.is_file():
                 raise MissingSkillFileError(f"Skill 目录缺少 {SKILL_FILE_NAME}：{directory}")
+            skill_file = skill_file.resolve(strict=True)
+            if not skill_file.is_relative_to(directory):
+                raise InvalidSkillMetadataError(f"{SKILL_FILE_NAME} 路径越界：{entry}")
             metadata = parse_skill_metadata(skill_file)
             if metadata.name in scanned:
                 raise InvalidSkillMetadataError(f"Skill 名称重复：{metadata.name!r}")
@@ -109,18 +132,3 @@ def _frontmatter_lines(handle: TextIO, path: Path) -> list[str]:
             return lines
         lines.append(line)
     raise InvalidSkillMetadataError(f"{path} 的 frontmatter 未闭合")
-
-
-def _load_references(skill_dir: Path, body: str) -> Iterator[SkillReference]:
-    for relative in _referenced_paths(body):
-        target = skill_dir / relative
-        if not target.is_file():
-            raise MissingSkillFileError(f"Skill {skill_dir.name!r} 引用的文件不存在：{relative}")
-        yield SkillReference(path=relative, text=target.read_text(encoding="utf-8"))
-
-
-def _referenced_paths(body: str) -> tuple[str, ...]:
-    seen: dict[str, None] = {}
-    for match in _REFERENCE_PATTERN.finditer(body):
-        seen.setdefault(match.group(0), None)
-    return tuple(seen)

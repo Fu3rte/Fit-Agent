@@ -40,7 +40,7 @@ from app.application.agent.contracts import (
     thread_config,
 )
 from app.application.agent.harness.registry import (
-    general_skill_bundle,
+    general_skill_metadata,
     general_system_prompt,
     general_ui_actions,
 )
@@ -371,7 +371,7 @@ async def _tool_messages(
 
     ``snapshot`` 由需要 Run 事实快照的 Intent 传入，其余 Intent 为 None。
     """
-    skill = general_skill_bundle(deps.skills, intent)
+    allowed_skills = general_skill_metadata(deps.skills, intent)
     result = await deps.tool_harnesses[intent].ainvoke(
         {
             "messages": harness_messages(
@@ -381,7 +381,7 @@ async def _tool_messages(
                     HARNESS_SYSTEM_PROMPTS.get(intent, TOOL_HARNESS_SYSTEM_PROMPT).format(
                         business_day=run.business_day.isoformat()
                     ),
-                    skill,
+                    allowed_skills,
                 ),
             )
         },
