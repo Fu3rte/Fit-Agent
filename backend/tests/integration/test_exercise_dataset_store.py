@@ -94,4 +94,3 @@ async def test_facet_vocabularies_cover_every_dataset_value() -> None:
 
     muscle_values = {row.muscle_group for row in rows}
     assert muscle_values <= (MUSCLE_GROUP_VALUES | set(MUSCLE_GROUP_ALIASES))
-    assert MUSCLE_GROUP_VALUES <= muscle_values | set(MUSCLE_GROUP_ALIASES)

@@ -21,8 +21,13 @@ from app.application.agent.contracts import (
     PlanWriteDeps,
 )
 from app.application.agent.harness.cache import ToolResultCache
-from app.application.agent.harness.tools.general import build_general_tool_harnesses
-from app.application.agent.harness.tools.training import build_plan_tool_harnesses
+from app.application.agent.harness.registry import (
+    build_general_tool_harnesses,
+    build_plan_tool_harnesses,
+)
+from app.application.agent.harness.tools.exercise_dataset.store import (
+    InMemoryCanonicalExerciseDataset,
+)
 from app.application.agent.plan_graph import build_generate_plan_graph
 from app.application.ports import (
     Conversations,
@@ -145,7 +150,7 @@ def create_app(
                 checkpoint_database_path(resolved)
             ) as checkpointer:
                 app.state.checkpointer = checkpointer
-                app.state.agent_runtime = build_agent_runtime(
+                app.state.agent_runtime = await build_agent_runtime(
                     checkpointer,
                     data_dir=resolved,
                     schema_version=user_version,
@@ -209,7 +214,7 @@ def build_services(
     )
 
 
-def build_agent_runtime(
+async def build_agent_runtime(
     checkpointer: BaseCheckpointSaver,
     *,
     data_dir: Path,
@@ -222,6 +227,9 @@ def build_agent_runtime(
     skills = SkillLoader(skills_dir())
     cache = ToolResultCache(
         revisions=repositories.tool_cache, schema_version=schema_version
+    )
+    dataset = InMemoryCanonicalExerciseDataset(
+        await repositories.exercises.list_all(), catalog_revision=schema_version
     )
     tool_harnesses: Mapping[Intent, CompiledStateGraph] = build_general_tool_harnesses(
         timeout_seconds=TOOL_TIMEOUT_SECONDS, cache=cache
@@ -240,6 +248,7 @@ def build_agent_runtime(
             stats=services.stats,
             revisions=repositories.tool_cache,
             schema_version=schema_version,
+            dataset=dataset,
         ),
         evaluator=PlanLlmNodeDeps(
             model=model,
@@ -251,6 +260,7 @@ def build_agent_runtime(
             stats=services.stats,
             revisions=repositories.tool_cache,
             schema_version=schema_version,
+            dataset=dataset,
         ),
         deterministic=PlanDeterministicDeps(
             profiles=repositories.profiles,
@@ -277,5 +287,8 @@ def build_agent_runtime(
             profiles=repositories.profiles,
             skills=skills,
             tool_harnesses=tool_harnesses,
+            revisions=repositories.tool_cache,
+            schema_version=schema_version,
+            dataset=dataset,
         ),
     )

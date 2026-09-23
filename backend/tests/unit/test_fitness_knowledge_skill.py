@@ -1,9 +1,9 @@
 # ST-04 fitness-knowledge Skill：真实 SkillLoader 校验正文、两个 reference 与 General 装载名称。
 
 from app.application.agent.contracts import LoadedSkill
-from app.application.agent.harness.tools.general import (
+from app.application.agent.harness.registry import (
+    GENERAL_INTENT_SKILLS,
     GENERAL_INTENT_TOOLS,
-    GENERAL_SKILL_NAMES,
 )
 from app.infrastructure.skills.loader import SkillLoader
 from config import skills_dir
@@ -23,7 +23,8 @@ def test_metadata_and_both_references_load_through_the_real_loader() -> None:
     skill = _load()
 
     assert skill.metadata.name == SKILL_NAME and skill.metadata.description.strip()
-    assert GENERAL_SKILL_NAMES.count(SKILL_NAME) == 1
+    names = [name for names in GENERAL_INTENT_SKILLS.values() for name in names]
+    assert SKILL_NAME in names
     assert tuple(ref.path for ref in skill.references) == REFERENCE_PATHS
     assert all(ref.text.strip() for ref in skill.references)
 

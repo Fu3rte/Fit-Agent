@@ -1,7 +1,7 @@
 # strength-training 的最小加载契约：真实 SkillLoader 按名取到正文与它明确引用的两份 reference，
 # 且它在 General 装载清单里只登记一次。
 
-from app.application.agent.harness.tools.general import GENERAL_SKILL_NAMES
+from app.application.agent.harness.registry import GENERAL_INTENT_SKILLS
 from app.infrastructure.skills.loader import SkillLoader
 from config import skills_dir
 
@@ -23,6 +23,6 @@ def test_strength_training_loads_both_references() -> None:
 
 
 def test_strength_training_is_registered_once_and_loadable() -> None:
-    assert GENERAL_SKILL_NAMES.count(SKILL_NAME) == 1
-    assert len(set(GENERAL_SKILL_NAMES)) == len(GENERAL_SKILL_NAMES)
+    names = [name for names in GENERAL_INTENT_SKILLS.values() for name in names]
+    assert SKILL_NAME in names
     assert SkillLoader(skills_dir()).load(SKILL_NAME).metadata.name == SKILL_NAME

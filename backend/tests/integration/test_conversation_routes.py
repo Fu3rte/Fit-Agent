@@ -34,7 +34,10 @@ from app.application.agent.contracts import (
     PlanWriteDeps,
     thread_config,
 )
-from app.application.agent.harness.tools.training import build_plan_tool_harnesses
+from app.application.agent.harness.registry import build_plan_tool_harnesses
+from app.application.agent.harness.tools.exercise_dataset.store import (
+    InMemoryCanonicalExerciseDataset,
+)
 from app.application.agent.plan_graph import invoke_confirmation
 from app.application.agent.prompts import (
     EVALUATOR_SYSTEM_PROMPT,
@@ -125,9 +128,12 @@ async def _app(
     if not isinstance(user_version, int):
         raise RuntimeError(f"迁移后 user_version 不是整数：{user_version!r}")
     app.state.services = services
+    dataset = InMemoryCanonicalExerciseDataset(
+        await repositories.exercises.list_all(), catalog_revision=user_version
+    )
     app.state.agent_runtime = AgentRuntime(
         graph=harness_graph,
-        deps=_deps(repositories, services, model, user_version),
+        deps=_deps(repositories, services, model, user_version, dataset),
         run_deps=AgentRunDeps(
             model=model,
             stats=services.stats,
@@ -138,13 +144,18 @@ async def _app(
             profiles=repositories.profiles,
             skills=SkillLoader(skills_dir()),
             tool_harnesses=_tool_harnesses(),
+            revisions=repositories.tool_cache,
+            schema_version=user_version,
+            dataset=dataset,
         ),
     )
     app.dependency_overrides[current_business_date] = lambda: BUSINESS_DAY
     return app
 
 
-def _plan_llm_deps(model, repositories, services, schema_version, *, evaluation):
+def _plan_llm_deps(
+    model, repositories, services, schema_version, dataset, *, evaluation
+):
     """一次 LLM Node 的构造期依赖：唯一模型入口 ＋ 该路径自己的 ToolNode 与只读端口。"""
     harnesses = build_plan_tool_harnesses(timeout_seconds=TOOL_TIMEOUT_SECONDS)
     return PlanLlmNodeDeps(
@@ -157,6 +168,7 @@ def _plan_llm_deps(model, repositories, services, schema_version, *, evaluation)
         stats=services.stats,
         revisions=repositories.tool_cache,
         schema_version=schema_version,
+        dataset=dataset,
     )
 
 
@@ -165,14 +177,15 @@ def _deps(
     services: AppServices,
     model: ScriptedGateway,
     schema_version: int,
+    dataset: Any,
 ) -> GeneratePlanDeps:
     now = lambda: datetime(2026, 6, 1, 9, 0, tzinfo=UTC)  # noqa: E731
     return GeneratePlanDeps(
         planner=_plan_llm_deps(
-            model, repositories, services, schema_version, evaluation=False
+            model, repositories, services, schema_version, dataset, evaluation=False
         ),
         evaluator=_plan_llm_deps(
-            model, repositories, services, schema_version, evaluation=True
+            model, repositories, services, schema_version, dataset, evaluation=True
         ),
         deterministic=PlanDeterministicDeps(
             profiles=repositories.profiles,

@@ -21,9 +21,8 @@ from app.application.agent.harness.cache import ToolResultCache
 from app.application.agent.harness.declaration import HarnessContext, HarnessState
 from app.application.agent.harness.graph import build_tool_harness
 from app.application.agent.harness.policy import build_tool_call_wrapper
-from app.application.agent.harness.tools.training import (
-    PROGRESS_TOOLS,
-    SCHEDULE_TOOLS,
+from app.application.agent.harness.registry import PROGRESS_TOOLS, SCHEDULE_TOOLS
+from app.application.agent.harness.tools.read_training_calendar import (
     ReadTrainingCalendarArgs,
 )
 from app.application.ports import ModelGateway
@@ -442,10 +441,10 @@ async def test_key_comes_from_validated_args(tmp_path: Path) -> None:
             "read_training_history", {}, call_id="call-1", context=h.context
         )
         explicit = _request(
-            "read_training_history", {"limit": 4}, call_id="call-2", context=h.context
+            "read_training_history", {"limit": 20}, call_id="call-2", context=h.context
         )
         text = _request(
-            "read_training_history", {"limit": "4"}, call_id="call-3", context=h.context
+            "read_training_history", {"limit": "20"}, call_id="call-3", context=h.context
         )
 
         assert await h.cache.key_for(empty) == await h.cache.key_for(explicit)

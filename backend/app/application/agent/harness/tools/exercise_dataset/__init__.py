@@ -1,16 +1,27 @@
-# 动作数据集工具的对外聚合（对应 pi 的 tools/index.ts）：节点注册只需从本包导入工具元组与上下文，
-# 装配时给出 dataset 实现。词表、读取端口与工具实现各在同目录的 vocab.py／store.py／tools.py。
+# 动作数据集工具的对外聚合（对应 pi 的 tools/index.ts）：canonical search_exercises 是八工具之一的
+# 业务入口；数据集库检索与详情读取只在包内提供，供内部能力与测试使用。词表、读取端口与工具实现各在同
+# 目录的 vocab.py／store.py／tools.py。
 
 from app.application.agent.harness.tools.exercise_dataset.store import (
+    CanonicalExerciseDataset,
+    CanonicalExerciseHit,
+    ExerciseCatalogUnavailable,
+    ExerciseDataset,
+    InMemoryCanonicalExerciseDataset,
     InMemoryExerciseDataset,
 )
 from app.application.agent.harness.tools.exercise_dataset.tools import (
-    EXERCISE_DATASET_TOOLS,
     ExerciseDatasetHarnessContext,
+    search_exercises,
 )
 
 __all__ = (
-    "EXERCISE_DATASET_TOOLS",
+    "CanonicalExerciseDataset",
+    "CanonicalExerciseHit",
+    "ExerciseCatalogUnavailable",
+    "ExerciseDataset",
     "ExerciseDatasetHarnessContext",
+    "InMemoryCanonicalExerciseDataset",
     "InMemoryExerciseDataset",
+    "search_exercises",
 )

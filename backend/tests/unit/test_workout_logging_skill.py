@@ -1,7 +1,9 @@
 from app.api.schemas.agent_dto import ConfirmWorkoutBody, WorkoutSetBody
-from app.application.agent.harness.tools.general import (
+from app.application.agent.harness.registry import (
+    GENERAL_INTENT_SKILLS,
     GENERAL_INTENT_TOOLS,
-    GENERAL_SKILL_NAMES,
+)
+from app.application.agent.harness.tools.prepare_workout_record import (
     ExtractedWorkout,
     _workout_payload,
     _workout_set_input,
@@ -17,7 +19,8 @@ REFERENCE_PATHS = ("references/logging-contract.md", "references/few-shots.md")
 def test_workout_logging_skill_loads_with_its_references() -> None:
     skill = SkillLoader(skills_dir()).load(SKILL_NAME)
 
-    assert GENERAL_SKILL_NAMES.count(SKILL_NAME) == 1
+    names = [name for names in GENERAL_INTENT_SKILLS.values() for name in names]
+    assert SKILL_NAME in names
     assert skill.metadata.name == SKILL_NAME
     assert tuple(reference.path for reference in skill.references) == REFERENCE_PATHS
     assert tuple(

@@ -10,7 +10,6 @@ from datetime import date
 from pathlib import Path
 from typing import Any
 
-import pytest
 from langchain_core.messages import AIMessage, ToolMessage
 from langgraph.graph import START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
@@ -18,14 +17,16 @@ from langgraph.prebuilt import ToolNode
 
 from app.application.agent.contracts import ToolExecutionContext
 from app.application.agent.harness.declaration import HarnessState
-from app.application.agent.harness.tools.training import (
-    EVALUATION_TOOLS,
-    PLAN_REQUIRED_FACTS,
+from app.application.agent.harness.registry import (
     PLANNING_TOOLS,
-    PROFILE_TOOLS,
     PROGRESS_TOOLS,
     SCHEDULE_TOOLS,
-    TrainingHarnessContext,
+)
+from app.application.agent.harness.snapshot import PLAN_REQUIRED_FACTS
+from app.application.agent.harness.tools import read_user_profile
+from app.application.agent.harness.tools.common import TrainingHarnessContext
+from app.application.agent.harness.tools.exercise_dataset.store import (
+    InMemoryCanonicalExerciseDataset,
 )
 from app.application.ports import ModelGateway
 from app.bootstrap import SqliteHealthProbe, build_repositories, build_services
@@ -189,6 +190,11 @@ async def _harness(
             db,
             SqliteHealthProbe(db, db.path.parent),
         )
+        catalog_revision = await db.pragma_value("user_version")
+        if not isinstance(catalog_revision, int):
+            raise RuntimeError(
+                f"迁移后 user_version 不是整数：{catalog_revision!r}"
+            )
         context = TrainingHarnessContext(
             model=_MODEL,
             budget=_UnusedBudget(),
@@ -198,6 +204,10 @@ async def _harness(
             catalog=ExerciseRepo(db),
             records=services.records,
             stats=services.stats,
+            dataset=InMemoryCanonicalExerciseDataset(
+                await repositories.exercises.list_all(),
+                catalog_revision=catalog_revision,
+            ),
         )
         graph = StateGraph(HarnessState, context_schema=TrainingHarnessContext)
         graph.add_node("tools", ToolNode(list(tools)))
@@ -311,153 +321,6 @@ def _leaf_values(value: Any) -> list[Any]:
     if isinstance(value, list):
         return [leaf for item in value for leaf in _leaf_values(item)]
     return [value]
-
-
-async def test_read_active_plan_returns_null_without_active_plan(tmp_path: Path) -> None:
-    """没有 active 计划：只回业务日、null 与空渐进决策，不编造计划。"""
-    async with _harness(tmp_path) as h:
-        before = await h.counts()
-
-        payload = await h.payload("read_active_plan", {})
-
-        assert payload == {
-            "business_day": "2026-06-01",
-            "active_plan": None,
-            "progression_decisions": [],
-        }
-        assert await h.counts() == before
-
-
-async def test_read_active_plan_reports_window_and_expands_catalog_names(
-    tmp_path: Path,
-) -> None:
-    """窗口为开始日起七天，动作按目录补 standard_name_zh，范围外日期不落休息日。"""
-    async with _harness(tmp_path) as h:
-        plan_id = await h.seed_plan(_plan_content())
-
-        plan = (await h.payload("read_active_plan", {}))["active_plan"]
-
-        assert set(plan) == {
-            "id",
-            "version",
-            "coverage",
-            "goal",
-            "explanation",
-            "weekly_frequency",
-            "training_days",
-        }
-        assert plan["id"] == plan_id
-        assert plan["version"] == 1
-        assert plan["coverage"] == {
-            "starts_on": "2026-06-01",
-            "ends_on": "2026-06-07",
-        }
-        assert plan["goal"] == "增肌"
-        assert plan["explanation"] == "每周三练"
-        assert plan["weekly_frequency"] == 3
-        assert [day["scheduled_on"] for day in plan["training_days"]] == [
-            "2026-06-01",
-            "2026-06-02",
-            "2026-06-03",
-        ]
-        assert all(
-            set(day) == {"scheduled_on", "exercises"} for day in plan["training_days"]
-        )
-        first_day = plan["training_days"][0]
-        assert [exercise["exercise_name"] for exercise in first_day["exercises"]] == [
-            "杠铃背蹲",
-            "平板支撑",
-        ]
-        assert first_day["exercises"][0]["sets"] == 3
-        assert first_day["exercises"][0]["prescription"]["load"]["weight_kg"] == 60.0
-
-
-async def test_read_active_plan_returns_null_name_for_missing_catalog_entry(
-    tmp_path: Path,
-) -> None:
-    """目录缺失的动作保留稳定身份并把名称显式置 null，其余动作照常展开。"""
-    async with _harness(tmp_path) as h:
-        await h.seed_plan(_plan_content(squat_id="not-in-catalog"))
-
-        plan = (await h.payload("read_active_plan", {}))["active_plan"]
-
-        missing, present = plan["training_days"][0]["exercises"]
-        assert set(plan) == {
-            "id",
-            "version",
-            "coverage",
-            "goal",
-            "explanation",
-            "weekly_frequency",
-            "training_days",
-        }
-        assert missing["exercise_id"] == "not-in-catalog"
-        assert missing["exercise_name"] is None
-        assert present["exercise_name"] == "平板支撑"
-
-
-async def test_read_active_plan_reports_the_progression_decisions_of_weighted_targets(
-    tmp_path: Path,
-) -> None:
-    """带目标处方的负重动作给出渐进决策：关联训练由该计划的日程身份界定，决策取自 10B／10B-1 规则。"""
-    async with _harness(tmp_path) as h:
-        plan_id = await h.seed_plan(_plan_content())
-        await h.seed_sessions(plan_id, [date(2026, 6, 1)])
-        sessions = await h.plan_sessions(plan_id)
-        await h.seed_workout(
-            date(2026, 5, 30), [_squat_set()], plan_session_id=sessions[0].id
-        )
-
-        decisions = (await h.payload("read_active_plan", {}))[
-            "progression_decisions"
-        ]
-
-        assert decisions == [
-            {
-                "exercise_id": BARBELL_BACK_SQUAT,
-                "sets": 3,
-                "reps_min": 5,
-                "reps_max": 8,
-                "target_load_kg": 60.0,
-                "decision": {"action": "keep", "load_kg": 60.0},
-            }
-        ]
-
-
-async def test_read_active_plan_skips_targets_without_a_catalog_increment(
-    tmp_path: Path,
-) -> None:
-    """目录没有增重单位的动作不产生渐进决策：只有能被规则判定的目标才出现在事实里。"""
-    async with _harness(tmp_path) as h:
-        await h.seed_plan(_plan_content(squat_id=PULL_UP))
-
-        plan = await h.payload("read_active_plan", {})
-
-        assert plan["progression_decisions"] == []
-
-
-async def test_search_exercises_returns_the_candidate_facts_with_the_starting_load(
-    tmp_path: Path,
-) -> None:
-    """检索结果带可推荐、增重单位与起始负荷：起始负荷取自该动作最近一次有效工作组。"""
-    async with _harness(tmp_path, tools=PLANNING_TOOLS) as h:
-        no_history = await h.payload("search_exercises", {"query": "杠铃背蹲"})
-
-        assert [hit["exercise_id"] for hit in no_history] == [BARBELL_BACK_SQUAT]
-        assert no_history[0]["recommendable"] is True
-        assert no_history[0]["min_load_increment_kg"] == 2.5
-        assert no_history[0]["starting_load"] == {"status": "needs_calibration"}
-
-        workout_id = await h.seed_workout(date(2026, 5, 30), [_squat_set()])
-
-        known = (await h.payload("search_exercises", {"query": "杠铃背蹲"}))[0]
-
-        assert known["starting_load"] == {
-            "status": "known",
-            "weight_kg": 60.0,
-            "source_workout_session_id": workout_id,
-            "source_set_no": 1,
-        }
 
 
 async def test_read_active_plan_rejects_undeclared_arguments(tmp_path: Path) -> None:
@@ -587,63 +450,6 @@ async def test_read_training_calendar_rejects_undeclared_arguments(tmp_path: Pat
         assert "Extra inputs are not permitted" in message.content
 
 
-async def test_read_training_history_defaults_to_four_sessions(tmp_path: Path) -> None:
-    """缺省取最近 4 次训练，最新在前，字段严格来自现有 Schema。"""
-    async with _harness(tmp_path) as h:
-        plan_id = await h.seed_plan(_plan_content())
-        await h.seed_sessions(plan_id, [date(2026, 5, 30)])
-        sessions = await h.plan_sessions(plan_id)
-        for day in (26, 27, 28, 29):
-            await h.seed_workout(date(2026, 5, day), [_squat_set()])
-        linked_id = await h.seed_workout(
-            date(2026, 5, 30), [_squat_set(), _plank_set()], plan_session_id=sessions[0].id
-        )
-
-        workouts = await h.payload("read_training_history", {})
-
-        assert isinstance(workouts, list)
-        assert [workout["performed_on"] for workout in workouts] == [
-            "2026-05-30",
-            "2026-05-29",
-            "2026-05-28",
-            "2026-05-27",
-        ]
-        assert workouts[0]["id"] == linked_id
-        assert workouts[0]["plan_session_id"] == sessions[0].id
-        assert workouts[1]["plan_session_id"] is None
-        assert set(workouts[0]) == {"id", "performed_on", "plan_session_id", "sets"}
-        assert [workout_set["exercise_id"] for workout_set in workouts[0]["sets"]] == [
-            BARBELL_BACK_SQUAT,
-            PLANK,
-        ]
-        assert set(workouts[0]["sets"][0]) == {
-            "id",
-            "workout_session_id",
-            "exercise_id",
-            "set_no",
-            "set_type",
-            "load_convention",
-            "weight_kg",
-            "reps",
-            "duration_seconds",
-        }
-
-
-async def test_read_training_history_accepts_limit_bounds(tmp_path: Path) -> None:
-    """limit 的 1 与 20 端点合法，0 与 21 被 Schema 拦下。"""
-    async with _harness(tmp_path) as h:
-        for day in (26, 27, 28, 29, 30):
-            await h.seed_workout(date(2026, 5, day), [_squat_set()])
-
-        assert len((await h.payload("read_training_history", {"limit": 1}))) == 1
-        assert len((await h.payload("read_training_history", {"limit": 20}))) == 5
-        for limit in (0, 21):
-            message = await h.call("read_training_history", {"limit": limit})
-            assert message.status == "error", message.content
-            assert "limit" in message.content
-            assert "Extra inputs are not permitted" not in message.content
-
-
 async def test_read_training_history_rejects_undeclared_arguments(tmp_path: Path) -> None:
     """最近训练工具同样拒绝未声明字段。"""
     async with _harness(tmp_path) as h:
@@ -651,95 +457,6 @@ async def test_read_training_history_rejects_undeclared_arguments(tmp_path: Path
 
         assert message.status == "error"
         assert "Extra inputs are not permitted" in message.content
-
-
-async def test_read_progress_without_data_reports_no_data(tmp_path: Path) -> None:
-    """没有任何记录时三段摘要字段齐全、状态为 no_data、数值为 null。"""
-    async with _harness(tmp_path) as h:
-        payload = await h.payload("read_progress", {})
-
-        assert payload == {
-            "business_day": "2026-06-01",
-            "personal_bests": [],
-            "trend_summary": {
-                "weight_change": {
-                    "status": "no_data",
-                    "current": None,
-                    "current_on": None,
-                    "previous": None,
-                    "previous_on": None,
-                    "change": None,
-                },
-                "body_fat_change": {
-                    "status": "no_data",
-                    "current": None,
-                    "current_on": None,
-                    "previous": None,
-                    "previous_on": None,
-                    "change": None,
-                },
-                "days_since_last_workout": {
-                    "status": "no_data",
-                    "days": None,
-                    "last_performed_on": None,
-                },
-            },
-        }
-
-
-async def test_read_progress_reports_personal_bests_and_trend_summary(
-    tmp_path: Path,
-) -> None:
-    """有数据时：PB 取来源组事实，体重变化与停训天数由既有实现现算，体脂不足两条不给数。"""
-    async with _harness(tmp_path) as h:
-        workout_id = await h.seed_workout(
-            date(2026, 5, 30), [_squat_set(weight_kg=60.0, reps=5)]
-        )
-        metrics = build_services(
-            build_repositories(h.db),
-            h.db,
-            SqliteHealthProbe(h.db, h.db.path.parent),
-        ).body_metrics
-        await metrics.create(date(2026, 5, 25), 74.8)
-        await metrics.create(date(2026, 5, 30), 74.2, 18.5)
-
-        payload = await h.payload("read_progress", {})
-
-        assert payload["business_day"] == "2026-06-01"
-        assert payload["personal_bests"] == [
-            {
-                "exercise_id": BARBELL_BACK_SQUAT,
-                "exercise_name": "杠铃背蹲",
-                "pb_type": "weight_pb",
-                "value": 60.0,
-                "load_convention": "barbell_includes_bar_total",
-                "weight_kg": 60.0,
-                "workout_session_id": workout_id,
-                "set_no": 1,
-                "performed_on": "2026-05-30",
-            }
-        ]
-        summary = payload["trend_summary"]
-        weight_change = summary["weight_change"]
-        assert weight_change["status"] == "ok"
-        assert weight_change["current"] == pytest.approx(74.2)
-        assert weight_change["current_on"] == "2026-05-30"
-        assert weight_change["previous"] == pytest.approx(74.8)
-        assert weight_change["previous_on"] == "2026-05-25"
-        assert weight_change["change"] == pytest.approx(-0.6)
-        assert summary["body_fat_change"] == {
-            "status": "insufficient_data",
-            "current": None,
-            "current_on": None,
-            "previous": None,
-            "previous_on": None,
-            "change": None,
-        }
-        assert summary["days_since_last_workout"] == {
-            "status": "ok",
-            "days": 2,
-            "last_performed_on": "2026-05-30",
-        }
 
 
 async def test_read_progress_rejects_undeclared_arguments(tmp_path: Path) -> None:
@@ -774,9 +491,15 @@ def test_read_tool_schemas_forbid_undeclared_fields_and_hide_injected_context() 
         "read_user_profile": set(),
         "read_active_plan": set(),
         "read_training_calendar": {"year", "month"},
-        "read_training_history": {"limit"},
-        "read_progress": set(),
-        "search_exercises": {"query"},
+        "read_training_history": {"from_on", "to_on", "exercise_ids", "limit"},
+        "read_progress": {"window_days"},
+        "search_exercises": {
+            "query",
+            "muscle_groups",
+            "equipment",
+            "movement_patterns",
+            "limit",
+        },
     }
 
 
@@ -850,7 +573,7 @@ def _all_tool_calls() -> tuple[tuple[str, dict[str, Any]], ...]:
 
 async def test_read_user_profile_returns_the_profile_facts(tmp_path: Path) -> None:
     """画像 Tool 只读三态事实；未建档时明确返回 null，不编造字段。"""
-    async with _harness(tmp_path, tools=PROFILE_TOOLS) as h:
+    async with _harness(tmp_path, tools=(read_user_profile,)) as h:
         assert await h.payload("read_user_profile") == {"profile": None}
         services = build_services(
             build_repositories(h.db),
@@ -878,8 +601,6 @@ def test_plan_tool_whitelists_cover_the_required_facts() -> None:
         "read_progress",
         "search_exercises",
     )
-    assert tuple(tool.name for tool in EVALUATION_TOOLS) == names
-    assert tuple(tool.name for tool in PROFILE_TOOLS) == ("read_user_profile",)
     generate = set(PLAN_REQUIRED_FACTS["generate_plan"])
     adjust = set(PLAN_REQUIRED_FACTS["adjust_plan"])
     assert generate < adjust

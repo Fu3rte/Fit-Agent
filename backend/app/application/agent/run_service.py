@@ -35,19 +35,25 @@ from app.application.agent.contracts import (
     RequiredActivePlanMissing,
     RequiredProfileMissing,
     TerminationReason,
+    ToolExecutionContext,
     WorkflowState,
     initial_workflow_state,
     thread_config,
 )
-from app.application.agent.harness.tools.general import (
+from app.application.agent.harness.registry import (
     general_skill_bundle,
     general_system_prompt,
     general_ui_actions,
-    prepare_workout_record_payload,
-    workout_confirmation_action,
+)
+from app.application.agent.harness.snapshot import run_fact_snapshot
+from app.application.agent.harness.tools.common import TrainingHarnessContext
+from app.application.agent.harness.tools.get_workout_record_form import (
     workout_form_action,
 )
-from app.application.agent.harness.tools.training import TrainingHarnessContext
+from app.application.agent.harness.tools.prepare_workout_record import (
+    prepare_workout_record_payload,
+    workout_confirmation_action,
+)
 from app.application.agent.prompts import (
     DISCARD_FAILED_CANDIDATE_MESSAGE,
     GENERAL_CHAT_SYSTEM_PROMPT,
@@ -280,7 +286,7 @@ async def _general_branch(
     """五项会话 Intent 的唯一分支：按 Intent 的只读白名单取事实，输出 message ＋ ui_actions。"""
     request = state["request"]
     if intent == "natural_language_record":
-        return await _natural_language_record(request, run=run, deps=deps)
+        return await _natural_language_record(request, state, run=run, deps=deps)
     if intent not in NON_PLAN_INTENTS:
         raise ValueError(f"General 分支收到未登记的会话 Intent：{intent!r}")
     messages = await _tool_messages(intent, request, run=run, deps=deps)
@@ -329,7 +335,12 @@ async def _existing_draft_target(
     return ExistingDraftTarget(replacement_id=draft.id)
 
 
-def harness_context(run: GeneratePlanRun, *, deps: AgentRunDeps) -> TrainingHarnessContext:
+def harness_context(
+    run: GeneratePlanRun,
+    *,
+    deps: AgentRunDeps,
+    snapshot: ToolExecutionContext | None = None,
+) -> TrainingHarnessContext:
     """General 只读工具的运行上下文：业务日、共享预算与既有只读入口，身份不进模型参数。"""
     return TrainingHarnessContext(
         model=deps.model,
@@ -340,11 +351,17 @@ def harness_context(run: GeneratePlanRun, *, deps: AgentRunDeps) -> TrainingHarn
         catalog=deps.catalog,
         records=deps.records,
         stats=deps.stats,
+        dataset=deps.dataset,
+        snapshot=snapshot,
     )
 
 
 async def _tool_messages(
-    intent: Intent, request: str, *, run: GeneratePlanRun, deps: AgentRunDeps
+    intent: Intent,
+    request: str,
+    *,
+    run: GeneratePlanRun,
+    deps: AgentRunDeps,
 ) -> tuple[BaseMessage, ...]:
     """工具类 Intent 的唯一实现：本次 Intent 白名单的 general_tools 出消息；调用由模型自选。"""
     skill = general_skill_bundle(deps.skills, intent)
@@ -403,13 +420,20 @@ def harness_answer(messages: Sequence[BaseMessage]) -> str:
 
 
 async def _natural_language_record(
-    request: str, *, run: GeneratePlanRun, deps: AgentRunDeps
+    request: str, state: WorkflowState, *, run: GeneratePlanRun, deps: AgentRunDeps
 ) -> GeneralOutcome:
     """自然语言打卡的唯一实现：提取 → 校验 → 候选日程 → 可读摘要；确认前不写业务训练表。"""
     skill = general_skill_bundle(deps.skills, "natural_language_record")
+    snapshot = await run_fact_snapshot(
+        deps.revisions,
+        schema_version=deps.schema_version,
+        user_id=state["user_id"],
+        run_id=state["run_id"],
+        business_day=run.business_day,
+    )
     try:
         payload = await prepare_workout_record_payload(
-            harness_context(run, deps=deps),
+            harness_context(run, deps=deps, snapshot=snapshot),
             request,
             history=run.conversation_messages,
             skill=skill,
@@ -423,8 +447,8 @@ async def _natural_language_record(
             {
                 "request": request,
                 **history_payload(run.conversation_messages),
-                "workout": payload["workout"],
-                "candidate_plan_sessions": payload["candidate_plan_sessions"],
+                "workout": payload.workout,
+                "candidate_plan_sessions": payload.candidate_plan_sessions,
                 "skill": skill.model_dump(),
             },
             run.budget,

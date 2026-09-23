@@ -48,6 +48,9 @@ TOOL_CACHE_DIMENSIONS: Mapping[str, ToolCacheDimensions] = {
     "read_progress": ToolCacheDimensions(
         namespaces=("workouts", "metrics"), business_day=True, schema_version=True
     ),
+    "search_exercises": ToolCacheDimensions(
+        namespaces=(), business_day=False, schema_version=True
+    ),
 }
 
 

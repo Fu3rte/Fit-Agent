@@ -247,6 +247,10 @@ class AgentRunDeps:
     profiles: ProfileReads
     skills: SkillSource
     tool_harnesses: Mapping[Intent, CompiledStateGraph]
+    revisions: ToolCacheRevisions
+    schema_version: int
+    #: canonical 目录 × 数据集的联表只读端口；组合根构造一次，所有 Run 共享。
+    dataset: Any = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -298,6 +302,8 @@ class PlanLlmNodeDeps:
     stats: StatsService
     revisions: ToolCacheRevisions
     schema_version: int
+    #: canonical 目录 × 数据集的联表只读端口；组合根构造一次，两条计划路径共享。
+    dataset: Any = None
 
 
 @dataclass(frozen=True, slots=True)

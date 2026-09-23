@@ -70,10 +70,8 @@ async def test_coverage_relative_schedule_questions_read_the_same_window(
 
         assert result.messages == (ANSWER,)
         assert payload["business_day"] == BUSINESS_DAY.isoformat()
-        assert payload["active_plan"]["coverage"] == {
-            "starts_on": BUSINESS_DAY.isoformat(),
-            "ends_on": COVERAGE_END,
-        }
+        assert payload["active_plan"]["starts_on"] == BUSINESS_DAY.isoformat()
+        assert payload["active_plan"]["ends_on"] == COVERAGE_END
         scheduled = [
             day["scheduled_on"] for day in payload["active_plan"]["training_days"]
         ]
@@ -99,7 +97,8 @@ async def test_expired_active_plan_reports_coverage_outside_the_business_day(
         assert result.messages == (ANSWER,)
         assert payload["business_day"] == BUSINESS_DAY.isoformat()
         plan = payload["active_plan"]
-        assert plan["coverage"] == {"starts_on": "2026-05-25", "ends_on": "2026-05-31"}
+        assert plan["starts_on"] == "2026-05-25"
+        assert plan["ends_on"] == "2026-05-31"
         assert [
             day["scheduled_on"] for day in plan["training_days"]
         ] == ["2026-05-25", "2026-05-26"]
@@ -145,10 +144,9 @@ async def test_recent_workout_query_without_records_returns_an_empty_list(
     ) as h:
         before = await _row_counts(h.db)
         result = await h.invoke(RECENT_WORKOUT_QUESTION)
-        workouts = json.loads(_tool_message(h.model.harness_calls[1]).content)
+        payload = json.loads(_tool_message(h.model.harness_calls[1]).content)
 
-        assert isinstance(workouts, list)
-        assert workouts == []
+        assert payload == {"sessions": []}
         assert result.messages == (ANSWER,)
         assert await _row_counts(h.db) == before
 

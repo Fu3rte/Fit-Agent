@@ -36,17 +36,17 @@ from app.application.agent.contracts import (
     initial_workflow_state,
     thread_config,
 )
-from app.application.agent.harness.tools.general import (
-    ExtractedWorkout,
-    build_general_tool_harnesses,
-)
-from app.application.agent.harness.tools.training import (
-    EVALUATION_TOOLS,
+from app.application.agent.harness.registry import (
     PLANNING_TOOLS,
-    MissingPlanFacts,
     UnregisteredCandidateExercise,
+    build_general_tool_harnesses,
     build_plan_tool_harnesses,
 )
+from app.application.agent.harness.snapshot import MissingPlanFacts
+from app.application.agent.harness.tools.exercise_dataset.store import (
+    InMemoryCanonicalExerciseDataset,
+)
+from app.application.agent.harness.tools.prepare_workout_record import ExtractedWorkout
 from app.application.agent.plan_graph import build_generate_plan_graph
 from app.application.agent.prompts import (
     EVALUATOR_SYSTEM_PROMPT,
@@ -309,7 +309,9 @@ class Harness:
         )
 
 
-def _plan_llm_deps(model, repositories, services, schema_version, *, evaluation):
+def _plan_llm_deps(
+    model, repositories, services, schema_version, dataset, *, evaluation
+):
     """一次 LLM Node 的构造期依赖：唯一模型入口 ＋ 该路径自己的 ToolNode 与只读端口。"""
     harnesses = build_plan_tool_harnesses(timeout_seconds=TOOL_TIMEOUT_SECONDS)
     return PlanLlmNodeDeps(
@@ -322,6 +324,7 @@ def _plan_llm_deps(model, repositories, services, schema_version, *, evaluation)
         stats=services.stats,
         revisions=repositories.tool_cache,
         schema_version=schema_version,
+        dataset=dataset,
     )
 
 
@@ -346,6 +349,9 @@ async def _harness(
         user_version = await db.pragma_value("user_version")
         if not isinstance(user_version, int):
             raise RuntimeError(f"迁移后 user_version 不是整数：{user_version!r}")
+        dataset = InMemoryCanonicalExerciseDataset(
+            await repositories.exercises.list_all(), catalog_revision=user_version
+        )
         model = ScriptedGateway(
             structured_scripts={
                 schema: [dict(row) for row in rows]
@@ -358,10 +364,10 @@ async def _harness(
         )
         deps = GeneratePlanDeps(
             planner=_plan_llm_deps(
-                model, repositories, services, user_version, evaluation=False
+                model, repositories, services, user_version, dataset, evaluation=False
             ),
             evaluator=_plan_llm_deps(
-                model, repositories, services, user_version, evaluation=True
+                model, repositories, services, user_version, dataset, evaluation=True
             ),
             deterministic=PlanDeterministicDeps(
                 profiles=repositories.profiles,
@@ -390,6 +396,9 @@ async def _harness(
                     profiles=repositories.profiles,
                     skills=skills,
                     tool_harnesses=_tool_harnesses(),
+                    revisions=repositories.tool_cache,
+                    schema_version=user_version,
+                    dataset=dataset,
                 ),
             )
     finally:
@@ -724,7 +733,7 @@ async def test_plan_path_runs_two_independent_tool_loops(tmp_path: Path) -> None
         )
         assert planner_call.offered == tuple(tool.name for tool in PLANNING_TOOLS)
         assert planner_answer.offered == planner_call.offered
-        assert evaluator_call.offered == tuple(tool.name for tool in EVALUATION_TOOLS)
+        assert evaluator_call.offered == tuple(tool.name for tool in PLANNING_TOOLS)
         assert evaluator_answer.offered == evaluator_call.offered
         # 两个 loop 的真实轨迹都来自实际完成的调用，且都是本次 Intent 的必需事实集。
         assert executed_tools(planner_answer) == GENERATE_FACT_TOOLS

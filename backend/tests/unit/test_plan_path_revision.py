@@ -4,14 +4,17 @@
 # 本文件只驱动节点与路由本身，不经过 Skill 装载（那一段由 agent 分支测试覆盖）。
 
 import json
+from collections.abc import Collection
 from dataclasses import dataclass, field
 from datetime import date
+from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
 from langchain_core.messages import AIMessage
 
 from app.application.agent.contracts import (
+    AdjustmentContext,
     ConfirmationConflict,
     GeneratePlanDeps,
     GeneratePlanRun,
@@ -24,15 +27,19 @@ from app.application.agent.contracts import (
     ToolEvidence,
     WorkflowState,
 )
-from app.application.agent.harness.tools.training import (
-    EVALUATION_TOOLS,
+from app.application.agent.harness.registry import (
     EVALUATION_TOOLS_NODE_NAME,
-    PLAN_REQUIRED_FACTS,
     PLANNING_TOOLS,
     PLANNING_TOOLS_NODE_NAME,
-    MissingPlanFacts,
     UnregisteredCandidateExercise,
     build_plan_tool_harnesses,
+)
+from app.application.agent.harness.snapshot import (
+    PLAN_REQUIRED_FACTS,
+    MissingPlanFacts,
+)
+from app.application.agent.harness.tools.exercise_dataset.store import (
+    InMemoryCanonicalExerciseDataset,
 )
 from app.application.agent.plan_graph import (
     _route_after_evaluator,
@@ -56,6 +63,7 @@ from app.domain.plans.schema import (
     RuleFailure,
 )
 from app.domain.profile.schema import Fact, Profile
+from app.domain.stats.schema import MetricChange, WorkoutGap
 from config import TOOL_TIMEOUT_SECONDS
 
 BUSINESS_DAY = date(2026, 6, 1)
@@ -119,8 +127,24 @@ def _pull_up() -> Exercise:
     )
 
 
+def _plank() -> Exercise:
+    return Exercise(
+        id="plank",
+        standard_name_zh="平板支撑",
+        aliases=("平板", "plank"),
+        equipment_variant="bodyweight",
+        record_type="time",
+        load_convention=None,
+        min_load_increment_kg=None,
+        recommendable=True,
+        modes=("核心",),
+        source_ref="refactor-log/stage2.md:§3",
+        attribution="Fit-Agent Stage 2 口径",
+    )
+
+
 def _catalog() -> _Catalog:
-    return _Catalog((_pull_up(),))
+    return _Catalog((_pull_up(), _plank()))
 
 
 @dataclass
@@ -133,13 +157,24 @@ class _Profiles:
 
 @dataclass
 class _Plans:
-    async def read_active(self) -> None:
-        return None
+    async def read_active(self) -> Any:
+        return SimpleNamespace(
+            id=1,
+            version=1,
+            structured_content=_draft().model_dump(mode="json"),
+        )
 
 
 @dataclass
 class _Records:
-    async def list_recent(self, limit: int) -> tuple[Any, ...]:
+    async def list_recent(
+        self,
+        limit: int,
+        *,
+        from_on: date | None = None,
+        to_on: date | None = None,
+        exercise_ids: Collection[str] = (),
+    ) -> tuple[Any, ...]:
         return ()
 
 
@@ -167,6 +202,14 @@ class _Stats:
 
     async def trend_summary(self, business_day: date) -> dict[str, Any]:
         return {}
+
+    async def weight_change_between(
+        self, from_on: date, to_on: date
+    ) -> MetricChange:
+        return MetricChange("no_data", None, None, None, None, None)
+
+    async def days_since_last_workout(self, business_day: date) -> WorkoutGap:
+        return WorkoutGap("no_data", None, None)
 
 
 class _Revisions:
@@ -240,7 +283,7 @@ class _Deps:
     catalog: _Catalog
     stats: _Stats
     persistence: _Persistence
-    schema_version: int = 4
+    schema_version: int = 7
     profiles: _Profiles = field(default_factory=lambda: _Profiles(_profile()))
     plans: _Plans = field(default_factory=_Plans)
     records: _Records = field(default_factory=_Records)
@@ -268,6 +311,9 @@ def _read_deps(deps: _Deps, *, evaluation: bool) -> PlanLlmNodeDeps:
         stats=deps.stats,
         revisions=deps.persistence.revisions,
         schema_version=deps.schema_version,
+        dataset=InMemoryCanonicalExerciseDataset(
+            deps.catalog.exercises, catalog_revision=deps.schema_version
+        ),
     )
 
 
@@ -479,8 +525,7 @@ async def test_planner_and_evaluator_consume_one_candidate_snapshot() -> None:
         ("read_user_profile", "profile", 1),
         ("read_training_history", "workouts", 2),
         ("read_progress", "workouts", 2),
-        ("search_exercises", "catalog", 4),
-        ("search_exercises", "workouts", 2),
+        ("search_exercises", "catalog", 7),
     ]
     assert "user-1" not in deps.model.payloads[0]
     assert "revision" not in deps.model.payloads[0]
@@ -506,7 +551,7 @@ async def test_planner_and_evaluator_consume_one_candidate_snapshot() -> None:
 
 
 async def test_planner_payload_facts_come_only_from_the_real_tool_loop() -> None:
-    """Planner 载荷的事实只来自本次两个真实 ToolNode loop：候选动作只由 search_exercises 的返回整形。"""
+    """Planner 事实来自真实 Tool loop；候选身份由检索返回，负荷由目录与工作组确定性补齐。"""
     deps = _Deps(
         catalog=_catalog(),
         stats=_Stats(),
@@ -678,7 +723,16 @@ async def test_adjust_plan_loop_reads_all_six_required_facts() -> None:
 
     written = await _planner(deps).planner_agent(
         _planner_state(intent="adjust_plan"),
-        _Runtime(GeneratePlanRun(BUSINESS_DAY)),
+        _Runtime(
+            GeneratePlanRun(
+                BUSINESS_DAY,
+                adjustment=AdjustmentContext(
+                    plan_id=1,
+                    active_draft=_draft(),
+                    linked_workout_session_ids=(),
+                ),
+            )
+        ),
     )
 
     evidence: tuple[ToolEvidence, ...] = written["planner_evidence"]
@@ -688,7 +742,7 @@ async def test_adjust_plan_loop_reads_all_six_required_facts() -> None:
 async def test_candidate_outside_the_real_search_results_fails() -> None:
     """真实 search_exercises 没有返回候选动作的 id：越界候选明确失败，不进评审。"""
     deps = _Deps(
-        catalog=_Catalog(()),
+        catalog=_Catalog((_plank(),)),
         stats=_Stats(),
         persistence=_Persistence(),
         model=_Model(tool_loops=[GENERATE_FACTS]),
@@ -703,15 +757,11 @@ async def test_candidate_outside_the_real_search_results_fails() -> None:
 
 
 def test_planning_and_evaluation_whitelists_stay_independent() -> None:
-    """两个 ToolNode 共用同一只读 Registry，但白名单元组与节点名各自独立。"""
+    """两个 ToolNode 共用同一只读 Registry 与同一白名单元组，节点名与调用轨迹各自独立。"""
     harnesses = build_plan_tool_harnesses(timeout_seconds=TOOL_TIMEOUT_SECONDS)
     planning_nodes = harnesses.planning.get_graph().nodes
     evaluation_nodes = harnesses.evaluation.get_graph().nodes
 
-    assert EVALUATION_TOOLS is not PLANNING_TOOLS
-    assert [tool.name for tool in EVALUATION_TOOLS] == [
-        tool.name for tool in PLANNING_TOOLS
-    ]
     assert set(PLAN_REQUIRED_FACTS["generate_plan"]) < set(
         PLAN_REQUIRED_FACTS["adjust_plan"]
     )

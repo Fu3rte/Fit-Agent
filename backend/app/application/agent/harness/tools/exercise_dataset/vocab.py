@@ -7,7 +7,13 @@ from dataclasses import dataclass
 from typing import Any
 
 #: 可过滤的 facet 字段；动作名（开放集）与二级肌群（列表）不在可精确过滤的 facet 内。
-FACET_FIELDS: tuple[str, ...] = ("body_part", "equipment", "target", "muscle_group")
+FACET_FIELDS: tuple[str, ...] = (
+    "body_part",
+    "equipment",
+    "target",
+    "muscle_group",
+    "movement_pattern",
+)
 
 # 规范英文（数据集里出现的全部取值，即下列字典的键）→ 中文：面向用户的答复展示与中文查询词归一的
 # 权威对照。muscle_group 以短形为键，数据集里的长名记为别名。
@@ -102,6 +108,34 @@ MUSCLE_GROUP_ZH: Mapping[str, str] = {
     "wrist extensors": "腕伸肌",
     "wrist flexors": "腕屈肌",
     "wrists": "腕关节",
+    "rear deltoids": "后三角肌",
+    "brachialis": "肱肌",
+    "back": "背部",
+    "feet": "足部",
+    "upper chest": "上胸部",
+    "sternocleidomastoid": "胸锁乳突肌",
+    "groin": "腹股沟",
+    "grip muscles": "握力肌群",
+    "lower abs": "下腹部",
+    "inner thighs": "大腿内侧",
+    "shins": "胫骨前侧",
+}
+
+#: canonical ``Exercise.modes`` 的动作模式：规范英文 → canonical 中文标签，键覆盖当前目录全部 modes。
+MOVEMENT_PATTERN_ZH: Mapping[str, str] = {
+    "squat": "深蹲",
+    "hip hinge": "髋铰链",
+    "horizontal push": "水平推",
+    "vertical push": "垂直推",
+    "horizontal pull": "水平拉",
+    "vertical pull": "垂直拉",
+    "knee extension": "膝伸",
+    "knee flexion": "膝屈",
+    "ankle plantar flexion": "小腿（踝跖屈）",
+    "core": "核心",
+    "shoulder isolation": "肩孤立",
+    "elbow flexion": "肘屈",
+    "elbow extension": "肘伸",
 }
 
 #: 各 facet 的规范英文取值：中英对照表的键即为数据集出现过的全部规范取值。
@@ -121,6 +155,7 @@ _ZH: Mapping[str, Mapping[str, str]] = {
     "equipment": EQUIPMENT_ZH,
     "target": TARGET_ZH,
     "muscle_group": MUSCLE_GROUP_ZH,
+    "movement_pattern": MOVEMENT_PATTERN_ZH,
 }
 
 
@@ -141,12 +176,18 @@ _NORMALIZERS: Mapping[str, dict[str, str]] = {
     "equipment": _normalizer(EQUIPMENT_ZH, {}),
     "target": _normalizer(TARGET_ZH, {}),
     "muscle_group": _normalizer(MUSCLE_GROUP_ZH, MUSCLE_GROUP_ALIASES),
+    "movement_pattern": _normalizer(MOVEMENT_PATTERN_ZH, {}),
 }
+
+
+def resolve_facet(field: str, value: str) -> str | None:
+    """facet 取值对应的规范英文；不在词表内即 None，由调用方决定失败语义。"""
+    return _NORMALIZERS[field].get(value.strip().casefold())
 
 
 def normalize_facet(field: str, value: str) -> str:
     """把中文或英文 facet 取值归一为数据集的规范英文；无法归一时抛错，交回调用侧修正参数。"""
-    canonical = _NORMALIZERS[field].get(value.strip().casefold())
+    canonical = resolve_facet(field, value)
     if canonical is None:
         raise UnknownFacetValue(
             f"{field} 取值 {value!r} 不在词表内；"

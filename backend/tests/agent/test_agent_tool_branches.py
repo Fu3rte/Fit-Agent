@@ -16,11 +16,8 @@ from app.application.agent.budget import (
     ModelRequestBudgetExceeded,
     ToolCallBudgetExceeded,
 )
-from app.application.agent.contracts import thread_config
-from app.application.agent.harness.tools.training import (
-    PROGRESS_TOOLS,
-    SCHEDULE_TOOLS,
-)
+from app.application.agent.contracts import LOCAL_USER_ID, thread_config
+from app.application.agent.harness.registry import PROGRESS_TOOLS, SCHEDULE_TOOLS
 from app.application.agent.prompts import TOOL_HARNESS_SYSTEM_PROMPT
 from app.application.agent.run_service import stream_agent_run
 from app.bootstrap import SqliteHealthProbe, build_repositories, build_services
@@ -120,10 +117,8 @@ async def test_schedule_query_answers_from_the_real_active_plan(tmp_path: Path) 
         ] * 2
         payload = json.loads(_tool_message(h.model.harness_calls[1]).content)
         assert payload["business_day"] == CALENDAR_DATE
-        assert payload["active_plan"]["coverage"] == {
-            "starts_on": CALENDAR_DATE,
-            "ends_on": COVERAGE_END,
-        }
+        assert payload["active_plan"]["starts_on"] == CALENDAR_DATE
+        assert payload["active_plan"]["ends_on"] == COVERAGE_END
         assert [
             day["scheduled_on"] for day in payload["active_plan"]["training_days"]
         ] == [CALENDAR_DATE, NEXT_DATE]
@@ -187,14 +182,18 @@ async def test_progress_query_offers_only_the_progress_tools(tmp_path: Path) -> 
             PROGRESS_TOOL_NAMES
         ] * 2
         payload = json.loads(_tool_message(h.model.harness_calls[1]).content)
-        assert set(payload) == {"business_day", "personal_bests", "trend_summary"}
-        assert payload["business_day"] == CALENDAR_DATE
-        assert payload["personal_bests"] == []
-        assert set(payload["trend_summary"]) == {
+        assert set(payload) == {
+            "business_day",
+            "window_days",
+            "personal_bests",
             "weight_change",
-            "body_fat_change",
             "days_since_last_workout",
         }
+        assert payload["business_day"] == CALENDAR_DATE
+        assert payload["window_days"] == 30
+        assert payload["personal_bests"] == []
+        assert payload["weight_change"]["status"] == "no_data"
+        assert payload["days_since_last_workout"]["status"] == "no_data"
         assert await _row_counts(h.db) == before
 
 
@@ -219,7 +218,8 @@ async def test_recent_workout_query_reads_the_written_session(tmp_path: Path) ->
         )
         before = await _row_counts(h.db)
         result = await h.invoke("我最近练了什么？")
-        sessions = json.loads(_tool_message(h.model.harness_calls[1]).content)
+        payload = json.loads(_tool_message(h.model.harness_calls[1]).content)
+        sessions = payload["sessions"]
 
         assert result.messages == (ANSWER,)
         assert [
@@ -314,7 +314,12 @@ async def test_streamed_frames_stay_in_the_closed_event_set(tmp_path: Path) -> N
             event
             async for event in stream_agent_run(
                 h.graph,
-                {"conversation_id": CONVERSATION_ID, "request": SCHEDULE_REQUEST},
+                {
+                    "conversation_id": CONVERSATION_ID,
+                    "request": SCHEDULE_REQUEST,
+                    "user_id": LOCAL_USER_ID,
+                    "run_id": "tool-branch-run",
+                },
                 thread_config(CONVERSATION_ID),
                 h.run_context(),
                 h.run_deps,

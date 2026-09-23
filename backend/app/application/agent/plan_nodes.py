@@ -35,16 +35,19 @@ from app.application.agent.contracts import (
     ToolExecutionContext,
     WorkflowState,
 )
-from app.application.agent.harness.tools.training import (
-    CATALOG_REVISION_DOMAIN,
-    PLAN_REQUIRED_FACTS,
-    PLAN_REVISION_DOMAINS,
-    MissingPlanFacts,
-    PlanToolHarnessContext,
-    ToolCallRecord,
-    plan_fact_evidence,
+from app.application.agent.harness.registry import (
     require_canonical_candidates,
     run_plan_fact_loop,
+)
+from app.application.agent.harness.snapshot import (
+    PLAN_REQUIRED_FACTS,
+    MissingPlanFacts,
+    plan_fact_evidence,
+    run_fact_snapshot,
+)
+from app.application.agent.harness.tools.common import (
+    ToolCallRecord,
+    TrainingHarnessContext,
 )
 from app.application.agent.prompts import (
     ADJUSTMENT_PLANNER_SYSTEM_PROMPT,
@@ -56,7 +59,10 @@ from app.application.agent.prompts import (
 from app.application.ports import Plans, SkillSource, Stats
 from app.domain.conversations.context import history_payload
 from app.domain.plans.rules import (
+    active_load_targets,
     known_forbidden_exercise_ids,
+    resolve_progression,
+    resolve_starting_load,
     snapshot_mismatch_failures,
     validate_plan_adjustment,
     validate_plan_draft,
@@ -135,7 +141,7 @@ class PlannerAgentNode:
         intent = state.get("intent")
         snapshot, facts = await _read_plan_facts(self._deps, state=state, run=run)
         evidence = plan_fact_evidence(intent, snapshot=snapshot, tool_calls=facts)
-        payload = _planner_payload(state, run, facts=facts)
+        payload = await _planner_payload(state, run, facts=facts, deps=self._deps)
         revision_count = state.get("revision_count") or 0
         if revision_count:
             payload["revision"] = {
@@ -361,10 +367,16 @@ async def _read_plan_facts(
     required = PLAN_REQUIRED_FACTS.get(intent or "")
     if required is None:
         raise ValueError(f"未登记的计划 Intent：{intent!r}")
-    snapshot = await _snapshot(deps, state=state, run=run)
+    snapshot = await run_fact_snapshot(
+        deps.revisions,
+        schema_version=deps.schema_version,
+        user_id=state["user_id"],
+        run_id=state["run_id"],
+        business_day=run.business_day,
+    )
     facts = await run_plan_fact_loop(
         deps.harness,
-        context=PlanToolHarnessContext(
+        context=TrainingHarnessContext(
             model=deps.model,
             budget=_plan_loop_budget(run),
             business_day=run.business_day,
@@ -373,6 +385,7 @@ async def _read_plan_facts(
             catalog=deps.catalog,
             records=deps.records,
             stats=deps.stats,
+            dataset=deps.dataset,
             snapshot=snapshot,
         ),
         messages=_fact_loop_messages(
@@ -382,31 +395,12 @@ async def _read_plan_facts(
     return snapshot, facts
 
 
-async def _snapshot(
-    deps: PlanLlmNodeDeps, *, state: WorkflowState, run: GeneratePlanRun
-) -> ToolExecutionContext:
-    """本次读取的事实快照键：身份来自 State，三个 revision 从只读端口读，catalog 用迁移版本。"""
-    revisions = await deps.revisions.read_all()
-    missing = [
-        domain
-        for domain in PLAN_REVISION_DOMAINS
-        if domain != CATALOG_REVISION_DOMAIN and domain not in revisions
-    ]
-    if missing:
-        raise ValueError(f"计划路径缺少事实域 revision：{missing}")
-    return ToolExecutionContext(
-        user_id=state["user_id"],
-        run_id=state["run_id"],
-        business_day=run.business_day,
-        profile_revision=revisions["profile"],
-        workouts_revision=revisions["workouts"],
-        plans_revision=revisions["plans"],
-        catalog_revision=deps.schema_version,
-    )
-
-
-def _planner_payload(
-    state: WorkflowState, run: GeneratePlanRun, *, facts: Sequence[ToolCallRecord]
+async def _planner_payload(
+    state: WorkflowState,
+    run: GeneratePlanRun,
+    *,
+    facts: Sequence[ToolCallRecord],
+    deps: PlanLlmNodeDeps,
 ) -> dict[str, Any]:
     """Planner 输入：请求与业务日 ＋ 已加载 Skill ＋ 本次 ``planning_tools`` 的真实工具事实与候选动作。"""
     payload: dict[str, Any] = {
@@ -415,14 +409,22 @@ def _planner_payload(
         "business_day": run.business_day.isoformat(),
         "skill": asdict(state["loaded_skill"]),
         "facts": _fact_payloads(facts),
-        "candidate_actions": _candidate_actions(facts),
+        "candidate_actions": await _candidate_actions(facts, deps),
         # 无历史时不出现该键：与 Router／Evaluator 的载荷形状一致。
         **history_payload(run.conversation_messages),
     }
     if state.get("intent") == ADJUST_PLAN_INTENT:
-        active = _tool_result(facts, READ_ACTIVE_PLAN_TOOL)
-        payload["active_plan"] = active["active_plan"]
-        payload["progression_decisions"] = active["progression_decisions"]
+        adjustment = run.adjustment
+        if adjustment is None:
+            raise RequiredActivePlanMissing(
+                "调整计划缺少预读的 active 计划上下文"
+            )
+        active = dict(_tool_result(facts, READ_ACTIVE_PLAN_TOOL)["active_plan"])
+        active["explanation"] = adjustment.active_draft.explanation
+        payload["active_plan"] = active
+        payload["progression_decisions"] = await _progression_decisions(
+            adjustment, deps
+        )
     return payload
 
 
@@ -447,24 +449,71 @@ def _evaluator_payload(
     }
 
 
-def _candidate_actions(facts: Sequence[ToolCallRecord]) -> list[dict[str, Any]]:
-    """候选动作：本次 ``search_exercises`` 真实返回的可推荐动作，去掉画像禁用 ID 后投影工具事实。"""
-    forbidden = _forbidden_exercise_ids(facts)
-    fields = (
-        "exercise_id",
-        "standard_name_zh",
-        "record_type",
-        "load_convention",
-        "min_load_increment_kg",
-        "starting_load",
-    )
-    return [
-        {field: item[field] for field in fields}
-        for record in facts
-        if record.tool_name == SEARCH_EXERCISES_TOOL
-        for item in record.payload
-        if item["recommendable"] and item["exercise_id"] not in forbidden
+async def _progression_decisions(
+    adjustment: AdjustmentContext, deps: PlanLlmNodeDeps
+) -> list[dict[str, Any]]:
+    """调整计划的渐进决策：active 目标、目录增量与关联工作组确定性归约。"""
+    exercises = {
+        exercise.id: exercise for exercise in await deps.catalog.list_all()
+    }
+    targets = [
+        (exercise_id, target, exercise.min_load_increment_kg)
+        for exercise_id, target in active_load_targets(
+            adjustment.active_draft
+        ).items()
+        if (exercise := exercises.get(exercise_id)) is not None
+        and exercise.min_load_increment_kg is not None
     ]
+    work_sets = await deps.stats.list_valid_work_sets()
+    return [
+        {
+            "exercise_id": exercise_id,
+            **asdict(target),
+            "decision": asdict(
+                resolve_progression(
+                    work_sets,
+                    linked_workout_session_ids=adjustment.linked_workout_session_ids,
+                    target_sets=target.sets,
+                    reps_min=target.reps_min,
+                    reps_max=target.reps_max,
+                    target_load_kg=target.target_load_kg,
+                    increment_kg=increment_kg,
+                )
+            ),
+        }
+        for exercise_id, target, increment_kg in targets
+    ]
+
+
+async def _candidate_actions(
+    facts: Sequence[ToolCallRecord], deps: PlanLlmNodeDeps
+) -> list[dict[str, Any]]:
+    """候选动作：检索决定身份，目录与工作组确定性补齐计划负荷事实。"""
+    forbidden = _forbidden_exercise_ids(facts)
+    catalog = {exercise.id: exercise for exercise in await deps.catalog.list_all()}
+    work_sets = await deps.stats.list_valid_work_sets()
+    candidates: list[dict[str, Any]] = []
+    for record in facts:
+        if record.tool_name != SEARCH_EXERCISES_TOOL:
+            continue
+        for item in record.payload["exercises"]:
+            exercise_id = item["exercise_id"]
+            if not item["recommendable"] or exercise_id in forbidden:
+                continue
+            exercise = catalog[exercise_id]
+            candidates.append(
+                {
+                    "exercise_id": exercise_id,
+                    "standard_name_zh": item["standard_name_zh"],
+                    "record_type": item["record_type"],
+                    "load_convention": item["load_convention"],
+                    "min_load_increment_kg": exercise.min_load_increment_kg,
+                    "starting_load": resolve_starting_load(
+                        work_sets, exercise_id=exercise_id
+                    ).model_dump(mode="json"),
+                }
+            )
+    return candidates
 
 
 def _forbidden_exercise_ids(facts: Sequence[ToolCallRecord]) -> frozenset[str]:

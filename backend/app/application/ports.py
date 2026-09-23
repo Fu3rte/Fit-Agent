@@ -1,5 +1,5 @@
 import json
-from collections.abc import Awaitable, Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date
 from typing import TYPE_CHECKING, Any, Literal, Protocol, TypeVar
@@ -140,8 +140,15 @@ class Records(Protocol):
     async def list_all(self) -> tuple[WorkoutSession, ...]:
         """全部训练，按发生日期排序。"""
 
-    async def list_recent(self, limit: int) -> tuple[WorkoutSession, ...]:
-        """最近 ``limit`` 次训练。"""
+    async def list_recent(
+        self,
+        limit: int,
+        *,
+        from_on: date | None = None,
+        to_on: date | None = None,
+        exercise_ids: Collection[str] = (),
+    ) -> tuple[WorkoutSession, ...]:
+        """最近 ``limit`` 次训练；日期闭区间与动作集合条件取 AND，命中会话返回全部组。"""
 
     async def list_unfinished_plan_sessions(
         self, scheduled_on: date
@@ -253,8 +260,15 @@ class SkillSource(Protocol):
 class WorkoutRecords(Protocol):
     """训练记录用例的调用面：Agent Run 依赖的读取与确认前校验。"""
 
-    async def list_recent(self, limit: int) -> tuple[WorkoutSession, ...]:
-        """最近 ``limit`` 次训练。"""
+    async def list_recent(
+        self,
+        limit: int,
+        *,
+        from_on: date | None = None,
+        to_on: date | None = None,
+        exercise_ids: Collection[str] = (),
+    ) -> tuple[WorkoutSession, ...]:
+        """最近 ``limit`` 次训练；日期闭区间与动作集合条件取 AND，命中会话返回全部组。"""
 
     async def list_unfinished_plan_sessions(
         self, scheduled_on: date

@@ -16,11 +16,16 @@ from langgraph.prebuilt import ToolNode
 
 from app.application.agent.harness.declaration import HarnessState
 from app.application.agent.harness.tools.exercise_dataset import (
-    EXERCISE_DATASET_TOOLS,
     ExerciseDatasetHarnessContext,
     InMemoryExerciseDataset,
 )
+from app.application.agent.harness.tools.exercise_dataset.tools import (
+    get_exercise_detail,
+    search_exercise_library,
+)
 from app.application.ports import ModelGateway
+
+INTERNAL_TOOLS = (search_exercise_library, get_exercise_detail)
 
 KNOWN_ID = "0001"
 UNKNOWN_ID = "999999"
@@ -100,19 +105,19 @@ async def _harness() -> AsyncIterator[_Harness]:
         dataset=InMemoryExerciseDataset(),
     )
     graph = StateGraph(HarnessState, context_schema=ExerciseDatasetHarnessContext)
-    graph.add_node("tools", ToolNode(list(EXERCISE_DATASET_TOOLS)))
+    graph.add_node("tools", ToolNode(list(INTERNAL_TOOLS)))
     graph.add_edge(START, "tools")
     yield _Harness(graph=graph.compile(), context=context)
 
 
 def test_dataset_tool_schemas_forbid_extra_fields_and_hide_runtime() -> None:
     """两个工具的 args_schema 都 additionalProperties: false；注入的 runtime 不进模型可见 Schema。"""
-    assert [tool.name for tool in EXERCISE_DATASET_TOOLS] == [
+    assert [tool.name for tool in INTERNAL_TOOLS] == [
         "search_exercise_library",
         "get_exercise_detail",
     ]
     visible: dict[str, set[str]] = {}
-    for tool in EXERCISE_DATASET_TOOLS:
+    for tool in INTERNAL_TOOLS:
         assert tool.args_schema.model_json_schema()["additionalProperties"] is False
         properties = tool.tool_call_schema.model_json_schema()["properties"]
         assert "runtime" not in properties

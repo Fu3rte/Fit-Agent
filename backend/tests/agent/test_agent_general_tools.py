@@ -9,17 +9,17 @@ from typing import Any
 from langchain_core.messages import ToolMessage
 
 from app.application.agent.contracts import (
+    LOCAL_USER_ID,
     LoadedSkill,
     SkillMetadata,
     SkillReference,
 )
-from app.application.agent.harness.tools.general import (
+from app.application.agent.harness.registry import (
     GENERAL_INTENT_SKILLS,
     GENERAL_INTENT_TOOLS,
-    GENERAL_SKILL_NAMES,
-    WORKOUT_FORM_FIELDS,
     general_skill_bundle,
 )
+from app.application.agent.harness.tools.common import WORKOUT_FORM_FIELDS
 from app.application.agent.prompts import (
     FORM_RECORD_GUIDE,
     NATURAL_LANGUAGE_RECORD_MESSAGE_PROMPT,
@@ -239,12 +239,13 @@ def test_general_skill_bundle_is_scoped_by_intent() -> None:
 
     logging = general_skill_bundle(source, "natural_language_record")
     assert logging.names == ("workout-logging",)
-    assert GENERAL_SKILL_NAMES == (
+    names = {name for names in GENERAL_INTENT_SKILLS.values() for name in names}
+    assert names == {
         "workout-logging",
         "strength-training",
         "fitness-knowledge",
         "exercise-guidance",
-    )
+    }
 
 
 class _FakeSkillSource:
@@ -270,7 +271,10 @@ def _single_action(outcome: Any) -> dict:
 async def _general_outcome(h: Any, intent: str, request: str) -> Any:
     """直接取 General 分支的输出契约（``message ＋ ui_actions``），不重复跑一遍事件流。"""
     return await _general_branch(
-        intent, {"request": request}, h.run_context(), deps=h.run_deps
+        intent,
+        {"request": request, "user_id": LOCAL_USER_ID, "run_id": "general-branch-run"},
+        h.run_context(),
+        deps=h.run_deps,
     )
 
 

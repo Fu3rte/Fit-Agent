@@ -1,0 +1,12 @@
+{
+  "catalog_revision": 7,
+  "dataset_revision": "7455efae41b330c265e7cd4b78dfa848e7ce5ebd",
+  "canonical_only": {
+    "plank": {
+      "source_ref": "refactor-log/stage2.md:§3",
+      "name_en": "plank",
+      "equipment": "body weight",
+      "muscle_groups": ["core"]
+    }
+  }
+}

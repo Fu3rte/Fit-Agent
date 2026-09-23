@@ -13,13 +13,16 @@ from app.domain.stats.rules import (
 )
 from app.domain.stats.schema import (
     TREND_WINDOW_DAYS,
+    CalendarDay,
     CalendarMonth,
+    MetricChange,
     MetricPoint,
     PersonalBest,
     TrendReport,
     TrendSummary,
     ValidWorkSet,
     WorkoutFact,
+    WorkoutGap,
 )
 
 
@@ -71,9 +74,25 @@ class StatsService:
             business_day,
         )
 
-    async def calendar_month(self, year: int, month: int) -> CalendarMonth:
-        """一个自然月的计划日程与实际训练事实（只读当前 active 计划，不聚合完成率）。"""
-        first_on, last_on = month_bounds(year, month)
+    async def weight_change_between(
+        self, from_on: date, to_on: date
+    ) -> MetricChange:
+        """闭区间内最近两条体重记录的变化。"""
+        metrics = await self._stats.list_body_metrics_between(from_on, to_on)
+        return compute_trend_summary(
+            tuple(reversed(metrics[-2:])), (), None, to_on
+        ).weight_change
+
+    async def days_since_last_workout(self, business_day: date) -> WorkoutGap:
+        """截至业务日距最近一次训练的天数。"""
+        return compute_trend_summary(
+            (), (), await self._stats.read_last_workout_on(), business_day
+        ).days_since_last_workout
+
+    async def calendar_range(
+        self, from_on: date, to_on: date
+    ) -> tuple[CalendarDay, ...]:
+        """闭区间内的计划日程与实际训练事实（只读当前 active 计划，不聚合完成率）。"""
         active = await self._plans.read_active()
         sessions = (
             () if active is None else await self._plans.list_sessions(active.id)
@@ -82,15 +101,20 @@ class StatsService:
             fact.plan_session_id: fact
             for fact in await self._stats.list_linked_workouts()
         }
+        return compute_calendar_days(
+            sessions,
+            completed,
+            await self._stats.list_workouts_between(from_on, to_on),
+            from_on,
+            to_on,
+        )
+
+    async def calendar_month(self, year: int, month: int) -> CalendarMonth:
+        """一个自然月的计划日程与实际训练事实（只读当前 active 计划，不聚合完成率）。"""
+        first_on, last_on = month_bounds(year, month)
         return CalendarMonth(
             month=f"{year:04d}-{month:02d}",
             from_on=first_on,
             to_on=last_on,
-            days=compute_calendar_days(
-                sessions,
-                completed,
-                await self._stats.list_workouts_between(first_on, last_on),
-                first_on,
-                last_on,
-            ),
+            days=await self.calendar_range(first_on, last_on),
         )

@@ -1,6 +1,6 @@
 """records 业务表手写 SQL：训练及其组的读写与计划日程关联候选。"""
 
-from collections.abc import Sequence
+from collections.abc import Collection, Sequence
 from datetime import date
 
 import aiosqlite
@@ -69,12 +69,35 @@ async def _read_all_sessions(
 
 
 async def _read_recent_sessions(
-    conn: aiosqlite.Connection, limit: int
+    conn: aiosqlite.Connection,
+    limit: int,
+    *,
+    from_on: date | None,
+    to_on: date | None,
+    exercise_ids: tuple[str, ...],
 ) -> tuple[WorkoutSession, ...]:
-    """最近 ``limit`` 次训练及其全部组（最新在前）。"""
+    """最近 ``limit`` 次训练及其全部组：先按日期与动作过滤，排序后截断，最新在前。"""
+    conditions: list[str] = []
+    params: list[str] = []
+    if from_on is not None:
+        conditions.append("performed_on >= ?")
+        params.append(from_on.isoformat())
+    if to_on is not None:
+        conditions.append("performed_on <= ?")
+        params.append(to_on.isoformat())
+    if exercise_ids:
+        placeholders = ", ".join("?" for _ in exercise_ids)
+        conditions.append(
+            "EXISTS (SELECT 1 FROM workout_sets WHERE"
+            " workout_session_id = workout_sessions.id"
+            f" AND exercise_id IN ({placeholders}))"
+        )
+        params.extend(exercise_ids)
+    where = "" if not conditions else " WHERE " + " AND ".join(conditions)
     recent = (
         "WITH recent AS (SELECT id, performed_on, plan_session_id FROM workout_sessions"
-        " ORDER BY "
+        + where
+        + " ORDER BY "
         + _RECENT_SESSION_ORDER
         + " LIMIT ?)"
     )
@@ -87,7 +110,7 @@ async def _read_recent_sessions(
         " ON ws.workout_session_id = s.id"
         " ORDER BY s.performed_on DESC, s.id DESC, ws.exercise_id, ws.set_no"
     )
-    async with conn.execute(statement, (limit,)) as cursor:
+    async with conn.execute(statement, (*params, limit)) as cursor:
         rows = await cursor.fetchall()
     grouped: dict[int, list[WorkoutSet]] = {}
     session_rows: dict[int, dict[str, object]] = {}
@@ -259,12 +282,25 @@ class WorkoutRecordsRepo:
         """全部训练及其全部组（按发生日期、身份排序）。"""
         return await self._db.under_lock(_read_all_sessions)
 
-    async def list_recent(self, limit: int) -> tuple[WorkoutSession, ...]:
-        """最近 ``limit`` 次训练及其全部组（最新在前）。"""
+    async def list_recent(
+        self,
+        limit: int,
+        *,
+        from_on: date | None = None,
+        to_on: date | None = None,
+        exercise_ids: Collection[str] = (),
+    ) -> tuple[WorkoutSession, ...]:
+        """最近 ``limit`` 次训练及其全部组（最新在前）；日期与动作条件取 AND。"""
         if limit < 1:
             raise ValueError(f"list_recent 的 limit 必须为正数：{limit!r}")
         return await self._db.under_lock(
-            lambda conn: _read_recent_sessions(conn, limit)
+            lambda conn: _read_recent_sessions(
+                conn,
+                limit,
+                from_on=from_on,
+                to_on=to_on,
+                exercise_ids=tuple(exercise_ids),
+            )
         )
 
     async def list_unfinished_plan_sessions(

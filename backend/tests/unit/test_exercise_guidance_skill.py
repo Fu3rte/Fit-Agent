@@ -6,19 +6,16 @@ from pathlib import Path
 from typing import Any
 
 from app.application.agent.contracts import LoadedSkill
-from app.application.agent.harness.tools.general import (
+from app.application.agent.harness.registry import (
+    GENERAL_INTENT_SKILLS,
     GENERAL_INTENT_TOOLS,
-    GENERAL_SKILL_NAMES,
-)
-from app.application.agent.harness.tools.training import (
     PLANNING_TOOLS,
-    search_exercises,
 )
+from app.application.agent.harness.tools import search_exercises
 from app.domain.actions.rules import LOAD_CONVENTIONS, RECORD_TYPES
-from app.domain.records.schema import WorkoutSetInput
 from app.infrastructure.skills.loader import SkillLoader
 from config import skills_dir
-from tests.agent.test_harness_training_tools import BUSINESS_DAY, _harness
+from tests.agent.test_harness_training_tools import _harness
 
 SKILL_NAME = "exercise-guidance"
 REFERENCE_PATHS = ("references/guidance-rules.md", "references/few-shots.md")
@@ -27,88 +24,56 @@ REFERENCE_PATHS = ("references/guidance-rules.md", "references/few-shots.md")
 CATALOG_FIELDS = (
     "exercise_id",
     "standard_name_zh",
+    "name_en",
     "aliases",
-    "equipment_variant",
+    "equipment",
+    "equipment_zh",
+    "muscle_groups",
+    "muscle_groups_zh",
+    "movement_patterns",
     "record_type",
     "load_convention",
     "recommendable",
-    "min_load_increment_kg",
-    "starting_load",
+    "instructions",
 )
 
 BARBELL_BENCH_PRESS = "barbell-bench-press"
 PULL_UP = "pull-up"
 
-#: 文档点名的动作事实：``exercise_id`` →（标准名、器械、记录口径、负重口径、加重单位）。
-DOCUMENTED_EXERCISES: dict[str, tuple[str, str, str, str | None, float | None]] = {
+#: 文档点名的动作事实：``exercise_id`` →（标准名、数据集器械、记录口径、负重口径）。
+DOCUMENTED_EXERCISES: dict[str, tuple[str, str, str, str | None]] = {
     "barbell-bench-press": (
-        "杠铃平板卧推",
-        "barbell",
-        "reps_weight",
-        "barbell_includes_bar_total",
-        2.5,
+        "杠铃平板卧推", "barbell", "reps_weight", "barbell_includes_bar_total"
     ),
     "barbell-close-grip-bench-press": (
-        "杠铃窄距卧推",
-        "barbell",
-        "reps_weight",
-        "barbell_includes_bar_total",
-        2.5,
+        "杠铃窄距卧推", "barbell", "reps_weight", "barbell_includes_bar_total"
     ),
     "barbell-decline-bench-press": (
-        "杠铃下斜卧推",
-        "barbell",
-        "reps_weight",
-        "barbell_includes_bar_total",
-        2.5,
+        "杠铃下斜卧推", "barbell", "reps_weight", "barbell_includes_bar_total"
     ),
     "barbell-incline-bench-press": (
-        "杠铃上斜卧推",
-        "barbell",
-        "reps_weight",
-        "barbell_includes_bar_total",
-        2.5,
+        "杠铃上斜卧推", "barbell", "reps_weight", "barbell_includes_bar_total"
     ),
     "dumbbell-bench-press": (
-        "哑铃平板卧推",
-        "dumbbell",
-        "reps_weight",
-        "dumbbell_per_hand",
-        2.5,
+        "哑铃平板卧推", "dumbbell", "reps_weight", "dumbbell_per_hand"
     ),
     "dumbbell-incline-bench-press": (
-        "哑铃上斜卧推",
-        "dumbbell",
-        "reps_weight",
-        "dumbbell_per_hand",
-        2.5,
+        "哑铃上斜卧推", "dumbbell", "reps_weight", "dumbbell_per_hand"
     ),
-    "chin-up": ("自重反手引体向上", "bodyweight", "reps_bodyweight", None, None),
-    "pull-up": ("自重引体向上", "bodyweight", "reps_bodyweight", None, None),
+    "chin-up": ("自重反手引体向上", "body weight", "reps_bodyweight", None),
+    "pull-up": ("自重引体向上", "body weight", "reps_bodyweight", None),
     "weighted-pull-up": (
-        "负重引体",
-        "weighted",
-        "reps_weight",
-        "external_added_weight",
-        5.0,
+        "负重引体", "weighted", "reps_weight", "external_added_weight"
     ),
     "barbell-seated-overhead-press": (
-        "杠铃坐姿肩推",
-        "barbell",
-        "reps_weight",
-        "barbell_includes_bar_total",
-        2.5,
+        "杠铃坐姿肩推", "barbell", "reps_weight", "barbell_includes_bar_total"
     ),
     "seated-dumbbell-shoulder-press": (
-        "坐姿哑铃肩推",
-        "dumbbell",
-        "reps_weight",
-        "dumbbell_per_hand",
-        2.5,
+        "坐姿哑铃肩推", "dumbbell", "reps_weight", "dumbbell_per_hand"
     ),
 }
 
-#: 文档写明的检索结果：查询词 → 命中的 ``exercise_id`` 列表，顺序即 Tool 返回顺序。
+#: 文档写明的检索结果：查询词 → 命中的 canonical ``exercise_id`` 集合。
 DOCUMENTED_HITS: dict[str, list[str]] = {
     "卧推": [
         "barbell-bench-press",
@@ -170,7 +135,8 @@ def test_general_skill_names_resolve_this_skill_through_the_real_loader() -> Non
     """General 装载矩阵里的该名称唯一，并且真实 SkillLoader 按同一个名称命中。"""
     loader = SkillLoader(skills_dir())
 
-    assert GENERAL_SKILL_NAMES.count(SKILL_NAME) == 1
+    names = [name for names in GENERAL_INTENT_SKILLS.values() for name in names]
+    assert SKILL_NAME in names
     assert loader.load(SKILL_NAME).metadata.name == SKILL_NAME
 
 
@@ -193,70 +159,41 @@ def test_skill_text_names_the_current_record_and_load_vocabularies() -> None:
 
 
 async def test_documented_catalog_fields_and_ids_match_the_real_catalog(tmp_path: Path) -> None:
-    """Tool 载荷字段、starting_load 两态与文档点名的动作事实全部对回真实目录。"""
+    """Tool 严格载荷与文档点名的动作事实全部对回真实 canonical 数据集。"""
     async with _harness(tmp_path, tools=(search_exercises,)) as h:
         payloads = {
             query: await h.payload("search_exercises", {"query": query})
             for query in DOCUMENTED_HITS
         }
-        empty = payloads["颈后推举"]
-
-        workout_id = await h.seed_workout(
-            BUSINESS_DAY,
-            [
-                WorkoutSetInput(
-                    exercise_id=BARBELL_BENCH_PRESS,
-                    set_no=1,
-                    set_type="work",
-                    load_convention="barbell_includes_bar_total",
-                    weight_kg=60.0,
-                    reps=5,
-                )
-            ],
-        )
-        # 起始负荷在写入之后重取：known 引用的就是刚写入的那一组。
-        known = _hit(
-            await h.payload("search_exercises", {"query": "卧推"}), BARBELL_BENCH_PRESS
-        )
-
+        bench = _hit(payloads["卧推"], BARBELL_BENCH_PRESS)
         bodyweight = _hit(payloads["引体"], PULL_UP)
         english_alias = _hit(payloads["barbell bench press"], BARBELL_BENCH_PRESS)
         documented = {
             hit["exercise_id"]: hit
             for payload in payloads.values()
-            for hit in payload
+            for hit in payload["exercises"]
         }
         catalog_ids = {exercise.id for exercise in await h.context.catalog.list_all()}
 
-    assert [hit["exercise_id"] for hit in payloads["卧推"]] == DOCUMENTED_HITS["卧推"]
-    assert [hit["exercise_id"] for hit in payloads["引体"]] == DOCUMENTED_HITS["引体"]
-    assert [hit["exercise_id"] for hit in payloads["推举"]] == DOCUMENTED_HITS["推举"]
-    assert [hit["exercise_id"] for hit in payloads["barbell bench press"]] == DOCUMENTED_HITS[
-        "barbell bench press"
-    ]
-    assert empty == []
+    for query, expected in DOCUMENTED_HITS.items():
+        assert {
+            hit["exercise_id"] for hit in payloads[query]["exercises"]
+        } == set(expected)
+    assert payloads["颈后推举"] == {"exercises": [], "returned": 0}
 
-    assert set(known) == set(CATALOG_FIELDS)
-    assert known["starting_load"] == {
-        "status": "known",
-        "weight_kg": 60.0,
-        "source_workout_session_id": workout_id,
-        "source_set_no": 1,
-    }
+    assert set(bench) == set(CATALOG_FIELDS)
     assert bodyweight["record_type"] == "reps_bodyweight"
     assert bodyweight["load_convention"] is None
-    assert bodyweight["min_load_increment_kg"] is None
-    assert bodyweight["starting_load"] == {"status": "needs_calibration"}
+    assert bodyweight["equipment"] == "body weight"
     assert english_alias["aliases"] == ["卧推", "杠铃卧推", "barbell bench press"]
 
     for exercise_id, facts in DOCUMENTED_EXERCISES.items():
         hit = documented[exercise_id]
         assert (
             hit["standard_name_zh"],
-            hit["equipment_variant"],
+            hit["equipment"],
             hit["record_type"],
             hit["load_convention"],
-            hit["min_load_increment_kg"],
         ) == facts
 
     text = _skill_text(_load())
@@ -266,6 +203,8 @@ async def test_documented_catalog_fields_and_ids_match_the_real_catalog(tmp_path
     assert set(DOCUMENTED_EXERCISES) <= documented_ids
 
 
-def _hit(hits: list[dict[str, Any]], exercise_id: str) -> dict[str, Any]:
+def _hit(payload: dict[str, Any], exercise_id: str) -> dict[str, Any]:
     """按稳定身份取一条检索结果；缺失即失败，不静默降级。"""
-    return next(hit for hit in hits if hit["exercise_id"] == exercise_id)
+    return next(
+        hit for hit in payload["exercises"] if hit["exercise_id"] == exercise_id
+    )

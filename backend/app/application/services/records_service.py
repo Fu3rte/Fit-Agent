@@ -1,6 +1,6 @@
 """records 用例编排：训练记录的新增、查询、修改与删除，与确认写入的事务入口。"""
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Collection, Sequence
 from datetime import date
 from uuid import uuid4
 
@@ -56,13 +56,13 @@ class RecordsService:
         self._db = db
 
     async def validate_record_facts(
-        self, performed_on: date, sets: Sequence[WorkoutSetInput]
+        self, performed_on: date, facts: Sequence[WorkoutSetInput]
     ) -> tuple[date, tuple[WorkoutSetInput, ...]]:
         """写入前的完整事实校验（日期 ＋ 组规则 ＋ 目录口径），不写库、不碰关联日程。"""
         day = validate_performed_on(performed_on)
-        facts = validate_session_sets(sets)
-        await self._validate_sets_against_catalog(facts)
-        return day, facts
+        validated = validate_session_sets(facts)
+        await self._validate_sets_against_catalog(validated)
+        return day, validated
 
     async def create(
         self,
@@ -133,9 +133,18 @@ class RecordsService:
         """查询全部训练及其全部组（按发生日期排序）。"""
         return await self._records.list_all()
 
-    async def list_recent(self, limit: int) -> tuple[WorkoutSession, ...]:
-        """最近 ``limit`` 次训练及其全部组（最新在前，同日训练各算一次）。"""
-        return await self._records.list_recent(limit)
+    async def list_recent(
+        self,
+        limit: int,
+        *,
+        from_on: date | None = None,
+        to_on: date | None = None,
+        exercise_ids: Collection[str] = (),
+    ) -> tuple[WorkoutSession, ...]:
+        """最近 ``limit`` 次训练及其全部组（最新在前）；日期与动作条件取 AND。"""
+        return await self._records.list_recent(
+            limit, from_on=from_on, to_on=to_on, exercise_ids=exercise_ids
+        )
 
     async def update(
         self,
@@ -184,11 +193,11 @@ class RecordsService:
         return record
 
     async def list_unfinished_plan_sessions(
-        self, performed_on: date
+        self, scheduled_on: date
     ) -> tuple[PlanSession, ...]:
         """当天可关联的日程候选（未取消且未被其他训练关联）；供表单选择。"""
         return await self._records.list_unfinished_plan_sessions(
-            validate_performed_on(performed_on)
+            validate_performed_on(scheduled_on)
         )
 
     async def _validate_sets_against_catalog(
