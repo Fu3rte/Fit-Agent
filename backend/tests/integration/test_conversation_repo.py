@@ -21,6 +21,7 @@ from app.domain.conversations.schema import (
     InvalidConversationRow,
     validate_payload,
 )
+from app.domain.profile.schema import profile_from_json
 from app.infrastructure.database.connection import Database
 from app.infrastructure.database.migrations import load_migrations
 from app.infrastructure.database.repositories.conversations_repository import (
@@ -132,10 +133,10 @@ async def _drive_to(
         )
 
 
-async def test_fresh_database_migrates_to_version_seven(tmp_path: Path) -> None:
-    """全新库迁移到 v7；四张对话表与 entries 时间序索引就位。"""
+async def test_fresh_database_migrates_to_version_eight(tmp_path: Path) -> None:
+    """全新库迁移到 v8；四张对话表与 entries 时间序索引就位。"""
     async with _harness(tmp_path) as (db, _repo):
-        assert await db.pragma_value("user_version") == 7
+        assert await db.pragma_value("user_version") == 8
 
         async def op(conn: aiosqlite.Connection) -> tuple[list[str], list[str]]:
             async with conn.execute(
@@ -153,16 +154,62 @@ async def test_fresh_database_migrates_to_version_seven(tmp_path: Path) -> None:
 
 
 def test_migration_files_are_contiguous() -> None:
-    """007 归入连续编号清单（编号即 user_version，不跳号）。"""
+    """迁移编号连续（编号即 user_version，不跳号）。"""
     migrations = load_migrations(MIGRATIONS_DIR)
-    assert [version for version, _name, _sql in migrations] == [1, 2, 3, 4, 5, 6, 7]
-    assert migrations[-1][1] == "007_profile_revision_namespace.sql"
+    assert [version for version, _name, _sql in migrations] == list(range(1, 9))
+    assert migrations[-1][1] == "008_training_mode.sql"
+
+
+@pytest.mark.parametrize(
+    ("equipment", "expected"),
+    [(["bodyweight"], "bodyweight"), (["bodyweight", "barbell"], "equipment")],
+)
+async def test_training_mode_migrates_existing_profile(
+    tmp_path: Path, equipment: list[str], expected: str
+) -> None:
+    """旧画像的器械列表按训练方式迁移，其余事实原样保留。"""
+    v7_dir = tmp_path / "v7"
+    v7_dir.mkdir()
+    for path in MIGRATIONS_DIR.glob("00[1-7]_*.sql"):
+        shutil.copy(path, v7_dir / path.name)
+    db_path = tmp_path / "profile.db"
+    profile = {
+        "training_goal": {"state": "known", "value": "增肌"},
+        "weekly_frequency": {"state": "known", "value": 3},
+        "available_equipment": {"state": "known", "value": equipment},
+        "explicit_preferences": {"state": "unknown", "value": None},
+        "current_level": {"state": "unknown", "value": None},
+        "known_injuries": {"state": "denied", "value": None},
+        "forbidden_exercise_ids": {"state": "denied", "value": None},
+    }
+    async with _open_db(db_path, v7_dir) as db:
+        await db.migrate()
+        async with db.transaction() as conn:
+            await conn.execute(
+                "UPDATE athlete_profile SET profile_json = ? WHERE id = 1",
+                (json.dumps(profile),),
+            )
+    async with _open_db(db_path) as db:
+        assert await db.migrate() == 8
+
+        async def read_profile(conn: aiosqlite.Connection) -> str:
+            async with conn.execute(
+                "SELECT profile_json FROM athlete_profile WHERE id = 1"
+            ) as cursor:
+                return (await cursor.fetchone())[0]
+
+        raw = await db.under_lock(read_profile)
+        migrated = json.loads(raw)
+        assert "available_equipment" not in migrated
+        assert profile_from_json(raw).training_mode.value == expected
+        assert migrated["training_goal"] == profile["training_goal"]
+        assert migrated["known_injuries"] == profile["known_injuries"]
 
 
 async def test_version_three_database_upgrades_without_business_data_loss(
     tmp_path: Path,
 ) -> None:
-    """真实 v3 库（含业务数据）升级到 v7：业务行原样保留。"""
+    """真实 v3 库（含业务数据）升级到 v8：业务行原样保留。"""
     v3_dir = tmp_path / "v3"
     v3_dir.mkdir()
     for name in ("001_initial.sql", "002_timed_sets_and_new_actions.sql", "003_rejected_plan_status.sql"):
@@ -209,8 +256,8 @@ async def test_version_three_database_upgrades_without_business_data_loss(
         before = await legacy_db.under_lock(business_rows)
 
     async with _open_db(db_path) as upgraded_db:
-        assert await upgraded_db.migrate() == 7
-        assert await upgraded_db.pragma_value("user_version") == 7
+        assert await upgraded_db.migrate() == 8
+        assert await upgraded_db.pragma_value("user_version") == 8
         after = await upgraded_db.under_lock(business_rows)
         repo = ConversationRepo(upgraded_db)
         conversation = await repo.create_conversation(

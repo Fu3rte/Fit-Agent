@@ -86,7 +86,7 @@ export default function ChatComposer({
               if (busy) return;
               send();
             }}
-            placeholder="用一句话记录训练，或生成／调整计划"
+            placeholder="用一句话记录训练"
             disabled={busy}
             rows={1}
             className={

@@ -322,6 +322,11 @@ class PlanDeterministicNodes:
             "exercises": {exercise.id: exercise for exercise in catalog},
             "profile_weekly_frequency": require_weekly_frequency(profile),
             "forbidden_exercise_ids": known_forbidden_exercise_ids(profile),
+            "training_mode": (
+                profile.training_mode.value
+                if profile.training_mode.is_known
+                else None
+            ),
             "work_sets": await self._deps.stats.list_valid_work_sets(),
         }
         if adjustment is None:
@@ -576,6 +581,10 @@ async def _candidate_actions(
 ) -> list[dict[str, Any]]:
     """候选动作：检索决定身份，目录与工作组确定性补齐计划负荷事实。"""
     forbidden = _forbidden_exercise_ids(facts)
+    profile = _tool_result(facts, READ_USER_PROFILE_TOOL)["profile"]
+    training_mode = None
+    if profile is not None and profile["training_mode"]["state"] == "known":
+        training_mode = profile["training_mode"]["value"]
     catalog = {exercise.id: exercise for exercise in await deps.catalog.list_all()}
     work_sets = await deps.stats.list_valid_work_sets()
     candidates: list[dict[str, Any]] = []
@@ -587,6 +596,8 @@ async def _candidate_actions(
             if not item["recommendable"] or exercise_id in forbidden:
                 continue
             exercise = catalog[exercise_id]
+            if training_mode == "bodyweight" and exercise.equipment_variant != "bodyweight":
+                continue
             candidates.append(
                 {
                     "exercise_id": exercise_id,

@@ -413,7 +413,7 @@ def _profile() -> Profile:
     return Profile(
         training_goal=Fact.known("增肌"),
         weekly_frequency=Fact.known(PROFILE_WEEKLY_FREQUENCY),
-        available_equipment=Fact.known(("barbell", "bodyweight")),
+        training_mode=Fact.known("equipment"),
         explicit_preferences=Fact.denied(),
         current_level=Fact.known("中级"),
         known_injuries=Fact.denied(),

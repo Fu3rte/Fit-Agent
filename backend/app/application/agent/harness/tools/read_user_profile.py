@@ -42,7 +42,7 @@ class UserProfileView(StrictModel):
 
     training_goal: ProfileFact
     weekly_frequency: ProfileFact
-    available_equipment: ProfileFact
+    training_mode: ProfileFact
     explicit_preferences: ProfileFact
     current_level: ProfileFact
     known_injuries: ProfileFact
@@ -62,7 +62,7 @@ async def read_user_profile(
     """读取当前画像七字段的三态事实；未建档返回 ``profile=null``。
 
     ``known`` 表示用户已给出值，``unknown`` 表示尚未获得事实，``denied`` 表示用户拒绝提供或列表型
-    事实明确为空。不补造任何默认目标、频率、器械、水平、偏好、伤病与禁用动作。
+    事实明确为空。不补造任何默认目标、频率、训练方式、水平、偏好、伤病与禁用动作。
     """
     profile = await runtime.context.profiles.read()
     if profile is None:
@@ -75,7 +75,7 @@ def _profile_view(profile: Profile) -> UserProfileView:
     return UserProfileView(
         training_goal=_profile_fact(profile.training_goal),
         weekly_frequency=_profile_fact(profile.weekly_frequency),
-        available_equipment=_profile_fact(profile.available_equipment),
+        training_mode=_profile_fact(profile.training_mode),
         explicit_preferences=_profile_fact(profile.explicit_preferences),
         current_level=_profile_fact(profile.current_level),
         known_injuries=_profile_fact(profile.known_injuries),

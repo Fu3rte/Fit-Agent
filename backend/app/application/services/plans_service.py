@@ -270,12 +270,16 @@ class PlansService:
         }
         work_sets = await self._stats.list_valid_work_sets()
         forbidden = known_forbidden_exercise_ids(profile)
+        training_mode = (
+            profile.training_mode.value if profile.training_mode.is_known else None
+        )
         if adjustment_active is None:
             return validate_plan_draft(
                 draft,
                 exercises=exercises,
                 profile_weekly_frequency=profile.weekly_frequency.value,
                 forbidden_exercise_ids=forbidden,
+                training_mode=training_mode,
                 work_sets=work_sets,
             )
         return validate_plan_adjustment(
@@ -287,6 +291,7 @@ class PlansService:
             exercises=exercises,
             profile_weekly_frequency=profile.weekly_frequency.value,
             forbidden_exercise_ids=forbidden,
+            training_mode=training_mode,
             work_sets=work_sets,
         )
 

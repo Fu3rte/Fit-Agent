@@ -30,7 +30,7 @@ class ProfileBody(BaseModel):
 
     training_goal: ProfileFactIn
     weekly_frequency: ProfileFactIn
-    available_equipment: ProfileFactIn
+    training_mode: ProfileFactIn
     explicit_preferences: ProfileFactIn
     current_level: ProfileFactIn
     known_injuries: ProfileFactIn

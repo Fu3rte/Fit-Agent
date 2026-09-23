@@ -52,7 +52,7 @@ export interface ProfileFactWire<T> {
 export interface ProfileFactsWire {
   training_goal: ProfileFactWire<string>;
   weekly_frequency: ProfileFactWire<number>;
-  available_equipment: ProfileFactWire<string[]>;
+  training_mode: ProfileFactWire<"bodyweight" | "equipment">;
   explicit_preferences: ProfileFactWire<string[]>;
   current_level: ProfileFactWire<string>;
   known_injuries: ProfileFactWire<string[]>;

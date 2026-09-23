@@ -34,6 +34,10 @@ def _validate_value(name: str, value: Any) -> None:
         if not isinstance(value, str) or not value.strip():
             raise InvalidProfile(f"画像字段 {name} 需要非空文本：{value!r}")
         return
+    if kind == "training_mode":
+        if value not in ("bodyweight", "equipment"):
+            raise InvalidProfile(f"画像字段 {name} 需要徒手或器械训练方式：{value!r}")
+        return
     if kind == "integer":
         if isinstance(value, bool) or not isinstance(value, int):
             raise InvalidProfile(f"画像字段 {name} 需要整数：{value!r}")

@@ -12,7 +12,7 @@ T = TypeVar("T")
 FIELD_VALUE_KINDS: dict[str, str] = {
     "training_goal": "text",
     "weekly_frequency": "integer",
-    "available_equipment": "text_list",
+    "training_mode": "training_mode",
     "explicit_preferences": "text_list",
     "current_level": "text",
     "known_injuries": "text_list",
@@ -47,7 +47,7 @@ class Fact(Generic[T]):
 
     @classmethod
     def denied(cls) -> "Fact[T]":
-        """明确为空（如无可用器械、无已知伤病、无禁用动作）。"""
+        """明确为空（如无已知伤病、无禁用动作）。"""
         return cls("denied", None)
 
     @classmethod
@@ -66,7 +66,7 @@ class Profile:
 
     training_goal: Fact[str] = Fact.unknown()
     weekly_frequency: Fact[int] = Fact.unknown()
-    available_equipment: Fact[tuple[str, ...]] = Fact.unknown()
+    training_mode: Fact[str] = Fact.unknown()
     explicit_preferences: Fact[tuple[str, ...]] = Fact.unknown()
     current_level: Fact[str] = Fact.unknown()
     known_injuries: Fact[tuple[str, ...]] = Fact.unknown()
@@ -136,6 +136,10 @@ def _decode_value(name: str, raw: Any) -> Any:
     kind = FIELD_VALUE_KINDS[name]
     if kind == "text":
         return _require_text(name, raw)
+    if kind == "training_mode":
+        if raw not in ("bodyweight", "equipment"):
+            raise InvalidProfileRow(f"画像字段 {name} 需要徒手或器械训练方式：{raw!r}")
+        return raw
     if kind == "integer":
         if isinstance(raw, bool) or not isinstance(raw, int):
             raise InvalidProfileRow(f"画像字段 {name} 需要整数：{raw!r}")

@@ -171,7 +171,7 @@ async def _open_db(
 async def test_upgrade_keeps_existing_revisions_and_adds_profile_at_zero(
     tmp_path: Path,
 ) -> None:
-    """v6 库升级到 v7：三域已推进的 revision 原样保留，profile 从 0 起。"""
+    """v6 库升级到 v8：三域已推进的 revision 原样保留，profile 从 0 起。"""
     v6_dir = tmp_path / "v6"
     v6_dir.mkdir()
     for name in sorted(MIGRATIONS_DIR.glob("00[1-6]_*.sql")):
@@ -190,7 +190,7 @@ async def test_upgrade_keeps_existing_revisions_and_adds_profile_at_zero(
         await legacy.under_lock(advance)
 
     async with _open_db(db_path) as upgraded:
-        assert await upgraded.migrate() == 7
+        assert await upgraded.migrate() == 8
         assert await ToolCacheRevisionsRepo(upgraded).read_all() == {
             "plans": 7,
             "workouts": 0,

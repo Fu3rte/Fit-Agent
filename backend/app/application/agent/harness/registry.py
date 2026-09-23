@@ -62,6 +62,7 @@ GENERAL_INTENT_TOOLS: Mapping[Intent, tuple[BaseTool, ...]] = {
         search_exercises,
         read_training_history,
         read_active_plan,
+        read_user_profile,
     ),
 }
 
@@ -185,9 +186,7 @@ def require_canonical_candidates(
         for item in record.payload["exercises"]
     )
     planned = dict.fromkeys(
-        planned.exercise_id
-        for day in draft.training_days
-        for planned in day.exercises
+        planned.exercise_id for day in draft.training_days for planned in day.exercises
     )
     outside = [exercise_id for exercise_id in planned if exercise_id not in canonical]
     if outside:

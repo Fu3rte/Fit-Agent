@@ -208,8 +208,9 @@ def _prescription_failures(
     *,
     exercises: Mapping[str, Exercise],
     forbidden: Collection[str],
+    training_mode: str | None,
 ) -> list[RuleFailure]:
-    """一个候选动作的目录检查：动作存在、``recommendable``、记录口径一致、未被画像禁用。"""
+    """一个候选动作的目录检查：动作存在、``recommendable``、记录口径、训练方式与禁用项。"""
     exercise = exercises.get(planned.exercise_id)
     if exercise is None:
         return [
@@ -237,6 +238,14 @@ def _prescription_failures(
                     f"处方类型 {planned.prescription.type!r} 与目录动作 {exercise.id!r} 的"
                     f"记录口径 {exercise.record_type!r} 不一致"
                 ),
+                exercise_id=exercise.id,
+            )
+        )
+    if training_mode == "bodyweight" and exercise.equipment_variant != "bodyweight":
+        failures.append(
+            RuleFailure(
+                code="training_mode_mismatch",
+                message=f"徒手训练计划含非徒手目录动作：{exercise.id}",
                 exercise_id=exercise.id,
             )
         )
@@ -279,6 +288,7 @@ def validate_plan_draft(
     exercises: Mapping[str, Exercise],
     profile_weekly_frequency: int,
     forbidden_exercise_ids: Collection[str] = (),
+    training_mode: str | None = None,
     work_sets: Sequence[ValidWorkSet] = (),
 ) -> tuple[RuleFailure, ...]:
     """确定性层：Schema 之外的全部计划检查，按训练日／动作顺序全量返回失败项。"""
@@ -289,7 +299,12 @@ def validate_plan_draft(
     for day in draft.training_days:
         for planned in day.exercises:
             failures.extend(
-                _prescription_failures(planned, exercises=exercises, forbidden=forbidden)
+                _prescription_failures(
+                    planned,
+                    exercises=exercises,
+                    forbidden=forbidden,
+                    training_mode=training_mode,
+                )
             )
             exercise = exercises.get(planned.exercise_id)
             if exercise is None:
@@ -313,6 +328,7 @@ def validate_plan_adjustment(
     exercises: Mapping[str, Exercise],
     profile_weekly_frequency: int,
     forbidden_exercise_ids: Collection[str] = (),
+    training_mode: str | None = None,
     work_sets: Sequence[ValidWorkSet] = (),
 ) -> tuple[RuleFailure, ...]:
     """调整计划的确定性层：结构与目录检查同生成计划，负荷按当前 active 的渐进决策判断。"""
@@ -324,7 +340,12 @@ def validate_plan_adjustment(
     for day in draft.training_days:
         for planned in day.exercises:
             failures.extend(
-                _prescription_failures(planned, exercises=exercises, forbidden=forbidden)
+                _prescription_failures(
+                    planned,
+                    exercises=exercises,
+                    forbidden=forbidden,
+                    training_mode=training_mode,
+                )
             )
             exercise = exercises.get(planned.exercise_id)
             if exercise is None or not isinstance(

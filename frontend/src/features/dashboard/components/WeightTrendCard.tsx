@@ -174,9 +174,11 @@ export default function WeightTrendCard({ trends }: { trends: TrendsWire }) {
             </ResponsiveContainer>
           </div>
         )}
-        <p className="text-xs text-muted-foreground">
-          时间 {trends.from} 至 {trends.to}。
-        </p>
+        {earliest !== null && (
+          <p className="text-xs text-muted-foreground">
+            时间 {earliest.measured_on} 至 {trends.to}。
+          </p>
+        )}
       </CardContent>
     </Card>
   );

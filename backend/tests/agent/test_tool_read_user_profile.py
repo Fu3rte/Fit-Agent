@@ -99,7 +99,7 @@ def _full_profile() -> Profile:
     return Profile(
         training_goal=Fact.known("增肌"),
         weekly_frequency=Fact.known(3),
-        available_equipment=Fact.known(("cable", "barbell")),
+        training_mode=Fact.known("equipment"),
         explicit_preferences=Fact.denied(),
         current_level=Fact.known("中级"),
         known_injuries=Fact.denied(),
@@ -137,7 +137,7 @@ async def test_full_profile_projects_exactly_the_seven_fields(tmp_path: Path) ->
 
 
 async def test_unknown_fields_are_not_defaulted(tmp_path: Path) -> None:
-    """只填一个字段：其余六个仍是 unknown 且无值，不补默认目标、频率、器械与水平。"""
+    """只填一个字段：其余六个仍是 unknown 且无值，不补默认目标、频率、训练方式与水平。"""
     async with _harness(tmp_path) as harness:
         await harness.write(Profile(training_goal=Fact.known("增肌")))
 
@@ -159,12 +159,10 @@ async def test_list_values_are_stable_json_arrays(tmp_path: Path) -> None:
         second = await _call(harness)
 
         assert first == second
-        equipment = first["profile"]["available_equipment"]
-        assert equipment == {"state": "known", "value": ["cable", "barbell"]}
-        assert isinstance(equipment["value"], list)
+        assert first["profile"]["training_mode"] == {"state": "known", "value": "equipment"}
         assert first["profile"]["forbidden_exercise_ids"]["value"] == ["pull-up"]
-        assert UserProfileView.model_validate(first["profile"]).available_equipment == (
-            ProfileFact(state="known", value=("cable", "barbell"))
+        assert UserProfileView.model_validate(first["profile"]).training_mode == (
+            ProfileFact(state="known", value="equipment")
         )
 
 

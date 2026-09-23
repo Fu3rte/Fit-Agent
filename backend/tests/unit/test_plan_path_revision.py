@@ -76,7 +76,7 @@ def _profile(weekly_frequency: int = 1) -> Profile:
     return Profile(
         training_goal=Fact.known("增肌"),
         weekly_frequency=Fact.known(weekly_frequency),
-        available_equipment=Fact.denied(),
+        training_mode=Fact.known("bodyweight"),
         explicit_preferences=Fact.denied(),
         current_level=Fact.known("中级"),
         known_injuries=Fact.denied(),
@@ -307,7 +307,7 @@ class _Deps:
     catalog: _Catalog
     stats: _Stats
     persistence: _Persistence
-    schema_version: int = 7
+    schema_version: int = 8
     profiles: _Profiles = field(default_factory=lambda: _Profiles(_profile()))
     plans: _Plans = field(default_factory=_Plans)
     records: _Records = field(default_factory=_Records)
@@ -579,7 +579,7 @@ async def test_planner_and_evaluator_consume_one_candidate_snapshot() -> None:
         ("read_user_profile", "profile", 1),
         ("read_training_history", "workouts", 2),
         ("read_progress", "workouts", 2),
-        ("search_exercises", "catalog", 7),
+        ("search_exercises", "catalog", 8),
     ]
     assert "user-1" not in deps.model.payloads[0]
     assert "revision" not in deps.model.payloads[0]
@@ -681,7 +681,7 @@ async def test_candidate_actions_drop_the_actions_the_profile_forbids() -> None:
     profile = Profile(
         training_goal=Fact.known("增肌"),
         weekly_frequency=Fact.known(1),
-        available_equipment=Fact.denied(),
+        training_mode=Fact.known("bodyweight"),
         explicit_preferences=Fact.denied(),
         current_level=Fact.known("中级"),
         known_injuries=Fact.denied(),
@@ -852,7 +852,7 @@ async def test_planner_loads_few_shots_only_for_a_relevant_revision() -> None:
     profile = Profile(
         training_goal=Fact.known("增肌"),
         weekly_frequency=Fact.known(1),
-        available_equipment=Fact.denied(),
+        training_mode=Fact.known("bodyweight"),
         explicit_preferences=Fact.denied(),
         current_level=Fact.known("中级"),
         known_injuries=Fact.denied(),

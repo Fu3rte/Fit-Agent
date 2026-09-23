@@ -7,50 +7,57 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { UserRound } from "lucide-react";
 import { Field, FieldLabel, FieldTitle } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
 import { listExercises, putProfile } from "@/lib/api";
 import type { ProfileFactWire, ProfileFactsWire } from "@/lib/contract";
 
 type FieldKey = keyof ProfileFactsWire;
 
-type FieldKind = "text" | "count" | "list";
+type FieldKind = "text" | "count" | "list" | "mode";
 
 const FIELDS: Array<{
   key: FieldKey;
   label: string;
   kind: FieldKind;
 }> = [
-  {
-    key: "training_goal",
-    label: "训练目标",
-    kind: "text",
-  },
-  {
-    key: "current_level",
-    label: "当前水平",
-    kind: "text",
-  },
-  {
-    key: "weekly_frequency",
-    label: "每周可训练次数",
-    kind: "count",
-  },
-  {
-    key: "available_equipment",
-    label: "可用器械",
-    kind: "list",
-  },
-  {
-    key: "explicit_preferences",
-    label: "明确偏好",
-    kind: "list",
-  },
-  {
-    key: "known_injuries",
-    label: "已知伤病",
-    kind: "list",
-  },
-];
+    {
+      key: "training_goal",
+      label: "训练目标",
+      kind: "text",
+    },
+    {
+      key: "current_level",
+      label: "当前水平",
+      kind: "text",
+    },
+    {
+      key: "weekly_frequency",
+      label: "每周可训练次数",
+      kind: "count",
+    },
+    {
+      key: "training_mode",
+      label: "训练方式",
+      kind: "mode",
+    },
+    {
+      key: "explicit_preferences",
+      label: "明确偏好",
+      kind: "list",
+    },
+    {
+      key: "known_injuries",
+      label: "已知伤病",
+      kind: "list",
+    },
+  ];
 
 const splitList = (text: string) =>
   text
@@ -81,9 +88,7 @@ export default function ProfileCard({
           ? String(profile.weekly_frequency.value)
           : "",
       current_level: profile?.current_level.value ?? "",
-      available_equipment: (profile?.available_equipment.value ?? []).join(
-        "\n",
-      ),
+      training_mode: profile?.training_mode.value ?? "",
       explicit_preferences: (profile?.explicit_preferences.value ?? []).join(
         "\n",
       ),
@@ -113,6 +118,8 @@ export default function ProfileCard({
     const field = profile?.[key];
     if (field?.state === "denied") return "无";
     if (field?.state !== "known" || field.value === null) return "未填写";
+    if (key === "training_mode")
+      return field.value === "bodyweight" ? "徒手训练" : "器械训练";
     return Array.isArray(field.value)
       ? field.value.join("、")
       : String(field.value);
@@ -126,6 +133,13 @@ export default function ProfileCard({
     return { state: "known", value: value as T };
   };
 
+  const listFact = (
+    key: "explicit_preferences" | "known_injuries",
+  ): ProfileFactWire<string[]> => {
+    const values = splitList(texts[key] ?? "");
+    return values.length ? fact(key, values) : { state: "denied", value: null };
+  };
+
   const submit = () => {
     const frequency = texts.weekly_frequency?.trim() ?? "";
     const body: ProfileFactsWire = {
@@ -134,19 +148,13 @@ export default function ProfileCard({
         "weekly_frequency",
         frequency === "" ? null : Number(frequency),
       ),
-      available_equipment: fact(
-        "available_equipment",
-        splitList(texts.available_equipment ?? ""),
+      training_mode: fact(
+        "training_mode",
+        (texts.training_mode || null) as "bodyweight" | "equipment" | null,
       ),
-      explicit_preferences: fact(
-        "explicit_preferences",
-        splitList(texts.explicit_preferences ?? ""),
-      ),
+      explicit_preferences: listFact("explicit_preferences"),
       current_level: fact("current_level", texts.current_level?.trim() ?? ""),
-      known_injuries: fact(
-        "known_injuries",
-        splitList(texts.known_injuries ?? ""),
-      ),
+      known_injuries: listFact("known_injuries"),
       forbidden_exercise_ids: fact("forbidden_exercise_ids", forbidden),
     };
     save.mutate(body);
@@ -176,10 +184,39 @@ export default function ProfileCard({
                   <>
                     <FieldLabel htmlFor={key}>{label}</FieldLabel>
                     {kind === "list" ? (
-                      <Textarea {...bind} />
+                      <Textarea
+                        {...bind}
+                        placeholder={
+                          key === "explicit_preferences"
+                            ? "例如：偏好短时训练、避免跑步，没有就填无"
+                            : "例如：膝关节旧伤、腰背不适，没有就填无"
+                        }
+                      />
+                    ) : kind === "mode" ? (
+                      <Select
+                        value={texts[key] ?? ""}
+                        onValueChange={(value) =>
+                          setTexts((prev) => ({ ...prev, [key]: value }))
+                        }
+                      >
+                        <SelectTrigger id={key} className="w-full">
+                          <SelectValue placeholder="请选择训练方式" />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="bodyweight">徒手训练</SelectItem>
+                          <SelectItem value="equipment">器械训练</SelectItem>
+                        </SelectContent>
+                      </Select>
                     ) : (
                       <Input
                         {...bind}
+                        placeholder={
+                          key === "training_goal"
+                            ? "例如：增肌、减脂、提升力量"
+                            : key === "current_level"
+                              ? "例如：初学者、中级"
+                              : "例如：3"
+                        }
                         inputMode={kind === "count" ? "numeric" : undefined}
                         className={kind === "count" ? "w-24" : undefined}
                       />
