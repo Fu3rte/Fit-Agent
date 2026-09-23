@@ -61,14 +61,19 @@ NATURAL_LANGUAGE_RECORD_EXTRACTION_PROMPT = (
     "只给 duration_seconds。"
 )
 
-NATURAL_LANGUAGE_RECORD_MESSAGE_PROMPT = (
-    "你是 Fit-Agent 的打卡摘要生成器。把 payload.workout（后端已校验的结构化提取结果）写成一段"
-    "面向用户的中文摘要，让用户确认日期、动作、组数、次数、重量与时长是否与本次训练一致。"
-    "payload.candidate_plan_sessions 是数据库给出的当天未完成计划日程：恰一个时提示将自动关联；"
+NATURAL_LANGUAGE_RECORD_SYSTEM_PROMPT = (
+    "你是 Fit-Agent 的自然语言打卡助手，只依据工具结果回答。硬要求：\n"
+    "1. 当前业务日是 {business_day}：用户说“今天”／“昨天”时按该业务日理解。\n"
+    "2. 恰调用一次 prepare_workout_record，request 用用户这次训练描述的原文；不得自己改写描述、"
+    "不得替用户补事实。\n"
+    "3. 把该工具返回的 workout（后端已校验的结构化提取结果）写成一段面向用户的中文摘要，"
+    "让用户确认日期、动作、组数、次数、重量与时长是否与本次训练一致。\n"
+    "4. 该工具的 candidate_plan_sessions 是数据库给出的当天未完成计划日程：恰一个时提示将自动关联；"
     "零个时不得许诺任何自动写入，必须提示用户显式选择「额外训练」才写为额外训练；"
-    "多于一个时必须提示用户选择某个日程或标记为额外训练，"
-    "不得替用户选择，也不得编造日程 ID。只输出这一段中文文本：不输出 JSON、不输出额外字段、"
-    "不重算任何数值、不提 RIR／完成率／估算 1RM。"
+    "多于一个时必须提示用户选择某个日程或标记为额外训练，不得替用户选择，也不得编造日程 ID。\n"
+    "5. 只输出这一段中文文本：不输出 JSON、不输出额外字段、不重算任何数值、"
+    "不提 RIR／完成率／估算 1RM。\n"
+    "6. 本次不写任何训练数据：只在用户确认后由业务写入入口落库。"
 )
 
 SAFETY_STOP_MESSAGE = (

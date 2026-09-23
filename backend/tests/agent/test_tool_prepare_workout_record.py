@@ -10,6 +10,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from langchain_core.messages import ToolMessage
 from pydantic import ValidationError
 
 from app.application.agent.budget import ModelRequestBudget
@@ -21,9 +22,11 @@ from app.application.agent.harness.tools.exercise_dataset.store import (
     ExerciseCatalogUnavailable,
 )
 from app.application.agent.harness.tools.prepare_workout_record import (
+    MissingWorkoutRecordCandidate,
     PrepareWorkoutRecordArgs,
     WorkoutConfirmationPayload,
     prepare_workout_record,
+    workout_confirmation_payload,
 )
 from app.application.ports import ModelGateway
 from app.bootstrap import SqliteHealthProbe, build_repositories, build_services
@@ -268,3 +271,32 @@ async def test_tool_call_writes_no_business_rows(tmp_path: Path) -> None:
         counts = await _counts(db)
         assert counts["workout_sessions"] == 0
         assert counts["workout_sets"] == 0
+
+
+async def test_confirmation_payload_comes_from_the_only_successful_call(
+    tmp_path: Path,
+) -> None:
+    """恰一次成功 ``prepare_workout_record`` 才是确认载荷来源；零次、两次或非成功状态均明确失败。"""
+    async with _harness(tmp_path, [_extraction()]) as (_db, context):
+        content = await _call(context, "记录今天做8个引体")
+    successful = ToolMessage(
+        content=content, name="prepare_workout_record", tool_call_id="call-1"
+    )
+    second = ToolMessage(
+        content=content, name="prepare_workout_record", tool_call_id="call-2"
+    )
+    failed = ToolMessage(
+        content="动作身份不在 canonical 目录内",
+        name="prepare_workout_record",
+        tool_call_id="call-1",
+        status="error",
+    )
+
+    for records in ([], [successful, second], [failed]):
+        with pytest.raises(MissingWorkoutRecordCandidate):
+            workout_confirmation_payload(records)
+
+    payload = workout_confirmation_payload([failed, successful])
+    assert payload.requires_confirmation is True
+    assert payload.workout["performed_on"] == BUSINESS_DAY.isoformat()
+    assert payload.candidate_plan_sessions == ()

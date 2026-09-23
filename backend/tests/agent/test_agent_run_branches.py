@@ -51,7 +51,8 @@ from app.application.agent.plan_graph import build_generate_plan_graph
 from app.application.agent.prompts import (
     EVALUATOR_SYSTEM_PROMPT,
     GENERAL_CHAT_SYSTEM_PROMPT,
-    NATURAL_LANGUAGE_RECORD_MESSAGE_PROMPT,
+    NATURAL_LANGUAGE_RECORD_EXTRACTION_PROMPT,
+    NATURAL_LANGUAGE_RECORD_SYSTEM_PROMPT,
     PLANNER_SYSTEM_PROMPT,
     SAFETY_STOP_MESSAGE,
 )
@@ -646,7 +647,7 @@ async def test_general_chat_answers_with_one_harness_call(
 async def test_natural_language_record_still_extracts_without_writing(
     tmp_path: Path,
 ) -> None:
-    """回归：自然语言打卡仍走结构化提取与摘要，确认前不写业务库。"""
+    """回归：自然语言打卡经 prepare_workout_record ToolNode 出候选与可见文本，确认前不写业务库。"""
     async with _harness(
         tmp_path,
         structured={
@@ -659,7 +660,10 @@ async def test_natural_language_record_still_extracts_without_writing(
             ],
             **_extraction_scripts(),
         },
-        text={NATURAL_LANGUAGE_RECORD_MESSAGE_PROMPT: [SUMMARY]},
+        harness=[
+            tool_call("prepare_workout_record", {"request": "记录今天做8个引体"}),
+            final_answer(SUMMARY),
+        ],
     ) as h:
         before = await _row_counts(h.db)
         result = await h.invoke("记录今天做8个引体")
@@ -667,16 +671,68 @@ async def test_natural_language_record_still_extracts_without_writing(
         assert result.intent == "natural_language_record"
         assert result.messages == (SUMMARY,)
         assert result.draft_plan_id is None
-        skill_payloads = [
-            json.loads(payload)["skill"]
-            for _, payload in h.model.calls
-            if "skill" in json.loads(payload)
-        ]
-        assert [payload["names"] for payload in skill_payloads] == [
-            ["workout-logging"],
-            ["workout-logging"],
+        call = h.model.harness_calls[0]
+        assert call.offered == ("prepare_workout_record", "search_exercises")
+        system_prompt = str(call.messages[0].content)
+        assert system_prompt.startswith(
+            NATURAL_LANGUAGE_RECORD_SYSTEM_PROMPT.format(business_day=SCHEDULED_ON)
+        )
+        assert "workout-logging" in system_prompt
+        assert [prompt for prompt, _ in h.model.calls] == [
+            ROUTER_SYSTEM_PROMPT,
+            NATURAL_LANGUAGE_RECORD_EXTRACTION_PROMPT,
         ]
         assert await _row_counts(h.db) == before
+
+
+async def test_natural_language_record_extraction_receives_the_run_history(
+    tmp_path: Path,
+) -> None:
+    """历史投影进 harness 消息序列，也由运行上下文供 Tool 内的提取载荷使用，且本请求只出现一次。"""
+    history = (
+        ContextMessage(role="user", text="上一轮问题"),
+        ContextMessage(role="assistant", text="上一轮回答"),
+    )
+    async with _harness(
+        tmp_path,
+        structured={
+            FitnessIntent: [
+                {
+                    "domain": "workout_execution",
+                    "action": "create",
+                    "execution_type": "natural_language_record",
+                }
+            ],
+            **_extraction_scripts(),
+        },
+        harness=[
+            tool_call("prepare_workout_record", {"request": "记录今天做8个引体"}),
+            final_answer(SUMMARY),
+        ],
+    ) as h:
+        result = await h.invoke("记录今天做8个引体", history=history)
+        messages = h.model.harness_calls[0].messages
+        structured_payload = h.model.payload_for(
+            NATURAL_LANGUAGE_RECORD_EXTRACTION_PROMPT
+        )
+
+        assert result.messages == (SUMMARY,)
+        assert [type(message).__name__ for message in messages] == [
+            "SystemMessage",
+            "HumanMessage",
+            "AIMessage",
+            "HumanMessage",
+        ]
+        assert [message.content for message in messages[1:]] == [
+            "上一轮问题",
+            "上一轮回答",
+            "记录今天做8个引体",
+        ]
+        assert structured_payload["request"] == "记录今天做8个引体"
+        assert structured_payload["conversation_messages"] == [
+            {"role": "user", "text": "上一轮问题"},
+            {"role": "assistant", "text": "上一轮回答"},
+        ]
 
 
 async def test_generate_plan_keeps_the_plan_chain_and_the_run_budget(
@@ -878,7 +934,10 @@ async def test_conversation_intent_emits_its_branch_node_before_any_visible_text
             ],
             **_extraction_scripts(),
         },
-        text={NATURAL_LANGUAGE_RECORD_MESSAGE_PROMPT: [SUMMARY]},
+        harness=[
+            tool_call("prepare_workout_record", {"request": "记录今天做8个引体"}),
+            final_answer(SUMMARY),
+        ],
     ) as h:
         events = await h.stream("记录今天做8个引体")
 

@@ -6,6 +6,7 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
+import pytest
 from langchain_core.messages import ToolMessage
 
 from app.application.agent.contracts import (
@@ -20,14 +21,23 @@ from app.application.agent.harness.registry import (
     general_skill_bundle,
 )
 from app.application.agent.harness.tools.common import WORKOUT_FORM_FIELDS
+from app.application.agent.harness.tools.prepare_workout_record import (
+    ExtractedWorkout,
+    MissingWorkoutRecordCandidate,
+)
 from app.application.agent.prompts import (
     FORM_RECORD_GUIDE,
-    NATURAL_LANGUAGE_RECORD_MESSAGE_PROMPT,
+    NATURAL_LANGUAGE_RECORD_SYSTEM_PROMPT,
 )
-from app.application.agent.router import NON_PLAN_INTENTS, FitnessIntent
-from app.application.agent.run_service import _general_branch
+from app.application.agent.router import NON_PLAN_INTENTS
+from app.application.agent.run_service import (
+    MISSING_WORKOUT_RECORD_CANDIDATE_MESSAGE,
+    _general_branch,
+    agent_run_error_message,
+)
 from tests.agent.test_agent_run_branches import (
     ANSWER,
+    PULL_UP,
     SCHEDULED_ON,
     SUMMARY,
     _extraction_scripts,
@@ -181,34 +191,126 @@ async def test_general_chat_answers_without_ui_actions_or_writes(tmp_path: Path)
         assert await _row_counts(h.db) == before
 
 
+def _record_route() -> dict[type, list[Mapping[str, Any]]]:
+    """一次自然语言打卡请求的路由响应。"""
+    return _route(
+        domain="workout_execution",
+        action="create",
+        execution_type="natural_language_record",
+    )
+
+
 async def test_natural_language_record_waits_for_confirmation_before_any_write(
     tmp_path: Path,
 ) -> None:
-    """自然语言打卡：候选与确认等待事件齐备，确认前业务训练表零写入。"""
+    """自然语言打卡：唯一一次成功 prepare_workout_record 出候选与等待事件，确认前业务训练表零写入。"""
     async with _harness(
         tmp_path,
-        structured={
-            FitnessIntent: [
-                {
-                    "domain": "workout_execution",
-                    "action": "create",
-                    "execution_type": "natural_language_record",
-                }
-            ],
-            **_extraction_scripts(),
-        },
-        text={NATURAL_LANGUAGE_RECORD_MESSAGE_PROMPT: [SUMMARY]},
+        structured={**_record_route(), **_extraction_scripts()},
+        harness=[
+            tool_call(
+                "prepare_workout_record",
+                {"request": REQUEST_TEXTS["natural_language_record"]},
+            ),
+            final_answer(SUMMARY),
+        ],
     ) as h:
         before = await _row_counts(h.db)
         events = await h.stream(REQUEST_TEXTS["natural_language_record"])
         action = _waiting_action(events)
+        call = h.model.harness_calls[0]
 
+        assert [event.event for event in events] == [
+            "node",
+            "node",
+            "node",
+            "message",
+            "waiting",
+            "done",
+        ]
+        assert [
+            event.data["text"] for event in events if event.event == "message"
+        ] == [SUMMARY]
+        assert call.offered == ("prepare_workout_record", "search_exercises")
+        system_prompt = str(call.messages[0].content)
+        assert system_prompt.startswith(
+            NATURAL_LANGUAGE_RECORD_SYSTEM_PROMPT.format(business_day=SCHEDULED_ON)
+        )
+        assert "workout-logging" in system_prompt
         assert action["type"] == "workout_confirmation"
         assert action["workout"]["performed_on"] == SCHEDULED_ON
-        assert action["workout"]["sets"][0]["exercise_id"] == "pull-up"
+        assert action["workout"]["sets"][0]["exercise_id"] == PULL_UP
         assert action["candidate_plan_sessions"] == []
         assert await _row_counts(h.db) == before
         assert before["workout_sessions"] == 0
+
+
+async def test_natural_language_record_domain_error_keeps_its_text_without_actions(
+    tmp_path: Path,
+) -> None:
+    """领域校验失败：Tool 内的领域错误沿错误边界回到可见文本，不发确认动作、不写库。"""
+    async with _harness(
+        tmp_path,
+        structured={
+            **_record_route(),
+            ExtractedWorkout: [
+                {
+                    "performed_on": SCHEDULED_ON,
+                    "sets": [
+                        {
+                            "exercise_id": PULL_UP,
+                            "set_no": 0,
+                            "set_type": "work",
+                            "reps": 8,
+                        }
+                    ],
+                }
+            ],
+        },
+        harness=[
+            tool_call(
+                "prepare_workout_record",
+                {"request": REQUEST_TEXTS["natural_language_record"]},
+            ),
+            final_answer(ANSWER),
+        ],
+    ) as h:
+        before = await _row_counts(h.db)
+        events = await h.stream(REQUEST_TEXTS["natural_language_record"])
+
+        assert [event.event for event in events] == [
+            "node",
+            "node",
+            "node",
+            "message",
+            "done",
+        ]
+        assert events[3].data["text"].startswith("自然语言打卡未通过校验：")
+        assert await _row_counts(h.db) == before
+
+
+async def test_natural_language_record_without_a_successful_call_fails_in_place(
+    tmp_path: Path,
+) -> None:
+    """模型没成功调用 prepare_workout_record：本地明确失败，不发任何误导性确认动作。"""
+    async with _harness(
+        tmp_path,
+        structured=_record_route(),
+        harness=[final_answer(ANSWER)],
+    ) as h:
+        before = await _row_counts(h.db)
+
+        with pytest.raises(MissingWorkoutRecordCandidate):
+            await h.stream(REQUEST_TEXTS["natural_language_record"])
+
+        assert await _row_counts(h.db) == before
+
+
+def test_missing_workout_record_candidate_has_its_fixed_visible_text() -> None:
+    """缺打卡候选沿 Run 错误边界给出固定可见文案。"""
+    assert agent_run_error_message(MissingWorkoutRecordCandidate("没有成功调用")) == (
+        MISSING_WORKOUT_RECORD_CANDIDATE_MESSAGE
+    )
 
 
 async def test_safety_hit_produces_no_ui_actions_and_no_tool_calls(tmp_path: Path) -> None:

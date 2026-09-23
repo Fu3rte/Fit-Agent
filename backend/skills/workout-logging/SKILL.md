@@ -11,8 +11,8 @@ description: 用户用自然语言报告一次训练时加载；约束 prepare_w
 
 ## 职责
 
-- `intent = natural_language_record`：把用户这次训练描述提取成 `ExtractedWorkout`（业务自然日 ＋
-  逐组事实），供 Tool 内部校验与确认载荷使用。
+- `intent = natural_language_record`：把用户这次训练描述的**原文**交给 `prepare_workout_record`，由该 Tool 内部
+  完成提取（业务自然日 ＋ 逐组事实）与校验；模型不自行提取，也不代替用户补事实。
 - 校验通过后按待确认载荷写面向用户的确认摘要；摘要只描述载荷里已有的事实。
 - 字段、值域与确认载荷见 [logging-contract.md](references/logging-contract.md)，样例见
   [few-shots.md](references/few-shots.md)。
@@ -40,7 +40,7 @@ description: 用户用自然语言报告一次训练时加载；约束 prepare_w
 - 本次 Run 只产出待确认载荷：`workout`（日期、逐组事实与关联默认值）与 `candidate_plan_sessions`
   （当天未完成日程）。前端把载荷回填成确认界面，用户核对后才提交确认端点。
 - 摘要让用户核对日期、动作、组数、次数、重量与时长；候选日程数量按当前
-  `NATURAL_LANGUAGE_RECORD_MESSAGE_PROMPT` 的三态口径写：恰一个时说明将自动关联，零个时只提示用户
+  `NATURAL_LANGUAGE_RECORD_SYSTEM_PROMPT` 的三态口径写：恰一个时说明将自动关联，零个时只提示用户
   显式选择「额外训练」，多个时必须让用户选择某个日程或标记为额外训练。
 - 确认前业务训练表零写入；用户确认后由确认端点经 `RecordsService` 写入，重复确认返回既有记录。
 - 不计算 PB、趋势、完成率、训练容量与估算 1RM；不判定计划是否达成；不生成或调整计划；不做医疗判断。

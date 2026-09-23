@@ -43,13 +43,13 @@ from app.application.agent.prompts import (
     EVALUATOR_SYSTEM_PROMPT,
     GENERAL_CHAT_SYSTEM_PROMPT,
     NATURAL_LANGUAGE_RECORD_EXTRACTION_PROMPT,
-    NATURAL_LANGUAGE_RECORD_MESSAGE_PROMPT,
     PLANNER_SYSTEM_PROMPT,
 )
 from app.application.agent.router import ROUTER_SYSTEM_PROMPT, FitnessIntent
 from app.application.agent.run_graph import PLAN_NODE
 from app.application.agent.run_service import (
     AGENT_RUN_ERROR_MESSAGE,
+    MISSING_WORKOUT_RECORD_CANDIDATE_MESSAGE,
     agent_run_graph,
     persisted_events,
 )
@@ -281,6 +281,14 @@ def _natural_language_scripts() -> dict[type, list[Mapping[str, Any]]]:
         ],
         **_extraction_scripts(),
     }
+
+
+def _natural_language_harness() -> list[AIMessage]:
+    """自然语言打卡的 harness 脚本：一次 ``prepare_workout_record`` 调用 ＋ 一段确认摘要。"""
+    return [
+        tool_call("prepare_workout_record", {"request": NL_REQUEST}),
+        final_answer(NL_SUMMARY),
+    ]
 
 
 async def _call_with_disconnect(
@@ -956,7 +964,7 @@ async def test_disconnect_in_suspended_send_before_the_waiting_commit_cancels_th
     async with _harness(
         tmp_path,
         structured=_natural_language_scripts(),
-        text={NATURAL_LANGUAGE_RECORD_MESSAGE_PROMPT: [NL_SUMMARY]},
+        harness=_natural_language_harness(),
     ) as harness:
         app = await _app(harness.graph, harness.db, harness.model)
         async with httpx.AsyncClient(
@@ -1003,7 +1011,7 @@ async def test_disconnect_in_suspended_send_after_the_waiting_commit_keeps_waiti
     async with _harness(
         tmp_path,
         structured=_natural_language_scripts(),
-        text={NATURAL_LANGUAGE_RECORD_MESSAGE_PROMPT: [NL_SUMMARY]},
+        harness=_natural_language_harness(),
     ) as harness:
         app = await _app(harness.graph, harness.db, harness.model)
         async with httpx.AsyncClient(
@@ -1569,7 +1577,7 @@ async def test_natural_language_record_waiting_run_stays_waiting(
     async with _client(
         tmp_path,
         structured=_natural_language_scripts(),
-        text={NATURAL_LANGUAGE_RECORD_MESSAGE_PROMPT: [NL_SUMMARY]},
+        harness=_natural_language_harness(),
     ) as (client, _model, db):
         chat_id = await _create_conversation(client, "会话壬")
         frames = await _run(
@@ -1611,12 +1619,50 @@ async def test_natural_language_record_waiting_run_stays_waiting(
         ]
 
 
+async def test_natural_language_record_without_a_candidate_streams_one_error(
+    tmp_path: Any,
+) -> None:
+    """模型没成功调用 prepare_workout_record：Run 收敛为 failed，只发一个固定文案的 error 帧、不写库。"""
+    async with _client(
+        tmp_path,
+        structured=_natural_language_scripts(),
+        harness=[final_answer(NL_SUMMARY)],
+    ) as (client, _model, db):
+        chat_id = await _create_conversation(client, "会话艮")
+        frames = await _run(
+            client,
+            chat_id=chat_id,
+            thread_id=THREAD_1,
+            request=NL_REQUEST,
+            client_request_id="request-1",
+        )
+
+        names = [name for name, _ in frames]
+        assert names[-1] == "error"
+        assert names.count("error") == 1
+        assert "waiting" not in names
+        assert frames[-1][1] == {"message": MISSING_WORKOUT_RECORD_CANDIDATE_MESSAGE}
+        repo = ConversationRepo(db)
+        run = (await repo.list_runs(chat_id))[0]
+        assert run.status == "failed"
+        assert run.error_code == "MissingWorkoutRecordCandidate"
+        entries = await repo.list_entries(chat_id)
+        assert [entry.payload["role"] for entry in entries] == ["user"]
+        assert (
+            await build_services(
+                build_repositories(db),
+                db,
+                SqliteHealthProbe(db, db.path.parent),
+            ).records.list_all()
+        ) == ()
+
+
 async def test_workout_confirmation_replay_does_not_write_twice(tmp_path: Any) -> None:
     """同一来源 waiting Run 的重复确认：仍是一条训练记录与一条确认 Entry，响应同一份。"""
     async with _client(
         tmp_path,
         structured=_natural_language_scripts(),
-        text={NATURAL_LANGUAGE_RECORD_MESSAGE_PROMPT: [NL_SUMMARY]},
+        harness=_natural_language_harness(),
     ) as (client, _model, db):
         chat_id = await _create_conversation(client, "会话癸")
         frames = await _run(
@@ -1663,7 +1709,7 @@ async def test_concurrent_workout_confirmation_writes_one_session(tmp_path: Any)
     async with _client(
         tmp_path,
         structured=_natural_language_scripts(),
-        text={NATURAL_LANGUAGE_RECORD_MESSAGE_PROMPT: [NL_SUMMARY]},
+        harness=_natural_language_harness(),
     ) as (client, _model, db):
         chat_id = await _create_conversation(client, "会话壬")
         frames = await _run(
@@ -1712,7 +1758,7 @@ async def test_concurrent_workout_confirmation_writes_one_session(tmp_path: Any)
 async def test_natural_language_record_prompts_receive_history_once(
     tmp_path: Any,
 ) -> None:
-    """自然语言打卡的提取与摘要都带上一轮历史，本轮请求在每个载荷里只出现一次。"""
+    """自然语言打卡的 harness 消息与 Tool 内提取都带上一轮历史，本轮请求在每个模型输入里只出现一次。"""
     async with _client(
         tmp_path,
         structured={
@@ -1726,10 +1772,7 @@ async def test_natural_language_record_prompts_receive_history_once(
             ],
             **_extraction_scripts(),
         },
-        text={
-            NATURAL_LANGUAGE_RECORD_MESSAGE_PROMPT: [NL_SUMMARY],
-        },
-        harness=_general_harness([FIRST_ANSWER]),
+        harness=[*_general_harness([FIRST_ANSWER]), *_natural_language_harness()],
     ) as (client, model, _db):
         chat_id = await _create_conversation(client, "会话甲一")
         await _run(
@@ -1753,14 +1796,23 @@ async def test_natural_language_record_prompts_receive_history_once(
         payloads = [
             json.loads(payload)
             for prompt, payload in model.calls
-            if prompt
-            in (NATURAL_LANGUAGE_RECORD_EXTRACTION_PROMPT, NATURAL_LANGUAGE_RECORD_MESSAGE_PROMPT)
+            if prompt == NATURAL_LANGUAGE_RECORD_EXTRACTION_PROMPT
         ]
-        assert len(payloads) == 2
-        for payload in payloads:
-            assert payload["request"] == NL_REQUEST
-            assert payload["conversation_messages"] == history
-            assert all(message["text"] != NL_REQUEST for message in history)
+        assert len(payloads) == 1
+        assert payloads[0]["request"] == NL_REQUEST
+        assert payloads[0]["conversation_messages"] == history
+        record_messages = model.harness_calls[1].messages
+        assert [type(message).__name__ for message in record_messages] == [
+            "SystemMessage",
+            "HumanMessage",
+            "AIMessage",
+            "HumanMessage",
+        ]
+        assert [message.content for message in record_messages[1:]] == [
+            FIRST_REQUEST,
+            FIRST_ANSWER,
+            NL_REQUEST,
+        ]
 
 
 async def test_progress_harness_and_general_prompt_receive_history_once(

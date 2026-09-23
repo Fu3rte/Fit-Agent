@@ -17,6 +17,7 @@ from app.application.agent.harness.tools.exercise_dataset.store import (
 )
 from app.application.ports import ExerciseCatalog, Plans, ProfileReads, WorkoutRecords
 from app.application.services.stats_service import StatsService
+from app.domain.conversations.context import ContextMessage
 
 
 class CatalogReferentialIntegrityError(RuntimeError):
@@ -42,6 +43,8 @@ class TrainingHarnessContext(HarnessContext):
     dataset: CanonicalExerciseDataset | None = None
     #: 本次 Run 的事实快照键；由 Runtime 在每次 Run 注入，未提供时为 None。
     snapshot: ToolExecutionContext | None = None
+    #: 本次 Run 的历史消息投影；由 Runtime 注入，供 harness 驱动下的提取与摘要共用。
+    conversation_history: tuple[ContextMessage, ...] = ()
 
 
 class HarnessToolArgs(BaseModel):

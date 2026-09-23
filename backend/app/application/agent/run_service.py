@@ -17,7 +17,6 @@ from langgraph.types import Interrupt
 
 from app.application.agent.budget import (
     ModelRequestBudgetExceeded,
-    request_model,
 )
 from app.application.agent.contracts import (
     ADJUST_PLAN_INTENT,
@@ -51,13 +50,14 @@ from app.application.agent.harness.tools.get_workout_record_form import (
     workout_form_action,
 )
 from app.application.agent.harness.tools.prepare_workout_record import (
-    prepare_workout_record_payload,
+    MissingWorkoutRecordCandidate,
     workout_confirmation_action,
+    workout_confirmation_payload,
 )
 from app.application.agent.prompts import (
     DISCARD_FAILED_CANDIDATE_MESSAGE,
     GENERAL_CHAT_SYSTEM_PROMPT,
-    NATURAL_LANGUAGE_RECORD_MESSAGE_PROMPT,
+    NATURAL_LANGUAGE_RECORD_SYSTEM_PROMPT,
     TOOL_HARNESS_SYSTEM_PROMPT,
 )
 from app.application.agent.router import NON_PLAN_INTENTS
@@ -94,7 +94,6 @@ from app.domain.conversations.context import (
     ContextMessage,
     build_context_entries,
     context_messages,
-    history_payload,
 )
 from app.domain.conversations.schema import ConversationRun
 from app.domain.records.rules import InvalidRecordFact
@@ -117,8 +116,11 @@ _PLAN_TERMINATION_MESSAGES: Mapping[str, str] = {
     "discard_failed_candidate": DISCARD_FAILED_CANDIDATE_MESSAGE,
 }
 
-#: Intent → harness 系统提示词：一般对话用自己的对话提示词，其余工具 Intent 用工具循环提示词。
-HARNESS_SYSTEM_PROMPTS: Mapping[Intent, str] = {"general": GENERAL_CHAT_SYSTEM_PROMPT}
+#: Intent → harness 系统提示词：一般对话用对话提示词，自然语言打卡用打卡提示词，其余工具 Intent 用工具循环提示词。
+HARNESS_SYSTEM_PROMPTS: Mapping[Intent, str] = {
+    "general": GENERAL_CHAT_SYSTEM_PROMPT,
+    "natural_language_record": NATURAL_LANGUAGE_RECORD_SYSTEM_PROMPT,
+}
 
 
 def agent_run_graph(
@@ -341,7 +343,7 @@ def harness_context(
     deps: AgentRunDeps,
     snapshot: ToolExecutionContext | None = None,
 ) -> TrainingHarnessContext:
-    """General 只读工具的运行上下文：业务日、共享预算与既有只读入口，身份不进模型参数。"""
+    """General 只读工具的运行上下文：业务日、共享预算、历史投影与既有只读入口，身份不进模型参数。"""
     return TrainingHarnessContext(
         model=deps.model,
         budget=run.budget,
@@ -353,6 +355,7 @@ def harness_context(
         stats=deps.stats,
         dataset=deps.dataset,
         snapshot=snapshot,
+        conversation_history=run.conversation_messages,
     )
 
 
@@ -362,8 +365,12 @@ async def _tool_messages(
     *,
     run: GeneratePlanRun,
     deps: AgentRunDeps,
+    snapshot: ToolExecutionContext | None = None,
 ) -> tuple[BaseMessage, ...]:
-    """工具类 Intent 的唯一实现：本次 Intent 白名单的 general_tools 出消息；调用由模型自选。"""
+    """工具类 Intent 的唯一实现：本次 Intent 白名单的 general_tools 出消息；调用由模型自选。
+
+    ``snapshot`` 由需要 Run 事实快照的 Intent 传入，其余 Intent 为 None。
+    """
     skill = general_skill_bundle(deps.skills, intent)
     result = await deps.tool_harnesses[intent].ainvoke(
         {
@@ -378,7 +385,7 @@ async def _tool_messages(
                 ),
             )
         },
-        context=harness_context(run, deps=deps),
+        context=harness_context(run, deps=deps, snapshot=snapshot),
     )
     return tuple(result["messages"])
 
@@ -422,8 +429,11 @@ def harness_answer(messages: Sequence[BaseMessage]) -> str:
 async def _natural_language_record(
     request: str, state: WorkflowState, *, run: GeneratePlanRun, deps: AgentRunDeps
 ) -> GeneralOutcome:
-    """自然语言打卡的唯一实现：提取 → 校验 → 候选日程 → 可读摘要；确认前不写业务训练表。"""
-    skill = general_skill_bundle(deps.skills, "natural_language_record")
+    """自然语言打卡的唯一实现：本次 Intent 的 ToolNode loop 产出候选；无有效候选即明确失败。
+
+    确认动作只取唯一一次成功的 ``prepare_workout_record`` 调用；领域错误与缺候选沿 Run 错误边界收敛，
+    两条路径都不写业务训练表。
+    """
     snapshot = await run_fact_snapshot(
         deps.revisions,
         schema_version=deps.schema_version,
@@ -432,30 +442,19 @@ async def _natural_language_record(
         business_day=run.business_day,
     )
     try:
-        payload = await prepare_workout_record_payload(
-            harness_context(run, deps=deps, snapshot=snapshot),
+        messages = await _tool_messages(
+            "natural_language_record",
             request,
-            history=run.conversation_messages,
-            skill=skill,
+            run=run,
+            deps=deps,
+            snapshot=snapshot,
         )
     except (InvalidRecordFact, UnknownExercise, RecordLoadMismatch) as error:
         return GeneralOutcome(message=invalid_natural_language_record_message(error))
-    message = (
-        await request_model(
-            deps.model,
-            NATURAL_LANGUAGE_RECORD_MESSAGE_PROMPT,
-            {
-                "request": request,
-                **history_payload(run.conversation_messages),
-                "workout": payload.workout,
-                "candidate_plan_sessions": payload.candidate_plan_sessions,
-                "skill": skill.model_dump(),
-            },
-            run.budget,
-        )
-    ).strip()
+    payload = workout_confirmation_payload(messages)
     return GeneralOutcome(
-        message=message, actions=(workout_confirmation_action(payload),)
+        message=harness_answer(messages),
+        actions=(workout_confirmation_action(payload),),
     )
 
 
@@ -677,9 +676,13 @@ INVALID_MODEL_RESPONSE_MESSAGE = (
     "模型响应不符合统一 Schema：本次运行未产生计划写入，请稍后重试"
 )
 
+#: 自然语言打卡没有唯一一次成功的 ``prepare_workout_record`` 调用：不产生确认动作，也不写库。
+MISSING_WORKOUT_RECORD_CANDIDATE_MESSAGE = "模型未产出有效打卡候选，本次不写库，请重试"
+
 _FIXED_ERROR_MESSAGES: tuple[tuple[type[Exception], str], ...] = (
     (ModelConfigurationError, MODEL_CONFIGURATION_ERROR_MESSAGE),
     (InvalidModelResponse, INVALID_MODEL_RESPONSE_MESSAGE),
+    (MissingWorkoutRecordCandidate, MISSING_WORKOUT_RECORD_CANDIDATE_MESSAGE),
 )
 
 _PRODUCT_ERROR_TYPES: tuple[type[Exception], ...] = (

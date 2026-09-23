@@ -2,18 +2,19 @@ from collections.abc import Sequence
 from datetime import date
 from typing import Any, Literal
 
+from langchain_core.messages import BaseMessage
 from langchain_core.tools import tool
 from langgraph.prebuilt.tool_node import ToolRuntime
 from pydantic import Field
 
 from app.application.agent.budget import request_structured_model
-from app.application.agent.contracts import SkillBundle
 from app.application.agent.harness.declaration import HarnessState
 from app.application.agent.harness.tools.common import (
     HarnessToolArgs,
     StrictModel,
     TrainingHarnessContext,
     dump_tool_payload,
+    tool_call_records,
 )
 from app.application.agent.harness.tools.exercise_dataset.store import (
     ExerciseCatalogUnavailable,
@@ -64,7 +65,6 @@ async def prepare_workout_record_payload(
     request: str,
     *,
     history: Sequence[ContextMessage] = (),
-    skill: SkillBundle | None = None,
 ) -> WorkoutConfirmationPayload:
     """自然语言描述 → 已校验的打卡候选：日期、组事实与当天未完成计划日程，不入库。
 
@@ -83,7 +83,6 @@ async def prepare_workout_record_payload(
             **history_payload(history),
             "business_day": context.business_day.isoformat(),
             "actions": [_action_payload(exercise) for exercise in catalog],
-            **({"skill": skill.model_dump()} if skill is not None else {}),
         },
         context.budget,
         ExtractedWorkout,
@@ -115,8 +114,30 @@ async def prepare_workout_record(
     """把一次训练描述提取为待确认的打卡候选；本 Tool 不写业务训练表，确认写入由确认端点承担。"""
     if runtime.context.snapshot is None:
         raise ExerciseCatalogUnavailable("缺少 Run 事实快照：动作目录与 revision 不可用")
-    payload = await prepare_workout_record_payload(runtime.context, request)
+    payload = await prepare_workout_record_payload(
+        runtime.context, request, history=runtime.context.conversation_history
+    )
     return dump_tool_payload(payload)
+
+
+class MissingWorkoutRecordCandidate(ValueError):
+    """本次 harness 没有唯一一次成功的 ``prepare_workout_record`` 调用：不得据此生成确认动作。"""
+
+
+def workout_confirmation_payload(
+    messages: Sequence[BaseMessage],
+) -> WorkoutConfirmationPayload:
+    """harness 消息序列 → 唯一一次成功 ``prepare_workout_record`` 的确认载荷；零次或多次即明确失败。"""
+    records = [
+        record
+        for record in tool_call_records(messages)
+        if record.tool_name == "prepare_workout_record"
+    ]
+    if len(records) != 1:
+        raise MissingWorkoutRecordCandidate(
+            f"成功的 prepare_workout_record 调用次数不是 1：{len(records)}"
+        )
+    return WorkoutConfirmationPayload.model_validate(records[0].payload)
 
 
 def workout_confirmation_action(
