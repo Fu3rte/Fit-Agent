@@ -16,6 +16,7 @@ from app.domain.plans.schema import (
     evaluation_result_to_json,
     plan_draft_to_json,
 )
+from app.domain.stats.rules import workout_gap
 from app.infrastructure.database.connection import Database
 from app.infrastructure.database.repositories.actions_repository import ExerciseRepo
 from app.infrastructure.database.repositories.plans_repository import PlanRepo
@@ -181,7 +182,10 @@ class PlansService:
             )
         active = await self._plans.read_active()
         failures = await self._revalidation_failures(
-            draft, source_plan_id=plan.source_plan_id, active=active
+            draft,
+            source_plan_id=plan.source_plan_id,
+            active=active,
+            business_day=business_day,
         )
         if failures:
             raise PlanRevalidationFailed(
@@ -241,12 +245,16 @@ class PlansService:
         *,
         source_plan_id: int | None,
         active: Plan | None,
+        business_day: date,
     ) -> tuple[RuleFailure, ...]:
         """按当前目录、画像与有效工作组再跑一次确定性校验（不调模型 Rubric）。
 
         再校验所需的只读事实在事务外经只读端口读取：``Database`` 的唯一锁不可重入，读事实不能与写
         事务同时持锁（app/infrastructure/database/connection.py）。事务内只做带来源状态条件的写入，
         因此并发变化只会让条件更新未命中而整体回滚，不会写出部分状态。
+
+        调整候选的停训天数按**本次业务的当前业务日**重新判定：生成时未跨过回归阈值、确认时已跨过的
+        候选会在这里复验失败，计划保持 draft。
         """
         adjustment_active: Plan | None = None
         if source_plan_id is not None:
@@ -293,6 +301,9 @@ class PlansService:
             forbidden_exercise_ids=forbidden,
             training_mode=training_mode,
             work_sets=work_sets,
+            gap_days=workout_gap(
+                await self._stats.read_last_workout_on(), business_day
+            ).days,
         )
 
     async def _linked_workout_session_ids(self, active: Plan) -> tuple[int, ...]:

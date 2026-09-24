@@ -27,7 +27,11 @@ ADJUSTMENT_PLANNER_SYSTEM_PROMPT = (
     "5. training_days 数量等于 weekly_frequency，日期落在 starts_on 起连续七天内且不重复。\n"
     "6. starts_on 不得早于 payload.business_day：计划从当天或未来起始。\n"
     "7. 出现 payload.revision 时这是唯一一次修订：以 payload.revision.previous_plan 为基础逐项修正 "
-    "payload.revision.failures 指出的问题，其余已通过的部分保持不变。"
+    "payload.revision.failures 指出的问题，其余已通过的部分保持不变。\n"
+    "8. payload.facts 里 read_progress 的停训天数达到 21 天时按停训回归处理：该训练日首动作的 "
+    "training_days[].exercises[0] 减一组（不低于一组），负荷照抄 progression_decisions 的 "
+    "decision.load_kg（回归期不会给出 increase）；决策为 regress 或 needs_calibration 时组数沿用 "
+    "active 不动。回归期内每个训练日的动作数量、顺序与身份必须与 payload.active_plan 一致。"
 )
 PLAN_FACTS_SYSTEM_PROMPT = (
     "你是 Fit-Agent 的训练计划事实采集器，当前业务日是 {business_day}。硬要求：\n"

@@ -58,6 +58,7 @@ from app.application.agent.plan_nodes import (
 )
 from app.application.agent.prompts import DISCARD_FAILED_CANDIDATE_MESSAGE
 from app.domain.actions.schema import Exercise
+from app.domain.plans.rules import RETURN_PERIOD_GAP_DAYS
 from app.domain.plans.schema import (
     DeterministicResult,
     EvaluationResult,
@@ -201,6 +202,8 @@ def _rubric() -> RubricResult:
 
 @dataclass
 class _Stats:
+    gap_days: int | None = None
+
     async def list_valid_work_sets(self) -> tuple[Any, ...]:
         return ()
 
@@ -222,7 +225,9 @@ class _Stats:
         return MetricChange("no_data", None, None, None, None, None)
 
     async def days_since_last_workout(self, business_day: date) -> WorkoutGap:
-        return WorkoutGap("no_data", None, None)
+        if self.gap_days is None:
+            return WorkoutGap("no_data", None, None)
+        return WorkoutGap("ok", self.gap_days, business_day)
 
 
 class _Revisions:
@@ -421,6 +426,38 @@ async def test_validate_plan_returns_every_rule_failure_without_a_model_call() -
     deterministic: DeterministicResult = state["deterministic_result"]
     assert deterministic.passed is False
     assert {failure.code for failure in deterministic.failures}
+
+
+@pytest.mark.parametrize(
+    ("gap_days", "expected_codes"),
+    (
+        (RETURN_PERIOD_GAP_DAYS, ["sets_mismatch"]),
+        (RETURN_PERIOD_GAP_DAYS - 1, []),
+    ),
+)
+async def test_validate_plan_reads_the_return_period_gap_at_the_current_business_day(
+    gap_days: int, expected_codes: list[str]
+) -> None:
+    """停训天数由校验节点按当前业务日读统计：达到阈值时首动作未减组即被组数校验挡下，未达阈值不受约束。"""
+    draft = _draft()
+    nodes = _deterministic(
+        _Deps(
+            catalog=_catalog(),
+            stats=_Stats(gap_days=gap_days),
+            persistence=_Persistence(),
+        )
+    )
+    run = GeneratePlanRun(
+        BUSINESS_DAY,
+        adjustment=AdjustmentContext(
+            plan_id=1, active_draft=draft, linked_workout_session_ids=()
+        ),
+    )
+
+    state = await nodes.validate_plan(_state(draft), _runtime_context(run))
+
+    deterministic: DeterministicResult = state["deterministic_result"]
+    assert [failure.code for failure in deterministic.failures] == expected_codes
 
 
 def test_validate_plan_and_evaluator_share_one_bounded_revision_path() -> None:

@@ -32,7 +32,10 @@ description: 在当前 active 七天计划之上做有依据的局部调整：�
 ## 调整规则
 
 负荷只取渐进决策结果、保留 active 基线、一次只改一个主要变量、不从 PB 推算负荷，这四项的完整口径与
-确定实现位置见 [adjustment-rules.md](references/adjustment-rules.md) §1–§5。
+确定实现位置见 [adjustment-rules.md](references/adjustment-rules.md) §1–§4。
+
+停训天数达到回归阈值时按 [adjustment-rules.md](references/adjustment-rules.md) §5 处理：负荷不再采纳
+加重，改为该训练日首动作减一组；负荷已变化时不再减组。
 
 ## 输出 Contract
 

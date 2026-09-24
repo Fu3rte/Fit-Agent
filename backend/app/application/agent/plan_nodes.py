@@ -63,6 +63,7 @@ from app.application.ports import Plans, SkillSource, Stats
 from app.domain.conversations.context import history_payload
 from app.domain.plans.rules import (
     active_load_targets,
+    apply_return_period,
     known_forbidden_exercise_ids,
     resolve_progression,
     resolve_starting_load,
@@ -85,6 +86,8 @@ SEARCH_EXERCISES_TOOL = "search_exercises"
 READ_USER_PROFILE_TOOL = "read_user_profile"
 
 READ_ACTIVE_PLAN_TOOL = "read_active_plan"
+
+READ_PROGRESS_TOOL = "read_progress"
 
 _PLANNER_SKILLS = {
     "generate_plan": (
@@ -293,8 +296,12 @@ class PlanDeterministicNodes:
     ) -> WorkflowState:
         """确定性校验：Schema 已由 ``PlanDraft`` 承担，这里全量返回领域规则失败，不调用模型。"""
         profile = require_profile(await self._deps.profiles.read())
+        run = _run(runtime)
         failures = await self._deterministic_failures(
-            state["draft_plan"], profile, _run(runtime).adjustment
+            state["draft_plan"],
+            profile,
+            run.adjustment,
+            business_day=run.business_day,
         )
         return {
             "deterministic_result": DeterministicResult(
@@ -334,8 +341,13 @@ class PlanDeterministicNodes:
         draft: PlanDraft,
         profile: Profile,
         adjustment: AdjustmentContext | None,
+        *,
+        business_day: date,
     ) -> tuple[RuleFailure, ...]:
-        """确定性层：生成计划用最近工作组规则，调整计划用当前 active 的渐进决策。"""
+        """确定性层：生成计划用最近工作组规则，调整计划用当前 active 的渐进决策。
+
+        调整计划按当前业务日读取停训天数：跨过回归阈值时渐进不采纳 ``increase``，并校验首动作减一组。
+        """
         catalog = await self._deps.catalog.list_all()
         common = {
             "exercises": {exercise.id: exercise for exercise in catalog},
@@ -350,10 +362,12 @@ class PlanDeterministicNodes:
         }
         if adjustment is None:
             return validate_plan_draft(draft, **common)
+        inactivity = await self._deps.stats.days_since_last_workout(business_day)
         return validate_plan_adjustment(
             draft,
             active_draft=adjustment.active_draft,
             linked_workout_session_ids=adjustment.linked_workout_session_ids,
+            gap_days=inactivity.days,
             **common,
         )
 
@@ -527,7 +541,7 @@ async def _planner_payload(
         active["explanation"] = adjustment.active_draft.explanation
         payload["active_plan"] = active
         payload["progression_decisions"] = await _progression_decisions(
-            adjustment, deps
+            adjustment, deps, facts=facts
         )
     return payload
 
@@ -575,9 +589,12 @@ def _evaluator_payload(
 
 
 async def _progression_decisions(
-    adjustment: AdjustmentContext, deps: PlanLlmNodeDeps
+    adjustment: AdjustmentContext,
+    deps: PlanLlmNodeDeps,
+    *,
+    facts: Sequence[ToolCallRecord],
 ) -> list[dict[str, Any]]:
-    """调整计划的渐进决策：active 目标、目录增量与关联工作组确定性归约。"""
+    """调整计划的渐进决策：active 目标、目录增量与关联工作组确定性归约，含回归期加重抑制。"""
     exercises = {
         exercise.id: exercise for exercise in await deps.catalog.list_all()
     }
@@ -589,25 +606,41 @@ async def _progression_decisions(
         if (exercise := exercises.get(exercise_id)) is not None
         and exercise.min_load_increment_kg is not None
     ]
+    gap_days = _return_period_gap_days(facts)
     work_sets = await deps.stats.list_valid_work_sets()
     return [
         {
             "exercise_id": exercise_id,
             **asdict(target),
             "decision": asdict(
-                resolve_progression(
-                    work_sets,
-                    linked_workout_session_ids=adjustment.linked_workout_session_ids,
-                    target_sets=target.sets,
-                    reps_min=target.reps_min,
-                    reps_max=target.reps_max,
+                apply_return_period(
+                    resolve_progression(
+                        work_sets,
+                        linked_workout_session_ids=adjustment.linked_workout_session_ids,
+                        target_sets=target.sets,
+                        reps_min=target.reps_min,
+                        reps_max=target.reps_max,
+                        target_load_kg=target.target_load_kg,
+                        increment_kg=increment_kg,
+                    ),
+                    gap_days=gap_days,
                     target_load_kg=target.target_load_kg,
-                    increment_kg=increment_kg,
                 )
             ),
         }
         for exercise_id, target, increment_kg in targets
     ]
+
+
+def _return_period_gap_days(facts: Sequence[ToolCallRecord]) -> int | None:
+    """本轮 ``read_progress`` 事实里的停训天数：``no_data`` 时为 None。"""
+    inactivity = _tool_result(facts, READ_PROGRESS_TOOL)["days_since_last_workout"]
+    if inactivity["status"] == "no_data":
+        return None
+    days = inactivity["days"]
+    if not isinstance(days, int):
+        raise ValueError(f"停训天数与状态不一致：{inactivity!r}")
+    return days
 
 
 async def _candidate_actions(

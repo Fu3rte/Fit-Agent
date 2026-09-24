@@ -25,6 +25,9 @@ RECORD_TYPE_BY_PRESCRIPTION: dict[str, RecordType] = {
     "timed": "time",
 }
 
+#: 停训回归阈值：与上次训练相隔这么多天起，渐进不采纳 ``increase``，且训练日首动作减一组。
+RETURN_PERIOD_GAP_DAYS = 21
+
 
 class InvalidPlanRule(ValueError):
     """确定性规则的输入不满足前提（如加重单位非正）。"""
@@ -164,6 +167,17 @@ def resolve_progression(
             return ProgressionDecision("needs_calibration", None)
         return ProgressionDecision("regress", fallback.load_kg)
     return ProgressionDecision("keep", target_load_kg)
+
+
+def apply_return_period(
+    decision: ProgressionDecision, *, gap_days: int | None, target_load_kg: float
+) -> ProgressionDecision:
+    """停训回归期的加重抑制：间隔达到阈值时 ``increase`` 降为 ``keep``，其余决策原样返回。"""
+    if gap_days is None or gap_days < RETURN_PERIOD_GAP_DAYS:
+        return decision
+    if decision.action == "increase":
+        return ProgressionDecision("keep", target_load_kg)
+    return decision
 
 
 def _shared_progressed_load(recent_two: Sequence["_TrainingAssessment"]) -> float | None:
@@ -330,13 +344,19 @@ def validate_plan_adjustment(
     forbidden_exercise_ids: Collection[str] = (),
     training_mode: str | None = None,
     work_sets: Sequence[ValidWorkSet] = (),
+    gap_days: int | None = None,
 ) -> tuple[RuleFailure, ...]:
-    """调整计划的确定性层：结构与目录检查同生成计划，负荷按当前 active 的渐进决策判断。"""
+    """调整计划的确定性层：结构与目录检查同生成计划，负荷按当前 active 的渐进决策判断。
+
+    ``gap_days`` 为距上次训练的天数：达到停训回归阈值时渐进不采纳 ``increase``，并逐训练日校验
+    首动作减一组、其余动作与动作序列保持 active 原样。
+    """
     failures = _weekly_frequency_failures(
         draft, profile_weekly_frequency=profile_weekly_frequency
     )
     forbidden = set(forbidden_exercise_ids)
     targets = active_load_targets(active_draft)
+    decisions: dict[str, ProgressionDecision] = {}
     for day in draft.training_days:
         for planned in day.exercises:
             failures.extend(
@@ -352,33 +372,110 @@ def validate_plan_adjustment(
                 planned.prescription, WeightedRepsPrescription
             ):
                 continue
-            load = planned.prescription.load
-            if not isinstance(load, KnownLoad):
-                continue
             target = targets.get(planned.exercise_id)
             if target is None or exercise.min_load_increment_kg is None:
-                failures.extend(
-                    _load_source_failures(load, exercise_id=exercise.id, work_sets=work_sets)
-                )
+                load = planned.prescription.load
+                if isinstance(load, KnownLoad):
+                    failures.extend(
+                        _load_source_failures(
+                            load, exercise_id=exercise.id, work_sets=work_sets
+                        )
+                    )
                 continue
-            decision = resolve_progression(
-                work_sets,
-                linked_workout_session_ids=linked_workout_session_ids,
-                target_sets=target.sets,
-                reps_min=target.reps_min,
-                reps_max=target.reps_max,
-                target_load_kg=target.target_load_kg,
-                increment_kg=exercise.min_load_increment_kg,
-            )
-            failures.extend(
-                _progression_failures(
-                    load,
-                    decision=decision,
-                    exercise_id=exercise.id,
+            decision = apply_return_period(
+                resolve_progression(
+                    work_sets,
+                    linked_workout_session_ids=linked_workout_session_ids,
+                    target_sets=target.sets,
+                    reps_min=target.reps_min,
+                    reps_max=target.reps_max,
                     target_load_kg=target.target_load_kg,
+                    increment_kg=exercise.min_load_increment_kg,
+                ),
+                gap_days=gap_days,
+                target_load_kg=target.target_load_kg,
+            )
+            decisions.setdefault(planned.exercise_id, decision)
+            load = planned.prescription.load
+            if isinstance(load, KnownLoad):
+                failures.extend(
+                    _progression_failures(
+                        load,
+                        decision=decision,
+                        exercise_id=exercise.id,
+                        target_load_kg=target.target_load_kg,
+                    )
+                )
+    failures.extend(
+        _return_period_failures(
+            draft, active_draft, decisions=decisions, gap_days=gap_days
+        )
+    )
+    return tuple(failures)
+
+
+def _return_period_failures(
+    draft: PlanDraft,
+    active_draft: PlanDraft,
+    *,
+    decisions: Mapping[str, ProgressionDecision],
+    gap_days: int | None,
+) -> list[RuleFailure]:
+    """停训回归期的组数与结构校验：首动作减一组、其余沿用，动作与训练日序列不得改动。"""
+    if gap_days is None or gap_days < RETURN_PERIOD_GAP_DAYS:
+        return []
+    if len(draft.training_days) != len(active_draft.training_days):
+        return [
+            RuleFailure(
+                code="structure_mismatch",
+                message=(
+                    "停训回归期的训练日数量必须与 active 一致："
+                    f"{len(draft.training_days)} != {len(active_draft.training_days)}"
+                ),
+            )
+        ]
+    failures: list[RuleFailure] = []
+    for index, (day, active_day) in enumerate(
+        zip(draft.training_days, active_draft.training_days, strict=True)
+    ):
+        candidates = tuple(item.exercise_id for item in day.exercises)
+        actives = tuple(item.exercise_id for item in active_day.exercises)
+        if candidates != actives:
+            failures.append(
+                RuleFailure(
+                    code="structure_mismatch",
+                    message=(
+                        f"停训回归期第 {index + 1} 个训练日的动作序列必须与 active 一致："
+                        f"{list(candidates)} != {list(actives)}"
+                    ),
                 )
             )
-    return tuple(failures)
+            continue
+        for position, (planned, active_planned) in enumerate(
+            zip(day.exercises, active_day.exercises, strict=True)
+        ):
+            decision = decisions.get(planned.exercise_id)
+            reduce_sets = position == 0 and (
+                decision is None or decision.action == "keep"
+            )
+            expected = (
+                max(active_planned.sets - 1, 1)
+                if reduce_sets
+                else active_planned.sets
+            )
+            if planned.sets != expected:
+                failures.append(
+                    RuleFailure(
+                        code="sets_mismatch",
+                        message=(
+                            f"停训回归期第 {index + 1} 个训练日第 {position + 1} 个动作的组数"
+                            f"必须是 {expected}（active {active_planned.sets} 组）："
+                            f"{planned.exercise_id} 写成 {planned.sets} 组"
+                        ),
+                        exercise_id=planned.exercise_id,
+                    )
+                )
+    return failures
 
 
 def active_load_targets(active_draft: PlanDraft) -> dict[str, ActiveLoadTarget]:

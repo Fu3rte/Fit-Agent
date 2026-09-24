@@ -159,7 +159,7 @@ def compute_trend_summary(
                 if metric.body_fat_pct is not None
             )
         ),
-        days_since_last_workout=_workout_gap(last_workout_on, business_day),
+        days_since_last_workout=workout_gap(last_workout_on, business_day),
     )
 
 
@@ -194,7 +194,7 @@ def _metric_change(points: Sequence[tuple[date, float]]) -> MetricChange:
     )
 
 
-def _workout_gap(last_workout_on: date | None, business_day: date) -> WorkoutGap:
+def workout_gap(last_workout_on: date | None, business_day: date) -> WorkoutGap:
     """距上次训练天数；没有训练历史即 ``no_data``，不假装为 0 天。"""
     if last_workout_on is None:
         return WorkoutGap(status="no_data", days=None, last_performed_on=None)
