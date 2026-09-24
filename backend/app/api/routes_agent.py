@@ -21,6 +21,7 @@ from app.api.streaming import AgentRunStream, stream_frames
 from app.application.agent.contracts import AgentRuntime, GeneratePlanRun
 from app.application.agent.plan_graph import invoke_confirmation
 from app.application.agent.run_service import (
+    RunTraceRecorder,
     agent_run_graph,
     append_confirmation,
     persisted_events,
@@ -84,6 +85,7 @@ async def run_agent(
             stream_frames(replay_events(conversations, run.id)),
             media_type="text/event-stream",
         )
+    trace_recorder = RunTraceRecorder(conversations, run.id, now=iso_now)
     # 压缩、上下文重建与模型调用都不在本请求的数据库事务内；三段顺序固定在 ``run_events`` 里。
     return AgentRunStream(
         stream_frames(
@@ -100,8 +102,10 @@ async def run_agent(
                     regenerate=body.regenerate,
                     business_day=business_day,
                     now=iso_now,
+                    trace_recorder=trace_recorder,
                 ),
                 now=iso_now,
+                trace_recorder=trace_recorder,
             )
         ),
         conversations=conversations,

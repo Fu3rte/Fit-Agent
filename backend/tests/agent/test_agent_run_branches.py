@@ -338,6 +338,7 @@ async def _harness(
     structured: Mapping[type[BaseModel], Sequence[Mapping[str, Any]]] | None = None,
     text: Mapping[str, Sequence[str]] | None = None,
     harness: Sequence[AIMessage] = (),
+    profile: Profile | None = None,
 ) -> AsyncIterator[Harness]:
     db = Database(tmp_path / "fit_agent.db")
     await db.open()
@@ -348,7 +349,7 @@ async def _harness(
             repositories, db, SqliteHealthProbe(db, db.path.parent)
         )
         skills = SkillLoader(skills_dir())
-        await services.profile.update(_profile())
+        await services.profile.update(_profile() if profile is None else profile)
         user_version = await db.pragma_value("user_version")
         if not isinstance(user_version, int):
             raise RuntimeError(f"迁移后 user_version 不是整数：{user_version!r}")
@@ -635,7 +636,11 @@ async def test_general_chat_answers_with_one_harness_call(
             "read_training_history",
             "read_active_plan",
         )
-        assert call.offered[3:] == ("read_skill", "read_skill_reference")
+        assert call.offered[3:] == (
+            "read_user_profile",
+            "read_skill",
+            "read_skill_reference",
+        )
         system_prompt = str(call.messages[0].content)
         assert system_prompt.startswith(GENERAL_CHAT_SYSTEM_PROMPT)
         assert all(
@@ -742,9 +747,9 @@ async def test_natural_language_record_extraction_receives_the_run_history(
 async def test_generate_plan_keeps_the_plan_chain_and_the_run_budget(
     tmp_path: Path,
 ) -> None:
-    """回归：生成计划仍走计划子图；最坏路径（路由 ＋ 两次规划 ＋ 两次 Rubric）恰用满 5 次 Run 预算。
+    """回归：生成计划最坏路径包含路由、两次规划与两次 Rubric。
 
-    计划路径的两个 ToolNode loop 各有自己的事实预算，不占用这 5 次；工具结果来自真实迁移库。
+    计划路径的两个 ToolNode loop 各有自己的事实预算；工具结果来自真实迁移库。
     """
     budget = ModelRequestBudget()
     async with _harness(
@@ -775,13 +780,16 @@ async def test_generate_plan_keeps_the_plan_chain_and_the_run_budget(
         assert set(evaluator_skills[0]) == {
             "name", "instructions", "rules_reference"
         }
-        assert budget.used == MAX_MODEL_REQUESTS_PER_RUN
+        assert budget.used == 5
+        assert budget.max_requests == MAX_MODEL_REQUESTS_PER_RUN
         assert budget.tool_calls == 0
         assert result.intent == "generate_plan"
         assert result.draft_plan_id is not None
         written = await PlanRepo(h.db).read_by_id(result.draft_plan_id)
         assert written is not None and written.source_plan_id is None
 
+    for _ in range(MAX_MODEL_REQUESTS_PER_RUN - budget.used):
+        budget.begin_request()
     with pytest.raises(ModelRequestBudgetExceeded):
         budget.begin_request()
 
@@ -990,3 +998,243 @@ async def test_conversation_intent_emits_its_branch_node_before_any_visible_text
             "candidate_plan_sessions": [],
         }
         assert events[5].data["intent"] == "natural_language_record"
+
+
+#: 多模式检索场景的徒手画像：频率 3 与三个徒手目录动作相符。
+BODYWEIGHT_WEEKLY_FREQUENCY = 3
+BODYWEIGHT_EXERCISE_IDS = ("pull-up", "parallel-bar-dip", "hanging-leg-raise")
+BODYWEIGHT_DAYS = ("2026-06-01", "2026-06-03", "2026-06-05")
+PATTERN_SEARCHES: tuple[tuple[str, ...], ...] = (
+    ("垂直拉", "垂直推"),
+    ("核心",),
+)
+
+
+def _bodyweight_profile() -> Profile:
+    """徒手画像：三个徒手目录动作与频率 3 相符。"""
+    return Profile(
+        training_goal=Fact.known("增肌"),
+        weekly_frequency=Fact.known(BODYWEIGHT_WEEKLY_FREQUENCY),
+        training_mode=Fact.known("bodyweight"),
+        explicit_preferences=Fact.denied(),
+        current_level=Fact.known("中级"),
+        known_injuries=Fact.denied(),
+        forbidden_exercise_ids=Fact.denied(),
+    )
+
+
+def _three_day_bodyweight_plan(goal: str = "增肌") -> dict[str, Any]:
+    """三练的徒手草案：三个动作都在本场景两次检索的返回集合内。"""
+    return {
+        "goal": goal,
+        "starts_on": SCHEDULED_ON,
+        "explanation": "三个徒手动作按动作模式覆盖安排",
+        "weekly_frequency": BODYWEIGHT_WEEKLY_FREQUENCY,
+        "training_days": [
+            {
+                "scheduled_on": scheduled_on,
+                "exercises": [
+                    {
+                        "exercise_id": exercise_id,
+                        "sets": 3,
+                        "prescription": {
+                            "type": "bodyweight_reps",
+                            "reps_min": 8,
+                            "reps_max": 12,
+                            "progression_note": None,
+                        },
+                    }
+                ],
+            }
+            for scheduled_on, exercise_id in zip(
+                BODYWEIGHT_DAYS, BODYWEIGHT_EXERCISE_IDS, strict=True
+            )
+        ],
+    }
+
+
+def _pattern_fact_loop() -> list[AIMessage]:
+    """一次多模式事实采集脚本：三项只读事实先行，再按动作模式分两次检索。"""
+    return [
+        AIMessage(
+            content="",
+            tool_calls=[
+                {"name": name, "args": {}, "id": f"call-{name}", "type": "tool_call"}
+                for name in (
+                    "read_user_profile",
+                    "read_training_history",
+                    "read_progress",
+                )
+            ],
+        ),
+        *(
+            tool_call(
+                "search_exercises",
+                {"movement_patterns": list(patterns), "limit": 25},
+                call_id=f"search-{index}",
+            )
+            for index, patterns in enumerate(PATTERN_SEARCHES, start=1)
+        ),
+        final_answer(FACTS_READ),
+    ]
+
+
+def _search_args(call: HarnessCall) -> list[dict[str, Any]]:
+    """一次 harness 调用消息序列里 search_exercises 的模型参数（按调用顺序）。"""
+    return [
+        dict(tool_call["args"])
+        for message in call.messages
+        if isinstance(message, AIMessage)
+        for tool_call in (message.tool_calls or ())
+        if tool_call["name"] == "search_exercises"
+    ]
+
+
+def _returned_exercise_ids(call: HarnessCall) -> set[str]:
+    """一次 harness 调用消息序列里 search_exercises 真实返回的 canonical 身份。"""
+    return {
+        str(item["exercise_id"])
+        for message in call.messages
+        if isinstance(message, ToolMessage) and message.name == "search_exercises"
+        for item in json.loads(str(message.content))["exercises"]
+    }
+
+
+async def test_generate_plan_reads_profile_first_then_covers_patterns(
+    tmp_path: Path,
+) -> None:
+    """多模式检索场景：画像先行、两次检索覆盖不同模式，草案只取检索结果且结构等于画像频率。"""
+    planner_script = _pattern_fact_loop()
+    async with _harness(
+        tmp_path,
+        structured={
+            **_route(domain="plan_management", action="create"),
+            PlanDraft: [_three_day_bodyweight_plan()],
+            RubricResult: [_rubric_result(goal_alignment=True)],
+        },
+        harness=[*planner_script, *_fact_loop(*GENERATE_FACT_TOOLS)],
+        profile=_bodyweight_profile(),
+    ) as h:
+        result = await h.invoke("帮我生成一份训练计划")
+
+        planner_steps = h.model.harness_calls[: len(planner_script)]
+        executed = executed_tools(planner_steps[-1])
+        assert executed[:3] == (
+            "read_user_profile",
+            "read_training_history",
+            "read_progress",
+        )
+        assert executed[3:] == ("search_exercises", "search_exercises")
+        assert executed.index("read_user_profile") < executed.index("search_exercises")
+
+        fact_system = str(planner_steps[0].messages[0].content)
+        assert "本次计划知识：" in fact_system
+        assert "训练者分层" in fact_system
+        assert "传统硬拉准入" in fact_system
+        assert "Brad Schoenfeld" not in fact_system
+        assert "Brad Schoenfeld" not in h.model.payload_for(PLANNER_SYSTEM_PROMPT)["skill"]["rules_reference"]
+        evaluator_fact_system = str(h.model.harness_calls[-1].messages[0].content)
+        assert "训练者分层" not in evaluator_fact_system
+        assert "传统硬拉准入" not in evaluator_fact_system
+
+        patterns = [
+            set(item["movement_patterns"])
+            for item in _search_args(planner_steps[-1])
+        ]
+        assert len(patterns) == 2
+        assert patterns[0].isdisjoint(patterns[1])
+        assert len(set().union(*patterns)) >= 2
+
+        assert result.draft_plan_id is not None
+        written = await PlanRepo(h.db).read_by_id(result.draft_plan_id)
+        assert written is not None
+        content = written.structured_content
+        planned = {
+            str(exercise["exercise_id"])
+            for day in content["training_days"]
+            for exercise in day["exercises"]
+        }
+        assert planned == set(BODYWEIGHT_EXERCISE_IDS)
+        assert planned <= _returned_exercise_ids(planner_steps[-1])
+
+        scheduled = [str(day["scheduled_on"]) for day in content["training_days"]]
+        assert len(scheduled) == BODYWEIGHT_WEEKLY_FREQUENCY
+        assert len(set(scheduled)) == len(scheduled)
+        assert all(SCHEDULED_ON <= day <= "2026-06-07" for day in scheduled)
+        assert {
+            exercise["prescription"]["type"]
+            for day in content["training_days"]
+            for exercise in day["exercises"]
+        } == {"bodyweight_reps"}
+        for exercise_id in planned:
+            exercise = await h.run_deps.catalog.get_by_id(exercise_id)
+            assert exercise is not None
+            assert exercise.equipment_variant == "bodyweight"
+
+
+#: 检索按模式命中、但目录口径为器械的动作：徒手画像下它必须止步于候选面之前。
+EQUIPMENT_ONLY_PATTERN_CANDIDATE = "lat-pulldown"
+
+
+def _strength_bodyweight_profile() -> Profile:
+    """徒手 + 增力画像：目录里可推荐的徒手候选集中在推、拉与核心。"""
+    return Profile(
+        training_goal=Fact.known("增力"),
+        weekly_frequency=Fact.known(BODYWEIGHT_WEEKLY_FREQUENCY),
+        training_mode=Fact.known("bodyweight"),
+        explicit_preferences=Fact.denied(),
+        current_level=Fact.known("中级"),
+        known_injuries=Fact.denied(),
+        forbidden_exercise_ids=Fact.denied(),
+    )
+
+
+async def test_bodyweight_strength_plan_uses_only_bodyweight_candidates(
+    tmp_path: Path,
+) -> None:
+    """徒手 + 增力：检索到的器械候选不进候选面，草案动作全为徒手，按训练方式分节的增力口径进入采集阶段。"""
+    planner_script = _pattern_fact_loop()
+    async with _harness(
+        tmp_path,
+        structured={
+            **_route(domain="plan_management", action="create"),
+            PlanDraft: [_three_day_bodyweight_plan(goal="增力")],
+            RubricResult: [_rubric_result(goal_alignment=True)],
+        },
+        harness=[*planner_script, *_fact_loop(*GENERATE_FACT_TOOLS)],
+        profile=_strength_bodyweight_profile(),
+    ) as h:
+        result = await h.invoke("帮我生成一份增力计划")
+
+        planner_steps = h.model.harness_calls[: len(planner_script)]
+        returned = _returned_exercise_ids(planner_steps[-1])
+        assert EQUIPMENT_ONLY_PATTERN_CANDIDATE in returned
+
+        payload = h.model.payload_for(PLANNER_SYSTEM_PROMPT)
+        candidates = {
+            str(item["exercise_id"]) for item in payload["candidate_actions"]
+        }
+        assert candidates
+        assert EQUIPMENT_ONLY_PATTERN_CANDIDATE not in candidates
+        for exercise_id in candidates:
+            candidate = await h.run_deps.catalog.get_by_id(exercise_id)
+            assert candidate is not None
+            assert candidate.equipment_variant == "bodyweight"
+
+        fact_system = str(planner_steps[0].messages[0].content)
+        assert "训练方式为 `bodyweight`" in fact_system
+
+        assert result.draft_plan_id is not None
+        written = await PlanRepo(h.db).read_by_id(result.draft_plan_id)
+        assert written is not None
+        planned = {
+            str(exercise["exercise_id"])
+            for day in written.structured_content["training_days"]
+            for exercise in day["exercises"]
+        }
+        assert planned == set(BODYWEIGHT_EXERCISE_IDS)
+        assert planned <= candidates
+        for exercise_id in planned:
+            exercise = await h.run_deps.catalog.get_by_id(exercise_id)
+            assert exercise is not None
+            assert exercise.equipment_variant == "bodyweight"

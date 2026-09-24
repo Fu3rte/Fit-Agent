@@ -447,6 +447,65 @@ async def test_conversation_api_creates_lists_reads_and_deletes(tmp_path: Any) -
         assert (await client.get(f"/api/conversations/{chat_id}")).status_code == 404
 
 
+async def test_run_trace_endpoint_checks_chat_identity_and_returns_empty_for_old_runs(
+    tmp_path: Any,
+) -> None:
+    async with _client(tmp_path) as (client, _model, db):
+        chat_id = await _create_conversation(client, "trace")
+        repo = ConversationRepo(db)
+        async with db.transaction() as conn:
+            run, _entry = await repo.begin_run_in_transaction(
+                conn,
+                conversation_id=chat_id,
+                run_id="trace-run",
+                thread_id="trace-thread",
+                client_request_id="trace-request",
+                entry_id="trace-entry",
+                content="request",
+                created_at="2026-06-01T09:00:00+00:00",
+            )
+        response = await client.get(
+            f"/api/conversations/{chat_id}/runs/{run.thread_id}/trace"
+        )
+        assert response.status_code == 200
+        assert response.json() == {"run_id": run.id, "entries": []}
+        await repo.append_run_trace(
+            run_id=run.id,
+            stage="general",
+            tool_call_id="call-1",
+            tool_name="search_exercises",
+            status="success",
+            error_code=None,
+            created_at="2026-06-01T09:01:00+00:00",
+        )
+        populated = await client.get(
+            f"/api/conversations/{chat_id}/runs/{run.thread_id}/trace"
+        )
+        assert populated.json() == {
+            "run_id": run.id,
+            "entries": [
+                {
+                    "sequence": 1,
+                    "created_at": "2026-06-01T09:01:00+00:00",
+                    "stage": "general",
+                    "tool_call_id": "call-1",
+                    "tool_name": "search_exercises",
+                    "status": "success",
+                    "error_code": None,
+                }
+            ],
+        }
+
+        mismatch = await client.get(
+            f"/api/conversations/other-chat/runs/{run.thread_id}/trace"
+        )
+        missing = await client.get(
+            f"/api/conversations/{chat_id}/runs/missing-thread/trace"
+        )
+        assert mismatch.status_code == missing.status_code == 404
+        assert mismatch.json() == missing.json()
+
+
 async def test_unknown_and_illegal_conversation_ids_share_one_error_shape(
     tmp_path: Any,
 ) -> None:

@@ -39,5 +39,14 @@ active 计划走 `plan-adjustment`。
 
 不做安全分流、医疗判断或统计计算；不输出 RIR／RPE、训练容量、估算 1RM、完成率与进步判定。
 
+事实采集阶段先读画像确定目标、训练方式与水平，再据此确定要覆盖的动作模式并形成检索；安排动作、组数与
+次数区间前，对照本目录中与这些事实对应的小节，并按目标对应的分节决定计划必须包含的内容；无对应事实的
+部分保持未知。
+
 - [planning-rules.md](references/planning-rules.md)：事实优先级、动作选择与有效工作组口径。
+- [goal-content.md](references/goal-content.md)：增肌／增力／减脂三值各自的计划内容要求与目标缺失口径。
+- [training-principles.md](references/training-principles.md)：编排计划的定性原则、安全边界与未知处理。
+- [program-design.md](references/program-design.md)：频率与训练日、训练变量口径。
+- [trainee-classification.md](references/trainee-classification.md)：`current_level` 的 P0—L3 判定口径。
+- [exercise-selection.md](references/exercise-selection.md)：检索覆盖、P0—L3 起点、传统硬拉准入与替代规则。
 - [few-shots.md](references/few-shots.md)：已有负荷、待校准与目录无匹配示例。

@@ -1,5 +1,6 @@
-import { Fragment, type ReactNode } from "react";
+import { Fragment, useState, type ReactNode } from "react";
 import { Loader2 } from "lucide-react";
+import { useQuery } from "@tanstack/react-query";
 import ReactMarkdown from "react-markdown";
 import { Bubble, BubbleContent } from "@/components/ui/bubble";
 import { Message, MessageContent } from "@/components/ui/message";
@@ -12,11 +13,63 @@ import {
   MessageScrollerViewport,
 } from "@/components/ui/message-scroller";
 import { Marker, MarkerContent, MarkerIcon } from "@/components/ui/marker";
+import { readConversationRunTrace } from "@/lib/api";
 import {
   eventText,
   interruptedNotice,
   type ChatRound,
 } from "@/features/chat/utils/chatRound";
+
+function RunTrace({
+  chatId,
+  threadId,
+}: {
+  chatId: string | undefined;
+  threadId: string;
+}) {
+  const [open, setOpen] = useState(false);
+  const trace = useQuery({
+    queryKey: ["conversation-run-trace", chatId, threadId],
+    queryFn: () => readConversationRunTrace(chatId as string, threadId),
+    enabled: open && chatId !== undefined,
+  });
+
+  return (
+    <details
+      className="mt-2"
+      onToggle={(event) => setOpen(event.currentTarget.open)}
+    >
+      <summary className="cursor-pointer text-sm text-muted-foreground underline-offset-4 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50">
+        查看运行轨迹
+      </summary>
+      {open && (
+        <div className="mt-2 rounded-md border bg-background p-3 text-sm">
+          {trace.isPending && <p role="status">正在加载运行轨迹…</p>}
+          {trace.isError && (
+            <p role="alert">运行轨迹加载失败，请重新展开重试。</p>
+          )}
+          {trace.data?.entries.length === 0 && <p>此历史运行暂无运行轨迹。</p>}
+          {trace.data && trace.data.entries.length > 0 && (
+            <ol className="space-y-2">
+              {trace.data.entries.map((entry) => (
+                <li key={entry.sequence} className="min-w-0">
+                  <span className="font-medium">{entry.stage}</span>
+                  {entry.tool_name !== null && (
+                    <span> · {entry.tool_name}</span>
+                  )}
+                  <span>· {entry.status === "failure" ? "失败" : "成功"}</span>
+                  {entry.error_code !== null && (
+                    <span> · 异常类型：{entry.error_code}</span>
+                  )}
+                </li>
+              ))}
+            </ol>
+          )}
+        </div>
+      )}
+    </details>
+  );
+}
 
 function isSettled(round: ChatRound): boolean {
   if (
@@ -37,9 +90,11 @@ function isSettled(round: ChatRound): boolean {
 export default function ChatTranscript({
   rounds,
   children,
+  chatId,
 }: {
   rounds: ChatRound[];
   children?: ReactNode;
+  chatId?: string;
 }) {
   return (
     <MessageScrollerProvider
@@ -109,9 +164,15 @@ export default function ChatTranscript({
                             </Bubble>
                           )}
                           {notice !== undefined && (
-                            <Marker role="status" className="mt-1 w-auto">
-                              <MarkerContent>{notice}</MarkerContent>
-                            </Marker>
+                            <>
+                              <Marker role="status" className="mt-1 w-auto">
+                                <MarkerContent>{notice}</MarkerContent>
+                              </Marker>
+                              <RunTrace
+                                chatId={chatId}
+                                threadId={round.conversation_id}
+                              />
+                            </>
                           )}
                         </MessageContent>
                       </Message>

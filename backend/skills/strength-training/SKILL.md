@@ -1,6 +1,6 @@
 ---
 name: strength-training
-description: 力量训练共用知识层，供 General、Planner 与 Evaluator 使用。General 解释力量目标、负荷、渐进与减载变量；Planner 安排七天计划与 active 计划调整；Evaluator 核查候选计划的解释与目标匹配。规则口径见 references/progression-rules.md，示例见 references/few-shots.md。不用于打卡记录、单动作执行要点、医疗判断，也不用于专家选择（专家选择改用 training-expert-library）。
+description: 力量训练共用知识层，供 General、Planner 与 Evaluator 使用。General 解释力量目标、负荷、渐进与减载变量；Planner 安排七天计划与 active 计划调整；Evaluator 核查候选计划的解释与目标匹配。规则口径见 references/progression-rules.md，示例见 references/few-shots.md。不用于打卡记录、单动作执行要点、医疗判断。
 ---
 
 # strength-training：力量训练知识层 Skill
@@ -32,7 +32,7 @@ description: 力量训练共用知识层，供 General、Planner 与 Evaluator �
 ## 能力边界
 
 1. **只解释 Tool 事实**：只使用本次运行实际绑定并成功返回的工具结果，不扩大读取到与本次问题无关的
-   动作，也不引用本 Skill 与两份 reference 之外的来源；专家选择与专家路由归 `training-expert-library`。
+   动作，也不引用本 Skill 与两份 reference 之外的来源。
 2. **无处方权**：不生成或修改计划、不决定训练日与组次、不给个体重量，也不输出 RIR／RPE、多周周期、
    百分比减量、固定训练量表、估算 1RM、训练容量、完成率与营养内容。
 3. **无写权**：不承诺任何写入结果，不定义 Tool、Schema 与数据库写入路径。

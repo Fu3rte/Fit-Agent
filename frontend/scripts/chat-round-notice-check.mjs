@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
+import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { createServer } from "vite";
 
 // 消息列的失败提示行为：页面在途轮次与恢复历史都渲染同一条已脱敏的 error Event 文本，
@@ -116,6 +118,25 @@ try {
     }),
   );
   assert.match(streamed, /<strong>流式重点<\/strong>/);
+
+  const failed = renderToStaticMarkup(
+    createElement(
+      QueryClientProvider,
+      { client: new QueryClient() },
+      createElement(ChatTranscript, {
+        chatId: CHAT_ID,
+        rounds: [
+          round({ events: [errorEvent(SANITIZED)], run_status: "failed" }),
+        ],
+      }),
+    ),
+  );
+  assert.match(failed, /查看运行轨迹/);
+  assert.match(
+    failed,
+    /<details[^>]*>\s*<summary[^>]*>查看运行轨迹<\/summary>/,
+  );
+  assert.doesNotMatch(failed, /正在加载运行轨迹|此历史运行暂无运行轨迹/);
 
   console.log(
     `消息列验证通过：失败提示、助手 Markdown 安全渲染与用户纯文本（chat=${CHAT_ID} thread=${THREAD_ID}）`,

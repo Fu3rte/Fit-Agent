@@ -41,27 +41,48 @@ def build_tool_call_wrapper(
         execute: Callable[[ToolCallRequest], Awaitable[ToolMessage | Command]],
     ) -> ToolMessage | Command:
         context: HarnessContext = request.runtime.context
-        context.budget.take_tool_call()
-        started = time.perf_counter()
-        key = None if cache is None else await cache.key_for(request)
-        if key is not None:
-            hit = cache.get(key)
-            if hit is not None:
-                _log_observation(
-                    request, hit, started=started, cache_hit=True
+        call_id = str(request.tool_call["id"])
+        tool_name = str(request.tool_call["name"])
+        trace_call = context.trace_call
+        stage = context.trace_stage
+        try:
+            context.budget.take_tool_call()
+            started = time.perf_counter()
+            key = None if cache is None else await cache.key_for(request)
+            if key is not None:
+                hit = cache.get(key)
+                if hit is not None:
+                    _log_observation(request, hit, started=started, cache_hit=True)
+                    if trace_call is not None:
+                        await trace_call(stage, call_id, tool_name, "success", None)
+                    return hit.to_message(request)
+            async with asyncio.timeout(timeout_seconds):
+                result = await execute(request)
+        except Exception as error:
+            if trace_call is not None:
+                await trace_call(
+                    stage, call_id, tool_name, "failure", type(error).__name__
                 )
-                return hit.to_message(request)
-        async with asyncio.timeout(timeout_seconds):
-            result = await execute(request)
+            raise
         if not isinstance(result, ToolMessage):
-            raise ToolResultContractError(
+            error = ToolResultContractError(
                 f"工具 {request.tool_call['name']} 的执行结果不是 ToolMessage：{type(result).__name__}"
             )
+            if trace_call is not None:
+                await trace_call(
+                    stage, call_id, tool_name, "failure", type(error).__name__
+                )
+            raise error
         if not isinstance(result.content, str):
-            raise ToolResultContractError(
+            error = ToolResultContractError(
                 f"工具 {request.tool_call['name']} 的 ToolMessage.content 不是字符串："
                 f"{type(result.content).__name__}"
             )
+            if trace_call is not None:
+                await trace_call(
+                    stage, call_id, tool_name, "failure", type(error).__name__
+                )
+            raise error
         bounded = bound_text(result.content, max_bytes=max_bytes, max_lines=max_lines)
         observation = CachedToolResult(
             content=bounded.text,
@@ -73,6 +94,14 @@ def build_tool_call_wrapper(
         if key is not None and result.status == "success":
             cache.put(key, observation)
         _log_observation(request, observation, started=started, cache_hit=False)
+        if trace_call is not None:
+            await trace_call(
+                stage,
+                call_id,
+                tool_name,
+                "success" if result.status == "success" else "failure",
+                None,
+            )
         if not bounded.truncated:
             return result
         return result.model_copy(update={"content": bounded.text})

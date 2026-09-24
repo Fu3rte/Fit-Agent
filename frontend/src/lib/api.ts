@@ -10,6 +10,7 @@ import type {
   ConversationListWire,
   ConversationWire,
   BodyMetricItemWire,
+  ConversationRunTraceWire,
   BodyMetricListWire,
   BodyMetricWriteBody,
   CalendarResponseWire,
@@ -310,6 +311,12 @@ export const createConversation = (body: ConversationCreateBody) =>
 export const readConversation = (conversationId: string) =>
   request<ConversationDetailWire>(
     `/api/conversations/${encodeURIComponent(conversationId)}`,
+  );
+
+/** 失败轮次的受限运行轨迹：仅返回阶段、工具名、状态与错误类型 */
+export const readConversationRunTrace = (chatId: string, threadId: string) =>
+  request<ConversationRunTraceWire>(
+    `/api/conversations/${encodeURIComponent(chatId)}/runs/${encodeURIComponent(threadId)}/trace`,
   );
 
 /** 删除会话：Entry／Run／Event 由后端级联清理；不存在与非法身份返回同一错误 */

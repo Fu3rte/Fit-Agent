@@ -48,9 +48,12 @@ export interface ProfileFactWire<T> {
   value: T | null;
 }
 
+/** 训练目标的闭集取值（与后端 TRAINING_GOALS 同集合）；计划内容要求按目标分节 */
+export type TrainingGoal = "增肌" | "增力" | "减脂";
+
 /** GET／PUT /api/profile 的 profile 载荷：七字段逐字拼写 */
 export interface ProfileFactsWire {
-  training_goal: ProfileFactWire<string>;
+  training_goal: ProfileFactWire<TrainingGoal>;
   weekly_frequency: ProfileFactWire<number>;
   training_mode: ProfileFactWire<"bodyweight" | "equipment">;
   explicit_preferences: ProfileFactWire<string[]>;
@@ -475,6 +478,23 @@ export interface ConversationRoundWire {
   assistants: ConversationAssistantWire[];
   confirmations: ConversationConfirmationWire[];
   events: ConversationRunEventWire[];
+}
+
+/** 单条受限运行轨迹：只含阶段与工具诊断元数据 */
+export interface ConversationRunTraceEntryWire {
+  sequence: number;
+  created_at: string;
+  stage: string;
+  tool_call_id: string | null;
+  tool_name: string | null;
+  status: string;
+  error_code: string | null;
+}
+
+/** GET /api/conversations/{chat_id}/runs/{thread_id}/trace */
+export interface ConversationRunTraceWire {
+  run_id: string;
+  entries: ConversationRunTraceEntryWire[];
 }
 
 /** 一次压缩的展示分隔：摘要与保留起点（原始 Entry 不受影响） */

@@ -54,6 +54,18 @@ async def read_conversation(conversation_id: str, request: Request) -> dict[str,
     }
 
 
+@router.get("/api/conversations/{chat_id}/runs/{thread_id}/trace")
+async def read_run_trace(
+    chat_id: str, thread_id: str, request: Request
+) -> dict[str, Any]:
+    """读取指定会话中 Run 的受限工具执行轨迹。"""
+    conversations = app_services(request).conversations_repo
+    run = await conversations.read_run_by_thread_id(thread_id)
+    if run is None or run.conversation_id != chat_id:
+        raise ConversationNotFound(_MISSING_MESSAGE)
+    return {"run_id": run.id, "entries": await conversations.list_run_trace(run.id)}
+
+
 @router.delete("/api/conversations/{conversation_id}")
 async def delete_conversation(conversation_id: str, request: Request) -> dict[str, Any]:
     """删除会话：Entry／Run／Event 由外键级联清理；不存在与非法身份返回同一错误。"""

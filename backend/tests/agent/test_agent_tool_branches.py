@@ -16,8 +16,13 @@ from app.application.agent.budget import (
     ModelRequestBudgetExceeded,
     ToolCallBudgetExceeded,
 )
-from app.application.agent.contracts import LOCAL_USER_ID, thread_config
+from app.application.agent.contracts import (
+    LOCAL_USER_ID,
+    GeneratePlanRun,
+    thread_config,
+)
 from app.application.agent.harness.registry import PROGRESS_TOOLS, SCHEDULE_TOOLS
+from app.application.agent.plan_nodes import _plan_loop_budget
 from app.application.agent.prompts import TOOL_HARNESS_SYSTEM_PROMPT
 from app.application.agent.run_service import stream_agent_run
 from app.bootstrap import SqliteHealthProbe, build_repositories, build_services
@@ -25,7 +30,11 @@ from app.domain.conversations.context import ContextMessage
 from app.domain.records.schema import WorkoutSetInput
 from app.infrastructure.database.connection import Database
 from app.infrastructure.database.repositories.plans_repository import PlanRepo
-from config import MAX_TOOL_CALLS_PER_RUN
+from config import (
+    MAX_MODEL_REQUESTS_PER_RUN,
+    MAX_PLAN_TOOL_CALLS_PER_LOOP,
+    MAX_TOOL_CALLS_PER_RUN,
+)
 from tests.agent.test_agent_run_branches import (
     ANSWER,
     BUSINESS_DAY,
@@ -87,7 +96,13 @@ def test_default_tool_budget_matches_the_run_constant() -> None:
     """共享预算的默认上限就是 config 常量，工具调用与模型请求各自独立计数。"""
     budget = ModelRequestBudget()
 
-    assert budget.max_tool_calls == MAX_TOOL_CALLS_PER_RUN
+    assert budget.max_tool_calls == MAX_TOOL_CALLS_PER_RUN == 30
+    assert budget.max_requests == MAX_MODEL_REQUESTS_PER_RUN == 30
+    assert (
+        _plan_loop_budget(GeneratePlanRun(BUSINESS_DAY)).max_tool_calls
+        == MAX_PLAN_TOOL_CALLS_PER_LOOP
+        == 30
+    )
     assert budget.tool_calls == 0 and budget.used == 0
     for _ in range(MAX_TOOL_CALLS_PER_RUN):
         budget.take_tool_call()

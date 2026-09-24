@@ -1,4 +1,5 @@
-from dataclasses import dataclass
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass, field
 from typing import Protocol
 
 from langgraph.graph import MessagesState
@@ -22,6 +23,10 @@ class HarnessContext:
 
     model: ModelGateway
     budget: HarnessBudget
+    trace_stage: str = field(default="general", kw_only=True)
+    trace_call: Callable[[str, str, str, str, str | None], Awaitable[None]] | None = field(
+        default=None, kw_only=True
+    )
 
 
 class HarnessState(MessagesState):

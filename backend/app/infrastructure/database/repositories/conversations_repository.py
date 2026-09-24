@@ -40,6 +40,10 @@ _SELECT_EVENT = (
     "SELECT id, run_id, sequence, event_type, payload_json, created_at"
     " FROM conversation_run_events"
 )
+_SELECT_TRACE = (
+    "SELECT id AS sequence, created_at, stage, tool_call_id, tool_name, status, error_code"
+    " FROM conversation_run_trace"
+)
 
 _UNFINISHED_STATUSES = ("pending", "running")
 
@@ -293,6 +297,38 @@ class ConversationRepo:
         """事务内版本：与紧随其后的写入同一份快照，确认幂等判定因此原子。"""
         require_outer_transaction(conn, "确认 Entry 事务内读取")
         return await _read_confirmations_in_transaction(conn, run_id, action)
+
+    async def list_run_trace(self, run_id: str) -> tuple[dict[str, Any], ...]:
+        """某 Run 的受限执行轨迹，按自增序号升序。"""
+
+        async def op(conn: aiosqlite.Connection) -> tuple[dict[str, Any], ...]:
+            async with conn.execute(
+                _SELECT_TRACE + " WHERE run_id = ? ORDER BY id", (run_id,)
+            ) as cursor:
+                return tuple(dict(row) for row in await cursor.fetchall())
+
+        return await self._db.under_lock(op)
+
+    async def append_run_trace(
+        self,
+        *,
+        run_id: str,
+        stage: str,
+        tool_call_id: str | None,
+        tool_name: str | None,
+        status: str,
+        error_code: str | None,
+        created_at: str,
+    ) -> None:
+        """单条 trace 独立事务提交，嵌套图异常不能回滚已完成调用的轨迹。"""
+        async with self._db.transaction() as conn:
+            cursor = await conn.execute(
+                "INSERT INTO conversation_run_trace"
+                " (run_id, stage, tool_call_id, tool_name, status, error_code, created_at)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (run_id, stage, tool_call_id, tool_name, status, error_code, created_at),
+            )
+            await cursor.close()
 
     async def list_run_events(self, run_id: str) -> tuple[RunEvent, ...]:
         """某 Run 的全部事件（按 ``sequence`` 升序）。"""

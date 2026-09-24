@@ -9,8 +9,11 @@ FACT_STATES: tuple[FactState, ...] = ("unknown", "denied", "known")
 
 T = TypeVar("T")
 
+#: 训练目标的闭集取值：三个目标各有独立的计划内容要求（见 workout-planning/references/goal-content.md）。
+TRAINING_GOALS: tuple[str, ...] = ("增肌", "增力", "减脂")
+
 FIELD_VALUE_KINDS: dict[str, str] = {
-    "training_goal": "text",
+    "training_goal": "training_goal",
     "weekly_frequency": "integer",
     "training_mode": "training_mode",
     "explicit_preferences": "text_list",
@@ -139,6 +142,12 @@ def _decode_value(name: str, raw: Any) -> Any:
     if kind == "training_mode":
         if raw not in ("bodyweight", "equipment"):
             raise InvalidProfileRow(f"画像字段 {name} 需要徒手或器械训练方式：{raw!r}")
+        return raw
+    if kind == "training_goal":
+        if raw not in TRAINING_GOALS:
+            raise InvalidProfileRow(
+                f"画像字段 {name} 需要增肌、增力或减脂中的一个：{raw!r}"
+            )
         return raw
     if kind == "integer":
         if isinstance(raw, bool) or not isinstance(raw, int):

@@ -111,6 +111,48 @@ def invalid_natural_language_record_message(error: Exception) -> str:
 
 INTERRUPT_EVENT_KEY = "__interrupt__"
 
+
+class RunTraceRecorder:
+    """逐条独立提交受限 trace，并保留当前执行阶段供 Run 异常记录。"""
+
+    def __init__(
+        self, conversations: ConversationRepo, run_id: str, *, now: Callable[[], str]
+    ) -> None:
+        self._conversations = conversations
+        self._run_id = run_id
+        self._now = now
+        self.stage = "general"
+
+    async def record(
+        self,
+        stage: str,
+        tool_call_id: str | None,
+        tool_name: str | None,
+        status: str,
+        error_code: str | None,
+    ) -> None:
+        self.stage = stage
+        await self._conversations.append_run_trace(
+            run_id=self._run_id,
+            stage=stage,
+            tool_call_id=tool_call_id,
+            tool_name=tool_name,
+            status=status,
+            error_code=error_code,
+            created_at=self._now(),
+        )
+
+    async def record_run_error(self, error: BaseException) -> None:
+        await self._conversations.append_run_trace(
+            run_id=self._run_id,
+            stage=self.stage,
+            tool_call_id=None,
+            tool_name=None,
+            status="failure",
+            error_code=type(error).__name__,
+            created_at=self._now(),
+        )
+
 #: 计划分支的非正常终止 → 可见文本。
 _PLAN_TERMINATION_MESSAGES: Mapping[str, str] = {
     "discard_failed_candidate": DISCARD_FAILED_CANDIDATE_MESSAGE,
@@ -356,6 +398,9 @@ def harness_context(
         dataset=deps.dataset,
         snapshot=snapshot,
         conversation_history=run.conversation_messages,
+        trace_call=(
+            None if run.trace_recorder is None else run.trace_recorder.record
+        ),
     )
 
 
@@ -468,6 +513,7 @@ async def run_events(
     regenerate: bool,
     business_day: date,
     now: Callable[[], str],
+    trace_recorder: RunTraceRecorder | None = None,
 ) -> AsyncIterator[AgentEvent]:
     """已落库用户 Entry 之后的运行链：先按阈值压缩，再重建上下文，最后委托工作流。
 
@@ -528,6 +574,7 @@ async def run_events(
             business_day=business_day,
             regenerate=regenerate,
             conversation_messages=history,
+            trace_recorder=trace_recorder,
         ),
         runtime.run_deps,
     ):
@@ -541,6 +588,7 @@ async def persisted_events(
     events: AsyncIterator[AgentEvent],
     *,
     now: Callable[[], str],
+    trace_recorder: RunTraceRecorder | None = None,
 ) -> AsyncIterator[AgentEvent]:
     """事件流 → 已落库的产品事件：每个语义事件先落库再交给成帧层，运行错误只发一个 ``error`` 事件。
 
@@ -564,6 +612,8 @@ async def persisted_events(
         await converge_cancelled_run(conversations, run_id, now=now)
         raise
     except Exception as error:
+        if trace_recorder is not None:
+            await trace_recorder.record_run_error(error)
         message = agent_run_error_message(error)
         async with db.transaction() as conn:
             await conversations.update_run_with_event_in_transaction(

@@ -37,6 +37,8 @@ from app.application.agent.contracts import (
     WorkflowState,
 )
 from app.application.agent.harness.registry import (
+    EVALUATION_TOOLS_NODE_NAME,
+    PLANNING_TOOLS_NODE_NAME,
     require_canonical_candidates,
     run_plan_fact_loop,
 )
@@ -85,8 +87,21 @@ READ_USER_PROFILE_TOOL = "read_user_profile"
 READ_ACTIVE_PLAN_TOOL = "read_active_plan"
 
 _PLANNER_SKILLS = {
-    "generate_plan": (PLANNING_SKILL_NAME, "references/planning-rules.md"),
-    ADJUST_PLAN_INTENT: (ADJUSTMENT_SKILL_NAME, "references/adjustment-rules.md"),
+    "generate_plan": (
+        PLANNING_SKILL_NAME,
+        (
+            "references/planning-rules.md",
+            "references/goal-content.md",
+            "references/training-principles.md",
+            "references/program-design.md",
+            "references/trainee-classification.md",
+            "references/exercise-selection.md",
+        ),
+    ),
+    ADJUST_PLAN_INTENT: (
+        ADJUSTMENT_SKILL_NAME,
+        ("references/adjustment-rules.md",),
+    ),
 }
 _SKILL_EXAMPLES_PATH = "references/few-shots.md"
 _EVALUATION_RULES_PATH = "references/evaluation-rubric.md"
@@ -118,21 +133,21 @@ async def load_skill(
     *,
     skills: SkillSource,
 ) -> WorkflowState:
-    """按计划 Intent 读取唯一 Planner Skill 与必需规则 reference。"""
+    """按计划 Intent 读取唯一 Planner Skill 与它声明的全部规则 reference。"""
     intent = state.get("intent")
-    name, rules_path = _planner_skill_spec(intent)
+    name, rules_paths = _planner_skill_spec(intent)
     metadata = {item.name: item for item in skills.list_metadata()}.get(name)
     if metadata is None:
         raise ValueError(f"Skill 元数据中缺少 Planner Skill：{name}")
     planner_skill = LoadedSkill(
         metadata=metadata,
         body=skills.read_skill(name),
-        references=(skills.read_reference(name, rules_path),),
+        references=tuple(skills.read_reference(name, path) for path in rules_paths),
     )
     return {"loaded_skill": planner_skill}
 
 
-def _planner_skill_spec(intent: str | None) -> tuple[str, str]:
+def _planner_skill_spec(intent: str | None) -> tuple[str, tuple[str, ...]]:
     selected = _PLANNER_SKILLS.get(intent or "")
     if selected is None:
         raise ValueError(f"未登记的 Planner Intent：{intent!r}")
@@ -157,7 +172,9 @@ class PlannerAgentNode:
         """
         run = _run(runtime)
         intent = state.get("intent")
-        snapshot, facts = await _read_plan_facts(self._deps, state=state, run=run)
+        snapshot, facts = await _read_plan_facts(
+            self._deps, state=state, run=run, stage=PLANNING_TOOLS_NODE_NAME
+        )
         evidence = plan_fact_evidence(intent, snapshot=snapshot, tool_calls=facts)
         payload = await _planner_payload(state, run, facts=facts, deps=self._deps)
         skill_name, _ = _planner_skill_spec(intent)
@@ -208,7 +225,9 @@ class EvaluatorAgentNode:
         """
         run = _run(runtime)
         deterministic: DeterministicResult = state["deterministic_result"]
-        snapshot, facts = await _read_plan_facts(self._deps, state=state, run=run)
+        snapshot, facts = await _read_plan_facts(
+            self._deps, state=state, run=run, stage=EVALUATION_TOOLS_NODE_NAME
+        )
         evidence = plan_fact_evidence(
             state.get("intent"), snapshot=snapshot, tool_calls=facts
         )
@@ -413,9 +432,15 @@ class PlanWriteNodes:
 
 
 async def _read_plan_facts(
-    deps: PlanLlmNodeDeps, *, state: WorkflowState, run: GeneratePlanRun
+    deps: PlanLlmNodeDeps,
+    *,
+    state: WorkflowState,
+    run: GeneratePlanRun,
+    stage: str,
 ) -> tuple[ToolExecutionContext, tuple[ToolCallRecord, ...]]:
     """一次计划事实的 ToolNode loop：白名单在装配期固化，模型的工具调用进入真实轨迹。"""
+    if run.trace_recorder is not None:
+        run.trace_recorder.stage = stage
     intent = state.get("intent")
     required = PLAN_REQUIRED_FACTS.get(intent or "")
     if required is None:
@@ -440,9 +465,22 @@ async def _read_plan_facts(
             stats=deps.stats,
             dataset=deps.dataset,
             snapshot=snapshot,
+            trace_stage=stage,
+            trace_call=(
+                None
+                if run.trace_recorder is None
+                else run.trace_recorder.record
+            ),
         ),
         messages=_fact_loop_messages(
-            state["request"], business_day=run.business_day, required=required
+            state["request"],
+            business_day=run.business_day,
+            required=required,
+            knowledge=(
+                _fact_loop_knowledge(state)
+                if stage == PLANNING_TOOLS_NODE_NAME
+                else None
+            ),
         ),
     )
     return snapshot, facts
@@ -457,18 +495,14 @@ async def _planner_payload(
 ) -> dict[str, Any]:
     """Planner 输入：选定 Skill 的指令与规则、本次真实工具事实、候选动作及请求上下文。"""
     intent = state.get("intent")
-    skill_name, rules_path = _planner_skill_spec(intent)
+    skill_name, _ = _planner_skill_spec(intent)
     skill = state.get("loaded_skill")
     if skill is None:
         raise ValueError("Planner 状态缺少已装载 Skill")
     if skill.metadata.name != skill_name:
         raise ValueError(f"Planner Skill 与 Intent 不一致：{skill.metadata.name!r}")
-    rules = next(
-        (reference for reference in skill.references if reference.path == rules_path),
-        None,
-    )
-    if rules is None:
-        raise ValueError(f"Planner Skill 缺少必需规则 reference：{rules_path}")
+    if not skill.references:
+        raise ValueError("Planner Skill 缺少规则 reference")
     payload: dict[str, Any] = {
         "request": state["request"],
         "intent": intent,
@@ -476,7 +510,7 @@ async def _planner_payload(
         "skill": {
             "name": skill.metadata.name,
             "instructions": skill.body,
-            "rules_reference": rules.text,
+            "rules_reference": _rules_reference_text(skill),
         },
         "facts": _fact_payloads(facts),
         "candidate_actions": await _candidate_actions(facts, deps),
@@ -707,19 +741,34 @@ def _blocking_failures(state: WorkflowState) -> tuple[str, ...]:
     raise ValueError("阻断失败理由缺失：本轮既没有结构校验失败也没有评估结果")
 
 
+def _rules_reference_text(skill: LoadedSkill) -> str:
+    """已装载规则 reference 的拼接文本：按装载顺序，供候选载荷一次性对照。"""
+    return "\n\n".join(reference.text for reference in skill.references)
+
+
+def _fact_loop_knowledge(state: WorkflowState) -> str:
+    """事实采集阶段注入的知识：本次 Skill 正文与它声明的全部规则 reference。"""
+    skill = state.get("loaded_skill")
+    if skill is None:
+        raise ValueError("事实采集缺少已装载 Skill")
+    return f"{skill.body}\n\n{_rules_reference_text(skill)}"
+
+
 def _fact_loop_messages(
-    request: str, *, business_day: date, required: Sequence[str]
+    request: str,
+    *,
+    business_day: date,
+    required: Sequence[str],
+    knowledge: str | None = None,
 ) -> list[BaseMessage]:
-    """事实采集的消息序列：业务日与本次 Intent 的必需工具写进 system，当前请求只出现一次。"""
-    return [
-        SystemMessage(
-            content=PLAN_FACTS_SYSTEM_PROMPT.format(
-                business_day=business_day.isoformat(),
-                required_facts="、".join(required),
-            )
-        ),
-        HumanMessage(content=request),
-    ]
+    """事实采集的消息序列：业务日、必需工具与本次计划知识写进 system，当前请求只出现一次。"""
+    content = PLAN_FACTS_SYSTEM_PROMPT.format(
+        business_day=business_day.isoformat(),
+        required_facts="、".join(required),
+    )
+    if knowledge is not None:
+        content = f"{content}\n\n本次计划知识：\n{knowledge}"
+    return [SystemMessage(content=content), HumanMessage(content=request)]
 
 
 def _fact_payloads(facts: Sequence[ToolCallRecord]) -> list[dict[str, Any]]:

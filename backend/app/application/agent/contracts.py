@@ -269,6 +269,7 @@ class GeneratePlanRun:
     regenerate: bool = False
     #: 本次请求之前的完整对话上下文投影；当前用户消息不在其中（由 ``request`` 单独给出）。
     conversation_messages: tuple[ContextMessage, ...] = ()
+    trace_recorder: Any = None
 
 
 @dataclass(frozen=True, slots=True)

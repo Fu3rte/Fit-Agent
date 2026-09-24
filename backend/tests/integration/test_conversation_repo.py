@@ -21,7 +21,7 @@ from app.domain.conversations.schema import (
     InvalidConversationRow,
     validate_payload,
 )
-from app.domain.profile.schema import profile_from_json
+from app.domain.profile.schema import TRAINING_GOALS, profile_from_json
 from app.infrastructure.database.connection import Database
 from app.infrastructure.database.migrations import load_migrations
 from app.infrastructure.database.repositories.conversations_repository import (
@@ -42,6 +42,7 @@ _CONVERSATION_TABLES = (
     "conversation_entries",
     "conversation_runs",
     "conversation_run_events",
+    "conversation_run_trace",
 )
 
 _CONVERSATION_INDEXES = ("idx_conversation_entries_conversation_created",)
@@ -65,6 +66,12 @@ async def _harness(tmp_path: Path) -> AsyncIterator[tuple[Database, Conversation
     async with _open_db(tmp_path / "fit_agent.db") as db:
         await db.migrate()
         yield db, ConversationRepo(db)
+
+
+async def _trace_columns(conn: aiosqlite.Connection) -> set[str]:
+    async with conn.execute("PRAGMA table_info(conversation_run_trace)") as cursor:
+        rows = await cursor.fetchall()
+    return {str(row["name"]) for row in rows}
 
 
 async def _count(db: Database, table: str) -> int:
@@ -133,10 +140,10 @@ async def _drive_to(
         )
 
 
-async def test_fresh_database_migrates_to_version_eight(tmp_path: Path) -> None:
-    """全新库迁移到 v8；四张对话表与 entries 时间序索引就位。"""
+async def test_fresh_database_migrates_to_the_latest_version(tmp_path: Path) -> None:
+    """全新库迁移到最新版本；对话历史五张表与 entries 时间序索引就位。"""
     async with _harness(tmp_path) as (db, _repo):
-        assert await db.pragma_value("user_version") == 8
+        assert await db.pragma_value("user_version") == 10
 
         async def op(conn: aiosqlite.Connection) -> tuple[list[str], list[str]]:
             async with conn.execute(
@@ -156,8 +163,48 @@ async def test_fresh_database_migrates_to_version_eight(tmp_path: Path) -> None:
 def test_migration_files_are_contiguous() -> None:
     """迁移编号连续（编号即 user_version，不跳号）。"""
     migrations = load_migrations(MIGRATIONS_DIR)
-    assert [version for version, _name, _sql in migrations] == list(range(1, 9))
-    assert migrations[-1][1] == "008_training_mode.sql"
+    assert [version for version, _name, _sql in migrations] == list(range(1, 11))
+    assert migrations[-1][1] == "010_training_goal.sql"
+
+
+async def test_run_trace_is_ordered_private_and_cascades(tmp_path: Path) -> None:
+    async with _harness(tmp_path) as (db, repo):
+        conversation = await repo.create_conversation(
+            conversation_id="chat-trace", title="trace", created_at="2026-06-01T09:00:00+00:00"
+        )
+        run, _entry = await _create_run(repo, db, conversation.id, "trace")
+        await repo.append_run_trace(
+            run_id=run.id,
+            stage="planning_tools",
+            tool_call_id="requested-call",
+            tool_name="search_exercises",
+            status="failure",
+            error_code="ToolCallBudgetExceeded",
+            created_at="2026-06-01T09:01:00+00:00",
+        )
+        entries = await repo.list_run_trace(run.id)
+        assert len(entries) == 1
+        assert entries[0]["sequence"] > 0
+        assert entries[0]["tool_call_id"] == "requested-call"
+        assert entries[0]["tool_name"] == "search_exercises"
+        assert entries[0]["status"] == "failure"
+        assert entries[0]["error_code"] == "ToolCallBudgetExceeded"
+        columns = await db.under_lock(
+            lambda conn: _trace_columns(conn)
+        )
+        assert columns == {
+            "id",
+            "run_id",
+            "stage",
+            "tool_call_id",
+            "tool_name",
+            "status",
+            "error_code",
+            "created_at",
+        }
+
+        assert await repo.delete_conversation(conversation.id)
+        assert await repo.list_run_trace(run.id) == ()
 
 
 @pytest.mark.parametrize(
@@ -190,7 +237,7 @@ async def test_training_mode_migrates_existing_profile(
                 (json.dumps(profile),),
             )
     async with _open_db(db_path) as db:
-        assert await db.migrate() == 8
+        assert await db.migrate() == 10
 
         async def read_profile(conn: aiosqlite.Connection) -> str:
             async with conn.execute(
@@ -203,6 +250,65 @@ async def test_training_mode_migrates_existing_profile(
         assert "available_equipment" not in migrated
         assert profile_from_json(raw).training_mode.value == expected
         assert migrated["training_goal"] == profile["training_goal"]
+        assert migrated["known_injuries"] == profile["known_injuries"]
+
+
+#: 闭集三值在迁移里必须原样保留：取值直接来自源码常量，SQL 里的内联值漂移时本测试失败。
+_KEPT_GOALS = tuple(
+    ({"state": "known", "value": goal}, {"state": "known", "value": goal})
+    for goal in TRAINING_GOALS
+)
+_OTHER_GOALS = (
+    ({"state": "known", "value": "减肥"}, {"state": "unknown", "value": None}),
+    ({"state": "known", "value": "想变壮"}, {"state": "unknown", "value": None}),
+    ({"state": "known", "value": "增肌减脂"}, {"state": "unknown", "value": None}),
+    ({"state": "denied", "value": None}, {"state": "denied", "value": None}),
+    ({"state": "unknown", "value": None}, {"state": "unknown", "value": None}),
+)
+
+
+@pytest.mark.parametrize(("stored", "expected"), (*_KEPT_GOALS, *_OTHER_GOALS))
+async def test_training_goal_migrates_to_the_closed_set(
+    tmp_path: Path, stored: dict[str, str | None], expected: dict[str, str | None]
+) -> None:
+    """v9 库的训练目标按闭集归一：三值保留，其余已知值降为 unknown，其余事实原样保留。"""
+    v9_dir = tmp_path / "v9"
+    v9_dir.mkdir()
+    for path in MIGRATIONS_DIR.glob("00[1-9]_*.sql"):
+        shutil.copy(path, v9_dir / path.name)
+    db_path = tmp_path / "goal.db"
+    profile = {
+        "training_goal": stored,
+        "weekly_frequency": {"state": "known", "value": 3},
+        "training_mode": {"state": "known", "value": "equipment"},
+        "explicit_preferences": {"state": "unknown", "value": None},
+        "current_level": {"state": "unknown", "value": None},
+        "known_injuries": {"state": "denied", "value": None},
+        "forbidden_exercise_ids": {"state": "denied", "value": None},
+    }
+    async with _open_db(db_path, v9_dir) as db:
+        await db.migrate()
+        async with db.transaction() as conn:
+            await conn.execute(
+                "UPDATE athlete_profile SET profile_json = ? WHERE id = 1",
+                (json.dumps(profile, ensure_ascii=False),),
+            )
+    async with _open_db(db_path) as db:
+        assert await db.migrate() == 10
+
+        async def read_profile(conn: aiosqlite.Connection) -> str:
+            async with conn.execute(
+                "SELECT profile_json FROM athlete_profile WHERE id = 1"
+            ) as cursor:
+                return (await cursor.fetchone())[0]
+
+        raw = await db.under_lock(read_profile)
+        migrated = json.loads(raw)
+        goal = profile_from_json(raw).training_goal
+        assert migrated["training_goal"] == expected
+        assert goal.state == expected["state"]
+        assert goal.value == expected["value"]
+        assert migrated["weekly_frequency"] == profile["weekly_frequency"]
         assert migrated["known_injuries"] == profile["known_injuries"]
 
 
@@ -256,8 +362,8 @@ async def test_version_three_database_upgrades_without_business_data_loss(
         before = await legacy_db.under_lock(business_rows)
 
     async with _open_db(db_path) as upgraded_db:
-        assert await upgraded_db.migrate() == 8
-        assert await upgraded_db.pragma_value("user_version") == 8
+        assert await upgraded_db.migrate() == 10
+        assert await upgraded_db.pragma_value("user_version") == 10
         after = await upgraded_db.under_lock(business_rows)
         repo = ConversationRepo(upgraded_db)
         conversation = await repo.create_conversation(

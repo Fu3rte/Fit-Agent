@@ -16,11 +16,15 @@ import {
 } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
 import { listExercises, putProfile } from "@/lib/api";
-import type { ProfileFactWire, ProfileFactsWire } from "@/lib/contract";
+import type {
+  ProfileFactWire,
+  ProfileFactsWire,
+  TrainingGoal,
+} from "@/lib/contract";
 
 type FieldKey = keyof ProfileFactsWire;
 
-type FieldKind = "text" | "count" | "list" | "mode";
+type FieldKind = "text" | "count" | "list" | "mode" | "goal";
 
 const FIELDS: Array<{
   key: FieldKey;
@@ -30,7 +34,7 @@ const FIELDS: Array<{
     {
       key: "training_goal",
       label: "训练目标",
-      kind: "text",
+      kind: "goal",
     },
     {
       key: "current_level",
@@ -143,7 +147,10 @@ export default function ProfileCard({
   const submit = () => {
     const frequency = texts.weekly_frequency?.trim() ?? "";
     const body: ProfileFactsWire = {
-      training_goal: fact("training_goal", texts.training_goal?.trim() ?? ""),
+      training_goal: fact(
+        "training_goal",
+        (texts.training_goal || null) as TrainingGoal | null,
+      ),
       weekly_frequency: fact(
         "weekly_frequency",
         frequency === "" ? null : Number(frequency),
@@ -192,6 +199,22 @@ export default function ProfileCard({
                             : "例如：膝关节旧伤、腰背不适，没有就填无"
                         }
                       />
+                    ) : kind === "goal" ? (
+                      <Select
+                        value={texts[key] ?? ""}
+                        onValueChange={(value) =>
+                          setTexts((prev) => ({ ...prev, [key]: value }))
+                        }
+                      >
+                        <SelectTrigger id={key} className="w-full">
+                          <SelectValue placeholder="请选择训练目标" />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="增肌">增肌</SelectItem>
+                          <SelectItem value="增力">增力</SelectItem>
+                          <SelectItem value="减脂">减脂</SelectItem>
+                        </SelectContent>
+                      </Select>
                     ) : kind === "mode" ? (
                       <Select
                         value={texts[key] ?? ""}
@@ -211,11 +234,9 @@ export default function ProfileCard({
                       <Input
                         {...bind}
                         placeholder={
-                          key === "training_goal"
-                            ? "例如：增肌、减脂、提升力量"
-                            : key === "current_level"
-                              ? "例如：初学者、中级"
-                              : "例如：3"
+                          key === "current_level"
+                            ? "例如：初学者、中级"
+                            : "例如：3"
                         }
                         inputMode={kind === "count" ? "numeric" : undefined}
                         className={kind === "count" ? "w-24" : undefined}

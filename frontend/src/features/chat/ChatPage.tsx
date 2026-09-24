@@ -236,7 +236,7 @@ export default function ChatPage() {
   return (
     <div className="relative flex h-full w-full flex-col overflow-hidden">
       <div className="flex h-full w-full min-h-0 flex-1 flex-col">
-        <ChatTranscript rounds={rounds}>
+        <ChatTranscript rounds={rounds} chatId={chatId}>
           {planDraft && (
             <MessageScrollerItem messageId={`plan-wait:${planDraft.plan_id}`}>
               <PlanWaitingCard

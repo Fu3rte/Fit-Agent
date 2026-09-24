@@ -2,7 +2,13 @@
 
 from typing import Any
 
-from app.domain.profile.schema import FIELD_VALUE_KINDS, PROFILE_FIELDS, Fact, Profile
+from app.domain.profile.schema import (
+    FIELD_VALUE_KINDS,
+    PROFILE_FIELDS,
+    TRAINING_GOALS,
+    Fact,
+    Profile,
+)
 
 WEEKLY_FREQUENCY_MIN = 1
 WEEKLY_FREQUENCY_MAX = 7
@@ -37,6 +43,12 @@ def _validate_value(name: str, value: Any) -> None:
     if kind == "training_mode":
         if value not in ("bodyweight", "equipment"):
             raise InvalidProfile(f"画像字段 {name} 需要徒手或器械训练方式：{value!r}")
+        return
+    if kind == "training_goal":
+        if value not in TRAINING_GOALS:
+            raise InvalidProfile(
+                f"画像字段 {name} 需要增肌、增力或减脂中的一个：{value!r}"
+            )
         return
     if kind == "integer":
         if isinstance(value, bool) or not isinstance(value, int):

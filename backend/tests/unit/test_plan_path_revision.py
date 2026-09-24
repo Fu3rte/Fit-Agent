@@ -71,6 +71,16 @@ from config import TOOL_TIMEOUT_SECONDS
 
 BUSINESS_DAY = date(2026, 6, 1)
 
+#: generate_plan 的 Planner Skill 声明的规则 reference：与 ``_PLANNER_SKILLS`` 同序同集。
+GENERATE_RULES_REFERENCES: tuple[str, ...] = (
+    "references/planning-rules.md",
+    "references/goal-content.md",
+    "references/training-principles.md",
+    "references/program-design.md",
+    "references/trainee-classification.md",
+    "references/exercise-selection.md",
+)
+
 
 def _profile(weekly_frequency: int = 1) -> Profile:
     return Profile(
@@ -307,7 +317,7 @@ class _Deps:
     catalog: _Catalog
     stats: _Stats
     persistence: _Persistence
-    schema_version: int = 8
+    schema_version: int = 10
     profiles: _Profiles = field(default_factory=lambda: _Profiles(_profile()))
     plans: _Plans = field(default_factory=_Plans)
     records: _Records = field(default_factory=_Records)
@@ -553,7 +563,7 @@ async def test_graph_skips_evaluator_when_deterministic_validation_fails() -> No
     assert "evaluation" not in result
     assert deps.skills.body_reads == ["workout-planning"]
     assert deps.skills.reference_reads == [
-        ("workout-planning", "references/planning-rules.md")
+        ("workout-planning", path) for path in GENERATE_RULES_REFERENCES
     ]
     assert deps.model.payloads and len(deps.model.payloads) == 2
     assert run.budget.used == 2
@@ -579,7 +589,7 @@ async def test_planner_and_evaluator_consume_one_candidate_snapshot() -> None:
         ("read_user_profile", "profile", 1),
         ("read_training_history", "workouts", 2),
         ("read_progress", "workouts", 2),
-        ("search_exercises", "catalog", 8),
+        ("search_exercises", "catalog", 10),
     ]
     assert "user-1" not in deps.model.payloads[0]
     assert "revision" not in deps.model.payloads[0]
@@ -835,7 +845,7 @@ async def test_planner_reuses_selected_skill_for_the_single_revision() -> None:
     assert deps.skills.metadata_reads == 1
     assert deps.skills.body_reads == ["workout-planning"]
     assert deps.skills.reference_reads == [
-        ("workout-planning", "references/planning-rules.md")
+        ("workout-planning", path) for path in GENERATE_RULES_REFERENCES
     ]
     first_payload, revision_payload = map(json.loads, deps.model.payloads)
     assert first_payload["skill"] == revision_payload["skill"]
@@ -885,7 +895,7 @@ async def test_planner_loads_few_shots_only_for_a_relevant_revision() -> None:
     assert first_payload["candidate_actions"] == []
     assert first_payload["skill_examples"] == revision_payload["skill_examples"]
     assert deps.skills.reference_reads == [
-        ("workout-planning", "references/planning-rules.md"),
+        *(("workout-planning", path) for path in GENERATE_RULES_REFERENCES),
         ("workout-planning", "references/few-shots.md"),
         ("workout-planning", "references/few-shots.md"),
     ]

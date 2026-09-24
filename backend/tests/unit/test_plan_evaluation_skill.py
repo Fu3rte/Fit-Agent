@@ -54,14 +54,29 @@ def test_plan_evaluation_skill_reads_the_rubric_reference_by_path() -> None:
 
 
 @pytest.mark.parametrize(
-    ("intent", "name", "rules_path"),
+    ("intent", "name", "rules_paths"),
     (
-        ("generate_plan", PLANNING_SKILL_NAME, "references/planning-rules.md"),
-        ("adjust_plan", ADJUSTMENT_SKILL_NAME, "references/adjustment-rules.md"),
+        (
+            "generate_plan",
+            PLANNING_SKILL_NAME,
+            (
+                "references/planning-rules.md",
+                "references/goal-content.md",
+                "references/training-principles.md",
+                "references/program-design.md",
+                "references/trainee-classification.md",
+                "references/exercise-selection.md",
+            ),
+        ),
+        (
+            "adjust_plan",
+            ADJUSTMENT_SKILL_NAME,
+            ("references/adjustment-rules.md",),
+        ),
     ),
 )
-async def test_planner_skill_loads_only_the_selected_rules_reference(
-    intent: str, name: str, rules_path: str
+async def test_planner_skill_loads_the_selected_rules_references(
+    intent: str, name: str, rules_paths: tuple[str, ...]
 ) -> None:
     loaded = await load_skill(
         cast("WorkflowState", {"intent": intent}),
@@ -73,7 +88,10 @@ async def test_planner_skill_loads_only_the_selected_rules_reference(
 
     assert planner_skill.metadata.name == name
     assert planner_skill.body.strip()
-    assert tuple(reference.path for reference in planner_skill.references) == (rules_path,)
+    assert (
+        tuple(reference.path for reference in planner_skill.references) == rules_paths
+    )
+    assert all(reference.text.strip() for reference in planner_skill.references)
 
 
 async def test_planner_skill_selection_rejects_non_plan_intents() -> None:
