@@ -8,26 +8,21 @@ authors = [
 ]
 requires-python = ">=3.13"
 dependencies = [
+    "openai>=3,<4",
+    "pydantic>=2,<3",
+    "python-dotenv>=1,<2",
     "fastapi>=0.115",
     "uvicorn>=0.30",
-    "aiosqlite>=0.21",
     "anyio>=4",
-    "platformdirs>=4.3",
-    "tzlocal>=5",
-    "tzdata>=2024.1",
-    "langchain>=1,<2",
-    "langchain-openai>=1,<2",
-    "langchain-anthropic>=0.3",
-    "langgraph>=1,<2",
-    "langgraph-checkpoint-sqlite>=3,<4",
 ]
 
-# 源码以 backend/ 下的 app 包直接导入，不构建 Python 包。
+# 源码以 backend/ 下的 src namespace package 直接导入。
 [tool.uv]
 package = false
 
 [dependency-groups]
 dev = [
+    "httpx>=0.28,<1",
     "pytest>=9.1",
     "ruff>=0.16",
 ]

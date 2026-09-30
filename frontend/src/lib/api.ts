@@ -33,6 +33,7 @@ import type {
 } from "@/lib/contract";
 
 export type { ApiError };
+export { runReActStream } from "@/features/chat/utils/reactAgent";
 
 /** 后端统一 JSON 错误形状 → Error（形状不变；SSE 与普通请求共用同一份错误处理） */
 function apiError(body: unknown, status: number): Error & Partial<ApiError> {

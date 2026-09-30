@@ -36,7 +36,7 @@ export default function ChatComposer({
 
   const send = () => {
     const text = request.trim();
-    if (text === "") return;
+    if (busy || text === "" || Array.from(text).length > 32000) return;
     setRequest("");
     onSend(text);
   };
@@ -86,7 +86,8 @@ export default function ChatComposer({
               if (busy) return;
               send();
             }}
-            placeholder="用一句话记录训练"
+            placeholder="输入消息（最多 32000 字符）"
+            aria-label="消息"
             disabled={busy}
             rows={1}
             className={
@@ -105,7 +106,7 @@ export default function ChatComposer({
                   size="icon"
                   aria-label="发送"
                   onClick={send}
-                  disabled={busy}
+                  disabled={busy || Array.from(request.trim()).length > 32000}
                   className="size-8"
                 >
                   <SendHorizontal />
@@ -116,7 +117,7 @@ export default function ChatComposer({
                 size="icon"
                 aria-label="发送"
                 onClick={send}
-                disabled={busy}
+                disabled={busy || Array.from(request.trim()).length > 32000}
                 className="absolute top-1/2 right-4 size-8 -translate-y-1/2"
               >
                 <SendHorizontal />

@@ -1,3 +1,15 @@
+export interface ReActRunBody {
+  session_id: string;
+  request: string;
+}
+
+export type ReActEvent =
+  | { event: "tool_start"; data: { tool_call_id: string; name: string; arguments: Record<string, unknown> } }
+  | { event: "tool_result"; data: { tool_call_id: string; content: string } }
+  | { event: "message"; data: { text: string } }
+  | { event: "done"; data: { status: "completed" } }
+  | { event: "error"; data: { message: string; tool_call_id: string | null } };
+
 /** 请求或输入不合法 */
 export type ErrorCode = "invalid_request";
 

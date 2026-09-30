@@ -1,39 +1,49 @@
-# Fit-Agent
+## 本地运行与当前对话入口
 
-本地运行的健身训练助手：管理用户画像、训练计划、训练记录与身体指标，并通过对话生成计划和辅助记录训练。前端使用 React、TypeScript 和 Vite；后端使用 FastAPI、LangGraph 和 SQLite。
-
-## 功能
-
-- 用户画像：训练目标、每周训练次数、训练方式（徒手／器械）、偏好、水平、伤病及禁用动作。器械训练按拥有全部器械处理。
-- 训练计划：基于画像和训练记录生成七天计划草稿，确认后生效；支持查看计划和训练日历。
-- 训练记录：表单记录与对话辅助记录；查看历史、个人最佳和体重趋势。
-- 对话：保存会话历史，支持计划确认与打卡确认。
-- 模型配置：在界面内填写 API Key、Base URL、模型名、API 协议和结构化输出方式，并测试连通性。
-
-## 本地开发
-
-需要 Python 3.13+、uv 和 Node.js 22+。从仓库根目录分别启动两个终端：
+运行环境：Python 3.13+、uv、Node.js 与 npm。在仓库根目录安装现有依赖：
 
 ```bash
-cd backend
-uv sync --group dev
-uv run python main.py
+npm install
+npm --prefix frontend install
+uv sync --project backend
 ```
 
+在 `backend/.env` 配置 `OPENAI_API_KEY`、`OPENAI_BASE_URL`、`OPENAI_MODEL`；凭据仅供后端读取。
+
+启动前后端开发服务：
+
 ```bash
-cd frontend
-npm ci
 npm run dev
 ```
 
-在浏览器访问 Vite 终端显示的本地地址。开发服务器将 `/api` 代理到 `http://127.0.0.1:8000`。启动后可在侧栏的「模型配置」中填写模型信息；使用对话功能前需要完成配置。健康检查地址为 `http://127.0.0.1:8000/healthz`。
+打开 `http://localhost:5173`。后端监听 `127.0.0.1:8000`，Vite 将 `/api` 请求代理到后端。保持默认端口；HTTP Host/Origin 校验允许本地 8000、5173 端口。
 
-## 构建与运行
+独立启动时，在两个终端分别执行：
 
-在 `frontend/` 执行 `npm ci && npm run build`，然后在 `backend/` 执行 `uv sync && uv run python main.py`。后端会托管 `frontend/dist/`，浏览器访问 `http://127.0.0.1:8000`。服务仅监听回环地址，默认端口为 8000；可通过 `--port` 修改。数据库迁移在后端启动时执行。
+```bash
+npm run dev:backend
+npm run dev:frontend
+```
 
-## 数据与配置
+后端命令等价于在 `backend` 目录执行：
 
-业务数据库、LangGraph checkpoint 数据库和 `provider.json` 保存在操作系统的用户数据目录。可用环境变量 `FIT_AGENT_DATA_DIR` 指定数据目录。模型凭据保存在该目录的 `provider.json` 中；此文件包含 API Key，请勿提交到版本库或共享。
+```bash
+uv run python -m uvicorn src.interfaces.http:app --reload --host 127.0.0.1 --port 8000
+```
 
-后端仅接受本地回环 Host／Origin，适合单机使用。默认不暴露 OpenAPI 文档页面。
+CLI 入口保留，在 `backend` 目录运行：
+
+```bash
+uv run python main.py
+uv run python main.py --prompt "请回答你好"
+```
+
+产品定义与验收场景见 [PRODUCT.md](PRODUCT.md)。
+
+## 技术栈
+
+- **Agent：单 Agent Loop**。基于 ReAct 范式的最小执行循环及工具调用机制。
+- **后端：FastAPI**。提供对话、业务数据查询、确认提交、文件导入及模型配置接口。
+- **数据校验：Pydantic**。定义并校验接口输入、工具参数及业务数据结构。
+- **持久化：SQLite**。通过 aiosqlite 访问，保存个人画像、训练计划、实际训练记录、会话消息及待确认内容；确认提交通过数据库事务保证数据完整性与幂等性。
+- **前端**。React、TypeScript、Vite 及 Shadcn 布局和组件。
