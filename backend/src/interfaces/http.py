@@ -7,6 +7,7 @@ from copy import deepcopy
 from functools import partial
 from queue import Queue
 from threading import Event, Lock
+from time import time_ns
 from uuid import UUID
 
 from fastapi import Depends, FastAPI, HTTPException, Request
@@ -15,6 +16,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from src.agent.events import AgentEvent
 from src.agent.loop import run_turn
+from src.agent.messages import AgentMessage, SystemMessage, UserMessage
 from src.agent.prompts import SYSTEM_PROMPT
 from src.agent.providers.openai import complete
 from src.agent.tools.bash import create_bash_tool
@@ -23,7 +25,7 @@ from src.model_config import load_model_config
 
 ALLOWED_HOSTS = {"127.0.0.1:8000", "localhost:8000", "127.0.0.1:5173", "localhost:5173"}
 ALLOWED_ORIGINS = {f"http://{host}" for host in ALLOWED_HOSTS}
-sessions: dict[UUID, list[dict]] = {}
+sessions: dict[UUID, list[AgentMessage]] = {}
 active = Lock()
 
 
@@ -51,7 +53,9 @@ app = FastAPI(lifespan=lifespan)
 
 
 def encode(event: AgentEvent) -> str:
-    return f"event: {event.event}\ndata: {json.dumps(event.data, ensure_ascii=False)}\n\n"
+    return (
+        f"event: {event.event}\ndata: {json.dumps(event.data, ensure_ascii=False)}\n\n"
+    )
 
 
 async def check_boundary(request: Request) -> None:
@@ -69,19 +73,33 @@ async def run(payload: RunRequest, request: Request):
         raise HTTPException(409, "已有任务正在执行")
     cancel = Event()
     events: Queue[AgentEvent] = Queue()
-    pending = deepcopy(
-        sessions.get(payload.session_id, [{"role": "system", "content": SYSTEM_PROMPT}])
+    pending: list[AgentMessage] = deepcopy(sessions.get(payload.session_id, []))
+    new_session = not pending
+    pending.append(
+        UserMessage(
+            role="user", content=payload.request, timestamp=time_ns() // 1_000_000
+        )
     )
-    pending.append({"role": "user", "content": payload.request})
 
     def execute() -> None:
+        tools = {**create_file_tools(), "bash": create_bash_tool()}
+        if new_session:
+            pending.insert(
+                0,
+                SystemMessage(
+                    role="system",
+                    content=SYSTEM_PROMPT,
+                    toolsAdded=[tool.definition() for tool in tools.values()],
+                    timestamp=pending[0].timestamp,
+                ),
+            )
         config = load_model_config()
         with config.create_client() as client:
-            provider = partial(complete, client, config.OPENAI_MODEL)
+            provider = partial(complete, client, config)
             for event in run_turn(
                 pending,
                 provider,
-                {**create_file_tools(), "bash": create_bash_tool()},
+                tools,
                 64,
                 cancel,
             ):
@@ -113,10 +131,15 @@ async def run(payload: RunRequest, request: Request):
                 if not events.empty():
                     continue
                 if future.exception() is not None:
-                    yield encode(AgentEvent("error", {
-                        "message": "执行失败，请重新发起请求。",
-                        "tool_call_id": tool_call_id,
-                    }))
+                    yield encode(
+                        AgentEvent(
+                            "error",
+                            {
+                                "message": "执行失败，请重新发起请求。",
+                                "tool_call_id": tool_call_id,
+                            },
+                        )
+                    )
                 return
             await asyncio.sleep(0.01)
 

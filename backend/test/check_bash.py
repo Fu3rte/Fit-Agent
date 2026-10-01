@@ -2,6 +2,7 @@ import json
 import subprocess
 import sys
 import time
+from dataclasses import replace
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -12,8 +13,10 @@ from src.agent.tools.files import WORKSPACE, create_file_tools
 def check() -> None:
     tool = create_bash_tool()
 
-    def call(command: str, **arguments) -> str:
-        return tool.invoke(json.dumps({"command": command, **arguments}))
+    def call(command: str, *, is_error: bool = False, **arguments) -> str:
+        result = tool.invoke(json.dumps({"command": command, **arguments}))
+        assert result.isError is is_error
+        return result.content
 
     assert tool.arguments.model_validate_json('{"command":"true"}').timeout is None
     assert call("printf hello") == "hello"
@@ -23,7 +26,19 @@ def check() -> None:
     assert time.monotonic() - started < 1
     assert call("printf '中文'", timeout=0.5) == "中文"
     assert call("printf out; printf err >&2; printf end") == "outerrend"
-    assert call("printf failure >&2; exit 7") == "failure\n\nCommand exited with code 7"
+    assert (
+        call("printf failure >&2; exit 7", is_error=True)
+        == "failure\n\nCommand exited with code 7"
+    )
+    direct = tool.execute("printf direct", None)
+    assert direct.content == "direct" and direct.isError is False
+    limited = replace(tool, max_output_chars=8)
+    for exit_code in (0, 7):
+        result = limited.invoke(
+            json.dumps({"command": f"printf 1234567890; exit {exit_code}"})
+        )
+        assert result.isError is (exit_code != 0)
+        assert result.content == "12345678\n[输出截断：超过 8 字符]"
     assert Path(call("pwd").strip()).name == "temp"
     saved = set(WORKSPACE.glob("bash-*.log"))
     try:
@@ -33,8 +48,11 @@ def check() -> None:
         path = next(iter(set(WORKSPACE.glob("bash-*.log")) - saved))
         assert path.name in notice
         assert path.read_text().splitlines() == [str(i) for i in range(1, 2002)]
-        assert "2001" in create_file_tools()["read"].invoke(
-            json.dumps({"path": path.name, "offset": 2001, "limit": 1})
+        assert (
+            "2001"
+            in create_file_tools()["read"]
+            .invoke(json.dumps({"path": path.name, "offset": 2001, "limit": 1}))
+            .content
         )
         saved.add(path)
         path.unlink()
@@ -51,11 +69,15 @@ def check() -> None:
         saved.add(path)
         path.unlink()
 
+        failed = call("printf '%060000d' 0; exit 7", is_error=True)
+        assert "完整输出" in failed and failed.endswith("Command exited with code 7")
+        assert len(failed.split("\n\n", 1)[0].encode()) <= MAX_BYTES
+
         text = call("for ((i=0;i<18000;i++)); do printf '中'; done")
         output = text.split("\n\n", 1)[0]
         assert len(output.encode("utf-8")) <= MAX_BYTES and set(output) == {"中"}
 
-        invocation = "from src.agent.tools.bash import create_bash_tool; import sys; print(create_bash_tool().invoke(sys.argv[1]))"
+        invocation = "from src.agent.tools.bash import create_bash_tool; import sys; print(create_bash_tool().invoke(sys.argv[1]).content)"
         for arguments in (
             {"command": "true", "timeout": 0},
             {"command": "true", "timeout": -1},

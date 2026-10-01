@@ -8,7 +8,7 @@ from typing import BinaryIO
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from src.agent.tool import Tool
+from src.agent.tool import Tool, ToolExecutionResult
 from src.agent.tools.files import WORKSPACE
 
 MAX_LINES = 2000
@@ -83,7 +83,7 @@ def create_bash_tool() -> Tool:
         "sysnative",
     }
 
-    def execute(command: str, timeout: float | None) -> str:
+    def execute(command: str, timeout: float | None) -> ToolExecutionResult:
         with TemporaryFile(dir=root) as output:
             with subprocess.Popen(
                 [shell, "-s"] if legacy_wsl else [shell, "-c", command],
@@ -126,7 +126,7 @@ def create_bash_tool() -> Tool:
             exit_code = 128 - exit_code
         if exit_code != 0:
             text += f"\n\nCommand exited with code {exit_code}"
-        return text
+        return ToolExecutionResult(text, exit_code != 0)
 
     return Tool(
         "bash",

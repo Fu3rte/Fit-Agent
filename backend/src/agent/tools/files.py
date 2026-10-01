@@ -5,7 +5,7 @@ from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from src.agent.tool import Tool
+from src.agent.tool import Tool, ToolExecutionResult
 
 WORKSPACE = Path(__file__).resolve().parents[3] / "temp"
 
@@ -76,36 +76,44 @@ def create_file_tools() -> dict[str, Tool]:
                 if not candidate.is_symlink():
                     yield resolve(str(candidate.relative_to(root)))
 
-    def read(path: str, offset: int, limit: int) -> str:
+    def read(path: str, offset: int, limit: int) -> ToolExecutionResult:
         with resolve(path).open(encoding="utf-8") as stream:
             lines = islice(enumerate(stream, 1), offset - 1, offset + limit - 1)
-            return "".join(f"{number}: {line.rstrip()}\n" for number, line in lines)
+            return ToolExecutionResult(
+                "".join(f"{number}: {line.rstrip()}\n" for number, line in lines), False
+            )
 
-    def write(path: str, content: str) -> str:
+    def write(path: str, content: str) -> ToolExecutionResult:
         target = resolve(path)
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(content, encoding="utf-8")
-        return f"已写入 {target.relative_to(root).as_posix()}"
+        return ToolExecutionResult(
+            f"已写入 {target.relative_to(root).as_posix()}", False
+        )
 
-    def edit(path: str, old_text: str, new_text: str) -> str:
+    def edit(path: str, old_text: str, new_text: str) -> ToolExecutionResult:
         target = resolve(path)
         content = target.read_text(encoding="utf-8")
         if content.count(old_text) != 1:
             raise ValueError("old_text 必须在文件中精确匹配一次")
         target.write_text(content.replace(old_text, new_text, 1), encoding="utf-8")
-        return f"已编辑 {target.relative_to(root).as_posix()}"
+        return ToolExecutionResult(
+            f"已编辑 {target.relative_to(root).as_posix()}", False
+        )
 
-    def find(path: str, pattern: str, limit: int) -> str:
+    def find(path: str, pattern: str, limit: int) -> ToolExecutionResult:
         matches = []
         for candidate in files(path):
             relative = candidate.relative_to(root)
             if relative.full_match(pattern):
                 matches.append(relative.as_posix())
                 if len(matches) == limit:
-                    return "\n".join(matches) + "\n[已达到 limit]"
-        return "\n".join(matches)
+                    return ToolExecutionResult(
+                        "\n".join(matches) + "\n[已达到 limit]", False
+                    )
+        return ToolExecutionResult("\n".join(matches), False)
 
-    def grep(path: str, pattern: str, limit: int, glob: str) -> str:
+    def grep(path: str, pattern: str, limit: int, glob: str) -> ToolExecutionResult:
         expression = re.compile(pattern)
         matches = []
         for candidate in files(path):
@@ -119,10 +127,12 @@ def create_file_tools() -> dict[str, Tool]:
                             f"{relative.as_posix()}:{number}: {line.rstrip()}"
                         )
                         if len(matches) == limit:
-                            return "\n".join(matches) + "\n[已达到 limit]"
-        return "\n".join(matches)
+                            return ToolExecutionResult(
+                                "\n".join(matches) + "\n[已达到 limit]", False
+                            )
+        return ToolExecutionResult("\n".join(matches), False)
 
-    def ls(path: str, limit: int) -> str:
+    def ls(path: str, limit: int) -> ToolExecutionResult:
         target = resolve(path)
         entries = sorted(target.iterdir(), key=lambda item: item.name)
         result = "\n".join(
@@ -130,7 +140,7 @@ def create_file_tools() -> dict[str, Tool]:
         )
         if len(entries) > limit:
             result += "\n[输出截断：已达到 limit]"
-        return result
+        return ToolExecutionResult(result, False)
 
     tools = [
         Tool(

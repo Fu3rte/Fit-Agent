@@ -17,11 +17,13 @@ def check() -> None:
             arguments["path"] = str(
                 (root / arguments.get("path", ".")).relative_to(WORKSPACE)
             )
-            return tools[name].invoke(json.dumps(arguments))
+            result = tools[name].invoke(json.dumps(arguments))
+            assert result.isError is False
+            return result.content
 
         assert set(tools) == {"read", "edit", "write", "grep", "find", "ls"}
         for tool in tools.values():
-            assert tool.definition()["function"]["parameters"]["type"] == "object"
+            assert tool.definition().parameters["type"] == "object"
         call("write", path="nested/example.txt", content="hello\nworld\n")
         assert (
             call("read", path="nested/example.txt", offset=2, limit=1) == "2: world\n"
@@ -47,7 +49,7 @@ def check() -> None:
             "import sys; "
             f"sys.path.insert(0, {str(backend)!r}); "
             "from src.agent.tools.files import create_file_tools; "
-            "print(create_file_tools()[sys.argv[1]].invoke(sys.argv[2]))"
+            "print(create_file_tools()[sys.argv[1]].invoke(sys.argv[2]).content)"
         )
         result = subprocess.run(
             [
