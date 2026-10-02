@@ -7,21 +7,21 @@ from pathlib import Path
 
 from pydantic import BaseModel, TypeAdapter, ValidationError
 
-from src.agent import messages as message_models
-from src.agent.messages import (
-    AgentMessage,
+from src.ai import messages as message_models
+from src.ai.messages import (
     AssistantMessage,
     Message,
     SystemMessage,
     ToolCall,
     ToolResultMessage,
     UserMessage,
-    parse_agent_message,
     serialize_message,
 )
 
+_adapter = TypeAdapter(Message)
 
-def assert_rejected(source: dict, model: str = "AgentMessage") -> None:
+
+def assert_rejected(source: dict, model: str = "Message") -> None:
     with ThreadPoolExecutor(max_workers=1) as executor:
         error = executor.submit(
             TypeAdapter(getattr(message_models, model)).validate_python, source
@@ -29,11 +29,11 @@ def assert_rejected(source: dict, model: str = "AgentMessage") -> None:
     assert isinstance(error, ValidationError), error
 
 
-def roundtrip(source: dict) -> AgentMessage:
-    parsed = parse_agent_message(json.dumps(source))
+def roundtrip(source: dict) -> Message:
+    parsed = _adapter.validate_python(source)
     encoded = serialize_message(parsed)
     assert json.loads(encoded) == source
-    assert parse_agent_message(encoded) == parsed
+    assert _adapter.validate_json(encoded) == parsed
     return parsed
 
 
@@ -42,11 +42,11 @@ def check() -> None:
         {
             "role": "system",
             "content": [
-                {"type": "text", "text": "instructions", "textSignature": "sig"}
+                {"type": "text", "text": "instructions", "text_signature": "sig"}
             ],
             "sections": {"removed": None, "active": "指令片段"},
-            "toolsRemoved": [{"name": "old-tool"}],
-            "toolsAdded": [
+            "tools_removed": [{"name": "old-tool"}],
+            "tools_added": [
                 {
                     "name": "lookup",
                     "description": "lookup data",
@@ -59,7 +59,7 @@ def check() -> None:
                         "additionalProperties": False,
                         "x-provider": {"nested": [None, True, 2.5]},
                     },
-                    "constrainedSampling": {
+                    "constrained_sampling": {
                         "type": "grammar",
                         "variants": {"openai_regex": "[a-z]+"},
                     },
@@ -71,7 +71,7 @@ def check() -> None:
             "role": "user",
             "content": [
                 {"type": "text", "text": "question"},
-                {"type": "image", "data": "base64", "mimeType": "image/png"},
+                {"type": "image", "data": "base64", "mime_type": "image/png"},
             ],
             "timestamp": 2,
         },
@@ -83,48 +83,48 @@ def check() -> None:
                     "id": "call-1",
                     "name": "lookup",
                     "arguments": {"query": "a", "nested": {"values": [1, None]}},
-                    "thoughtSignature": "thought-signature",
+                    "thought_signature": "thought-signature",
                     "namespace": "tools",
                 },
                 {
                     "type": "thinking",
                     "thinking": "plan",
-                    "thinkingSignature": "encrypted-replay-payload",
+                    "thinking_signature": "encrypted-replay-payload",
                     "redacted": True,
                 },
                 {
                     "type": "text",
                     "text": "done",
-                    "textSignature": '{"v":1,"id":"response-id","phase":"final_answer"}',
+                    "text_signature": '{"v":1,"id":"response-id","phase":"final_answer"}',
                 },
             ],
             "api": "openai-completions",
             "provider": "example",
             "model": "model-1",
-            "responseModel": "actual-model",
-            "responseId": "response-1",
-            "providerThinkingLevel": "custom-effort",
-            "thinkingLevel": "off",
-            "errorMessage": "safe-error",
-            "rawStopReason": "provider-stop",
-            "endTurn": False,
+            "response_model": "actual-model",
+            "response_id": "response-1",
+            "provider_thinking_level": "custom-effort",
+            "thinking_level": "off",
+            "error_message": "safe-error",
+            "raw_stop_reason": "provider-stop",
+            "end_turn": False,
             "usage": {
                 "input": 1,
                 "output": 2,
-                "cacheRead": 3,
-                "cacheWrite": 4,
-                "cacheWrite1h": 5,
+                "cache_read": 3,
+                "cache_write": 4,
+                "cache_write_1h": 5,
                 "reasoning": 1,
-                "totalTokens": 3,
+                "total_tokens": 3,
                 "cost": {
                     "input": 0.1,
                     "output": 0.2,
-                    "cacheRead": 0.3,
-                    "cacheWrite": 0.4,
+                    "cache_read": 0.3,
+                    "cache_write": 0.4,
                     "total": 1,
                 },
             },
-            "stopReason": "toolUse",
+            "stop_reason": "toolUse",
             "diagnostics": [
                 {
                     "type": "provider",
@@ -140,35 +140,35 @@ def check() -> None:
             ],
             "deferred": {
                 "provider": "example",
-                "modelId": "model-1",
+                "model_id": "model-1",
                 "api": "custom",
                 "id": "task-1",
-                "expiresAt": 123.5,
-                "pollAfterMs": 2.5,
+                "expires_at": 123.5,
+                "poll_after_ms": 2.5,
                 "data": {"cursor": [1, {"next": None}]},
             },
             "timestamp": 3,
         },
         {
             "role": "toolResult",
-            "toolCallId": "call-1",
-            "toolName": "lookup",
+            "tool_call_id": "call-1",
+            "tool_name": "lookup",
             "content": [
                 {"type": "text", "text": "result"},
-                {"type": "image", "data": "base64", "mimeType": "image/jpeg"},
+                {"type": "image", "data": "base64", "mime_type": "image/jpeg"},
             ],
-            "isError": False,
+            "is_error": False,
             "timestamp": 4,
             "details": None,
-            "nestedCalls": {
+            "nested_calls": {
                 "calls": [
                     {
                         "id": "nested-1",
                         "name": "fetch",
                         "arguments": {"id": 9},
-                        "argumentsBytes": 8.5,
+                        "arguments_bytes": 8.5,
                         "status": "ok",
-                        "durationMs": 2.5,
+                        "duration_ms": 2.5,
                         "error": "safe-error",
                     }
                 ],
@@ -180,12 +180,11 @@ def check() -> None:
     messages[3]["usage"] = deepcopy(messages[2]["usage"])
     classes = [SystemMessage, UserMessage, AssistantMessage, ToolResultMessage]
     for source, model in zip(messages, classes, strict=True):
-        parsed = parse_agent_message(json.dumps(source).encode())
-        restored = parse_agent_message(serialize_message(parsed))
+        parsed = _adapter.validate_json(json.dumps(source).encode())
+        restored = _adapter.validate_json(serialize_message(parsed))
         assert type(restored) is model and restored == parsed
         assert json.loads(serialize_message(restored)) == source
         assert TypeAdapter(Message).validate_python(source) == parsed
-        assert TypeAdapter(AgentMessage).validate_python(source) == parsed
 
     required = {
         "SystemMessage": {"role", "content", "timestamp"},
@@ -197,24 +196,24 @@ def check() -> None:
             "provider",
             "model",
             "usage",
-            "stopReason",
+            "stop_reason",
             "timestamp",
         },
         "ToolResultMessage": {
             "role",
-            "toolCallId",
-            "toolName",
+            "tool_call_id",
+            "tool_name",
             "content",
-            "isError",
+            "is_error",
             "timestamp",
         },
         "TextContent": {"type", "text"},
-        "ImageContent": {"type", "data", "mimeType"},
+        "ImageContent": {"type", "data", "mime_type"},
         "ThinkingContent": {"type", "thinking"},
         "ToolCall": {"type", "id", "name", "arguments"},
-        "Usage": {"input", "output", "cacheRead", "cacheWrite", "totalTokens"},
-        "UsageCost": {"input", "output", "cacheRead", "cacheWrite", "total"},
-        "DeferredHandle": {"provider", "modelId", "api", "id"},
+        "Usage": {"input", "output", "cache_read", "cache_write", "total_tokens"},
+        "UsageCost": {"input", "output", "cache_read", "cache_write", "total"},
+        "DeferredHandle": {"provider", "model_id", "api", "id"},
         "AssistantMessageDiagnostic": {"type", "timestamp"},
         "DiagnosticErrorInfo": {"message"},
         "NestedToolCalls": {"calls", "complete"},
@@ -259,7 +258,7 @@ def check() -> None:
                     check_fields(item)
 
     for source in messages:
-        check_fields(parse_agent_message(json.dumps(source)))
+        check_fields(_adapter.validate_python(source))
     for sampling in (
         False,
         {"type": "json_schema", "strict": "prefer"},
@@ -271,9 +270,9 @@ def check() -> None:
         },
     ):
         source = deepcopy(messages[0])
-        source["toolsAdded"][0]["constrainedSampling"] = sampling
+        source["tools_added"][0]["constrained_sampling"] = sampling
         parsed = roundtrip(source)
-        config = parsed.toolsAdded[0].constrainedSampling
+        config = parsed.tools_added[0].constrained_sampling
         if isinstance(config, BaseModel):
             check_fields(config)
     assert checked == required.keys()
@@ -294,18 +293,27 @@ def check() -> None:
         "toolUse",
         "error",
         "aborted",
-        "deferred",
     ):
-        assistant = roundtrip(
-            {**minimal_assistant, "content": [], "stopReason": reason}
-        )
+        source = {**minimal_assistant, "content": [], "stop_reason": reason}
+        if reason == "error":
+            source["error_message"] = "协议失败说明"
+        assistant = roundtrip(source)
         serialized = json.loads(serialize_message(assistant))
-        assert serialized["content"] == [] and serialized["stopReason"] == reason
-        assert "responseId" not in serialized and "responseModel" not in serialized
+        assert serialized["content"] == [] and serialized["stop_reason"] == reason
+        assert "response_id" not in serialized and "response_model" not in serialized
         assert isinstance(assistant, AssistantMessage)
+    assert_rejected({**minimal_assistant, "stop_reason": "deferred"})
+    assert_rejected({**minimal_assistant, "stop_reason": "error"})
+    for reason in ("pending", "aborted"):
+        roundtrip({**minimal_assistant, "usage": None, "stop_reason": reason})
+    for reason in ("stop", "length", "toolUse", "error"):
+        assert_rejected({
+            **minimal_assistant, "usage": None, "stop_reason": reason,
+            "error_message": "协议失败说明",
+        })
     for level in ("off", "minimal", "low", "medium", "high", "xhigh", "max"):
-        assistant = roundtrip({**minimal_assistant, "thinkingLevel": level})
-        assert assistant.thinkingLevel == level
+        assistant = roundtrip({**minimal_assistant, "thinking_level": level})
+        assert assistant.thinking_level == level
     for source in messages[:2]:
         roundtrip({**source, "content": "纯文本"})
 
@@ -339,9 +347,9 @@ def check() -> None:
         assert_rejected({**source, "unknown": True})
     for source in messages[2:]:
         assert_rejected({**source, "content": "text"})
-    assert_rejected({**messages[3], "isError": 0})
-    assert_rejected({**messages[2], "stopReason": "unknown"})
-    assert_rejected({**messages[2], "thinkingLevel": "unknown"})
+    assert_rejected({**messages[3], "is_error": 0})
+    assert_rejected({**messages[2], "stop_reason": "unknown"})
+    assert_rejected({**messages[2], "thinking_level": "unknown"})
     assert_rejected({**messages[0], "role": "user"})
     for value in (None, [], "json", 1, True):
         assert_rejected({**messages[2]["content"][0], "arguments": value}, "ToolCall")
@@ -356,7 +364,7 @@ def check() -> None:
         {"type": "grammar", "variants": {"unknown": "x"}},
     ):
         assert_rejected(
-            {**messages[0]["toolsAdded"][0], "constrainedSampling": value}, "Tool"
+            {**messages[0]["tools_added"][0], "constrained_sampling": value}, "Tool"
         )
 
     for value in (
@@ -382,8 +390,9 @@ def check() -> None:
             [
                 sys.executable,
                 "-c",
-                "import sys; from src.agent.messages import parse_agent_message; "
-                "parse_agent_message(sys.argv[1])",
+                "import json, sys; from pydantic import TypeAdapter; "
+                "from src.ai.messages import Message; "
+                "TypeAdapter(Message).validate_python(json.loads(sys.argv[1]))",
                 json.dumps(source),
             ],
             cwd=Path(__file__).resolve().parents[1],
@@ -401,7 +410,7 @@ def check() -> None:
             [
                 sys.executable,
                 "-c",
-                "from src.agent.messages import ToolCall; "
+                "from src.ai.messages import ToolCall; "
                 "ToolCall.model_validate({'type':'toolCall','id':'x','name':'x',"
                 f"'arguments':{arguments}}})",
             ],

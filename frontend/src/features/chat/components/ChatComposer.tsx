@@ -1,16 +1,28 @@
 import { useEffect, useRef, useState } from "react";
-import { Maximize2, Minimize2, SendHorizontal } from "lucide-react";
+import { Maximize2, Minimize2, SendHorizontal, Square } from "lucide-react";
+import { canSubmitChatInput } from "../utils/reactAgent";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 
 export default function ChatComposer({
   busy,
+  ready,
+  error,
+  unknownRequests,
   onSend,
+  onStop,
 }: {
   busy: boolean;
-  onSend: (text: string) => void;
+  ready: boolean;
+  error?: string;
+  unknownRequests: string[];
+  onSend: (text: string) => Promise<boolean>;
+  onStop: () => void;
 }) {
   const [request, setRequest] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+  const pending = useRef(false);
+  const revision = useRef(0);
   const requestRef = useRef<HTMLTextAreaElement>(null);
   const [composerExpanded, setComposerExpanded] = useState(false);
   const [singleLine, setSingleLine] = useState(true);
@@ -34,23 +46,26 @@ export default function ChatComposer({
   const showExpand =
     composerExpanded || (request.trim() !== "" && atMaxHeight);
 
+  const valid = canSubmitChatInput(request, unknownRequests);
   const send = () => {
-    const text = request.trim();
-    if (busy || text === "" || Array.from(text).length > 32000) return;
-    setRequest("");
-    onSend(text);
+    if (!ready || pending.current || !valid) return;
+    const submittedRevision = revision.current;
+    pending.current = true;
+    setSubmitting(true);
+    void onSend(request).then((accepted) => {
+      pending.current = false;
+      setSubmitting(false);
+      if (accepted && revision.current === submittedRevision) setRequest("");
+    });
   };
 
   return (
     <div className="shrink-0 bg-background">
       <div className="mx-auto w-full max-w-4xl px-6 pt-4 pb-8">
+        {error && <p role="alert" className="mb-2 text-sm text-destructive">{error}</p>}
         {busy && (
-          <div className="mb-2 flex items-center gap-2 rounded-lg bg-secondary px-3 py-1.5 text-xs text-secondary-foreground">
-            <span
-              className="size-1.5 animate-pulse rounded-full bg-current"
-              aria-hidden
-            />
-            处理中
+          <div className="mb-2 flex justify-end">
+            <Button type="button" size="icon" variant="secondary" aria-label="停止" onClick={onStop} className="size-8"><Square aria-hidden className="size-4" /></Button>
           </div>
         )}
 
@@ -73,22 +88,19 @@ export default function ChatComposer({
           <Textarea
             ref={requestRef}
             value={request}
-            onChange={(event) => setRequest(event.target.value)}
+            onChange={(event) => { revision.current += 1; setRequest(event.target.value); }}
             onKeyDown={(event) => {
               if (
                 event.key !== "Enter" ||
                 event.shiftKey ||
-                event.nativeEvent.isComposing
+                event.nativeEvent.isComposing || event.nativeEvent.keyCode === 229
               ) {
                 return;
               }
               event.preventDefault();
-              if (busy) return;
               send();
             }}
-            placeholder="输入消息（最多 32000 字符）"
             aria-label="消息"
-            disabled={busy}
             rows={1}
             className={
               composerExpanded
@@ -106,7 +118,7 @@ export default function ChatComposer({
                   size="icon"
                   aria-label="发送"
                   onClick={send}
-                  disabled={busy || Array.from(request.trim()).length > 32000}
+                  disabled={!ready || submitting || !valid}
                   className="size-8"
                 >
                   <SendHorizontal />
@@ -117,7 +129,7 @@ export default function ChatComposer({
                 size="icon"
                 aria-label="发送"
                 onClick={send}
-                disabled={busy || Array.from(request.trim()).length > 32000}
+                disabled={!ready || submitting || !valid}
                 className="absolute top-1/2 right-4 size-8 -translate-y-1/2"
               >
                 <SendHorizontal />

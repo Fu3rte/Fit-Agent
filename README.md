@@ -31,13 +31,6 @@ npm run dev:frontend
 uv run python -m uvicorn src.interfaces.http:app --reload --host 127.0.0.1 --port 8000
 ```
 
-CLI 入口保留，在 `backend` 目录运行：
-
-```bash
-uv run python main.py
-uv run python main.py --prompt "请回答你好"
-```
-
 产品定义与验收场景见 [PRODUCT.md](PRODUCT.md)。
 
 ## 技术栈

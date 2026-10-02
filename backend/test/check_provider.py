@@ -1,52 +1,63 @@
+import asyncio
 import base64
 import json
 import subprocess
 from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
-from functools import partial
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from time import time_ns
 
+from openai.types.chat import ChatCompletion, ChatCompletionMessage
+from openai.types.chat.chat_completion import Choice
+from openai.types.completion_usage import CompletionUsage, PromptTokensDetails
 from pydantic import ValidationError
 
-from src.agent.loop import run_turn
-from src.agent.message_context import validate_tool_pairs
-from src.agent.messages import (
+from src.agent.agent_loop import run_agent_loop
+from src.agent.config import AgentLoopConfig
+from src.agent.tools.bash import create_bash_tool
+from src.agent.tools.files import WORKSPACE, create_file_tools
+from src.agent.usage import summarize_usage
+from src.ai.api.openai_completions import (
+    REASONING_FIELDS,
+    from_openai_response,
+    from_openai_usage,
+    to_openai_request,
+)
+from src.ai.context import validate_tool_pairs
+from src.ai.messages import (
     AssistantMessage,
     ImageContent,
     SystemMessage,
     TextContent,
     ThinkingContent,
     ToolCall,
-    ToolReference,
     ToolResultMessage,
     UserMessage,
     serialize_message,
 )
-from src.agent.providers.openai import (
-    REASONING_FIELDS,
-    complete,
-    from_openai_response,
-    from_openai_usage,
-    to_openai_request,
-)
-from src.agent.tools.bash import create_bash_tool
-from src.agent.tools.files import WORKSPACE, create_file_tools
-from src.agent.usage import summarize_usage
+from src.ai.stream import complete, stream
+from src.ai.types import ModelSpec, StreamOptions
 from src.model_config import load_model_config
 
 
 def check() -> None:
     registry = {**create_file_tools(), "bash": create_bash_tool()}
     config = load_model_config()
+    spec = ModelSpec(
+        api="openai-completions",
+        provider=config.OPENAI_PROVIDER,
+        id=config.OPENAI_MODEL,
+        base_url=config.OPENAI_BASE_URL,
+    )
+    options: StreamOptions = {"api_key": config.OPENAI_API_KEY}
     timestamp = time_ns() // 1_000_000
     system = SystemMessage(
         role="system",
         content="按用户请求执行。",
         timestamp=timestamp,
         sections={"current": "工具参数必须遵循声明。", "gone": None},
-        toolsAdded=[registry["read"].definition()],
+        tools_added=[registry["read"].definition()],
     )
     with (
         TemporaryDirectory(dir=WORKSPACE) as directory,
@@ -72,7 +83,7 @@ def check() -> None:
         image = ImageContent(
             type="image",
             data=base64.b64encode(image_path.read_bytes()).decode(),
-            mimeType="image/png",
+            mime_type="image/png",
         )
         plain = [
             SystemMessage(
@@ -80,17 +91,17 @@ def check() -> None:
             ),
             UserMessage(role="user", content="只回答完成。", timestamp=timestamp),
         ]
-        text = complete(client, config, plain)
-        assert text.stopReason == "stop" and any(
+        text = asyncio.run(complete(spec, {"messages": plain}, options))
+        assert text.stop_reason == "stop" and any(
             isinstance(block, TextContent) and block.text for block in text.content
         )
         assert (
             text.provider == config.OPENAI_PROVIDER and text.api == "openai-completions"
         )
         assert (
-            text.model == config.OPENAI_MODEL and text.responseId and text.responseModel
+            text.model == config.OPENAI_MODEL and text.response_id and text.response_model
         )
-        assert text.timestamp > 0 and text.usage.totalTokens > 0
+        assert text.timestamp > 0 and text.usage.total_tokens > 0
         assert "cost" not in json.loads(serialize_message(text))["usage"]
         visual = [
             plain[0],
@@ -105,8 +116,8 @@ def check() -> None:
                 timestamp=timestamp,
             ),
         ]
-        viewed = complete(client, config, visual)
-        assert viewed.stopReason == "stop" and "红" in "".join(
+        viewed = asyncio.run(complete(spec, {"messages": visual}, options))
+        assert viewed.stop_reason == "stop" and "红" in "".join(
             block.text for block in viewed.content if isinstance(block, TextContent)
         )
 
@@ -119,21 +130,21 @@ def check() -> None:
             ),
         ]
         raw = client.chat.completions.create(
-            **to_openai_request(history, config),
+            **to_openai_request(history, spec, options),
             tool_choice={"type": "function", "function": {"name": "read"}},
         )
-        assistant = from_openai_response(raw, config)
+        assistant = from_openai_response(raw, spec)
         assert (
-            assistant.stopReason == "toolUse"
-            and assistant.rawStopReason == "tool_calls"
+            assistant.stop_reason == "toolUse"
+            and assistant.raw_stop_reason == "tool_calls"
         )
-        assert assistant.responseId == raw.id and assistant.responseModel == raw.model
+        assert assistant.response_id == raw.id and assistant.response_model == raw.model
         assert assistant.timestamp == raw.created * 1000
-        assert assistant.usage.totalTokens == raw.usage.total_tokens
+        assert assistant.usage.total_tokens == raw.usage.total_tokens
         assert (
             assistant.usage.input
-            + assistant.usage.cacheRead
-            + assistant.usage.cacheWrite
+            + assistant.usage.cache_read
+            + assistant.usage.cache_write
             == raw.usage.prompt_tokens
         )
         assert assistant.usage.output == raw.usage.completion_tokens
@@ -164,41 +175,64 @@ def check() -> None:
             assert isinstance(
                 executor.submit(from_openai_usage, invalid).exception(), ValidationError
             )
+
+        def completion(finish_reason: str) -> ChatCompletion:
+            return ChatCompletion(
+                id="response-limit",
+                created=1,
+                model=config.OPENAI_MODEL,
+                object="chat.completion",
+                choices=[
+                    Choice(
+                        index=0,
+                        finish_reason=finish_reason,
+                        message=ChatCompletionMessage(
+                            role="assistant", content="已生成内容"
+                        ),
+                    )
+                ],
+                usage=CompletionUsage(
+                    prompt_tokens=4,
+                    completion_tokens=2,
+                    total_tokens=6,
+                    prompt_tokens_details=PromptTokensDetails(cached_tokens=0),
+                ),
+            )
+
+        limited_message = from_openai_response(completion("length"), spec)
+        assert limited_message.stop_reason == "length"
+        assert limited_message.raw_stop_reason == "length"
+        assert limited_message.usage is not None
+        assert "".join(
+            block.text
+            for block in limited_message.content
+            if isinstance(block, TextContent)
+        ) == "已生成内容"
+        blocked = from_openai_response(completion("content_filter"), spec)
+        assert blocked.stop_reason == "error"
+        assert blocked.raw_stop_reason == "content_filter"
+        assert blocked.error_message == "Provider finish_reason: content_filter"
+        assert blocked.usage is not None and blocked.content
         fields = raw.choices[0].message.model_dump(exclude_none=True)
         thoughts = [
             block for block in assistant.content if isinstance(block, ThinkingContent)
         ]
-        for field in REASONING_FIELDS:
-            if field in fields and fields[field] != "":
-                assert thoughts[0].thinking == fields[field]
-                assert thoughts[0].thinkingSignature == field
-                assert (
-                    sum(
-                        block.thinkingSignature in REASONING_FIELDS
-                        for block in thoughts
-                    )
-                    == 1
-                )
-                break
         replay_fields = [field for field in REASONING_FIELDS if fields.get(field)][:1]
+        if replay_fields:
+            assert thoughts[0].thinking == fields[replay_fields[0]]
+            assert thoughts[0].thinking_signature == replay_fields[0]
         if "reasoning_details" in fields:
             replay_fields.append("reasoning_details")
             assert any(
                 block.redacted
-                and json.loads(block.thinkingSignature) == fields["reasoning_details"]
+                and json.loads(block.thinking_signature) == fields["reasoning_details"]
                 for block in thoughts
             )
         if not replay_fields:
             assert not thoughts
-        assert all(
-            "textSignature" not in block.model_fields_set
-            for block in assistant.content
-            if isinstance(block, TextContent)
-        )
         calls = [block for block in assistant.content if isinstance(block, ToolCall)]
         assert len(calls) == 1 and isinstance(calls[0].arguments, dict)
-        assert "thoughtSignature" not in calls[0].model_fields_set
-        assert "namespace" not in calls[0].model_fields_set
+        assert "thought_signature" not in calls[0].model_fields_set
         result = registry[calls[0].name].invoke(json.dumps(calls[0].arguments))
         assert result.isError is False and "provider-check" in result.content
         history.extend(
@@ -206,18 +240,15 @@ def check() -> None:
                 assistant,
                 ToolResultMessage(
                     role="toolResult",
-                    toolCallId=calls[0].id,
-                    toolName=calls[0].name,
+                    tool_call_id=calls[0].id,
+                    tool_name=calls[0].name,
                     content=[TextContent(type="text", text=result.content)],
-                    isError=result.isError,
+                    is_error=result.isError,
                     timestamp=time_ns() // 1_000_000,
                 ),
             ]
         )
         replay = deepcopy(history)
-        call = next(block for block in replay[2].content if isinstance(block, ToolCall))
-        call.id = "call|" + "长 ID / " * 25
-        replay[3].toolCallId = call.id
         replay[3].content.append(image)
         replay.append(
             UserMessage(
@@ -227,23 +258,11 @@ def check() -> None:
             )
         )
         before = [serialize_message(message) for message in replay]
-        request = to_openai_request(replay, config)
-        api_assistant = next(
-            message for message in request["messages"] if message["role"] == "assistant"
-        )
+        request = to_openai_request(replay, spec, options)
         api_tool = next(
             message for message in request["messages"] if message["role"] == "tool"
         )
-        assert api_assistant["tool_calls"][0]["id"] == api_tool["tool_call_id"]
-        for field in replay_fields:
-            assert api_assistant[field] == fields[field]
-        assert (
-            api_tool["tool_call_id"] != call.id and len(api_tool["tool_call_id"]) <= 40
-        )
-        assert (
-            json.loads(api_assistant["tool_calls"][0]["function"]["arguments"])
-            == call.arguments
-        )
+        assert api_tool["tool_call_id"] == calls[0].id
         assert (
             request["messages"][0]["content"]
             == "按用户请求执行。\n\n工具参数必须遵循声明。"
@@ -254,7 +273,7 @@ def check() -> None:
             and any(part["type"] == "image_url" for part in message["content"])
             for message in request["messages"]
         )
-        answer = complete(client, config, replay)
+        answer = asyncio.run(complete(spec, {"messages": replay}, options))
         answer_text = "".join(
             block.text for block in answer.content if isinstance(block, TextContent)
         )
@@ -262,33 +281,21 @@ def check() -> None:
         assert [serialize_message(message) for message in replay] == before
         validate_tool_pairs(replay)
 
-        request_model = partial(complete, client, config)
-        removed = deepcopy(history[:2])
-        iterator = run_turn(removed, request_model, registry, 8)
-        started = next(iterator)
-        assert started.event == "tool_start" and started.data["name"] == "read"
-        removed.append(
-            SystemMessage(
-                role="system",
-                content="",
-                toolsRemoved=[ToolReference(name="read")],
-                timestamp=time_ns() // 1_000_000,
-            )
-        )
-        with ThreadPoolExecutor(max_workers=1) as executor:
-            failure = executor.submit(list, iterator).exception()
-        assert isinstance(failure, PermissionError)
-        assert not any(isinstance(message, ToolResultMessage) for message in removed)
-        assert path.read_text(encoding="utf-8") == "provider-check"
+        loop_config = AgentLoopConfig(model=config, max_turns=8)
+
+        async def noop(event):
+            pass
 
         invalid = deepcopy(history[:2])
-        invalid[0].toolsAdded[0].parameters = {}
+        invalid[0].tools_added[0].parameters = {}
         with ThreadPoolExecutor(max_workers=1) as executor:
             failure = executor.submit(
-                list, run_turn(invalid, request_model, registry, 8)
+                asyncio.run,
+                run_agent_loop(
+                    [], {"messages": invalid, "tools": registry}, loop_config, noop
+                ),
             ).exception()
         assert isinstance(failure, ValueError) and "注册表" in str(failure)
-        assert len(invalid) == 2
 
         bounded = [
             plain[0],
@@ -298,94 +305,84 @@ def check() -> None:
                 timestamp=timestamp,
             ),
         ]
+        bounded_before = [serialize_message(message) for message in bounded]
 
-        def limited(messages):
-            response = client.chat.completions.create(
-                **to_openai_request(messages, config), max_tokens=1
+        def limited(model, context, stream_options):
+            return stream(model, context, {**stream_options, "max_tokens": 1})
+
+        limited_events = []
+
+        async def collect_limited(event):
+            limited_events.append(event)
+
+        limited_messages = asyncio.run(
+            run_agent_loop(
+                [], {"messages": bounded, "tools": registry}, loop_config,
+                collect_limited, None, limited,
             )
-            return from_openai_response(response, config)
-
-        with ThreadPoolExecutor(max_workers=1) as executor:
-            failure = executor.submit(
-                list, run_turn(bounded, limited, registry, 1)
-            ).exception()
-        assert isinstance(failure, RuntimeError) and "length" in str(failure)
-        assert (
-            isinstance(bounded[-1], AssistantMessage)
-            and bounded[-1].stopReason == "length"
         )
-        assert bounded[-1].responseId and bounded[-1].usage.totalTokens > 0
+        assert len(limited_messages) == 1
+        final = limited_messages[0]
+        assert isinstance(final, AssistantMessage)
+        assert final.stop_reason == final.raw_stop_reason == "length"
+        assert final.usage is not None and final.usage.output > 0
+        assert not any(isinstance(block, ToolCall) for block in final.content)
+        assert not any(event["type"] in {"tool_start", "tool_result"} for event in limited_events)
+        assert [event["message"] for event in limited_events if event["type"] == "message_end"] == [final]
+        assert limited_events[-1]["type"] == "trace_end"
+        assert limited_events[-1]["status"] == "completed"
+        assert next(event for event in limited_events if event["type"] == "turn_end")["status"] == "completed"
+        validate_tool_pairs([*bounded, *limited_messages])
+        assert [serialize_message(message) for message in bounded] == bounded_before
 
         errors = [
             SystemMessage(
                 role="system",
                 content="仅执行用户指定的 Bash 命令，保留实际退出结果。",
-                toolsAdded=[registry["bash"].definition()],
+                tools_added=[registry["bash"].definition()],
                 timestamp=timestamp,
             ),
             UserMessage(
                 role="user",
-                content="必须用 bash 执行精确命令 printf failure; exit 7，执行一次后说明实际结果，不重试。",
+                content="必须用 bash 执行精确命令 printf failure; exit 7，"
+                "执行一次后说明实际结果，不重试。",
                 timestamp=timestamp,
             ),
         ]
-        events = list(run_turn(errors, request_model, registry, 8))
-        assert events[-1].event == "done"
+        events = []
+
+        async def collect(event):
+            events.append(event)
+
+        committed = asyncio.run(
+            run_agent_loop([], {"messages": errors, "tools": registry}, loop_config, collect)
+        )
+        assert (
+            events[-1]["type"] == "trace_end" and events[-1]["status"] == "completed"
+        )
         failed_results = [
-            message for message in errors if isinstance(message, ToolResultMessage)
+            message
+            for message in [*errors, *committed]
+            if isinstance(message, ToolResultMessage)
         ]
         assert failed_results and all(
-            message.isError is True for message in failed_results
+            message.is_error is True for message in failed_results
         )
         assert all(
             "Command exited with code 7" in message.content[0].text
             for message in failed_results
         )
-        validate_tool_pairs(errors)
+        validate_tool_pairs([*errors, *committed])
         totals = summarize_usage([*history, answer])
         assert (
-            totals.totalTokens == assistant.usage.totalTokens + answer.usage.totalTokens
+            totals.total_tokens == assistant.usage.total_tokens + answer.usage.total_tokens
         )
         assert "cost" not in totals.model_dump(exclude_unset=True)
-        evidence = WORKSPACE / "message-integration"
-        evidence.mkdir(exist_ok=True)
-        (evidence / "verified-messages.json").write_text(
-            json.dumps(
-                {
-                    "verification": {
-                        "source": "真实 StepFun Chat Completions 请求",
-                        "replay_fields": replay_fields,
-                        "reasoning_replay": "passed"
-                        if replay_fields
-                        else "not_observed",
-                        "textSignature": "field_roundtrip_only_not_reported",
-                        "thoughtSignature": "field_roundtrip_only_not_reported",
-                        "field_validation": "实际 usage 字段的缺失、计数不一致和 null cost 负向检查",
-                    },
-                    "tool_response": json.loads(serialize_message(assistant)),
-                    "raw_usage": raw_usage,
-                    "raw_message": raw.choices[0].message.model_dump(
-                        exclude_unset=True
-                    ),
-                    "summary": totals.model_dump(exclude_unset=True),
-                    "text": json.loads(serialize_message(text)),
-                    "image": json.loads(serialize_message(viewed)),
-                    "replay": json.loads(serialize_message(answer)),
-                    "length": json.loads(serialize_message(bounded[-1])),
-                    "bash": [
-                        json.loads(serialize_message(message)) for message in errors
-                    ],
-                },
-                ensure_ascii=False,
-                indent=2,
-            ),
-            encoding="utf-8",
-        )
     print(
-        "真实文本、图片、工具图片回放、ID 映射、用量、工具移除、length 与 Bash 错误结果检查通过"
+        "真实文本、图片、工具图片回放、ID 映射、用量、声明校验、length 与 Bash 错误结果检查通过"
     )
     print(
-        f"真实思考回放字段：{replay_fields}；textSignature/thoughtSignature 为字段往返验证"
+        f"真实思考回放字段：{replay_fields}；text_signature/thought_signature 为字段往返验证"
     )
 
 

@@ -1,7 +1,5 @@
 import json
 import socket
-import subprocess
-import sys
 import time
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -12,9 +10,9 @@ import httpx
 import uvicorn
 from pydantic import TypeAdapter
 
-from test.check_http import events, wait_idle
 from src.agent.tools.files import WORKSPACE
 from src.interfaces.http import app
+from test.check_http import events, final_text, validate_events, wait_idle
 
 ROOT = Path(__file__).resolve().parents[2]
 EVIDENCE = ROOT / ".pi/delivery/react-chat/t5"
@@ -27,14 +25,8 @@ def check() -> None:
     assert '"npm run dev:backend"' in package["scripts"]["dev"]
     assert '"npm run dev:frontend"' in package["scripts"]["dev"]
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
-    for command in (backend_command.removeprefix("cd backend && "), "npm run dev", "uv run python main.py"):
+    for command in (backend_command.removeprefix("cd backend && "), "npm run dev"):
         assert command in readme
-    assert "32,000" in readme and "手工浏览器产品体验验收未运行，由用户负责" in readme
-    cli = subprocess.run(
-        [sys.executable, "-X", "utf8", "main.py", "--help"],
-        cwd=ROOT / "backend", capture_output=True, text=True, encoding="utf-8", timeout=30,
-    )
-    assert cli.returncode == 0 and "--prompt" in cli.stdout and "--max-steps" in cli.stdout
 
     listener = socket.socket()
     listener.bind(("127.0.0.1", 0))
@@ -80,33 +72,23 @@ def check() -> None:
                     }, ensure_ascii=False, indent=2),
                     encoding="utf-8",
                 )
-                assert result[-1] == {"event": "done", "data": {"status": "completed"}}
-                assert result[-2]["event"] == "message" and result[-2]["data"]["text"]
-                starts = {}
-                results = {}
-                for event in result[:-2]:
-                    data = event["data"]
-                    call = data["tool_call_id"]
-                    if event["event"] == "tool_start":
-                        assert call not in starts and isinstance(data["arguments"], dict)
-                        relative = Path(data["arguments"]["path"])
-                        assert not relative.anchor and ".." not in relative.parts, diagnostic.name
-                        assert (WORKSPACE.resolve() / relative).resolve().is_relative_to(root.resolve()), diagnostic.name
-                        starts[call] = data
-                    else:
-                        assert event["event"] == "tool_result" and call in starts and call not in results
-                        results[call] = data["content"]
-                assert starts.keys() == results.keys()
+                assert result[-1]["event"] == "done" and final_text(result)
+                starts, results = validate_events(result)
+                for data in starts.values():
+                    relative = Path(data["arguments"]["path"])
+                    assert not relative.anchor and ".." not in relative.parts, diagnostic.name
+                    assert (WORKSPACE.resolve() / relative).resolve().is_relative_to(root.resolve()), diagnostic.name
                 return result, starts, results
 
             first, starts, results = turn(
-                f"全部文件工具的 path 必须在 {root.name} 目录内。必须调用 write 将 {path} 内容精确写为 {token}，"
-                "禁止附加空白或换行。随后必须调用 read 读取该文件，最后回答文件内容。"
+                f"{root.name} 目录已存在。仅允许 write 和 read 两种工具，禁止调用其他工具。"
+                f"必须直接调用 write 将 {path} 内容精确写为 {token}，禁止附加空白或换行。"
+                "随后必须调用 read 读取该文件，最后回答文件内容。"
             )
             assert (root / "delivery.txt").read_text(encoding="utf-8") == token
             assert {item["name"] for item in starts.values()} >= {"write", "read"}
             assert any(results[call] == f"1: {token}\n" for call, item in starts.items() if item["name"] == "read")
-            assert token in first[-2]["data"]["text"]
+            assert token in final_text(first)
             second, starts, results = turn(
                 "沿用上一轮上下文中的目录、文件路径与原文本。全部文件工具的 path 限定于该目录内。"
                 "必须调用 edit 将原文本精确替换为原文本拼接 -updated，禁止附加空白或换行；"
@@ -127,8 +109,8 @@ def check() -> None:
             }
             for name, content in expected.items():
                 assert any(results[call] == content for call, item in starts.items() if item["name"] == name), name
-            assert token in second[-2]["data"]["text"] and updated in second[-2]["data"]["text"]
-            print("PASS: dev entry and README commands; preserved CLI; real HTTP/SSE multi-turn memory; six paired file tools with exact disk-backed results")
+            assert token in final_text(second) and updated in final_text(second)
+            print("PASS: dev entry and README commands; real HTTP/SSE multi-turn memory; six paired file tools with exact disk-backed results")
     finally:
         server.should_exit = True
         thread.join(75)

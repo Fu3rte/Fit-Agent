@@ -3,12 +3,37 @@ export interface ReActRunBody {
   request: string;
 }
 
-export type ReActEvent =
+export type ReActStopReason = "stop" | "toolUse" | "length" | "error" | "aborted";
+
+export type ReActContent = { content_index: number } & (
+  | { type: "text"; text: string }
+  | { type: "thinking"; thinking: string }
+  | { type: "tool_call"; tool_call_id: string; name: string; arguments: Record<string, unknown> }
+);
+
+export type ReActUpdateType =
+  | "text_start" | "text_delta" | "text_end"
+  | "thinking_start" | "thinking_delta" | "thinking_end"
+  | "toolcall_start" | "toolcall_delta" | "toolcall_end";
+
+export type SteeringStatus =
+  | { status: "consumed" }
+  | { status: "discarded"; reason: "completed" | "run_failed" | "cancelled" };
+
+export interface SteeringBody { session_id: string; message: string }
+export interface SteeringAccepted { run_id: string; steering_id: string; status: "accepted" }
+
+type ReActMessageData = { message_id: string; content: ReActContent[] };
+export type ReActEvent = { data: { run_id: string } } & (
+  | { event: "message_start"; data: ReActMessageData }
+  | { event: "message_update"; data: ReActMessageData & { content_index: number; update_type: ReActUpdateType } }
+  | { event: "message_end"; data: ReActMessageData & { stop_reason: ReActStopReason } }
   | { event: "tool_start"; data: { tool_call_id: string; name: string; arguments: Record<string, unknown> } }
-  | { event: "tool_result"; data: { tool_call_id: string; content: string } }
-  | { event: "message"; data: { text: string } }
-  | { event: "done"; data: { status: "completed" } }
-  | { event: "error"; data: { message: string; tool_call_id: string | null } };
+  | { event: "tool_result"; data: { tool_call_id: string; content: string; is_error: boolean } }
+  | { event: "steering_status"; data: { steering_id: string } & SteeringStatus }
+  | { event: "done"; data: { status: "completed"; stop_reason: "stop" | "length" } }
+  | { event: "error"; data: { status: "failed" | "cancelled"; code: "execution_failed" | "cancelled"; message: string; tool_call_id: string | null } }
+);
 
 /** 请求或输入不合法 */
 export type ErrorCode = "invalid_request";

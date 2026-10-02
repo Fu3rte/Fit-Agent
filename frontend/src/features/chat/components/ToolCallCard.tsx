@@ -12,7 +12,7 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 export type ToolCallCardProps = {
   name: string;
   arguments: Record<string, unknown>;
-  status: "running" | "completed" | "failed";
+  status: "running" | "completed" | "failed" | "cancelled";
   content?: string;
   error?: string;
 };
@@ -21,6 +21,7 @@ const statuses = {
   running: { label: "执行中", icon: Loader2, className: "animate-spin" },
   completed: { label: "已完成", icon: CheckCircle2, className: "text-primary" },
   failed: { label: "失败", icon: XCircle, className: "text-destructive" },
+  cancelled: { label: "已中断", icon: XCircle, className: "text-muted-foreground" },
 };
 
 export default function ToolCallCard({

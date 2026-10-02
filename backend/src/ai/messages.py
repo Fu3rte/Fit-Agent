@@ -1,5 +1,5 @@
 import json
-from typing import Annotated, Literal, Never, TypeAlias
+from typing import Annotated, Literal, Self, TypeAlias
 
 from pydantic import (
     BaseModel,
@@ -7,7 +7,7 @@ from pydantic import (
     ConfigDict,
     Field,
     JsonValue,
-    TypeAdapter,
+    model_validator,
 )
 
 
@@ -21,26 +21,26 @@ JsonObject: TypeAlias = dict[str, JsonValue]
 ThinkingLevel: TypeAlias = Literal["minimal", "low", "medium", "high", "xhigh", "max"]
 ModelThinkingLevel: TypeAlias = Literal["off"] | ThinkingLevel
 StopReason: TypeAlias = Literal[
-    "pending", "stop", "length", "toolUse", "error", "aborted", "deferred"
+    "pending", "stop", "length", "toolUse", "error", "aborted"
 ]
 
 
 class TextContent(Model):
     type: Literal["text"]
     text: str
-    textSignature: str = None
+    text_signature: str = None
 
 
 class ImageContent(Model):
     type: Literal["image"]
     data: str
-    mimeType: str
+    mime_type: str
 
 
 class ThinkingContent(Model):
     type: Literal["thinking"]
     thinking: str
-    thinkingSignature: str = None
+    thinking_signature: str = None
     redacted: bool = None
 
 
@@ -49,7 +49,7 @@ class ToolCall(Model):
     id: str
     name: str
     arguments: JsonObject
-    thoughtSignature: str = None
+    thought_signature: str = None
     namespace: str = None
 
 
@@ -67,29 +67,29 @@ ToolResultContent: TypeAlias = UserContent
 class UsageCost(Model):
     input: int | float
     output: int | float
-    cacheRead: int | float
-    cacheWrite: int | float
+    cache_read: int | float
+    cache_write: int | float
     total: int | float
 
 
 class Usage(Model):
     input: int | float
     output: int | float
-    cacheRead: int | float
-    cacheWrite: int | float
-    cacheWrite1h: int | float = None
+    cache_read: int | float
+    cache_write: int | float
+    cache_write_1h: int | float = None
     reasoning: int | float = None
-    totalTokens: int | float
+    total_tokens: int | float
     cost: UsageCost = None
 
 
 class DeferredHandle(Model):
     provider: str
-    modelId: str
+    model_id: str
     api: str
     id: str
-    expiresAt: int | float = None
-    pollAfterMs: int | float = None
+    expires_at: int | float = None
+    poll_after_ms: int | float = None
     data: JsonValue = None
 
 
@@ -111,9 +111,9 @@ class NestedToolCallRecord(Model):
     id: str
     name: str
     arguments: JsonObject = None
-    argumentsBytes: int | float = None
+    arguments_bytes: int | float = None
     status: Literal["ok", "error", "unfinished"]
-    durationMs: int | float = None
+    duration_ms: int | float = None
     error: str = None
 
 
@@ -152,7 +152,7 @@ ConstrainedSamplingConfig: TypeAlias = Annotated[
 
 def _validate_false(value: object) -> Literal[False]:
     if value is not False:
-        raise ValueError("constrainedSampling 必须为 false 或受限采样配置")
+        raise ValueError("constrained_sampling 必须为 false 或受限采样配置")
     return value
 
 
@@ -160,7 +160,7 @@ class Tool(Model):
     name: str
     description: str
     parameters: JsonObject
-    constrainedSampling: (
+    constrained_sampling: (
         Annotated[Literal[False], BeforeValidator(_validate_false)]
         | ConstrainedSamplingConfig
     ) = None
@@ -170,8 +170,8 @@ class SystemMessage(Model):
     role: Literal["system"]
     content: str | list[TextContent]
     sections: dict[str, str | None] = None
-    toolsAdded: list[Tool] = None
-    toolsRemoved: list[ToolReference] = None
+    tools_added: list[Tool] = None
+    tools_removed: list[ToolReference] = None
     timestamp: int | float
 
 
@@ -187,47 +187,47 @@ class AssistantMessage(Model):
     api: Api
     provider: ProviderId
     model: str
-    responseModel: str = None
-    responseId: str = None
-    providerThinkingLevel: str = None
-    thinkingLevel: ModelThinkingLevel = None
+    response_model: str = None
+    response_id: str = None
+    provider_thinking_level: str = None
+    thinking_level: ModelThinkingLevel = None
     diagnostics: list[AssistantMessageDiagnostic] = None
-    usage: Usage
-    stopReason: StopReason
+    usage: Usage | None
+    stop_reason: StopReason
     deferred: DeferredHandle = None
-    errorMessage: str = None
-    rawStopReason: str = None
-    endTurn: bool = None
+    error_message: str = None
+    raw_stop_reason: str = None
+    end_turn: bool = None
     timestamp: int | float
+
+    @model_validator(mode="after")
+    def validate_usage(self) -> Self:
+        if self.usage is None and self.stop_reason not in {"pending", "aborted"}:
+            raise ValueError("完整助手消息必须包含真实 usage")
+        if self.stop_reason == "error" and not self.error_message:
+            raise ValueError("协议 error 必须包含 error_message")
+        return self
 
 
 class ToolResultMessage(Model):
     role: Literal["toolResult"]
-    toolCallId: str
-    toolName: str
+    tool_call_id: str
+    tool_name: str
     content: list[ToolResultContent]
-    isError: bool
+    is_error: bool
     timestamp: int | float
     details: JsonValue = None
     usage: Usage = None
-    nestedCalls: NestedToolCalls = None
+    nested_calls: NestedToolCalls = None
 
 
 Message: TypeAlias = Annotated[
     SystemMessage | UserMessage | AssistantMessage | ToolResultMessage,
     Field(discriminator="role"),
 ]
-CustomMessage: TypeAlias = Never
-AgentMessage: TypeAlias = Message
-
-_agent_message_adapter = TypeAdapter(AgentMessage)
 
 
-def parse_agent_message(value: str | bytes) -> AgentMessage:
-    return _agent_message_adapter.validate_python(json.loads(value))
-
-
-def serialize_message(message: AgentMessage) -> str:
+def serialize_message(message: Message) -> str:
     return json.dumps(
         message.model_dump(exclude_unset=True), ensure_ascii=False, allow_nan=False
     )

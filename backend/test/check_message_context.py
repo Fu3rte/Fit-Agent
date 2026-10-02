@@ -6,22 +6,23 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from threading import Event
 
-from pydantic import ValidationError
+from pydantic import TypeAdapter, ValidationError
 
-from src.agent.message_context import (
-    convert_to_llm,
+from src.agent.message_context import convert_to_llm, prepare_message_context
+from src.agent.tools.files import WORKSPACE, create_file_tools
+from src.ai.context import (
     get_current_system_message,
     get_current_system_prompt,
     get_current_tools,
     normalize_context,
-    prepare_message_context,
     validate_tool_pairs,
 )
-from src.agent.messages import AgentMessage, parse_agent_message, serialize_message
-from src.agent.tools.files import WORKSPACE, create_file_tools
+from src.ai.messages import Message, serialize_message
+
+_adapter = TypeAdapter(Message)
 
 
-def snapshot(messages: list[AgentMessage]) -> list[str]:
+def snapshot(messages: list[Message]) -> list[str]:
     return [serialize_message(message) for message in messages]
 
 
@@ -33,7 +34,7 @@ def assert_rejected(source: list[dict], error: str) -> None:
     assert failure is not None and error in f"{type(failure).__name__}: {failure}"
 
 
-async def check_projection(messages: list[AgentMessage]) -> None:
+async def check_projection(messages: list[Message]) -> None:
     before = snapshot(messages)
     identities = [id(message) for message in messages]
     signal = Event()
@@ -48,7 +49,7 @@ async def check_projection(messages: list[AgentMessage]) -> None:
         order.append("transform")
         captured.append(items)
         items[0].sections["a"] = "request-only"
-        items[0].toolsAdded[0].parameters["x-request"] = {"nested": [None, True]}
+        items[0].tools_added[0].parameters["x-request"] = {"nested": [None, True]}
         items[4].details["nested"][1]["value"] = "request-only"
         items[1].content = "request-only question"
         return items
@@ -77,13 +78,13 @@ async def check_projection(messages: list[AgentMessage]) -> None:
         assert projected[index].content[0] is not messages[index].content[0]
     assert projected[2].content[2].arguments is not messages[2].content[2].arguments
     assert (
-        projected[0].toolsAdded[0].parameters
-        is not messages[0].toolsAdded[0].parameters
+        projected[0].tools_added[0].parameters
+        is not messages[0].tools_added[0].parameters
     )
     saved = snapshot(projected)
     for items in captured:
         items[4].details["nested"].clear()
-        items[0].toolsAdded.clear()
+        items[0].tools_added.clear()
     assert snapshot(projected) == saved and snapshot(messages) == before
     projected[0].sections.clear()
     projected[2].usage.cost.input = 999
@@ -107,7 +108,7 @@ async def check_projection(messages: list[AgentMessage]) -> None:
     for source in sources:
         if "usage" in source:
             del source["usage"]["cost"]
-    no_cost = [parse_agent_message(json.dumps(source)) for source in sources]
+    no_cost = [_adapter.validate_python(source) for source in sources]
     assert snapshot(await prepare_message_context(no_cost)) == snapshot(no_cost)
     assert snapshot(messages) == before
 
@@ -122,7 +123,7 @@ async def check_projection(messages: list[AgentMessage]) -> None:
     assert snapshot(messages) == before
 
 
-def check_failures(messages: list[AgentMessage]) -> None:
+def check_failures(messages: list[Message]) -> None:
     before = snapshot(messages)
     entered = []
     signal = Event()
@@ -192,7 +193,7 @@ def check_failures(messages: list[AgentMessage]) -> None:
         assert isinstance(failure, ValidationError)
 
         def unpaired_convert(items):
-            items[4].toolName = "write"
+            items[4].tool_name = "write"
             return convert_to_llm(items)
 
         failure = executor.submit(
@@ -224,16 +225,16 @@ def check() -> None:
     usage = {
         "input": 2,
         "output": 3,
-        "cacheRead": 4,
-        "cacheWrite": 5,
-        "cacheWrite1h": 1,
+        "cache_read": 4,
+        "cache_write": 5,
+        "cache_write_1h": 1,
         "reasoning": 2,
-        "totalTokens": 14,
+        "total_tokens": 14,
         "cost": {
             "input": 0.1,
             "output": 0.2,
-            "cacheRead": 0.3,
-            "cacheWrite": 0.4,
+            "cache_read": 0.3,
+            "cache_write": 0.4,
             "total": 1,
         },
     }
@@ -248,7 +249,7 @@ def check() -> None:
                 "role": "system",
                 "content": "base",
                 "sections": {"a": "A", "gone": "G", "empty": ""},
-                "toolsAdded": [declarations["read"], declarations["write"]],
+                "tools_added": [declarations["read"], declarations["write"]],
                 "timestamp": 0,
             },
             {"role": "user", "content": "question", "timestamp": 1},
@@ -258,12 +259,12 @@ def check() -> None:
                     {
                         "type": "text",
                         "text": "reading",
-                        "textSignature": "text-signature",
+                        "text_signature": "text-signature",
                     },
                     {
                         "type": "thinking",
                         "thinking": "",
-                        "thinkingSignature": "encrypted",
+                        "thinking_signature": "encrypted",
                         "redacted": True,
                     },
                     {
@@ -271,21 +272,21 @@ def check() -> None:
                         "id": "call-1",
                         "name": "read",
                         "arguments": arguments,
-                        "thoughtSignature": "thought-signature",
+                        "thought_signature": "thought-signature",
                     },
                 ],
                 "api": "openai-completions",
                 "provider": "custom-provider",
                 "model": "model",
                 "usage": usage,
-                "stopReason": "toolUse",
-                "responseId": "response-id",
+                "stop_reason": "toolUse",
+                "response_id": "response-id",
                 "diagnostics": [
                     {"type": "safe", "timestamp": 2, "details": {"a": [None]}}
                 ],
                 "deferred": {
                     "provider": "custom-provider",
-                    "modelId": "model",
+                    "model_id": "model",
                     "api": "custom-api",
                     "id": "task-id",
                     "data": None,
@@ -298,17 +299,17 @@ def check() -> None:
                     {
                         "type": "text",
                         "text": "later-1",
-                        "textSignature": "system-signature",
+                        "text_signature": "system-signature",
                     },
                     {"type": "text", "text": "later-2"},
                 ],
                 "sections": {"a": "updated-A", "gone": None, "b": "B"},
-                "toolsRemoved": [
+                "tools_removed": [
                     {"name": "write"},
                     {"name": "read"},
                     {"name": "absent"},
                 ],
-                "toolsAdded": [
+                "tools_added": [
                     {
                         **declarations["read"],
                         "description": "updated read",
@@ -323,12 +324,12 @@ def check() -> None:
             },
             {
                 "role": "toolResult",
-                "toolCallId": "call-1",
-                "toolName": "read",
+                "tool_call_id": "call-1",
+                "tool_name": "read",
                 "content": [{"type": "text", "text": result.content}],
                 "details": {"nested": [None, {"value": "original"}]},
                 "usage": usage,
-                "isError": False,
+                "is_error": False,
                 "timestamp": 4,
             },
             {
@@ -337,47 +338,47 @@ def check() -> None:
                     {
                         "type": "text",
                         "text": "done",
-                        "textSignature": '{"v":1,"id":"response","phase":"final_answer"}',
+                        "text_signature": '{"v":1,"id":"response","phase":"final_answer"}',
                     }
                 ],
                 "api": "openai-completions",
                 "provider": "custom-provider",
                 "model": "model",
                 "usage": usage,
-                "stopReason": "stop",
+                "stop_reason": "stop",
                 "timestamp": 5,
             },
             {
                 "role": "system",
                 "content": [],
                 "sections": {"empty": None},
-                "toolsRemoved": [{"name": "ls"}],
-                "toolsAdded": [declarations["write"]],
+                "tools_removed": [{"name": "ls"}],
+                "tools_added": [declarations["write"]],
                 "timestamp": 6,
             },
         ]
-        messages = [parse_agent_message(json.dumps(source)) for source in sources]
+        messages = [_adapter.validate_python(source) for source in sources]
         before = snapshot(messages)
         asyncio.run(check_projection(messages))
         check_failures(messages)
         state = get_current_system_message(messages)
         assert state.timestamp == 0 and state.content == "base\n\nlater-1\nlater-2"
         assert state.sections == {"a": "updated-A", "b": "B"}
-        assert [tool.name for tool in state.toolsAdded] == ["read", "write"]
-        assert state.toolsAdded[0].description == "updated read"
-        assert state.toolsAdded[0].parameters["x-provider"] == {"nested": [None, True]}
+        assert [tool.name for tool in state.tools_added] == ["read", "write"]
+        assert state.tools_added[0].description == "updated read"
+        assert state.tools_added[0].parameters["x-provider"] == {"nested": [None, True]}
         assert (
             get_current_system_prompt(messages)
             == "base\n\nlater-1\nlater-2\n\nupdated-A\n\nB"
         )
-        assert get_current_tools(messages) == state.toolsAdded
-        state.toolsAdded[0].parameters.clear()
+        assert get_current_tools(messages) == state.tools_added
+        state.tools_added[0].parameters.clear()
         state.sections.clear()
         assert snapshot(messages) == before
         assert get_current_system_message([]) is None
         assert get_current_system_prompt([messages[1]]) == ""
         assert get_current_tools([messages[1]]) == []
-        empty = parse_agent_message('{"role":"system","content":"","timestamp":7}')
+        empty = _adapter.validate_json('{"role":"system","content":"","timestamp":7}')
         assert get_current_system_message([empty]) == empty
         validate_tool_pairs(messages)
 
@@ -387,8 +388,8 @@ def check() -> None:
             ([sources[2]], "缺少结果"),
             ([sources[2], sources[4], sources[4]], "缺少待配对调用"),
             ([sources[2], sources[4], sources[2], sources[4]], "重复工具调用 ID"),
-            ([sources[2], {**sources[4], "toolName": "write"}], "名称不匹配"),
-            ([sources[2], {**sources[4], "toolCallId": "unknown"}], "缺少待配对调用"),
+            ([sources[2], {**sources[4], "tool_name": "write"}], "名称不匹配"),
+            ([sources[2], {**sources[4], "tool_call_id": "unknown"}], "缺少待配对调用"),
             ([sources[2], sources[1], sources[4]], "未完整配对"),
             ([sources[2], sources[5], sources[4]], "未完整配对"),
             ([{**sources[1], "role": "custom"}], "ValidationError"),
@@ -402,11 +403,11 @@ def check() -> None:
         parallel["content"].append({**parallel["content"][2], "id": "call-2"})
         parallel_sources = [
             parallel,
-            {**sources[4], "toolCallId": "call-2"},
+            {**sources[4], "tool_call_id": "call-2"},
             sources[4],
         ]
         parallel_messages = [
-            parse_agent_message(json.dumps(source)) for source in parallel_sources
+            _adapter.validate_python(source) for source in parallel_sources
         ]
         projected = asyncio.run(prepare_message_context(parallel_messages))
         assert snapshot(projected) == snapshot(parallel_messages)

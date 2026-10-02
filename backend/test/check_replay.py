@@ -2,30 +2,42 @@ import json
 from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 
-from src.agent.messages import (
+from pydantic import TypeAdapter
+
+from src.ai.api.openai_completions import REASONING_FIELDS, to_openai_request
+from src.ai.messages import (
     AssistantMessage,
+    Message,
     TextContent,
     ThinkingContent,
     ToolCall,
     ToolResultMessage,
     Usage,
-    parse_agent_message,
     serialize_message,
 )
-from src.agent.providers.openai import REASONING_FIELDS, to_openai_request
+from src.ai.types import ModelSpec, StreamOptions
 from src.model_config import load_model_config
+
+_adapter = TypeAdapter(Message)
 
 
 def check() -> None:
     config = load_model_config()
+    spec = ModelSpec(
+        api="openai-completions",
+        provider=config.OPENAI_PROVIDER,
+        id=config.OPENAI_MODEL,
+        base_url=config.OPENAI_BASE_URL,
+    )
+    options: StreamOptions = {"api_key": "k"}
     message = AssistantMessage(
         role="assistant",
-        content=[TextContent(type="text", text="answer", textSignature="原始文本签名")],
+        content=[TextContent(type="text", text="answer", text_signature="原始文本签名")],
         api="openai-completions",
         provider=config.OPENAI_PROVIDER,
         model=config.OPENAI_MODEL,
-        usage=Usage(input=0, output=0, cacheRead=0, cacheWrite=0, totalTokens=0),
-        stopReason="stop",
+        usage=Usage(input=0, output=0, cache_read=0, cache_write=0, total_tokens=0),
+        stop_reason="stop",
         timestamp=0,
     )
     details = [
@@ -45,27 +57,27 @@ def check() -> None:
                 ThinkingContent(
                     type="thinking",
                     thinking="思考文本" if marker in REASONING_FIELDS else "",
-                    thinkingSignature=marker,
+                    thinking_signature=marker,
                     redacted=marker == signature,
                 ),
             )
             before = serialize_message(signed)
-            assert serialize_message(parse_agent_message(before)) == before
-            request = to_openai_request([signed], config)
+            assert serialize_message(_adapter.validate_json(before)) == before
+            request = to_openai_request([signed], spec, options)
             projected = request["messages"][0]
             assert projected["content"] == "answer"
             if marker in REASONING_FIELDS:
                 assert projected[marker] == "思考文本"
             else:
                 assert projected["reasoning_details"] == details
-                assert signed.content[0].thinkingSignature == signature
+                assert signed.content[0].thinking_signature == signature
             assert serialize_message(signed) == before
             for field in ("api", "provider", "model"):
                 other = deepcopy(signed)
                 setattr(other, field, "different-source")
                 snapshot = serialize_message(other)
                 failure = executor.submit(
-                    to_openai_request, [other], config
+                    to_openai_request, [other], spec, options
                 ).exception()
                 assert isinstance(failure, ValueError) and "api/provider/model" in str(
                     failure
@@ -75,7 +87,9 @@ def check() -> None:
         unsigned.content.insert(
             0, ThinkingContent(type="thinking", thinking="思考文本")
         )
-        failure = executor.submit(to_openai_request, [unsigned], config).exception()
+        failure = executor.submit(
+            to_openai_request, [unsigned], spec, options
+        ).exception()
         assert isinstance(failure, ValueError) and "缺少" in str(failure)
         invalid = deepcopy(message)
         invalid.content.insert(
@@ -83,40 +97,42 @@ def check() -> None:
             ThinkingContent(
                 type="thinking",
                 thinking="",
-                thinkingSignature='{"opaque":true}',
+                thinking_signature='{"opaque":true}',
                 redacted=True,
             ),
         )
-        failure = executor.submit(to_openai_request, [invalid], config).exception()
+        failure = executor.submit(
+            to_openai_request, [invalid], spec, options
+        ).exception()
         assert isinstance(failure, ValueError) and "无法回放" in str(failure)
         called = deepcopy(message)
-        called.stopReason = "toolUse"
+        called.stop_reason = "toolUse"
         called.content = [
             ToolCall(
                 type="toolCall",
                 id="call-1",
                 name="read",
                 arguments={},
-                thoughtSignature="原始工具签名",
+                thought_signature="原始工具签名",
             )
         ]
         result = ToolResultMessage(
             role="toolResult",
-            toolCallId="call-1",
-            toolName="read",
+            tool_call_id="call-1",
+            tool_name="read",
             content=[],
-            isError=False,
+            is_error=False,
             timestamp=1,
         )
         snapshot = serialize_message(called)
         failure = executor.submit(
-            to_openai_request, [called, result], config
+            to_openai_request, [called, result], spec, options
         ).exception()
         assert isinstance(failure, ValueError) and "工具签名" in str(failure)
         assert serialize_message(called) == snapshot
-    request = to_openai_request([message], config)
+    request = to_openai_request([message], spec, options)
     assert request["messages"] == [{"role": "assistant", "content": "answer"}]
-    assert message.content[0].textSignature == "原始文本签名"
+    assert message.content[0].text_signature == "原始文本签名"
     print(
         "请求转换字段检查：回放标记、JSON 数据、来源兼容、签名原值保护与协议拒绝检查通过"
     )

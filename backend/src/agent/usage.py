@@ -1,26 +1,26 @@
 from src.agent.message_context import convert_to_llm
-from src.agent.messages import AgentMessage, AssistantMessage, ToolResultMessage, Usage
+from src.ai.messages import AssistantMessage, Message, ToolResultMessage, Usage
 
 
-def summarize_usage(messages: list[AgentMessage]) -> Usage:
+def summarize_usage(messages: list[Message]) -> Usage:
     records: list[Usage] = []
     tool_ids: set[str] = set()
     for message in convert_to_llm(messages):
         if isinstance(message, AssistantMessage):
-            if message.stopReason == "pending":
+            if message.stop_reason == "pending" or message.usage is None:
                 raise ValueError("用量汇总仅接受完整助手消息")
             records.append(message.usage)
         elif isinstance(message, ToolResultMessage):
-            if message.toolCallId in tool_ids:
-                raise ValueError(f"重复工具结果: {message.toolCallId}")
-            tool_ids.add(message.toolCallId)
+            if message.tool_call_id in tool_ids:
+                raise ValueError(f"重复工具结果: {message.tool_call_id}")
+            tool_ids.add(message.tool_call_id)
             if message.usage is not None:
                 records.append(message.usage)
     totals = {
         field: sum(getattr(usage, field) for usage in records)
-        for field in ("input", "output", "cacheRead", "cacheWrite", "totalTokens")
+        for field in ("input", "output", "cache_read", "cache_write", "total_tokens")
     }
-    for field in ("reasoning", "cacheWrite1h"):
+    for field in ("reasoning", "cache_write_1h"):
         reported = [
             getattr(usage, field)
             for usage in records
@@ -31,6 +31,6 @@ def summarize_usage(messages: list[AgentMessage]) -> Usage:
     if records and all(usage.cost is not None for usage in records):
         totals["cost"] = {
             field: sum(getattr(usage.cost, field) for usage in records)
-            for field in ("input", "output", "cacheRead", "cacheWrite", "total")
+            for field in ("input", "output", "cache_read", "cache_write", "total")
         }
     return Usage.model_validate(totals)

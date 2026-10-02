@@ -3,7 +3,7 @@ from dataclasses import dataclass
 
 from pydantic import BaseModel
 
-from src.agent.messages import Tool as ToolDeclaration
+from src.ai.messages import Tool as ToolDeclaration
 
 
 @dataclass(frozen=True)

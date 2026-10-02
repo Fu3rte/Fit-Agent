@@ -13,16 +13,16 @@ import uvicorn
 from openai._streaming import SSEDecoder
 from pydantic import TypeAdapter
 
-from src.agent.messages import (
+from src.agent.prompts import SYSTEM_PROMPT
+from src.agent.tools.files import WORKSPACE
+from src.agent.usage import summarize_usage
+from src.ai.messages import (
     AssistantMessage,
     SystemMessage,
     ToolResultMessage,
     UserMessage,
     serialize_message,
 )
-from src.agent.prompts import SYSTEM_PROMPT
-from src.agent.tools.files import WORKSPACE
-from src.agent.usage import summarize_usage
 from src.interfaces.http import ALLOWED_HOSTS, RunRequest, active, app, sessions
 from src.model_config import load_model_config
 
@@ -44,6 +44,68 @@ def events(response):
             "event": event.event,
             "data": TypeAdapter(dict).validate_json(event.data),
         }
+
+
+def final_text(result) -> str:
+    final = next(event for event in reversed(result) if event["event"] == "message_end")
+    return "".join(block["text"] for block in final["data"]["content"] if block["type"] == "text")
+
+
+def validate_events(result):
+    assert result and result[-1]["event"] in {"done", "error"}
+    run_id = result[0]["data"]["run_id"]
+    UUID(run_id)
+    messages = {}
+    starts = {}
+    results = {}
+    for position, event in enumerate(result):
+        kind, data = event["event"], event["data"]
+        assert data["run_id"] == run_id
+        if kind in {"done", "error"}:
+            assert position == len(result) - 1
+            continue
+        if kind == "steering_status":
+            assert data["status"] in {"consumed", "discarded"}
+            continue
+        if kind.startswith("message_"):
+            identifier = data["message_id"]
+            UUID(identifier)
+            if kind == "message_start":
+                assert identifier not in messages
+                messages[identifier] = False
+            else:
+                assert identifier in messages and not messages[identifier]
+            indices = [block["content_index"] for block in data["content"]]
+            assert indices == sorted(set(indices))
+            assert all(set(block) <= {
+                "content_index", "type", "text", "thinking", "tool_call_id", "name", "arguments",
+            } for block in data["content"])
+            if kind == "message_update":
+                assert data["update_type"] in {
+                    "text_start", "text_delta", "text_end", "thinking_start", "thinking_delta",
+                    "thinking_end", "toolcall_start", "toolcall_delta", "toolcall_end",
+                }
+                assert data["content_index"] in indices
+            elif kind == "message_end":
+                assert data["stop_reason"] in {"stop", "length", "toolUse", "error", "aborted"}
+                messages[identifier] = True
+            continue
+        call = data["tool_call_id"]
+        if kind == "tool_start":
+            assert call not in starts and isinstance(data["arguments"], dict)
+            assert any(item["event"] == "message_end" and item["data"]["stop_reason"] == "toolUse" for item in result[:position])
+            starts[call] = data
+        else:
+            assert kind == "tool_result" and call in starts and call not in results
+            assert type(data["is_error"]) is bool
+            results[call] = data["content"]
+    if result[-1]["event"] == "done":
+        assert result[-1]["data"]["status"] == "completed"
+        assert all(messages.values())
+        assert starts.keys() == results.keys()
+        last = next(item for item in reversed(result) if item["event"] == "message_end")
+        assert result[-1]["data"]["stop_reason"] == last["data"]["stop_reason"] in {"stop", "length"}
+    return starts, results
 
 
 async def check_duplicate_host() -> None:
@@ -157,26 +219,8 @@ def check() -> None:
                     json={"session_id": identifier, "request": prompt},
                 ) as response:
                     result = list(events(response))
-                assert result[-1] == {"event": "done", "data": {"status": "completed"}}
-                assert result[-2]["event"] == "message" and result[-2]["data"]["text"]
-                starts = {}
-                results = {}
-                for event in result[:-2]:
-                    data = event["data"]
-                    call = data["tool_call_id"]
-                    if event["event"] == "tool_start":
-                        assert call not in starts and isinstance(
-                            data["arguments"], dict
-                        )
-                        starts[call] = data
-                    else:
-                        assert (
-                            event["event"] == "tool_result"
-                            and call in starts
-                            and call not in results
-                        )
-                        results[call] = data["content"]
-                assert starts.keys() == results.keys()
+                assert result[-1]["event"] == "done" and final_text(result)
+                starts, results = validate_events(result)
                 wait_idle()
                 return result, starts, results
 
@@ -193,7 +237,7 @@ def check() -> None:
                 history[1], UserMessage
             )
             assert history[0].content == SYSTEM_PROMPT
-            assert {tool.name for tool in history[0].toolsAdded} == {
+            assert {tool.name for tool in history[0].tools_added} == {
                 "read",
                 "write",
                 "edit",
@@ -207,9 +251,9 @@ def check() -> None:
             for call, content in results.items():
                 assert any(
                     isinstance(message, ToolResultMessage)
-                    and message.toolCallId == call
+                    and message.tool_call_id == call
                     and message.content[0].text == content
-                    and message.isError is False
+                    and message.is_error is False
                     for message in history
                 )
             count = len(history)
@@ -217,13 +261,13 @@ def check() -> None:
                 "使用 read 读取上一轮上下文中的同一文件。回答上一轮原文本与本次真实读取的文本。"
             )
             assert "read" in {data["name"] for data in starts.values()}
-            assert token in second[-2]["data"]["text"]
+            assert token in final_text(second)
             assert len(sessions[UUID(session)]) > count
             committed = sessions[UUID(session)]
             snapshot = [serialize_message(message) for message in committed]
             totals = summarize_usage(committed)
-            assert totals.totalTokens == sum(
-                message.usage.totalTokens
+            assert totals.total_tokens == sum(
+                message.usage.total_tokens
                 for message in committed
                 if isinstance(message, AssistantMessage)
             )

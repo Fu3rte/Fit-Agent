@@ -2,7 +2,11 @@ from pathlib import Path
 
 from dotenv import dotenv_values
 from openai import OpenAI
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+from src.ai.stream import ADAPTERS
+
+DEFAULT_MODEL_API = "openai-completions"
 
 
 class ModelConfig(BaseModel):
@@ -12,6 +16,14 @@ class ModelConfig(BaseModel):
     OPENAI_BASE_URL: str = Field(min_length=1)
     OPENAI_MODEL: str = Field(min_length=1)
     OPENAI_PROVIDER: str = Field(min_length=1)
+    MODEL_API: str = DEFAULT_MODEL_API
+
+    @field_validator("MODEL_API")
+    @classmethod
+    def registered(cls, value: str) -> str:
+        if value not in ADAPTERS:
+            raise ValueError(f"未注册的协议: {value}")
+        return value
 
     def create_client(self) -> OpenAI:
         return OpenAI(
