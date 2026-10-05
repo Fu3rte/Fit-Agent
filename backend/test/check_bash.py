@@ -6,8 +6,8 @@ from dataclasses import replace
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from src.agent.tools.bash import MAX_BYTES, MAX_LINES, create_bash_tool
-from src.agent.tools.files import WORKSPACE, create_file_tools
+from app.agent.tools.bash import MAX_BYTES, MAX_LINES, create_bash_tool
+from app.agent.tools.files import WORKSPACE, create_file_tools
 
 
 def check() -> None:
@@ -77,7 +77,7 @@ def check() -> None:
         output = text.split("\n\n", 1)[0]
         assert len(output.encode("utf-8")) <= MAX_BYTES and set(output) == {"中"}
 
-        invocation = "from src.agent.tools.bash import create_bash_tool; import sys; print(create_bash_tool().invoke(sys.argv[1]).content)"
+        invocation = "from app.agent.tools.bash import create_bash_tool; import sys; print(create_bash_tool().invoke(sys.argv[1]).content)"
         for arguments in (
             {"command": "true", "timeout": 0},
             {"command": "true", "timeout": -1},

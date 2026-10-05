@@ -4,7 +4,7 @@ import sys
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from src.agent.tools.files import WORKSPACE, create_file_tools
+from app.agent.tools.files import WORKSPACE, create_file_tools
 
 
 def check() -> None:
@@ -48,7 +48,7 @@ def check() -> None:
         invocation = (
             "import sys; "
             f"sys.path.insert(0, {str(backend)!r}); "
-            "from src.agent.tools.files import create_file_tools; "
+            "from app.agent.tools.files import create_file_tools; "
             "print(create_file_tools()[sys.argv[1]].invoke(sys.argv[2]).content)"
         )
         result = subprocess.run(

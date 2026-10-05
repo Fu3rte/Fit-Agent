@@ -2,7 +2,6 @@ import asyncio
 import json
 import socket
 import time
-from copy import deepcopy
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from threading import Thread
@@ -13,20 +12,54 @@ import uvicorn
 from openai._streaming import SSEDecoder
 from pydantic import TypeAdapter
 
-from src.agent.prompts import SYSTEM_PROMPT
-from src.agent.tools.files import WORKSPACE
-from src.agent.usage import summarize_usage
-from src.ai.messages import (
+from app.agent.prompts import SYSTEM_PROMPT
+from app.agent.tools.files import WORKSPACE
+from app.agent.usage import summarize_usage
+from app.ai.messages import (
     AssistantMessage,
     SystemMessage,
     ToolResultMessage,
     UserMessage,
     serialize_message,
 )
-from src.interfaces.http import ALLOWED_HOSTS, RunRequest, active, app, sessions
-from src.model_config import load_model_config
+from app.domain.session.errors import SessionNotFound
+from app.interfaces.http import ALLOWED_HOSTS, RunRequest, active, app, runs
+from app.model_config import load_model_config
+from test.regression_support import patch_default_database
 
-EVIDENCE = Path(__file__).resolve().parents[2] / ".pi/delivery/react-chat/t2"
+EVIDENCE = Path(__file__).resolve().parents[1] / "temp" / "http"
+
+
+def stored_messages(session_id: str) -> list:
+    service = app.state.session_service
+    try:
+        session = asyncio.run_coroutine_threadsafe(
+            service.get_session(session_id), app.state.loop
+        ).result()
+    except SessionNotFound:
+        return []
+    if session is None:
+        return []
+    entries = asyncio.run_coroutine_threadsafe(
+        service.get_current_branch(session_id), app.state.loop
+    ).result()
+    return [entry.messages[0] for entry in entries]
+
+
+def create_session(client, session_id: str, title: str = "只回答完成") -> None:
+    response = client.post(
+        "/api/sessions", json={"session_id": session_id, "title": title}
+    )
+    assert response.status_code in {200, 201}, response.text
+    UUID(response.json()["session_id"])
+
+
+def last_run(session_id: str):
+    service = app.state.session_service
+    runs_list = asyncio.run_coroutine_threadsafe(
+        service.list_runs(session_id), app.state.loop
+    ).result()
+    return runs_list[-1] if runs_list else None
 
 
 def wait_idle() -> None:
@@ -88,6 +121,8 @@ def validate_events(result):
                 assert data["content_index"] in indices
             elif kind == "message_end":
                 assert data["stop_reason"] in {"stop", "length", "toolUse", "error", "aborted"}
+                assert data["entry_id"] == identifier
+                UUID(data["parent_id"])
                 messages[identifier] = True
             continue
         call = data["tool_call_id"]
@@ -98,6 +133,8 @@ def validate_events(result):
         else:
             assert kind == "tool_result" and call in starts and call not in results
             assert type(data["is_error"]) is bool
+            UUID(data["entry_id"])
+            UUID(data["parent_id"])
             results[call] = data["content"]
     if result[-1]["event"] == "done":
         assert result[-1]["data"]["status"] == "completed"
@@ -114,14 +151,37 @@ async def check_duplicate_host() -> None:
     ) as client:
         response = await client.post(
             "/api/agent/run",
-            json={"session_id": str(uuid4()), "request": "请回答完成"},
+            json={
+                "session_id": str(uuid4()),
+                "operation_id": str(uuid4()),
+                "request": "请回答完成",
+            },
             headers=[("Host", "localhost:8000"), ("Host", "evil.example")],
         )
         assert response.status_code == 403
 
 
+def check_credential_filter() -> None:
+    from app.interfaces.http import CredentialFilter
+
+    secret = "sk-" + "a" * 61
+    guard = CredentialFilter((secret,))
+    assert guard.contains(secret)
+    assert guard.contains({"nested": [{"value": secret}]})
+    assert guard.contains({secret: "value"})
+    assert guard.contains(f"前缀 {secret} 后缀")
+    assert not guard.contains("普通内容")
+    assert guard.contains(secret[: len(secret) - 1]) is False
+    for index in range(len(secret) + 1):
+        prefix = secret[:index]
+        assert secret not in guard.tail_safe(prefix)
+        assert guard.contains(prefix) == (index == len(secret))
+
+
 def check() -> None:
     EVIDENCE.mkdir(parents=True, exist_ok=True)
+    patch_default_database("http")
+    check_credential_filter()
     asyncio.run(check_duplicate_host())
     listener = socket.socket()
     listener.bind(("127.0.0.1", 0))
@@ -146,10 +206,15 @@ def check() -> None:
         ):
             root = Path(directory)
             session = str(uuid4())
+            create_session(client, session, "请回答完成")
             token = uuid4().hex
             path = f"{root.name}/note.txt"
-            payload = {"session_id": session, "request": "请回答完成"}
-            before = deepcopy(sessions)
+            payload = {
+                "session_id": session,
+                "operation_id": str(uuid4()),
+                "request": "请回答完成",
+            }
+            before = stored_messages(session)
             for host in (
                 "evil.example",
                 "127.0.0.1:8000.evil.example",
@@ -202,36 +267,71 @@ def check() -> None:
                 {**payload, "extra": True},
             ):
                 assert client.post("/api/agent/run", json=invalid).status_code == 422
-            assert sessions == before and not active.locked()
+            key = load_model_config().OPENAI_API_KEY
+            blocked = client.post(
+                "/api/agent/run",
+                json={
+                    "session_id": session,
+                    "operation_id": str(uuid4()),
+                    "request": f"记住这段凭据 {key}",
+                },
+            )
+            assert blocked.status_code == 422
+            assert blocked.json() == {
+                "detail": {"code": "credential_detected", "message": "检测到受保护凭据，操作已拒绝"}
+            }
+            assert client.post(
+                "/api/sessions", json={"session_id": str(uuid4()), "title": f"标题 {key}"}
+            ).status_code == 422
+            assert stored_messages(session) == before and not active.locked()
             assert (
                 len(
                     RunRequest.model_validate(
-                        {"session_id": session, "request": "x" * 32000}
+                        {
+                            "session_id": session,
+                            "operation_id": str(uuid4()),
+                            "request": "x" * 32000,
+                        }
                     ).request
                 )
                 == 32000
             )
 
             def turn(prompt, identifier=session):
+                operation_id = str(uuid4())
                 with client.stream(
                     "POST",
                     "/api/agent/run",
-                    json={"session_id": identifier, "request": prompt},
+                    json={
+                        "session_id": identifier,
+                        "operation_id": operation_id,
+                        "request": prompt,
+                    },
                 ) as response:
+                    assert response.status_code == 200, response.text
+                    assert response.headers["content-type"].startswith(
+                        "text/event-stream"
+                    )
+                    assert response.headers["X-Session-ID"] == identifier
+                    assert response.headers["X-Operation-ID"] == operation_id
+                    run_id = response.headers["X-Run-ID"]
+                    UUID(run_id)
+                    UUID(response.headers["X-Request-Entry-ID"])
                     result = list(events(response))
                 assert result[-1]["event"] == "done" and final_text(result)
                 starts, results = validate_events(result)
                 wait_idle()
-                return result, starts, results
+                return result, starts, results, operation_id, run_id
 
             received_after = time.time_ns() // 1_000_000
-            first, starts, results = turn(
+            first_prompt = (
                 f"只操作 {root.name}/ 下文件。使用 write 在 {path} 写入精确文本 {token}，"
                 "然后使用 read 读取同一文件，最后说明内容。禁止添加空白或换行。"
             )
+            first, starts, results, first_op, first_run = turn(first_prompt)
             assert {data["name"] for data in starts.values()} >= {"write", "read"}
             assert (root / "note.txt").read_text(encoding="utf-8") == token
-            history = sessions[UUID(session)]
+            history = stored_messages(session)
             assert history[0].role == "system" and history[1].role == "user"
             assert isinstance(history[0], SystemMessage) and isinstance(
                 history[1], UserMessage
@@ -257,13 +357,59 @@ def check() -> None:
                     for message in history
                 )
             count = len(history)
-            second, starts, _ = turn(
+            second, starts, _, _, _ = turn(
                 "使用 read 读取上一轮上下文中的同一文件。回答上一轮原文本与本次真实读取的文本。"
             )
             assert "read" in {data["name"] for data in starts.values()}
             assert token in final_text(second)
-            assert len(sessions[UUID(session)]) > count
-            committed = sessions[UUID(session)]
+            assert len(stored_messages(session)) > count
+
+            repeated = client.post(
+                "/api/agent/run",
+                json={"session_id": session, "operation_id": first_op, "request": first_prompt},
+            )
+            assert repeated.status_code == 200
+            assert repeated.headers["content-type"].startswith("application/json")
+            repeat_body = repeated.json()
+            assert repeat_body == {
+                "operation_id": first_op,
+                "session_id": session,
+                "run_id": first_run,
+                "request_entry_id": repeat_body["request_entry_id"],
+                "status": "completed",
+            }
+            UUID(repeat_body["request_entry_id"])
+            assert UUID(first_run) not in runs
+
+            queried = client.get(f"/api/sessions/{session}/operations/{first_op}")
+            assert queried.status_code == 200
+            queried_body = queried.json()
+            assert queried_body["accepted"] is True and queried_body["kind"] == "send"
+            assert queried_body["run"]["run_id"] == first_run
+            assert queried_body["run"]["status"] == "completed"
+            assert queried_body["steering"] is None
+
+            run_query = client.get(f"/api/sessions/{session}/runs/{first_run}")
+            assert run_query.status_code == 200
+            assert run_query.json() == queried_body["run"]
+
+            unaccepted = client.get(f"/api/sessions/{session}/operations/{uuid4()}")
+            assert unaccepted.status_code == 200
+            assert unaccepted.json() == {
+                "operation_id": unaccepted.json()["operation_id"],
+                "session_id": session,
+                "accepted": False,
+                "kind": None,
+                "run": None,
+                "steering": None,
+            }
+            assert client.get(f"/api/sessions/{uuid4()}/operations/{uuid4()}").status_code == 404
+            assert client.get(f"/api/sessions/{session}/runs/{uuid4()}").status_code == 404
+            assert client.get(f"/api/sessions/{uuid4()}/runs/{uuid4()}").status_code == 404
+            assert client.post("/api/sessions", json={"session_id": session, "title": "请回答完成"}).status_code == 200
+            assert client.post("/api/sessions", json={"session_id": session, "title": "冲突标题"}).status_code == 409
+
+            committed = stored_messages(session)
             snapshot = [serialize_message(message) for message in committed]
             totals = summarize_usage(committed)
             assert totals.total_tokens == sum(
@@ -274,17 +420,18 @@ def check() -> None:
             assert "cost" not in totals.model_dump(exclude_unset=True)
             assert [serialize_message(message) for message in committed] == snapshot
             other = str(uuid4())
+            create_session(client, other)
             turn("只回答完成，无需使用工具。", other)
             assert token not in "".join(
-                serialize_message(message) for message in sessions[UUID(other)]
+                serialize_message(message) for message in stored_messages(other)
             )
 
-            before = deepcopy(sessions)
             with client.stream(
                 "POST",
                 "/api/agent/run",
                 json={
                     "session_id": session,
+                    "operation_id": str(uuid4()),
                     "request": f"必须直接使用 read 读取 {root.name}/missing.txt，无需其他工具。",
                 },
             ) as response:
@@ -297,7 +444,8 @@ def check() -> None:
             assert failure[-2]["event"] == "tool_start"
             assert all(event["event"] != "done" for event in failure)
             wait_idle()
-            assert sessions == before
+            assert last_run(session).status == "failed"
+            session_after_failure = stored_messages(session)
             error_text = json.dumps(failure[-1], ensure_ascii=False)
             assert load_model_config().OPENAI_API_KEY not in error_text
             assert (
@@ -306,12 +454,14 @@ def check() -> None:
             )
 
             cancelled = str(uuid4())
+            create_session(client, cancelled)
             cancelled_path = f"{root.name}/disconnect.txt"
             with client.stream(
                 "POST",
                 "/api/agent/run",
                 json={
                     "session_id": cancelled,
+                    "operation_id": str(uuid4()),
                     "request": f"全部文件操作仅允许在 {root.name}/ 内；如需 ls 仅可列出该目录。使用 write 在 {cancelled_path} 写入精确文本 {token}，然后使用 read 读取该文件，最后说明内容。",
                 },
             ) as response:
@@ -352,7 +502,7 @@ def check() -> None:
                             )
                             if (root / "disconnect.txt").exists()
                             else None,
-                            "context_committed": UUID(cancelled) in sessions,
+                            "context_committed": bool(stored_messages(cancelled)),
                         },
                         ensure_ascii=False,
                         indent=2,
@@ -365,22 +515,24 @@ def check() -> None:
             assert active.locked()
             assert client.post("/api/agent/run", json=payload).status_code == 409
             wait_idle()
-            assert sessions == before
+            assert stored_messages(session) == session_after_failure
             assert (root / "disconnect.txt").read_text(encoding="utf-8") == token
-            recovered, _, _ = turn("只回答完成，无需使用工具。", cancelled)
-            assert len(sessions[UUID(cancelled)]) == 3
+            recovered, _, _, _, _ = turn("只回答完成，无需使用工具。", cancelled)
+            assert len(stored_messages(cancelled)) >= 4
             early = str(uuid4())
+            create_session(client, early)
             with client.stream(
                 "POST",
                 "/api/agent/run",
                 json={
                     "session_id": early,
+                    "operation_id": str(uuid4()),
                     "request": f"全部文件操作仅允许在 {root.name}/ 内。使用 write 在 {root.name}/early.txt 写入 completed。",
                 },
             ) as response:
                 assert response.status_code == 200
             wait_idle()
-            assert UUID(early) not in sessions
+            assert last_run(early).status in {"cancelled", "failed"}
             assert not (root / "early.txt").exists()
             EVIDENCE.mkdir(parents=True, exist_ok=True)
             (EVIDENCE / "real-http-events.json").write_text(
@@ -393,7 +545,7 @@ def check() -> None:
                         "recovered": recovered,
                         "messages": [
                             json.loads(serialize_message(message))
-                            for message in sessions[UUID(session)]
+                            for message in stored_messages(session)
                         ],
                         "usage": totals.model_dump(exclude_unset=True),
                     },

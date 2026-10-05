@@ -11,13 +11,13 @@ import pytest
 from openai import APIConnectionError
 from pydantic import ValidationError
 
-from src.agent.agent_loop import run_agent_loop
-from src.agent.config import AgentLoopConfig
-from src.agent.tools.files import WORKSPACE, create_file_tools
-from src.agent.usage import summarize_usage
-from src.ai.api.openai_completions import STOP_REASONS
-from src.ai.context import normalize_context
-from src.ai.messages import (
+from app.agent.agent_loop import run_agent_loop
+from app.agent.config import AgentLoopConfig
+from app.agent.tools.files import WORKSPACE, create_file_tools
+from app.agent.usage import summarize_usage
+from app.ai.api.openai_completions import STOP_REASONS
+from app.ai.context import normalize_context
+from app.ai.messages import (
     AssistantMessage,
     SystemMessage,
     TextContent,
@@ -25,9 +25,9 @@ from src.ai.messages import (
     ToolReference,
     UserMessage,
 )
-from src.ai.stream import complete, stream
-from src.ai.types import DoneReason, ModelSpec
-from src.model_config import load_model_config
+from app.ai.stream import complete, stream
+from app.ai.types import DoneReason, ModelSpec
+from app.model_config import load_model_config
 
 
 def checked_run(coro):
@@ -180,11 +180,16 @@ async def check_steering(config, directory):
 
 
 async def check_cancel(config, model, options):
-    for boundary in ("generation", "message_end", "tool_start"):
+    for boundary in ("generation", "message_end", "tool_start", "tool_result"):
         cancel = Event()
         events = []
+        trace = []
         polls = 0
-        tools = {"write": create_file_tools()["write"]} if boundary == "tool_start" else {}
+        tools = (
+            {"write": create_file_tools()["write"]}
+            if boundary in {"tool_start", "tool_result"}
+            else {}
+        )
         with TemporaryDirectory(dir=WORKSPACE) as directory:
             path = Path(directory) / "cancelled.txt"
             system = SystemMessage(role="system", content="按用户要求执行。", tools_added=[tool.definition() for tool in tools.values()], timestamp=0)
@@ -194,14 +199,19 @@ async def check_cancel(config, model, options):
                 polls += 1
                 return []
 
+            async def save_message(node_id, message):
+                trace.append(("save", node_id))
+
             async def emit(event):
                 events.append(event)
+                key = event.get("message_id") or event.get("tool_call_id")
+                trace.append(("emit", event["type"], key))
                 if boundary == "generation" and event["type"] == "message_update":
                     cancel.set()
-                elif event["type"] == boundary:
+                elif boundary != "generation" and event["type"] == boundary:
                     cancel.set()
 
-            config_loop = AgentLoopConfig(model=config, max_turns=3, get_steering_messages=steer)
+            config_loop = AgentLoopConfig(model=config, max_turns=3, get_steering_messages=steer, save_message=save_message)
             prompt = (
                 f"调用 write 在 {path.parent.name}/cancelled.txt 写入 cancelled。" if tools
                 else "只回复 OK。" if boundary == "message_end"
@@ -211,11 +221,21 @@ async def check_cancel(config, model, options):
                 await run_agent_loop([user(prompt)], {"messages": [system], "tools": tools}, config_loop, emit, cancel)
             ends = [event["message"] for event in events if event["type"] == "message_end"]
             assert len(ends) == 1
-            assert ends[0].stop_reason == {"generation": "aborted", "message_end": "stop", "tool_start": "toolUse"}[boundary]
+            assert ends[0].stop_reason == {"generation": "aborted", "message_end": "stop", "tool_start": "toolUse", "tool_result": "toolUse"}[boundary]
             assert events[-1]["type"] == "trace_end" and events[-1]["status"] == "cancelled"
             assert [event for event in events if event["type"] == "turn_end"][-1]["status"] == "cancelled"
-            assert polls == 1 and not path.exists()
-            assert not any(event["type"] == "tool_result" for event in events)
+            assert polls == 1
+            saved_at = {
+                entry[1]: index for index, entry in enumerate(trace) if entry[0] == "save"
+            }
+            for index, entry in enumerate(trace):
+                if entry[0] == "emit" and entry[1] in {"message_end", "tool_result"}:
+                    assert entry[2] in saved_at and saved_at[entry[2]] < index, (boundary, entry)
+            results = [event for event in events if event["type"] == "tool_result"]
+            if boundary == "tool_result":
+                assert results and path.read_text(encoding="utf-8") == "cancelled"
+            else:
+                assert not results and not path.exists()
             if boundary == "generation":
                 assert not any(isinstance(block, ToolCall) for block in ends[0].content)
                 if ends[0].usage is None:

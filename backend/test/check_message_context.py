@@ -8,16 +8,16 @@ from threading import Event
 
 from pydantic import TypeAdapter, ValidationError
 
-from src.agent.message_context import convert_to_llm, prepare_message_context
-from src.agent.tools.files import WORKSPACE, create_file_tools
-from src.ai.context import (
+from app.agent.message_context import convert_to_llm, prepare_message_context
+from app.agent.tools.files import WORKSPACE, create_file_tools
+from app.ai.context import (
     get_current_system_message,
     get_current_system_prompt,
     get_current_tools,
     normalize_context,
     validate_tool_pairs,
 )
-from src.ai.messages import Message, serialize_message
+from app.ai.messages import Message, serialize_message
 
 _adapter = TypeAdapter(Message)
 

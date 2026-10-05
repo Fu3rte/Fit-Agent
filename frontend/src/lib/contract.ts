@@ -1,7 +1,235 @@
+/* ===== 会话持久化请求层（backend-http-sse-contract §11）===== */
+
+/** 会话对象（§11.2）：``active_leaf_id`` 为 UUID 或 null，其余字段非空 */
+export interface SessionWire {
+  session_id: string;
+  title: string;
+  active_leaf_id: string | null;
+  created_at: number;
+  updated_at: number;
+}
+
+/** 运行状态（§11.2） */
+export type RunStatusWire =
+  | "running"
+  | "completed"
+  | "failed"
+  | "cancelled"
+  | "interrupted";
+
+/** 运行对象（§11.2）：``last_entry_id``／``finished_at`` 与错误字段允许 null */
+export interface SessionRunWire {
+  session_id: string;
+  run_id: string;
+  request_entry_id: string;
+  last_entry_id: string | null;
+  status: RunStatusWire;
+  started_at: number;
+  finished_at: number | null;
+  error_code: string | null;
+  error_message: string | null;
+}
+
+/** 输入状态（§11.2） */
+export type SteeringStatusWire =
+  | "pending"
+  | "consumed"
+  | "withdrawn"
+  | "discarded";
+
+/** 丢弃原因（§11.2） */
+export type DiscardReasonWire =
+  | "completed"
+  | "failed"
+  | "cancelled"
+  | "interrupted";
+
+/** 输入对象（§11.2）：``entry_id`` 仅 consumed 有值，``reason`` 仅 discarded 有值 */
+export interface SteeringInputWire {
+  session_id: string;
+  run_id: string;
+  steering_id: string;
+  status: SteeringStatusWire;
+  entry_id: string | null;
+  reason: DiscardReasonWire | null;
+  created_at: number;
+  updated_at: number;
+}
+
+/** 操作类型（§11.2） */
+export type OperationKindWire = "send" | "edit" | "regenerate" | "steering";
+
+/** 创建会话请求体（§4）：``session_id`` 标准 UUID，``title`` 为首条请求原文 */
+export interface SessionCreateBody {
+  session_id: string;
+  title: string;
+}
+
+/** 发送请求体（§5）：``operation_id`` 为同一次操作的幂等键，显式重试沿用原值 */
 export interface ReActRunBody {
   session_id: string;
+  operation_id: string;
   request: string;
 }
+
+/** 编辑请求体（session-edit-regenerate-contract §3）：``target_entry_id`` 为被编辑的用户节点 */
+export interface EditRunBody {
+  session_id: string;
+  operation_id: string;
+  target_entry_id: string;
+  request: string;
+}
+
+/** 重新生成请求体（session-edit-regenerate-contract §4）：``target_entry_id`` 为执行起点的用户节点 */
+export interface RegenerateRunBody {
+  session_id: string;
+  operation_id: string;
+  target_entry_id: string;
+}
+
+/** 重复发送返回的 JSON（§11.3）：原运行的关联身份与当前持久化状态 */
+export interface SendRunRepeatWire {
+  operation_id: string;
+  session_id: string;
+  run_id: string;
+  request_entry_id: string;
+  status: RunStatusWire;
+}
+
+/** 接收 Steering 请求体（§6.1） */
+export interface SteeringBody {
+  session_id: string;
+  operation_id: string;
+  message: string;
+}
+
+/** 接收 Steering 响应状态（§11.3）：首次为 accepted，重复为原输入当前持久化状态 */
+export type SteeringReceiveStatusWire = "accepted" | SteeringStatusWire;
+
+/** 接收 Steering 响应（§11.3） */
+export interface SteeringReceiveWire {
+  operation_id: string;
+  session_id: string;
+  run_id: string;
+  steering_id: string;
+  created: boolean;
+  status: SteeringReceiveStatusWire;
+  entry_id: string | null;
+  reason: DiscardReasonWire | null;
+}
+
+/** 撤回 Steering 请求体（§6.2） */
+export interface SteeringWithdrawBody {
+  session_id: string;
+}
+
+/** 撤回 Steering 响应（§11.3）：``status`` 为 withdrawn 或已有 discarded */
+export interface SteeringWithdrawWire {
+  session_id: string;
+  run_id: string;
+  steering_id: string;
+  status: "withdrawn" | "discarded";
+  entry_id: string | null;
+  reason: DiscardReasonWire | null;
+}
+
+/** 操作查询响应（§11.3）：未受理时 kind／run／steering 全为 null */
+export interface OperationQueryWire {
+  operation_id: string;
+  session_id: string;
+  accepted: boolean;
+  kind: OperationKindWire | null;
+  run: SessionRunWire | null;
+  steering: SteeringInputWire | null;
+}
+
+/** SSE 响应头（§11.4）：四个身份均为标准 UUID 字符串 */
+export interface AgentStreamHeaders {
+  session_id: string;
+  operation_id: string;
+  run_id: string;
+  request_entry_id: string;
+}
+
+/* ===== 会话列表与当前分支历史（session-history-contract §2、§3）===== */
+
+/** GET /api/sessions：全量会话头（§2） */
+export interface SessionListWire {
+  sessions: SessionWire[];
+}
+
+/** 助手公开内容块（§3.2）：历史与 SSE 使用同一公开快照规则 */
+export type PublicAssistantContent = ReActContent;
+
+/** 历史消息公开投影（§3.2）：系统消息不含可见字段，前端不产生可见消息 */
+export type PublicMessageWire =
+  | { role: "system" }
+  | { role: "user"; text: string; timestamp: number }
+  | {
+      role: "assistant";
+      content: PublicAssistantContent[];
+      stop_reason: ReActStopReason;
+      timestamp: number;
+    }
+  | {
+      role: "toolResult";
+      tool_call_id: string;
+      tool_name: string;
+      content: string;
+      is_error: boolean;
+      timestamp: number;
+    };
+
+/** 一个已提交节点（§3.1）：entries 为 active_leaf_id 的祖先链，按根到叶排列 */
+export interface HistoryEntryWire {
+  entry_id: string;
+  parent_id: string | null;
+  run_id: string | null;
+  created_at: number;
+  message: PublicMessageWire;
+}
+
+/** 历史运行对象（§3.3）：与运行接口契约的运行对象同形 */
+export type HistoryRunWire = SessionRunWire;
+
+/** 历史输入状态（§3.4）：consumed 关联用户节点，其余状态不伪造节点 */
+export interface HistorySteeringWire {
+  session_id: string;
+  run_id: string;
+  steering_id: string;
+  text: string;
+  timestamp: number;
+  status: SteeringStatusWire;
+  entry_id: string | null;
+  reason: DiscardReasonWire | null;
+  created_at: number;
+  updated_at: number;
+}
+
+/** GET /api/sessions/{session_id}/history：会话头 ＋ 当前分支节点 ＋ 关联运行与输入（§3） */
+export interface SessionHistoryWire {
+  session: SessionWire;
+  entries: HistoryEntryWire[];
+  runs: HistoryRunWire[];
+  steering: HistorySteeringWire[];
+}
+
+/* ===== 会话运行及 Steering 独立列表（session-list-contract §2、§3）===== */
+
+/** GET /api/sessions/{session_id}/runs：该会话仍保存的全部运行，按 started_at、run_id 升序（§2） */
+export interface SessionRunListWire {
+  session_id: string;
+  runs: SessionRunWire[];
+}
+
+/** GET /api/sessions/{session_id}/runs/{run_id}/steering：指定运行的全部保留输入，按 created_at、steering_id 升序（§3） */
+export interface RunSteeringListWire {
+  session_id: string;
+  run_id: string;
+  steering: HistorySteeringWire[];
+}
+
+/* ===== Agent SSE 事件（backend-http-sse-contract §8、§11.6）===== */
 
 export type ReActStopReason = "stop" | "toolUse" | "length" | "error" | "aborted";
 
@@ -16,27 +244,40 @@ export type ReActUpdateType =
   | "thinking_start" | "thinking_delta" | "thinking_end"
   | "toolcall_start" | "toolcall_delta" | "toolcall_end";
 
+/** 一条 Steering 状态通知（§11.6）：三种状态的字段组合固定 */
 export type SteeringStatus =
-  | { status: "consumed" }
-  | { status: "discarded"; reason: "completed" | "run_failed" | "cancelled" };
-
-export interface SteeringBody { session_id: string; message: string }
-export interface SteeringAccepted { run_id: string; steering_id: string; status: "accepted" }
+  | { status: "consumed"; entry_id: string; reason: null }
+  | { status: "withdrawn"; entry_id: null; reason: null }
+  | { status: "discarded"; entry_id: null; reason: DiscardReasonWire };
 
 type ReActMessageData = { message_id: string; content: ReActContent[] };
+
+/** 已提交节点身份：首节点的 ``parent_id`` 为 null（§8） */
+interface ReActCommittedEntry {
+  entry_id: string;
+  parent_id: string | null;
+}
+
 export type ReActEvent = { data: { run_id: string } } & (
   | { event: "message_start"; data: ReActMessageData }
   | { event: "message_update"; data: ReActMessageData & { content_index: number; update_type: ReActUpdateType } }
-  | { event: "message_end"; data: ReActMessageData & { stop_reason: ReActStopReason } }
+  | { event: "message_end"; data: ReActMessageData & ReActCommittedEntry & { stop_reason: ReActStopReason } }
   | { event: "tool_start"; data: { tool_call_id: string; name: string; arguments: Record<string, unknown> } }
-  | { event: "tool_result"; data: { tool_call_id: string; content: string; is_error: boolean } }
+  | { event: "tool_result"; data: { tool_call_id: string; content: string; is_error: boolean } & ReActCommittedEntry }
   | { event: "steering_status"; data: { steering_id: string } & SteeringStatus }
   | { event: "done"; data: { status: "completed"; stop_reason: "stop" | "length" } }
-  | { event: "error"; data: { status: "failed" | "cancelled"; code: "execution_failed" | "cancelled"; message: string; tool_call_id: string | null } }
+  | { event: "error"; data: { status: "failed" | "cancelled"; code: "execution_failed" | "cancelled" | "credential_detected"; message: string; tool_call_id: string | null } }
 );
 
-/** 请求或输入不合法 */
-export type ErrorCode = "invalid_request";
+/** 已注册业务接口错误码（§11.5，编辑与重新生成新增 ``entry_not_found`` / ``invalid_target_entry``） */
+export type ErrorCode =
+  | "host_forbidden" | "origin_forbidden"
+  | "session_not_found" | "run_not_found" | "steering_not_found"
+  | "entry_not_found" | "invalid_target_entry"
+  | "session_conflict" | "session_mismatch" | "run_busy" | "run_closed"
+  | "operation_conflict" | "steering_consumption_conflict" | "incomplete_tool_chain"
+  | "invalid_request" | "credential_detected"
+  | "internal_error";
 
 export interface ApiError {
   http_status: number;
@@ -409,20 +650,6 @@ export interface TrendsResponseWire {
 
 export interface CalendarResponseWire {
   calendar: CalendarMonthWire;
-}
-
-/**
- * POST /api/agent/run 请求体：``chat_id`` 是稳定会话身份（conversations.id），
- * ``conversation_id`` 是本轮由前端生成 UUID 的 LangGraph thread 身份，
- * ``client_request_id`` 是本轮创建幂等键（重放同一键只重发已提交事件）。
- */
-export interface AgentRunBody {
-  chat_id: string;
-  conversation_id: string;
-  client_request_id: string;
-  request: string;
-  /** 缺省 false：已有同类 draft 时直接复用，不调模型 */
-  regenerate?: boolean;
 }
 
 /** POST /api/agent/confirm 与 /api/agent/reject 请求体：会话身份 + 目标计划身份 */

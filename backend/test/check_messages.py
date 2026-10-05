@@ -7,8 +7,8 @@ from pathlib import Path
 
 from pydantic import BaseModel, TypeAdapter, ValidationError
 
-from src.ai import messages as message_models
-from src.ai.messages import (
+from app.ai import messages as message_models
+from app.ai.messages import (
     AssistantMessage,
     Message,
     SystemMessage,
@@ -391,7 +391,7 @@ def check() -> None:
                 sys.executable,
                 "-c",
                 "import json, sys; from pydantic import TypeAdapter; "
-                "from src.ai.messages import Message; "
+                "from app.ai.messages import Message; "
                 "TypeAdapter(Message).validate_python(json.loads(sys.argv[1]))",
                 json.dumps(source),
             ],
@@ -410,7 +410,7 @@ def check() -> None:
             [
                 sys.executable,
                 "-c",
-                "from src.ai.messages import ToolCall; "
+                "from app.ai.messages import ToolCall; "
                 "ToolCall.model_validate({'type':'toolCall','id':'x','name':'x',"
                 f"'arguments':{arguments}}})",
             ],

@@ -7,14 +7,14 @@ from threading import Event
 from time import time_ns
 from uuid import uuid4
 
-from src.agent.agent_loop import run_agent_loop
-from src.agent.config import AgentLoopConfig
-from src.agent.message_context import convert_to_llm
-from src.agent.prompts import SYSTEM_PROMPT
-from src.agent.tools.files import WORKSPACE, create_file_tools
-from src.agent.usage import summarize_usage
-from src.ai.context import validate_tool_pairs
-from src.ai.messages import (
+from app.agent.agent_loop import run_agent_loop
+from app.agent.config import AgentLoopConfig
+from app.agent.message_context import convert_to_llm
+from app.agent.prompts import SYSTEM_PROMPT
+from app.agent.tools.files import WORKSPACE, create_file_tools
+from app.agent.usage import summarize_usage
+from app.ai.context import validate_tool_pairs
+from app.ai.messages import (
     AssistantMessage,
     SystemMessage,
     TextContent,
@@ -22,7 +22,7 @@ from src.ai.messages import (
     UserMessage,
     serialize_message,
 )
-from src.model_config import load_model_config
+from app.model_config import load_model_config
 
 
 def check() -> None:

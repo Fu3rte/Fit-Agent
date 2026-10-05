@@ -13,19 +13,19 @@ from openai.types.chat.chat_completion import Choice
 from openai.types.completion_usage import CompletionUsage, PromptTokensDetails
 from pydantic import ValidationError
 
-from src.agent.agent_loop import run_agent_loop
-from src.agent.config import AgentLoopConfig
-from src.agent.tools.bash import create_bash_tool
-from src.agent.tools.files import WORKSPACE, create_file_tools
-from src.agent.usage import summarize_usage
-from src.ai.api.openai_completions import (
+from app.agent.agent_loop import run_agent_loop
+from app.agent.config import AgentLoopConfig
+from app.agent.tools.bash import create_bash_tool
+from app.agent.tools.files import WORKSPACE, create_file_tools
+from app.agent.usage import summarize_usage
+from app.ai.api.openai_completions import (
     REASONING_FIELDS,
     from_openai_response,
     from_openai_usage,
     to_openai_request,
 )
-from src.ai.context import validate_tool_pairs
-from src.ai.messages import (
+from app.ai.context import validate_tool_pairs
+from app.ai.messages import (
     AssistantMessage,
     ImageContent,
     SystemMessage,
@@ -36,9 +36,9 @@ from src.ai.messages import (
     UserMessage,
     serialize_message,
 )
-from src.ai.stream import complete, stream
-from src.ai.types import ModelSpec, StreamOptions
-from src.model_config import load_model_config
+from app.ai.stream import complete, stream
+from app.ai.types import ModelSpec, StreamOptions
+from app.model_config import load_model_config
 
 
 def check() -> None:

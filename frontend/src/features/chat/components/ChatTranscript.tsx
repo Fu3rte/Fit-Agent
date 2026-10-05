@@ -1,4 +1,4 @@
-import { Fragment } from "react";
+import { Fragment, useState, type Dispatch, type SetStateAction } from "react";
 import { ChevronDown, Loader2 } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import { Bubble, BubbleContent } from "@/components/ui/bubble";
@@ -6,17 +6,53 @@ import { Button } from "@/components/ui/button";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import { Message, MessageContent } from "@/components/ui/message";
 import { MessageScroller, MessageScrollerButton, MessageScrollerContent, MessageScrollerItem, MessageScrollerProvider, MessageScrollerViewport } from "@/components/ui/message-scroller";
+import { Textarea } from "@/components/ui/textarea";
 import ToolCallCard from "./ToolCallCard";
 import type { ReActEntry, ReActRound } from "../utils/reactAgent";
 
-function Entry({ entry }: { entry: ReActEntry }) {
+/** 就地编辑状态（用户约定）：正在编辑的消息节点及其文本 */
+type EditState = { entryId: string; text: string } | null;
+
+function Entry({ entry, roundId, onWithdraw, canEdit, editing, setEditing, onEdit, onRegenerate }: {
+  entry: ReActEntry;
+  roundId: string;
+  onWithdraw: (roundId: string, steeringId: string) => void;
+  canEdit: boolean;
+  editing: EditState;
+  setEditing: Dispatch<SetStateAction<EditState>>;
+  onEdit: (entryId: string, text: string) => Promise<boolean>;
+  onRegenerate: (entryId: string) => void;
+}) {
   if (entry.kind === "tool") return <ToolCallCard {...entry} />;
-  if (entry.kind === "user") return entry.request ? (
-    <Message align="end"><MessageContent>
-      <Bubble variant="default" align="end"><BubbleContent className="whitespace-pre-wrap">{entry.request}</BubbleContent></Bubble>
-      {entry.steering?.status === "discarded" && <p role="status" className="text-sm text-muted-foreground">未被本次执行消费</p>}
-    </MessageContent></Message>
-  ) : null;
+  if (entry.kind === "user") {
+    if (entry.request === undefined) return null;
+    const request = entry.request;
+    const nodeId = entry.entry_id;
+    const activeEdit = editing !== null && nodeId !== undefined && editing.entryId === nodeId ? editing : null;
+    return (
+      <Message align="end"><MessageContent>
+        {activeEdit !== null ? (
+          <div className="flex w-full flex-col gap-2">
+            <Textarea value={activeEdit.text} onChange={(event) => setEditing({ entryId: activeEdit.entryId, text: event.target.value })} aria-label="编辑消息" rows={2} className="min-h-0 resize-none" />
+            <div className="flex justify-end gap-2">
+              <Button type="button" variant="secondary" size="sm" onClick={() => setEditing(null)}>取消</Button>
+              <Button type="button" size="sm" disabled={!canEdit || !activeEdit.text.trim() || Array.from(activeEdit.text).length > 32000} onClick={() => { void onEdit(activeEdit.entryId, activeEdit.text).then((accepted) => { if (accepted) setEditing(null); }); }}>提交编辑</Button>
+            </div>
+          </div>
+        ) : (
+          <Bubble variant="default" align="end"><BubbleContent className="whitespace-pre-wrap">{request}</BubbleContent></Bubble>
+        )}
+        {activeEdit === null && nodeId !== undefined && (
+          <div className="flex justify-end gap-2">
+            <Button type="button" variant="secondary" size="sm" disabled={!canEdit} onClick={() => setEditing({ entryId: nodeId, text: request })}>编辑</Button>
+            <Button type="button" variant="secondary" size="sm" disabled={!canEdit} onClick={() => onRegenerate(nodeId)}>重新生成</Button>
+          </div>
+        )}
+        {entry.steering?.status === "pending" && <Button type="button" variant="secondary" size="sm" onClick={() => onWithdraw(roundId, entry.id)}>撤回</Button>}
+        {entry.steering?.status === "discarded" && <p role="status" className="text-sm text-muted-foreground">未被本次执行消费</p>}
+      </MessageContent></Message>
+    );
+  }
   return (
     <Message align="start"><MessageContent>
       {entry.content.map((block) => {
@@ -44,7 +80,16 @@ function Entry({ entry }: { entry: ReActEntry }) {
   );
 }
 
-export default function ChatTranscript({ rounds }: { rounds: ReActRound[] }) {
+export default function ChatTranscript({ rounds, onRetry, onWithdraw, retrying, canEdit, onEdit, onRegenerate }: {
+  rounds: ReActRound[];
+  onRetry: (roundId: string, operationId: string) => void;
+  onWithdraw: (roundId: string, steeringId: string) => void;
+  retrying?: string;
+  canEdit: boolean;
+  onEdit: (entryId: string, text: string) => Promise<boolean>;
+  onRegenerate: (entryId: string) => void;
+}) {
+  const [editing, setEditing] = useState<EditState>(null);
   return (
     <MessageScrollerProvider autoScroll defaultScrollPosition="end" scrollPreviousItemPeek={64}>
       <MessageScroller className="min-h-0 flex-1">
@@ -53,13 +98,22 @@ export default function ChatTranscript({ rounds }: { rounds: ReActRound[] }) {
             {rounds.map((round) => (
               <Fragment key={round.id}>
                 {round.entries.filter((entry) => entry.kind === "tool" || (entry.kind === "user" ? !!entry.request : entry.content.some((block) => block.type === "text" ? !!block.text : block.type === "thinking" ? !!block.thinking : !entry.stop_reason) || entry.stop_reason === "length" || entry.stop_reason === "aborted")).map((entry) => (
-                  <MessageScrollerItem key={entry.id} messageId={entry.id}><Entry entry={entry} /></MessageScrollerItem>
+                  <MessageScrollerItem key={entry.id} messageId={entry.id}>
+                    <Entry entry={entry} roundId={round.id} onWithdraw={onWithdraw} canEdit={canEdit} editing={editing} setEditing={setEditing} onEdit={onEdit} onRegenerate={onRegenerate} />
+                  </MessageScrollerItem>
                 ))}
-                {round.unknown_steering?.map((request, index) => <MessageScrollerItem key={`unknown:${index}`} messageId={`${round.id}:unknown:${index}`}><p role="status" className="text-sm text-muted-foreground">Steering 提交结果未知。</p><p className="whitespace-pre-wrap text-sm">{request}</p></MessageScrollerItem>)}
+                {round.pending?.map((operation) => <MessageScrollerItem key={`pending:${operation.operation_id}`} messageId={`${round.id}:pending:${operation.operation_id}`}>
+                  <div className="flex items-center gap-2">
+                    <p role="status" className="text-sm text-muted-foreground">提交结果未知</p>
+                    <Button type="button" variant="secondary" size="sm" disabled={retrying === operation.operation_id} onClick={() => onRetry(round.id, operation.operation_id)}>重试</Button>
+                  </div>
+                </MessageScrollerItem>)}
                 {(round.status !== "completed" || round.error) && <MessageScrollerItem messageId={`${round.id}:status`}>
                   {round.status === "running" && <Loader2 role="status" aria-label="执行中" className="size-4 animate-spin text-muted-foreground" />}
                   {round.status === "cancelled" && <p role="status" className="text-sm text-muted-foreground">已取消</p>}
-                  {round.error && <p role="alert" className="text-sm text-destructive">{round.error}</p>}
+                  {round.status === "interrupted" && <p role="status" className="text-sm text-muted-foreground">已中断</p>}
+                  {round.status === "failed" && !round.error && <p role="status" className="text-sm text-muted-foreground">本次运行失败</p>}
+                  {round.error && round.status !== "interrupted" && <p role="alert" className="text-sm text-destructive">{round.error}</p>}
                 </MessageScrollerItem>}
               </Fragment>
             ))}

@@ -4,23 +4,32 @@ import time
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from threading import Thread
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import httpx
 import uvicorn
 from pydantic import TypeAdapter
 
-from src.agent.tools.files import WORKSPACE
-from src.interfaces.http import app
-from test.check_http import events, final_text, validate_events, wait_idle
+from app.agent.tools.files import WORKSPACE
+from app.interfaces.http import app
+from test.check_http import (
+    create_session,
+    events,
+    final_text,
+    validate_events,
+    wait_idle,
+)
+from test.regression_support import patch_default_database
 
+EVIDENCE = Path(__file__).resolve().parents[1] / "temp" / "chat-delivery"
 ROOT = Path(__file__).resolve().parents[2]
-EVIDENCE = ROOT / ".pi/delivery/react-chat/t5"
 
 
 def check() -> None:
+    patch_default_database("chat-delivery")
+    EVIDENCE.mkdir(parents=True, exist_ok=True)
     package = TypeAdapter(dict).validate_json((ROOT / "package.json").read_text(encoding="utf-8"))
-    backend_command = "cd backend && uv run python -m uvicorn src.interfaces.http:app --reload --host 127.0.0.1 --port 8000"
+    backend_command = "cd backend && uv run python -m uvicorn app.interfaces.http:app --reload --host 127.0.0.1 --port 8000"
     assert package["scripts"]["dev:backend"] == backend_command
     assert '"npm run dev:backend"' in package["scripts"]["dev"]
     assert '"npm run dev:frontend"' in package["scripts"]["dev"]
@@ -47,9 +56,15 @@ def check() -> None:
             path = f"{root.name}/delivery.txt"
             token = uuid4().hex
             session = str(uuid4())
+            create_session(client, session)
 
             def turn(prompt):
-                with client.stream("POST", "/api/agent/run", json={"session_id": session, "request": prompt}) as response:
+                with client.stream("POST", "/api/agent/run", json={"session_id": session, "operation_id": str(uuid4()), "request": prompt}) as response:
+                    assert response.status_code == 200, response.text
+                    assert response.headers["content-type"].startswith("text/event-stream")
+                    assert response.headers["X-Session-ID"] == session
+                    UUID(response.headers["X-Run-ID"])
+                    UUID(response.headers["X-Request-Entry-ID"])
                     result = list(events(response))
                 wait_idle()
                 diagnostic = EVIDENCE / f"turn-{session}-{uuid4().hex}.json"

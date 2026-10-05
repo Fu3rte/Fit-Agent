@@ -4,7 +4,7 @@ from tempfile import TemporaryDirectory
 
 from pydantic import ValidationError
 
-from src.model_config import load_model_config
+from app.model_config import load_model_config
 
 
 def check() -> None:

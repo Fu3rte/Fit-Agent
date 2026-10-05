@@ -4,8 +4,8 @@ from copy import deepcopy
 
 from pydantic import TypeAdapter
 
-from src.ai.api.openai_completions import REASONING_FIELDS, to_openai_request
-from src.ai.messages import (
+from app.ai.api.openai_completions import REASONING_FIELDS, to_openai_request
+from app.ai.messages import (
     AssistantMessage,
     Message,
     TextContent,
@@ -15,8 +15,8 @@ from src.ai.messages import (
     Usage,
     serialize_message,
 )
-from src.ai.types import ModelSpec, StreamOptions
-from src.model_config import load_model_config
+from app.ai.types import ModelSpec, StreamOptions
+from app.model_config import load_model_config
 
 _adapter = TypeAdapter(Message)
 

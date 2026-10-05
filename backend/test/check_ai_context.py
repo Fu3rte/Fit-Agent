@@ -1,12 +1,12 @@
 import pytest
 
-from src.ai.context import (
+from app.ai.context import (
     get_current_system_message,
     get_current_system_prompt,
     get_current_tools,
     normalize_context,
 )
-from src.ai.messages import (
+from app.ai.messages import (
     AssistantMessage,
     SystemMessage,
     Tool,

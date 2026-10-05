@@ -4,18 +4,18 @@ from tempfile import TemporaryDirectory
 from time import time_ns
 from uuid import uuid4
 
-from src.agent.agent_loop import run_agent_loop, run_loop
-from src.agent.config import AgentLoopConfig
-from src.agent.tools.files import WORKSPACE, create_file_tools
-from src.ai.api.openai_completions import to_openai_request
-from src.ai.messages import (
+from app.agent.agent_loop import run_agent_loop, run_loop
+from app.agent.config import AgentLoopConfig
+from app.agent.tools.files import WORKSPACE, create_file_tools
+from app.ai.api.openai_completions import to_openai_request
+from app.ai.messages import (
     AssistantMessage,
     SystemMessage,
     ToolResultMessage,
     UserMessage,
 )
-from src.ai.stream import stream
-from src.model_config import load_model_config
+from app.ai.stream import stream
+from app.model_config import load_model_config
 
 
 def check():
@@ -38,9 +38,17 @@ def check():
         path = f"{root.name}/react.txt"
         token = uuid4().hex
         events = []
+        trace = []
+
+        async def save_message(node_id, message):
+            trace.append(("save", node_id))
 
         async def emit(event):
             events.append(event)
+            key = event.get("message_id") or event.get("tool_call_id")
+            trace.append(("emit", event["type"], key))
+
+        loop_config.save_message = save_message
 
         system = SystemMessage(
             role="system",
@@ -101,6 +109,38 @@ def check():
         } >= {"write", "read"}
         assert events[0]["type"] == "trace_start"
         assert events[-1]["type"] == "trace_end" and events[-1]["status"] == "completed"
+        started, ended = {}, set()
+        for event in events:
+            if event["type"] == "message_start":
+                assert event["message_id"] not in started
+                started[event["message_id"]] = True
+            elif event["type"] == "message_update":
+                assert event["message_id"] in started
+            elif event["type"] == "message_end":
+                assert event["message_id"] in started and event["message_id"] not in ended
+                ended.add(event["message_id"])
+        assert set(started) == ended
+        saved_at = {
+            entry[1]: index for index, entry in enumerate(trace) if entry[0] == "save"
+        }
+        for index, entry in enumerate(trace):
+            if entry[0] == "emit" and entry[1] in {"message_end", "tool_result"}:
+                assert entry[2] in saved_at and saved_at[entry[2]] < index, entry
+        recorded = [
+            message for message in messages if isinstance(message, ToolResultMessage)
+        ]
+        delivered = {
+            event["tool_call_id"]: event
+            for event in events
+            if event["type"] == "tool_result"
+        }
+        assert delivered and set(delivered) == {
+            message.tool_call_id for message in recorded
+        }
+        for message in recorded:
+            event = delivered[message.tool_call_id]
+            assert event["content"] == message.content[0].text
+            assert event["is_error"] == message.is_error
 
         events.clear()
         context = {

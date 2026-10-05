@@ -8,8 +8,8 @@ import pytest
 from dotenv import dotenv_values
 from openai import APIConnectionError
 
-from src.ai.api import anthropic_messages, openai_completions
-from src.ai.messages import (
+from app.ai.api import anthropic_messages, openai_completions
+from app.ai.messages import (
     AssistantMessage,
     JsonSchemaSampling,
     StopReason,
@@ -22,8 +22,8 @@ from src.ai.messages import (
     Usage,
     UserMessage,
 )
-from src.ai.stream import ADAPTERS, AssistantResponse, complete, stream
-from src.ai.types import (
+from app.ai.stream import ADAPTERS, AssistantResponse, complete, stream
+from app.ai.types import (
     AssistantStreamEvent,
     DoneEvent,
     LlmContext,

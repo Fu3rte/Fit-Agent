@@ -28,7 +28,7 @@ npm run dev:frontend
 后端命令等价于在 `backend` 目录执行：
 
 ```bash
-uv run python -m uvicorn src.interfaces.http:app --reload --host 127.0.0.1 --port 8000
+uv run python -m uvicorn app.interfaces.http:app --reload --host 127.0.0.1 --port 8000
 ```
 
 产品定义与验收场景见 [PRODUCT.md](PRODUCT.md)。
