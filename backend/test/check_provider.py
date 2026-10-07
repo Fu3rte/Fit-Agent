@@ -39,6 +39,7 @@ from app.ai.messages import (
 from app.ai.stream import complete, stream
 from app.ai.types import ModelSpec, StreamOptions
 from app.model_config import load_model_config
+from test.regression_support import run_tool
 
 
 def check() -> None:
@@ -233,21 +234,11 @@ def check() -> None:
         calls = [block for block in assistant.content if isinstance(block, ToolCall)]
         assert len(calls) == 1 and isinstance(calls[0].arguments, dict)
         assert "thought_signature" not in calls[0].model_fields_set
-        result = registry[calls[0].name].invoke(json.dumps(calls[0].arguments))
-        assert result.isError is False and "provider-check" in result.content
-        history.extend(
-            [
-                assistant,
-                ToolResultMessage(
-                    role="toolResult",
-                    tool_call_id=calls[0].id,
-                    tool_name=calls[0].name,
-                    content=[TextContent(type="text", text=result.content)],
-                    is_error=result.isError,
-                    timestamp=time_ns() // 1_000_000,
-                ),
-            ]
+        tool_result = run_tool(
+            registry[calls[0].name], calls[0].arguments, tool_call_id=calls[0].id
         )
+        assert tool_result.is_error is False and "provider-check" in tool_result.content[0].text
+        history.extend([assistant, tool_result])
         replay = deepcopy(history)
         replay[3].content.append(image)
         replay.append(

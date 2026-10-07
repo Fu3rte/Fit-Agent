@@ -4,13 +4,12 @@ from concurrent.futures import CancelledError
 from contextlib import aclosing
 from sys import exception
 from threading import Event
-from time import time_ns
 from typing import Literal, NotRequired, TypedDict
 from uuid import uuid4
 
 from app.agent.config import AgentLoopConfig
 from app.agent.message_context import prepare_message_context
-from app.agent.tool import Tool
+from app.agent.tool import AgentTool, FinalizedToolCall, ToolBatchResult, run_tool_batch
 from app.ai.context import get_current_tools
 from app.ai.messages import (
     AssistantMessage,
@@ -18,7 +17,7 @@ from app.ai.messages import (
     Message,
     TextContent,
     ToolCall,
-    ToolResultMessage,
+    text_projection,
 )
 from app.ai.stream import AssistantResponse, stream
 from app.ai.types import (
@@ -40,6 +39,7 @@ class LoopEvent(TypedDict):
         "message_update",
         "message_end",
         "tool_start",
+        "tool_execution_end",
         "tool_result",
     ]
     trace_id: NotRequired[str]
@@ -53,11 +53,16 @@ class LoopEvent(TypedDict):
     arguments: NotRequired[JsonObject]
     content: NotRequired[str]
     is_error: NotRequired[bool]
+    duration_ms: NotRequired[float | None]
+    postprocess_ms: NotRequired[float | None]
+    tool_prepare_started_at: NotRequired[float | None]
+    tool_first_result_at: NotRequired[float | None]
+    tool_finalized_at: NotRequired[float | None]
 
 
 class AgentContext(TypedDict):
     messages: list[Message]
-    tools: dict[str, Tool]
+    tools: dict[str, AgentTool]
 
 
 AgentEventSink = Callable[[LoopEvent], Awaitable[None]]
@@ -179,6 +184,27 @@ async def run_loop(
 ) -> None:
     trace_id = uuid4().hex
     await emit({"type": "trace_start", "trace_id": trace_id})
+
+    async def emit_tool_start(call: ToolCall) -> None:
+        await emit({
+            "type": "tool_start",
+            "tool_call_id": call.id,
+            "name": call.name,
+            "arguments": call.arguments,
+        })
+
+    async def emit_tool_finalized(finalized: FinalizedToolCall) -> None:
+        message = finalized.message
+        await emit({
+            "type": "tool_execution_end",
+            "tool_call_id": message.tool_call_id,
+            "name": message.tool_name,
+            "content": text_projection(message.content),
+            "is_error": message.is_error,
+            "duration_ms": finalized.duration_ms,
+            "postprocess_ms": finalized.postprocess_ms,
+        })
+
     trace_completed = False
     try:
         check_cancelled(signal)
@@ -201,6 +227,7 @@ async def run_loop(
                 "turn_id": turn_id,
             })
             turn_completed = False
+            tool_timing: ToolBatchResult | None = None
             try:
                 context["messages"].extend(pending_messages)
                 messages.extend(pending_messages)
@@ -248,41 +275,30 @@ async def run_loop(
                 active = {
                     tool.name: tool for tool in get_current_tools(context["messages"])
                 }
-                validated_calls = []
                 for call in tool_calls:
-                    check_cancelled(signal)
                     if call.id in seen:
                         raise ValueError(f"重复工具调用 ID: {call.id}")
                     seen.add(call.id)
-                    if call.name not in active or call.name not in context["tools"]:
-                        raise PermissionError(f"工具未声明或已被移除: {call.name}")
-                    tool = context["tools"][call.name]
-                    registered = tool.definition()
-                    if (
-                        active[call.name].parameters != registered.parameters
-                        or active[call.name].description != registered.description
-                    ):
-                        raise ValueError(f"工具声明与执行注册表不一致: {call.name}")
-                    arguments = tool.arguments.model_validate(call.arguments)
-                    validated_calls.append((call, tool, arguments))
-                for call, tool, arguments in validated_calls:
-                    check_cancelled(signal)
-                    await emit({
-                        "type": "tool_start",
-                        "tool_call_id": call.id,
-                        "name": call.name,
-                        "arguments": arguments.model_dump(),
-                    })
-                    check_cancelled(signal)
-                    result = tool.invoke(arguments.model_dump_json())
-                    tool_result = ToolResultMessage(
-                        role="toolResult",
-                        tool_call_id=call.id,
-                        tool_name=call.name,
-                        content=[TextContent(type="text", text=result.content)],
-                        is_error=result.isError,
-                        timestamp=time_ns() // 1_000_000,
-                    )
+                # 助手消息已持久化：按发起本批调用的助手节点绑定业务工具执行实例，
+                # 工具声明保持稳定，执行实例按批绑定。
+                batch_tools = context["tools"]
+                if config.bind_tools is not None:
+                    batch_tools = config.bind_tools(message_id)
+                batch = await run_tool_batch(
+                    tool_calls,
+                    tools=batch_tools,
+                    declared=active,
+                    before_tool_call=config.before_tool_call,
+                    after_tool_call=config.after_tool_call,
+                    signal=signal,
+                    execution_mode=config.tool_execution,
+                    on_tool_start=emit_tool_start,
+                    on_tool_finalized=emit_tool_finalized,
+                    on_tool_update=config.on_tool_update,
+                    contains_credentials=config.contains_credentials,
+                )
+                tool_timing = batch
+                for tool_result in batch.messages:
                     context["messages"].append(tool_result)
                     messages.append(tool_result)
                     tool_node_id = str(uuid4())
@@ -291,10 +307,13 @@ async def run_loop(
                     await emit({
                         "type": "tool_result",
                         "message_id": tool_node_id,
-                        "tool_call_id": call.id,
-                        "content": result.content,
-                        "is_error": result.isError,
+                        "tool_call_id": tool_result.tool_call_id,
+                        "content": text_projection(tool_result.content),
+                        "is_error": tool_result.is_error,
                     })
+                if batch.failure is not None:
+                    # 已取得的安全结果按调用顺序保存后，再传播框架/取消异常。
+                    raise batch.failure
                 check_cancelled(signal)
                 turn_completed = True
             finally:
@@ -305,6 +324,15 @@ async def run_loop(
                     "status": (
                         "cancelled" if isinstance(exception(), (CancelledError, TaskCancelledError))
                         else "completed" if turn_completed else "failed"
+                    ),
+                    "tool_prepare_started_at": (
+                        tool_timing.prepare_started_at if tool_timing is not None else None
+                    ),
+                    "tool_first_result_at": (
+                        tool_timing.first_result_at if tool_timing is not None else None
+                    ),
+                    "tool_finalized_at": (
+                        tool_timing.finalized_at if tool_timing is not None else None
                     ),
                 })
             check_cancelled(signal)

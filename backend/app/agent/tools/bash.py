@@ -4,12 +4,15 @@ import signal
 import subprocess
 from pathlib import Path
 from tempfile import NamedTemporaryFile, TemporaryFile
+from threading import Event
+from time import monotonic
 from typing import BinaryIO
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from app.agent.tool import Tool, ToolExecutionResult
+from app.agent.tool import AgentTool, AgentToolResult
 from app.agent.tools.files import WORKSPACE
+from app.ai.messages import TextContent
 
 MAX_LINES = 2000
 MAX_BYTES = 50 * 1024
@@ -72,7 +75,83 @@ def format_output(stream: BinaryIO, root: Path) -> str:
     )
 
 
-def create_bash_tool() -> Tool:
+def kill_tree(process: subprocess.Popen) -> None:
+    if os.name == "nt":
+        subprocess.run(
+            [
+                str(Path(os.environ["SystemRoot"]) / "System32" / "taskkill.exe"),
+                "/F",
+                "/T",
+                "/PID",
+                str(process.pid),
+            ],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    else:
+        os.killpg(process.pid, signal.SIGKILL)
+    process.wait()
+
+
+def run_command(
+    shell: str,
+    legacy_wsl: bool,
+    root: Path,
+    command: str,
+    timeout: float | None,
+    cancel: Event | None,
+) -> AgentToolResult:
+    with TemporaryFile(dir=root) as output:
+        with subprocess.Popen(
+            [shell, "-s"] if legacy_wsl else [shell, "-c", command],
+            cwd=root,
+            stdin=subprocess.PIPE if legacy_wsl else subprocess.DEVNULL,
+            stdout=output,
+            stderr=subprocess.STDOUT,
+            start_new_session=os.name != "nt",
+        ) as process:
+            aborted = False
+            timed_out = False
+            exit_code: int | None = None
+            deadline = None if timeout is None else monotonic() + timeout
+            try:
+                if legacy_wsl:
+                    assert process.stdin is not None
+                    process.stdin.write(command.encode("utf-8"))
+                    process.stdin.close()
+                while True:
+                    if cancel is not None and cancel.is_set():
+                        aborted = True
+                        break
+                    if deadline is not None and monotonic() >= deadline:
+                        timed_out = True
+                        break
+                    try:
+                        exit_code = process.wait(timeout=0.1)
+                        break
+                    except subprocess.TimeoutExpired:
+                        continue
+            finally:
+                if process.poll() is None:
+                    kill_tree(process)
+        text = format_output(output, root)
+    if aborted:
+        text += "\n\nCommand aborted"
+    elif timed_out:
+        text += f"\n\nCommand timed out after {timeout} seconds"
+    else:
+        if exit_code is not None and exit_code < 0:
+            exit_code = 128 - exit_code
+        if exit_code != 0:
+            text += f"\n\nCommand exited with code {exit_code}"
+    return AgentToolResult(
+        [TextContent(type="text", text=text)],
+        is_error=aborted or timed_out or bool(exit_code),
+    )
+
+
+def create_bash_tool() -> AgentTool:
     if WORKSPACE.is_symlink() or WORKSPACE.is_junction():
         raise PermissionError("backend/temp 不能是链接")
     WORKSPACE.mkdir(exist_ok=True)
@@ -83,57 +162,20 @@ def create_bash_tool() -> Tool:
         "sysnative",
     }
 
-    def execute(command: str, timeout: float | None) -> ToolExecutionResult:
-        with TemporaryFile(dir=root) as output:
-            with subprocess.Popen(
-                [shell, "-s"] if legacy_wsl else [shell, "-c", command],
-                cwd=root,
-                stdin=subprocess.PIPE if legacy_wsl else subprocess.DEVNULL,
-                stdout=output,
-                stderr=subprocess.STDOUT,
-                start_new_session=os.name != "nt",
-            ) as process:
-                try:
-                    if legacy_wsl:
-                        assert process.stdin is not None
-                        process.stdin.write(command.encode("utf-8"))
-                        process.stdin.close()
-                    exit_code = process.wait(timeout=timeout)
-                finally:
-                    if process.poll() is None:
-                        if os.name == "nt":
-                            subprocess.run(
-                                [
-                                    str(
-                                        Path(os.environ["SystemRoot"])
-                                        / "System32"
-                                        / "taskkill.exe"
-                                    ),
-                                    "/F",
-                                    "/T",
-                                    "/PID",
-                                    str(process.pid),
-                                ],
-                                check=True,
-                                stdout=subprocess.DEVNULL,
-                                stderr=subprocess.DEVNULL,
-                            )
-                        else:
-                            os.killpg(process.pid, signal.SIGKILL)
-                        process.wait()
-            text = format_output(output, root)
-        if exit_code < 0:
-            exit_code = 128 - exit_code
-        if exit_code != 0:
-            text += f"\n\nCommand exited with code {exit_code}"
-        return ToolExecutionResult(text, exit_code != 0)
+    def execute(
+        tool_call_id, params: BashArguments, signal, on_update
+    ) -> AgentToolResult:
+        return run_command(
+            shell, legacy_wsl, root, params.command, params.timeout, signal
+        )
 
-    return Tool(
+    return AgentTool(
         "bash",
         "在 backend/temp 中执行 Bash 命令，按写入顺序合并 stdout 和 stderr。"
         "保留末尾最多 2000 行或 50KB，截断时完整输出保存到 workspace 文件。"
         "timeout 为可选的秒数，默认无超时；Bash 命令以宿主进程权限运行。",
         BashArguments,
         execute,
+        execution_mode="sequential",
         max_output_chars=None,
     )

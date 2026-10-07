@@ -1,5 +1,4 @@
 import asyncio
-import json
 from concurrent.futures import CancelledError, ThreadPoolExecutor
 from copy import deepcopy
 from pathlib import Path
@@ -18,6 +17,7 @@ from app.ai.context import (
     validate_tool_pairs,
 )
 from app.ai.messages import Message, serialize_message
+from test.regression_support import run_tool
 
 _adapter = TypeAdapter(Message)
 
@@ -242,8 +242,8 @@ def check() -> None:
         path = Path(directory) / "context.txt"
         path.write_text("context-check", encoding="utf-8")
         arguments = {"path": path.relative_to(WORKSPACE).as_posix()}
-        result = registry["read"].invoke(json.dumps(arguments))
-        assert result.isError is False
+        result = run_tool(registry["read"], arguments)
+        assert result.is_error is False
         sources = [
             {
                 "role": "system",
@@ -326,7 +326,7 @@ def check() -> None:
                 "role": "toolResult",
                 "tool_call_id": "call-1",
                 "tool_name": "read",
-                "content": [{"type": "text", "text": result.content}],
+                "content": [{"type": "text", "text": result.content[0].text}],
                 "details": {"nested": [None, {"value": "original"}]},
                 "usage": usage,
                 "is_error": False,

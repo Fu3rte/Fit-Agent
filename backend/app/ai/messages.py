@@ -227,6 +227,17 @@ Message: TypeAlias = Annotated[
 ]
 
 
+def text_projection(content) -> str:
+    if isinstance(content, str):
+        return content
+    parts: list[str] = []
+    for block in content:
+        if not isinstance(block, TextContent):
+            raise ValueError("消息包含无法公开投影的内容块")
+        parts.append(block.text)
+    return "".join(parts)
+
+
 def serialize_message(message: Message) -> str:
     return json.dumps(
         message.model_dump(exclude_unset=True), ensure_ascii=False, allow_nan=False

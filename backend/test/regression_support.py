@@ -1,3 +1,4 @@
+import asyncio
 import socket
 import time
 from pathlib import Path
@@ -6,6 +7,26 @@ from uuid import uuid4
 
 import httpx
 import uvicorn
+
+
+def run_tool(tool, arguments, *, declared=None, signal=None, tool_call_id="call"):
+    from app.agent.tool import run_tool_call
+    from app.ai.messages import ToolCall
+
+    tool_call = ToolCall(
+        type="toolCall", id=tool_call_id, name=tool.name, arguments=arguments
+    )
+    declarations = {tool.name: tool.definition()} if declared is None else declared
+    return asyncio.run(
+        run_tool_call(
+            tool_call, tools={tool.name: tool}, declared=declarations, signal=signal
+        )
+    )
+
+
+def text(message) -> str:
+    return "".join(block.text for block in message.content)
+
 
 BACKEND = Path(__file__).resolve().parents[1]
 TEMP_ROOT = BACKEND / "temp"

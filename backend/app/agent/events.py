@@ -6,6 +6,7 @@ from typing import Literal
 class AgentEvent:
     event: Literal[
         "message_start", "message_update", "message_end", "tool_start",
-        "tool_result", "steering_status", "done", "error",
+        "tool_execution_update", "tool_execution_end", "tool_result",
+        "steering_status", "done", "error",
     ]
     data: dict
