@@ -1,7 +1,4 @@
-import type {
-  AgentEventWire,
-  ConversationDetailWire,
-} from "@/lib/contract";
+import type { AgentEventWire, ConversationDetailWire } from "@/lib/contract";
 import type {
   ChatRound,
   PlanDraft,

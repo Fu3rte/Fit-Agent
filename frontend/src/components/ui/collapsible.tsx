@@ -10,13 +10,17 @@ function Collapsible(
 function CollapsibleTrigger(
   props: React.ComponentProps<typeof CollapsiblePrimitive.Trigger>,
 ) {
-  return <CollapsiblePrimitive.Trigger data-slot="collapsible-trigger" {...props} />;
+  return (
+    <CollapsiblePrimitive.Trigger data-slot="collapsible-trigger" {...props} />
+  );
 }
 
 function CollapsibleContent(
   props: React.ComponentProps<typeof CollapsiblePrimitive.Content>,
 ) {
-  return <CollapsiblePrimitive.Content data-slot="collapsible-content" {...props} />;
+  return (
+    <CollapsiblePrimitive.Content data-slot="collapsible-content" {...props} />
+  );
 }
 
 export { Collapsible, CollapsibleTrigger, CollapsibleContent };

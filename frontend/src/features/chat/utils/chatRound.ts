@@ -52,8 +52,9 @@ export function eventText(event: AgentEventWire): string {
         ? `等待确认：计划 #${event.data.draft_plan_id}`
         : "解析结果待确认";
     case "done":
-      return `结束：intent ${event.data.intent ?? "无"}，终止原因 ${event.data.termination_reason ?? "无"
-        }`;
+      return `结束：intent ${event.data.intent ?? "无"}，终止原因 ${
+        event.data.termination_reason ?? "无"
+      }`;
     case "error":
       return `错误：${event.data.message}`;
   }

@@ -25,7 +25,6 @@ import type {
   PlanListWire,
   PlanSessionCandidatesWire,
   ProfileResponseWire,
-  ProfileWriteBody,
   ProviderStatusWire,
   ProviderTestWire,
   ProviderWriteBody,
@@ -40,6 +39,7 @@ import type {
   RunSteeringListWire,
   SendRunRepeatWire,
   SessionCreateBody,
+  SessionDeleteWire,
   SessionHistoryWire,
   SessionListWire,
   SessionRunListWire,
@@ -54,7 +54,24 @@ import type {
   SteeringWithdrawWire,
   TrendsResponseWire,
 } from "@/lib/contract";
-import { ReActHttpError, createReActParser, validChatInput } from "@/features/chat/utils/reactAgent";
+import {
+  isObject,
+  nullableMillis,
+  nullableString,
+  nullableUuid,
+  parseProfileResponse,
+  requireArray,
+  requireBoolean,
+  requireEnum,
+  requireMillis,
+  requireString,
+  requireUuid,
+} from "@/lib/business";
+import {
+  ReActHttpError,
+  createReActParser,
+  validChatInput,
+} from "@/features/chat/utils/reactAgent";
 
 export type { ApiError };
 
@@ -82,16 +99,6 @@ const post = <T>(path: string, body?: unknown) =>
   request<T>(path, {
     method: "POST",
     body: body === undefined ? "{}" : JSON.stringify(body),
-  });
-
-/** 画像（七字段三态事实）；profile: null = 未建档 */
-export const getProfile = () => request<ProfileResponseWire>("/api/profile");
-
-/** 整份覆盖写入画像：未填写用 unknown、明确为空用 denied */
-export const putProfile = (body: ProfileWriteBody) =>
-  request<ProfileResponseWire>("/api/profile", {
-    method: "PUT",
-    body: JSON.stringify(body),
   });
 
 /** Provider 状态：has_api_key 表示是否已存 Key，响应不含 Key 本体 */
@@ -180,9 +187,6 @@ export const getCalendarMonth = (month: string) =>
 
 /* ===== 会话持久化请求层（backend-http-sse-contract §11）===== */
 
-const UUID_PATTERN =
-  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-
 const RUN_STATUSES = [
   "running",
   "completed",
@@ -210,55 +214,6 @@ const DISCARD_REASONS = [
   "interrupted",
 ] as const;
 const OPERATION_KINDS = ["send", "edit", "regenerate", "steering"] as const;
-
-function isObject(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === "object" && !Array.isArray(value);
-}
-
-function requireUuid(value: unknown, field: string): string {
-  if (typeof value !== "string" || !UUID_PATTERN.test(value))
-    throw new Error(`${field} 身份无效。`);
-  return value;
-}
-
-function nullableUuid(value: unknown, field: string): string | null {
-  return value === null ? null : requireUuid(value, field);
-}
-
-function requireString(value: unknown, field: string): string {
-  if (typeof value !== "string" || value === "")
-    throw new Error(`${field} 无效。`);
-  return value;
-}
-
-function nullableString(value: unknown, field: string): string | null {
-  return value === null ? null : requireString(value, field);
-}
-
-function requireMillis(value: unknown, field: string): number {
-  if (!Number.isSafeInteger(value) || (value as number) < 0)
-    throw new Error(`${field} 无效。`);
-  return value as number;
-}
-
-function nullableMillis(value: unknown, field: string): number | null {
-  return value === null ? null : requireMillis(value, field);
-}
-
-function requireBoolean(value: unknown, field: string): boolean {
-  if (typeof value !== "boolean") throw new Error(`${field} 无效。`);
-  return value;
-}
-
-function requireEnum<T extends string>(
-  value: unknown,
-  allowed: readonly T[],
-  field: string,
-): T {
-  if (typeof value !== "string" || !(allowed as readonly string[]).includes(value))
-    throw new Error(`${field} 无效。`);
-  return value as T;
-}
 
 /** 会话持久化接口错误（§11.5）：body 形如 ``{"detail":{"code":"...","message":"..."}}`` */
 async function contractError(response: Response): Promise<ReActHttpError> {
@@ -378,7 +333,11 @@ function parseSteeringReceive(
   if (received.run_id !== runId || received.session_id !== sessionId)
     throw new Error("Steering 接受响应身份不匹配。");
   if (received.status === "accepted") {
-    if (!received.created || received.entry_id !== null || received.reason !== null)
+    if (
+      !received.created ||
+      received.entry_id !== null ||
+      received.reason !== null
+    )
       throw new Error("Steering 首次受理响应无效。");
   } else {
     if (received.created) throw new Error("Steering 重复受理响应无效。");
@@ -393,7 +352,11 @@ function parseSteeringWithdraw(body: unknown): SteeringWithdrawWire {
     session_id: requireUuid(body.session_id, "session_id"),
     run_id: requireUuid(body.run_id, "run_id"),
     steering_id: requireUuid(body.steering_id, "steering_id"),
-    status: requireEnum(body.status, ["withdrawn", "discarded"] as const, "status"),
+    status: requireEnum(
+      body.status,
+      ["withdrawn", "discarded"] as const,
+      "status",
+    ),
     entry_id: nullableUuid(body.entry_id, "entry_id"),
     reason:
       body.reason === null
@@ -424,7 +387,8 @@ function parseOperationQuery(body: unknown): OperationQueryWire {
   const kind = requireEnum(body.kind, OPERATION_KINDS, "kind");
   if (body.run === null) throw new Error("已受理操作缺少运行对象。");
   const run = parseRun(body.run);
-  const steering = kind === "steering" ? parseSteeringInput(body.steering) : null;
+  const steering =
+    kind === "steering" ? parseSteeringInput(body.steering) : null;
   if (kind !== "steering" && body.steering !== null)
     throw new Error("操作查询响应 steering 字段无效。");
   if (run.session_id !== session_id)
@@ -443,7 +407,10 @@ function parseAgentStreamHeaders(
   body: { session_id: string; operation_id: string },
 ): AgentStreamHeaders {
   const headers: AgentStreamHeaders = {
-    session_id: requireUuid(response.headers.get("X-Session-ID"), "X-Session-ID"),
+    session_id: requireUuid(
+      response.headers.get("X-Session-ID"),
+      "X-Session-ID",
+    ),
     operation_id: requireUuid(
       response.headers.get("X-Operation-ID"),
       "X-Operation-ID",
@@ -508,7 +475,9 @@ export async function runReActStream(
     signal,
   });
   if (!response.ok) throw await contractError(response);
-  const contentType = (response.headers.get("content-type") ?? "").toLowerCase();
+  const contentType = (
+    response.headers.get("content-type") ?? ""
+  ).toLowerCase();
   if (contentType.includes("application/json"))
     return parseSendRunRepeat(await response.json());
   if (!contentType.includes("text/event-stream"))
@@ -569,13 +538,21 @@ export const withdrawSteering = (
     { method: "POST", body: JSON.stringify(body), signal },
     parseSteeringWithdraw,
   ).then((result) => {
-    if (result.session_id !== body.session_id || result.run_id !== runId || result.steering_id !== steeringId)
+    if (
+      result.session_id !== body.session_id ||
+      result.run_id !== runId ||
+      result.steering_id !== steeringId
+    )
       throw new Error("撤回响应身份不匹配。");
     return result;
   });
 
 /** 操作查询（§7.1）：已受理返回关联身份与当前状态，未受理 accepted=false */
-export const getOperation = (sessionId: string, operationId: string, signal?: AbortSignal) =>
+export const getOperation = (
+  sessionId: string,
+  operationId: string,
+  signal?: AbortSignal,
+) =>
   sessionRequest<OperationQueryWire>(
     `/api/sessions/${encodeURIComponent(sessionId)}/operations/${encodeURIComponent(operationId)}`,
     { method: "GET", signal },
@@ -587,7 +564,11 @@ export const getOperation = (sessionId: string, operationId: string, signal?: Ab
   });
 
 /** 运行查询（§7.2）：断连或停止后据此确认终态，不推断运行已结束 */
-export const getRun = (sessionId: string, runId: string, signal?: AbortSignal) =>
+export const getRun = (
+  sessionId: string,
+  runId: string,
+  signal?: AbortSignal,
+) =>
   sessionRequest<SessionRunWire>(
     `/api/sessions/${encodeURIComponent(sessionId)}/runs/${encodeURIComponent(runId)}`,
     { method: "GET", signal },
@@ -602,11 +583,6 @@ export const getRun = (sessionId: string, runId: string, signal?: AbortSignal) =
 
 const STOP_REASONS = ["stop", "length", "toolUse", "error", "aborted"] as const;
 
-function requireArray(value: unknown, field: string): unknown[] {
-  if (!Array.isArray(value)) throw new Error(`${field} 无效。`);
-  return value;
-}
-
 /** 消息 timestamp（§1）：有限数值，保留存储精度 */
 function requireTimestamp(value: unknown): number {
   if (typeof value !== "number" || !Number.isFinite(value))
@@ -616,7 +592,11 @@ function requireTimestamp(value: unknown): number {
 
 /** 助手公开内容块（§3.2）：content_index 唯一且严格递增，隐藏块过滤后允许不连续 */
 function parseAssistantContent(value: unknown): PublicAssistantContent {
-  if (!isObject(value) || !Number.isSafeInteger(value.content_index) || (value.content_index as number) < 0)
+  if (
+    !isObject(value) ||
+    !Number.isSafeInteger(value.content_index) ||
+    (value.content_index as number) < 0
+  )
     throw new Error("助手内容块无效。");
   const content_index = value.content_index as number;
   if (value.type === "text" && typeof value.text === "string")
@@ -625,8 +605,10 @@ function parseAssistantContent(value: unknown): PublicAssistantContent {
     return { content_index, type: "thinking", thinking: value.thinking };
   if (value.type === "tool_call") {
     if (
-      typeof value.tool_call_id === "string" && value.tool_call_id !== "" &&
-      typeof value.name === "string" && value.name !== "" &&
+      typeof value.tool_call_id === "string" &&
+      value.tool_call_id !== "" &&
+      typeof value.name === "string" &&
+      value.name !== "" &&
       isObject(value.arguments)
     )
       return {
@@ -656,9 +638,12 @@ function parsePublicMessage(value: unknown): PublicMessageWire {
   if (!isObject(value)) throw new Error("历史消息无效。");
   if (value.role === "system") return { role: "system" };
   if (value.role === "user") {
-    if (typeof value.text !== "string")
-      throw new Error("历史用户消息无效。");
-    return { role: "user", text: value.text, timestamp: requireTimestamp(value.timestamp) };
+    if (typeof value.text !== "string") throw new Error("历史用户消息无效。");
+    return {
+      role: "user",
+      text: value.text,
+      timestamp: requireTimestamp(value.timestamp),
+    };
   }
   if (value.role === "assistant") {
     return {
@@ -723,8 +708,7 @@ function parseSessionList(body: unknown): SessionListWire {
   const sessions = requireArray(body.sessions, "sessions").map(parseSession);
   const ids = new Set<string>();
   for (const session of sessions) {
-    if (ids.has(session.session_id))
-      throw new Error("会话列表身份重复。");
+    if (ids.has(session.session_id)) throw new Error("会话列表身份重复。");
     ids.add(session.session_id);
   }
   return { sessions };
@@ -734,25 +718,24 @@ function parseSessionList(body: unknown): SessionListWire {
  * 历史响应（§3）：校验会话归属、祖先链顺序、运行请求节点、末节点归属与输入关联；
  * 协议异常就地报错，不转换为空历史。
  */
-function parseSessionHistory(
+export function parseSessionHistory(
   sessionId: string,
   body: unknown,
 ): SessionHistoryWire {
   if (!isObject(body)) throw new Error("会话历史响应无效。");
   const session = parseSession(body.session);
-  if (session.session_id !== sessionId)
-    throw new Error("会话历史身份不匹配。");
+  if (session.session_id !== sessionId) throw new Error("会话历史身份不匹配。");
   const entries = requireArray(body.entries, "entries").map(parseHistoryEntry);
   const runs = requireArray(body.runs, "runs").map(parseRun);
-  const steering = requireArray(body.steering, "steering").map(parseHistorySteering);
+  const steering = requireArray(body.steering, "steering").map(
+    parseHistorySteering,
+  );
 
   const nodes = new Map<string, HistoryEntryWire>();
   entries.forEach((entry, index) => {
-    if (nodes.has(entry.entry_id))
-      throw new Error("历史节点身份重复。");
+    if (nodes.has(entry.entry_id)) throw new Error("历史节点身份重复。");
     const expected = index === 0 ? null : entries[index - 1].entry_id;
-    if (entry.parent_id !== expected)
-      throw new Error("历史分支链无效。");
+    if (entry.parent_id !== expected) throw new Error("历史分支链无效。");
     nodes.set(entry.entry_id, entry);
   });
   if (session.active_leaf_id === null) {
@@ -786,11 +769,14 @@ function parseSessionHistory(
     if (input.session_id !== sessionId || steeringIds.has(input.steering_id))
       throw new Error("历史输入归属无效。");
     steeringIds.add(input.steering_id);
-    if (!runsById.has(input.run_id))
-      throw new Error("历史输入目标运行无效。");
+    if (!runsById.has(input.run_id)) throw new Error("历史输入目标运行无效。");
     if (input.status === "consumed") {
       const node = nodes.get(input.entry_id as string);
-      if (node === undefined || node.message.role !== "user" || node.run_id !== input.run_id)
+      if (
+        node === undefined ||
+        node.message.role !== "user" ||
+        node.run_id !== input.run_id
+      )
         throw new Error("历史消费节点无效。");
     }
   }
@@ -800,7 +786,11 @@ function parseSessionHistory(
 
 /** 会话列表（§2）：全量会话头，无分页与业务查询参数 */
 export const listSessions = (signal?: AbortSignal) =>
-  sessionRequest<SessionListWire>("/api/sessions", { method: "GET", signal }, parseSessionList);
+  sessionRequest<SessionListWire>(
+    "/api/sessions",
+    { method: "GET", signal },
+    parseSessionList,
+  );
 
 /** 当前分支历史（§3）：刷新与直接 URL 恢复展示的唯一来源 */
 export const readSessionHistory = (sessionId: string, signal?: AbortSignal) =>
@@ -808,6 +798,33 @@ export const readSessionHistory = (sessionId: string, signal?: AbortSignal) =>
     `/api/sessions/${encodeURIComponent(sessionId)}/history`,
     { method: "GET", signal },
     (body) => parseSessionHistory(sessionId, body),
+  );
+
+/**
+ * 删除会话（session-delete-contract §4）：``DELETE /api/sessions/{session_id}``，无请求正文与 operation_id；
+ * 重复删除与目标不存在返回同一成功结构。结构与身份校验失败即结果未知，调用方不得执行成功清理。
+ */
+export const deleteSession = (sessionId: string) =>
+  sessionRequest<SessionDeleteWire>(
+    `/api/sessions/${encodeURIComponent(sessionId)}`,
+    { method: "DELETE" },
+    (body) => {
+      if (!isObject(body) || body.deleted !== true)
+        throw new Error("会话删除响应无效。");
+      const session_id = requireUuid(body.session_id, "session_id");
+      if (session_id !== sessionId) throw new Error("会话删除响应身份不匹配。");
+      return { session_id, deleted: true };
+    },
+  );
+
+/* ===== 画像查询（backend-http-sse-contract §11.9）===== */
+
+/** 已保存画像（§11.9）：未建档同样返回 200，版本与内容同时为 null */
+export const getProfile = (signal?: AbortSignal) =>
+  sessionRequest<ProfileResponseWire>(
+    "/api/profile",
+    { method: "GET", signal },
+    parseProfileResponse,
   );
 
 /* ===== 会话运行及 Steering 独立列表（session-list-contract §2、§3）===== */
@@ -843,7 +860,11 @@ export function parseRunSteeringList(
   const steering = requireArray(body.steering, "steering").map(
     parseHistorySteering,
   );
-  if (steering.some((item) => item.session_id !== sessionId || item.run_id !== runId))
+  if (
+    steering.some(
+      (item) => item.session_id !== sessionId || item.run_id !== runId,
+    )
+  )
     throw new Error("输入列表项身份不匹配。");
   // 列表契约 §3、§4：timestamp 为 UTC Unix 毫秒整数，历史接口保留存储精度的有限数值规则在列表侧收紧
   for (const item of steering) requireMillis(item.timestamp, "timestamp");

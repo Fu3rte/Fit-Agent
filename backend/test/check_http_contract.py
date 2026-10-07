@@ -175,13 +175,21 @@ def check() -> None:
                         failure_steering = reply.json()["steering_id"]
             wait_idle()
             validate_events(failure)
-            assert failure_steering is not None and failure[-1]["event"] == "error"
-            assert failure[-1]["data"]["status"] == "failed"
-            assert failure[-2]["event"] == "steering_status"
-            assert failure[-2]["data"]["steering_id"] == failure_steering
-            assert failure[-2]["data"]["status"] == "discarded"
-            assert last_run(failure_session).status == "failed" and UUID(failed_run) not in runs
-            evidence["failure_discard"] = failure
+            assert failure_steering is not None and failure[-1]["event"] == "done"
+            assert any(
+                item["event"] == "tool_result"
+                and item["data"]["is_error"] is True
+                and "Command timed out after 0.2 seconds" in item["data"]["content"]
+                for item in failure
+            )
+            assert any(
+                item["event"] == "steering_status"
+                and item["data"]["steering_id"] == failure_steering
+                and item["data"]["status"] == "consumed"
+                for item in failure
+            )
+            assert last_run(failure_session).status == "completed" and UUID(failed_run) not in runs
+            evidence["tool_timeout"] = failure
 
             business_session = str(uuid4())
             create_session(client, business_session)
@@ -281,7 +289,7 @@ def check() -> None:
             assert key not in encoded
             assert all(term not in encoded for term in ("thinking_signature", "thought_signature", "text_signature", "Traceback", "Authorization"))
             (EVIDENCE / "real-events.json").write_text(encoded, encoding="utf-8")
-            print("PASS: real HTTP identity, FIFO steering, single consumption, rejection, failure discard, true is_error, stop/length/aborted, disconnect, resource cleanup; 100 atomic end races")
+            print("PASS: real HTTP identity, FIFO steering, single consumption, rejection, tool timeout is_error, true is_error, stop/length/aborted, disconnect, resource cleanup; 100 atomic end races")
     finally:
         server.should_exit = True
         thread.join(75)

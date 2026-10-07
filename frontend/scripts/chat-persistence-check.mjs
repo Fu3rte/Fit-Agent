@@ -107,11 +107,11 @@ try {
   await until(`(${LEDGER}).some((item) => item.kind === 'send' && item.run_id)`, 60000, "Steering 运行受理");
   await until(`document.querySelectorAll("button[aria-label='bash 工具调用详情']").length > ${bashBeforeSteer}`, 60000, "工具执行中");
   send("STEER_WITHDRAW_ONLY。");
-  await until(`[...document.querySelectorAll('button')].some((el) => el.textContent.trim() === '撤回')`, 30000, "出现撤回按钮");
+  await until(`!!document.querySelector("button[aria-label='撤回']")`, 30000, "出现撤回按钮");
   const steerStore = await store();
   assert.equal(steerStore.operations.some((item) => item.kind === "steering" && item.steering_id), true, "已受理 Steering 持久化身份");
   browser("find", "role", "button", "click", "--name", "撤回");
-  await until(`![...document.querySelectorAll('button')].some((el) => el.textContent.trim() === '撤回')`, 30000, "撤回后按钮消失");
+  await until(`!document.querySelector("button[aria-label='撤回']")`, 30000, "撤回后按钮消失");
   await until(`(${LEDGER}).every((item) => item.kind !== 'steering')`, 30000, "撤回终态清理操作");
   assert.equal((await evaluate(transcriptText)).includes("STEER_WITHDRAW_ONLY"), true, "撤回后保留输入原文");
   browser("click", stop);
@@ -176,7 +176,7 @@ try {
   evaluate("window.__steerGate.release && window.__steerGate.release(); true");
   await until(`(${LEDGER}).every((item) => item.kind !== 'steering')`, 30000, "后到 JSON 合并并清理操作");
   assert.equal(await evaluate("[...document.querySelectorAll('[data-slot=message-scroller-item]')].filter((el) => el.innerText === 'STEER_RACE_ONLY。').length"), 1, "输入只展示一次");
-  assert.equal(await evaluate("[...document.querySelectorAll('button')].some((el) => el.textContent.trim() === '撤回')"), false, "状态保持 consumed");
+  assert.equal(await evaluate(`!!document.querySelector("button[aria-label='撤回']")`), false, "状态保持 consumed");
   assert.equal(await evaluate("[...document.querySelectorAll('[role=alert]')].filter((el) => /协议|不匹配|标识冲突|重复|无效/.test(el.textContent)).length"), 0, "无协议异常");
   report.steeringRace = { status: raceStatus, shownOnce: true };
   note("SSE consumed 先到、JSON 后到：幂等合并");

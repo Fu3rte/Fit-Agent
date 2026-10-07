@@ -1,6 +1,7 @@
 import time
 import uuid
 from collections.abc import Sequence
+from typing import Protocol
 
 from app.ai.context import validate_tool_pairs
 from app.ai.messages import Message, SystemMessage, UserMessage, serialize_message
@@ -45,6 +46,16 @@ from app.domain.session.repository import SessionRepository
 
 CREDENTIAL_ERROR_CODE = "credential_detected"
 CREDENTIAL_SAFE_MESSAGE = "检测到受保护凭据，操作已拒绝"
+
+
+class SnapshotStore(Protocol):
+    # 会话内容替换与删除时的画像快照协作接口，由业务服务实现。
+    async def remove_for_entries(
+        self, session_id: str, entry_ids: set[str]
+    ) -> None: ...
+
+    async def remove_for_session(self, session_id: str) -> None: ...
+
 
 _REQUEST_MODELS = {
     "send": SendRequest,
@@ -117,8 +128,16 @@ def _subtree_ids(
 
 
 class SessionService:
-    def __init__(self, repository: SessionRepository) -> None:
+    def __init__(
+        self,
+        repository: SessionRepository,
+        snapshots: SnapshotStore | None = None,
+    ) -> None:
         self._repository = repository
+        self._snapshots = snapshots
+
+    def attach_snapshots(self, snapshots: SnapshotStore) -> None:
+        self._snapshots = snapshots
 
     async def create_session(
         self,
@@ -164,6 +183,17 @@ class SessionService:
 
     async def list_sessions(self) -> list[Session]:
         return await self._repository.list_sessions()
+
+    async def delete_session(self, session_id: str) -> None:
+        # 同一事务内删除会话的全部画像快照，再清除会话及全部关联记录；
+        # 已完成保存的幂等记录保留，已保存业务数据保持不动。
+        async with self._repository.transaction():
+            if await self._repository.get_session(session_id) is None:
+                return
+            await self._repository.defer_foreign_keys()
+            if self._snapshots is not None:
+                await self._snapshots.remove_for_session(session_id)
+            await self._repository.delete_session(session_id)
 
     async def get_entry(self, session_id: str, entry_id: str) -> SessionMessageEntry:
         return await self._require_entry(session_id, entry_id)
@@ -734,6 +764,9 @@ class SessionService:
         if not deleted_ids:
             return
         await self._repository.defer_foreign_keys()
+        if self._snapshots is not None:
+            # 随消息移除画像快照；已完成保存的幂等记录保留。
+            await self._snapshots.remove_for_entries(session_id, deleted_ids)
         runs = await self._repository.list_runs(session_id)
         entries_by_run: dict[str, list[SessionMessageEntry]] = {}
         for entry in entries:
@@ -775,7 +808,6 @@ class SessionService:
                     steering_to_delete.append(steering.id)
         deleted_steering_ids = set(steering_to_delete)
 
-        # 标记：确认卡片删除（session-business-history-contract §5）待确认模块落地后在此接入。
         operations = await self._repository.list_operations(session_id)
         operations_to_delete = [
             operation

@@ -1,6 +1,17 @@
-// 运行：node --experimental-transform-types scripts/chat-steering-merge-check.mjs
+// 运行：node scripts/chat-steering-merge-check.mjs
 import assert from "node:assert/strict";
-import { applyReActEvent, applySteeringStatus } from "../src/features/chat/utils/reactAgent.ts";
+import { createServer } from "vite";
+
+// 被测模块按项目别名引用 @/lib，须经 vite 解析加载
+const server = await createServer({
+  appType: "custom",
+  logLevel: "silent",
+  server: { middlewareMode: true },
+});
+const { applyReActEvent, applySteeringStatus } = await server.ssrLoadModule(
+  "/src/features/chat/utils/reactAgent.ts",
+);
+await server.close();
 
 const RUN = "11111111-1111-4111-8111-111111111111";
 const OTHER = "22222222-2222-4222-8222-222222222222";

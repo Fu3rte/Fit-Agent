@@ -1,8 +1,4 @@
-import {
-  layout,
-  prepareWithSegments,
-  walkLineRanges,
-} from "@chenglou/pretext";
+import { layout, prepareWithSegments, walkLineRanges } from "@chenglou/pretext";
 import type { PreparedTextWithSegments } from "@chenglou/pretext";
 import { BUBBLE, bubbleContentMaxWidth } from "./bubbleContract";
 

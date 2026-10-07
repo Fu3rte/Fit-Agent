@@ -90,6 +90,7 @@ def validate_events(result):
     UUID(run_id)
     messages = {}
     starts = {}
+    finals = {}
     results = {}
     for position, event in enumerate(result):
         kind, data = event["event"], event["data"]
@@ -130,16 +131,29 @@ def validate_events(result):
             assert call not in starts and isinstance(data["arguments"], dict)
             assert any(item["event"] == "message_end" and item["data"]["stop_reason"] == "toolUse" for item in result[:position])
             starts[call] = data
+        elif kind == "tool_execution_update":
+            assert call in starts and call not in results
+            assert data["tool_name"] == starts[call]["name"]
+            assert isinstance(data["content"], str) and type(data["is_error"]) is bool
+            assert "entry_id" not in data and "parent_id" not in data
+        elif kind == "tool_execution_end":
+            assert call in starts and call not in finals
+            assert data["tool_name"] == starts[call]["name"]
+            assert isinstance(data["content"], str) and type(data["is_error"]) is bool
+            assert "entry_id" not in data and "parent_id" not in data
+            finals[call] = data
         else:
-            assert kind == "tool_result" and call in starts and call not in results
+            assert kind == "tool_result" and call in starts and call in finals and call not in results
             assert type(data["is_error"]) is bool
+            assert data["content"] == finals[call]["content"]
+            assert data["is_error"] == finals[call]["is_error"]
             UUID(data["entry_id"])
             UUID(data["parent_id"])
             results[call] = data["content"]
     if result[-1]["event"] == "done":
         assert result[-1]["data"]["status"] == "completed"
         assert all(messages.values())
-        assert starts.keys() == results.keys()
+        assert starts.keys() == finals.keys() == results.keys()
         last = next(item for item in reversed(result) if item["event"] == "message_end")
         assert result[-1]["data"]["stop_reason"] == last["data"]["stop_reason"] in {"stop", "length"}
     return starts, results
@@ -345,6 +359,11 @@ def check() -> None:
                 "find",
                 "grep",
                 "bash",
+                "get_profile",
+                "search_exercises",
+                "prepare_profile_update",
+                "save_profile_update",
+                "get_profile_update_status",
             }
             assert received_after <= history[1].timestamp <= time.time_ns() // 1_000_000
             assert history[0].timestamp == history[1].timestamp
@@ -436,22 +455,24 @@ def check() -> None:
                 },
             ) as response:
                 failure = list(events(response))
-            assert failure[-1]["event"] == "error"
-            assert (
-                failure[-1]["data"]["tool_call_id"]
-                == failure[-2]["data"]["tool_call_id"]
-            )
-            assert failure[-2]["event"] == "tool_start"
-            assert all(event["event"] != "done" for event in failure)
+            starts, results = validate_events(failure)
+            assert failure[-1]["event"] == "done"
+            read_calls = [
+                call for call, data in starts.items() if data["name"] == "read"
+            ]
+            assert read_calls, starts
+            assert any("missing.txt" in results[call] for call in read_calls)
             wait_idle()
-            assert last_run(session).status == "failed"
+            assert last_run(session).status == "completed"
             session_after_failure = stored_messages(session)
-            error_text = json.dumps(failure[-1], ensure_ascii=False)
-            assert load_model_config().OPENAI_API_KEY not in error_text
-            assert (
-                str(WORKSPACE.resolve()) not in error_text
-                and "missing.txt" not in error_text
+            assert any(
+                isinstance(message, ToolResultMessage)
+                and message.is_error is True
+                and "missing.txt" in message.content[0].text
+                for message in session_after_failure
             )
+            error_text = json.dumps(failure, ensure_ascii=False)
+            assert load_model_config().OPENAI_API_KEY not in error_text
 
             cancelled = str(uuid4())
             create_session(client, cancelled)

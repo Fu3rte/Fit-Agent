@@ -52,9 +52,7 @@ export function rowsFromWorkout(
 }
 
 /** 编辑行 → 确认载荷的组：按行的记录口径只送适用字段（计时送秒数，其余送次数） */
-export function setsFromRows(
-  rows: WorkoutDraftRow[],
-): WorkoutSetConfirmWire[] {
+export function setsFromRows(rows: WorkoutDraftRow[]): WorkoutSetConfirmWire[] {
   return rows.map((row, index) => {
     const position = index + 1;
     if (row.exercise_id.trim() === "")
@@ -117,7 +115,9 @@ export function initialCandidates(
   workoutPerformedOn: string,
   candidates: PlanSessionCandidateWire[],
 ): PlanSessionCandidatesWire | undefined {
-  return performedOn === workoutPerformedOn ? { sessions: candidates } : undefined;
+  return performedOn === workoutPerformedOn
+    ? { sessions: candidates }
+    : undefined;
 }
 
 /**

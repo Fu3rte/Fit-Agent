@@ -4,12 +4,19 @@ import type {
   HistorySteeringWire,
   SessionHistoryWire,
 } from "@/lib/contract";
-import type { PendingOperation, ReActEntry, ReActRound } from "./reactAgent";
+import { preparedProfilePayload } from "@/lib/business";
+import {
+  PREPARE_PROFILE,
+  type PendingOperation,
+  type ReActEntry,
+  type ReActRound,
+} from "./reactAgent";
 
 /** 分支内每个运行产出的节点集合：用于在多个运行共享请求节点时挑选实际产生节点者 */
 function runsWithNodes(entries: HistoryEntryWire[]): Set<string> {
   const produced = new Set<string>();
-  for (const entry of entries) if (entry.run_id !== null) produced.add(entry.run_id);
+  for (const entry of entries)
+    if (entry.run_id !== null) produced.add(entry.run_id);
   return produced;
 }
 
@@ -26,12 +33,13 @@ function pickRequestRun(
     runs.find((run) => run.status === "running") ??
     [...runs].sort(
       (left, right) =>
-        left.started_at - right.started_at || left.run_id.localeCompare(right.run_id),
+        left.started_at - right.started_at ||
+        left.run_id.localeCompare(right.run_id),
     )[0]
   );
 }
 
-/** 已提交节点 → 展示条目（§3.2、§3.4）：系统节点返回 null，消费输入只挂到关联用户节点 */
+/** 已提交节点 → 展示条目（§3.2、§3.4）：系统节点返回 null，消费输入只挂到关联用户节点；准备工具结果附带完整画像 */
 function convertEntry(
   entry: HistoryEntryWire,
   consumedByEntry: Map<string, HistorySteeringWire>,
@@ -47,7 +55,14 @@ function convertEntry(
       entry_id: entry.entry_id,
       request: message.text,
       ...(consumed !== undefined
-        ? { steering: { status: "consumed" as const, entry_id: entry.entry_id, reason: null }, steering_id: consumed.steering_id }
+        ? {
+            steering: {
+              status: "consumed" as const,
+              entry_id: entry.entry_id,
+              reason: null,
+            },
+            steering_id: consumed.steering_id,
+          }
         : {}),
     };
   }
@@ -69,6 +84,9 @@ function convertEntry(
     status: message.is_error ? "failed" : "completed",
     entry_id: entry.entry_id,
     parent_id: entry.parent_id,
+    ...(message.tool_name === PREPARE_PROFILE && !message.is_error
+      ? { profile: preparedProfilePayload(message.content) }
+      : {}),
   };
 }
 
@@ -89,7 +107,8 @@ export function historyToRounds(history: SessionHistoryWire): ReActRound[] {
   for (const entry of entries)
     if (entry.message.role === "assistant")
       for (const block of entry.message.content)
-        if (block.type === "tool_call") toolArgs.set(block.tool_call_id, block.arguments);
+        if (block.type === "tool_call")
+          toolArgs.set(block.tool_call_id, block.arguments);
 
   const runById = new Map(runs.map((run) => [run.run_id, run]));
   const requestToRuns = new Map<string, HistoryRunWire[]>();
@@ -123,15 +142,20 @@ export function historyToRounds(history: SessionHistoryWire): ReActRound[] {
     let owner: HistoryRunWire | undefined;
     if (entry.message.role === "user") {
       const claimed = requestToRuns.get(entry.entry_id) ?? [];
-      owner = claimed.length > 0
-        ? pickRequestRun(claimed, produced)
-        : entry.run_id !== null ? runById.get(entry.run_id) : undefined;
+      owner =
+        claimed.length > 0
+          ? pickRequestRun(claimed, produced)
+          : entry.run_id !== null
+            ? runById.get(entry.run_id)
+            : undefined;
     } else {
       owner = entry.run_id !== null ? runById.get(entry.run_id) : undefined;
     }
     if (owner === undefined) continue;
     const converted = convertEntry(entry, consumedByEntry, toolArgs);
-    if (converted !== null) ensureRound(owner).entries.push(converted);
+    if (converted === null) continue;
+    const round = ensureRound(owner);
+    round.entries.push(converted);
   }
 
   /* 尚未产生节点的失败、取消、中断或执行中运行仍展示为空轮次（§3.3、§5.3） */
@@ -152,7 +176,11 @@ export function historyToRounds(history: SessionHistoryWire): ReActRound[] {
           ? { status: "pending", entry_id: null, reason: null }
           : input.status === "withdrawn"
             ? { status: "withdrawn", entry_id: null, reason: null }
-            : { status: "discarded", entry_id: null, reason: input.reason as never },
+            : {
+                status: "discarded",
+                entry_id: null,
+                reason: input.reason as never,
+              },
     });
   }
 
@@ -164,7 +192,9 @@ export function operationRound(operation: PendingOperation): ReActRound {
   const base = {
     id: operation.operation_id,
     ...(operation.run_id !== null ? { run_id: operation.run_id } : {}),
-    ...(operation.request_entry_id != null ? { request_entry_id: operation.request_entry_id } : {}),
+    ...(operation.request_entry_id != null
+      ? { request_entry_id: operation.request_entry_id }
+      : {}),
   };
   if (operation.kind === "regenerate")
     return { ...base, entries: [], status: "unknown", pending: [operation] };
@@ -178,7 +208,11 @@ export function operationRound(operation: PendingOperation): ReActRound {
           steering: { status: "pending", entry_id: null, reason: null },
           operation_id: operation.operation_id,
         }
-      : { kind: "user", id: operation.operation_id, request: operation.request };
+      : {
+          kind: "user",
+          id: operation.operation_id,
+          request: operation.request,
+        };
   return { ...base, entries: [entry], status: "unknown", pending: [operation] };
 }
 
@@ -194,7 +228,8 @@ export function pruneFrom(
   const kept: ReActRound[] = [];
   for (const round of rounds) {
     const index = round.entries.findIndex(
-      (entry) => entry.kind === "user" && (entry.entry_id ?? entry.id) === targetEntryId,
+      (entry) =>
+        entry.kind === "user" && (entry.entry_id ?? entry.id) === targetEntryId,
     );
     if (index === -1) {
       kept.push(round);
@@ -232,7 +267,8 @@ export function reconcileLedger(
     if (round.run_id !== undefined) roundByRun.set(round.run_id, round);
   const steeringHistory = new Map<string, HistorySteeringWire>();
   if (history !== null)
-    for (const input of history.steering) steeringHistory.set(input.steering_id, input);
+    for (const input of history.steering)
+      steeringHistory.set(input.steering_id, input);
 
   const watchByRun = new Map<string, { roundId: string; runId: string }>();
   const query: LedgerRecovery["query"] = [];
@@ -245,34 +281,47 @@ export function reconcileLedger(
 
   for (const operation of operations) {
     if (operation.kind !== "steering") {
-      const committed = operation.run_id !== null ? roundByRun.get(operation.run_id) : undefined;
+      const committed =
+        operation.run_id !== null
+          ? roundByRun.get(operation.run_id)
+          : undefined;
       if (committed !== undefined) {
-        if (committed.status !== "running") accepted.push(operation.operation_id);
+        if (committed.status !== "running")
+          accepted.push(operation.operation_id);
         continue;
       }
       const round = operationRound(operation);
       rounds.push(round);
       if (operation.run_id !== null) {
         roundByRun.set(operation.run_id, round);
-        watchByRun.set(operation.run_id, { roundId: round.id, runId: operation.run_id });
+        watchByRun.set(operation.run_id, {
+          roundId: round.id,
+          runId: operation.run_id,
+        });
       } else {
         query.push({ roundId: round.id, operation });
       }
       continue;
     }
     const record =
-      operation.steering_id != null ? steeringHistory.get(operation.steering_id) : undefined;
+      operation.steering_id != null
+        ? steeringHistory.get(operation.steering_id)
+        : undefined;
     if (record !== undefined) {
       if (record.status !== "pending") {
         accepted.push(operation.operation_id);
         continue;
       }
       const round = roundByRun.get(record.run_id);
-      const entry = round?.entries.find((item) => item.kind === "user" && item.id === record.steering_id);
-      if (entry !== undefined && entry.kind === "user") entry.operation_id = operation.operation_id;
+      const entry = round?.entries.find(
+        (item) => item.kind === "user" && item.id === record.steering_id,
+      );
+      if (entry !== undefined && entry.kind === "user")
+        entry.operation_id = operation.operation_id;
       continue;
     }
-    const runRound = operation.run_id !== null ? roundByRun.get(operation.run_id) : undefined;
+    const runRound =
+      operation.run_id !== null ? roundByRun.get(operation.run_id) : undefined;
     if (runRound !== undefined) {
       runRound.entries.push(operationRound(operation).entries[0]);
       query.push({ roundId: runRound.id, operation });
@@ -291,30 +340,43 @@ export function reconcileLedger(
  * 与已消费节点同身份）、工具按 tool_call_id、助手按 entry_id；同身份只在展示中出现一次。
  */
 function entryIdentity(round: ReActRound, entry: ReActEntry): string {
-  if (entry.kind === "assistant") return `assistant:${entry.entry_id ?? entry.id}`;
+  if (entry.kind === "assistant")
+    return `assistant:${entry.entry_id ?? entry.id}`;
   if (entry.kind === "tool") return `tool:${entry.id}`;
-  if (entry.steering !== undefined) return `steering:${entry.steering_id ?? entry.id}`;
+  if (entry.steering !== undefined)
+    return `steering:${entry.steering_id ?? entry.id}`;
   return `user:${round.request_entry_id ?? entry.id}`;
 }
 
-/** 已确认终态（§11.6）：同身份归并时终态优先于旧 pending 快照 */
+/** 已确认终态（§5.2-7）：同身份归并时终态优先于旧快照 */
 function settled(entry: ReActEntry): boolean {
-  return entry.kind === "user" && entry.steering !== undefined && entry.steering.status !== "pending";
+  return (
+    entry.kind === "user" &&
+    entry.steering !== undefined &&
+    entry.steering.status !== "pending"
+  );
 }
 
 /**
  * 同一运行的条目合并（§5.2-6）：历史为已提交事实来源，按稳定身份补齐并替换同身份条目；
  * 同身份优先已确认终态；本地未提交快照按其原顺序插回对应位置，保持分支内顺序。
  */
-function mergeEntries(existing: ReActRound, incoming: ReActRound): ReActEntry[] {
-  const localByKey = new Map(existing.entries.map((entry) => [entryIdentity(existing, entry), entry]));
+function mergeEntries(
+  existing: ReActRound,
+  incoming: ReActRound,
+): ReActEntry[] {
+  const localByKey = new Map(
+    existing.entries.map((entry) => [entryIdentity(existing, entry), entry]),
+  );
   const indexOf = new Map<string, number>();
   const merged: ReActEntry[] = [];
   for (const entry of incoming.entries) {
     const key = entryIdentity(incoming, entry);
     const local = localByKey.get(key);
     indexOf.set(key, merged.length);
-    merged.push(local !== undefined && settled(local) && !settled(entry) ? local : entry);
+    merged.push(
+      local !== undefined && settled(local) && !settled(entry) ? local : entry,
+    );
   }
   let anchor: string | undefined;
   for (const entry of existing.entries) {
@@ -325,7 +387,8 @@ function mergeEntries(existing: ReActRound, incoming: ReActRound): ReActEntry[] 
     }
     const at = anchor === undefined ? 0 : indexOf.get(anchor)! + 1;
     merged.splice(at, 0, entry);
-    for (const [placed, index] of indexOf) if (index >= at) indexOf.set(placed, index + 1);
+    for (const [placed, index] of indexOf)
+      if (index >= at) indexOf.set(placed, index + 1);
     indexOf.set(key, at);
     anchor = key;
   }
@@ -341,7 +404,9 @@ function unconfirmedPending(
   confirmed: ReadonlySet<string>,
 ): PendingOperation[] | undefined {
   if (pending === undefined) return undefined;
-  const remaining = pending.filter((operation) => !confirmed.has(operation.operation_id));
+  const remaining = pending.filter(
+    (operation) => !confirmed.has(operation.operation_id),
+  );
   return remaining.length === 0 ? undefined : remaining;
 }
 
@@ -360,8 +425,17 @@ export function mergeHistoryRounds(
     const existing = local.get(identity(round));
     if (existing === undefined || existing.status === "unknown") return round;
     const entries = mergeEntries(existing, round);
-    const base = existing.status === "running" && round.status !== "running" ? round : existing;
-    return { ...base, entries, pending: unconfirmedPending(existing.pending, confirmed) };
+    const base =
+      existing.status === "running" &&
+      round.status !== "running" &&
+      round.status !== "unknown"
+        ? round
+        : existing;
+    return {
+      ...base,
+      entries,
+      pending: unconfirmedPending(existing.pending, confirmed),
+    };
   });
   const covered = new Set(merged.map(identity));
   const extras = current.filter((round) => !covered.has(identity(round)));

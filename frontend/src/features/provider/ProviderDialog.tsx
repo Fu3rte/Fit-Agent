@@ -33,10 +33,7 @@ const API_LABELS: Record<ProviderApiWire, string> = {
 const API_VALUES = Object.keys(API_LABELS) as ProviderApiWire[];
 
 /** 结构化输出机制的中文标签（value 与后端 STRUCTURED_OUTPUTS 同集合） */
-const STRUCTURED_OUTPUT_LABELS: Record<
-  ProviderStructuredOutputWire,
-  string
-> = {
+const STRUCTURED_OUTPUT_LABELS: Record<ProviderStructuredOutputWire, string> = {
   json_schema: "JSON Schema",
   function_calling_strict: "Function Calling（strict）",
 };

@@ -20,7 +20,12 @@ from app.agent.agent_loop import run_agent_loop
 from app.agent.config import AgentLoopConfig
 from app.agent.events import AgentEvent
 from app.agent.prompts import SYSTEM_PROMPT
+from app.agent.tool import CredentialDetectedError
 from app.agent.tools.bash import create_bash_tool
+from app.agent.tools.business import (
+    bind_business_tools,
+    business_tool_declarations,
+)
 from app.agent.tools.files import create_file_tools
 from app.ai.messages import (
     AssistantMessage,
@@ -31,10 +36,19 @@ from app.ai.messages import (
     ToolCall,
     ToolResultMessage,
     UserMessage,
+    text_projection,
 )
 from app.ai.types import check_cancelled
+from app.application.business.catalog import Catalog
+from app.application.business.coordination import ReplacementCoordinator
+from app.application.business.service import (
+    BUSINESS_TIMEZONE,
+    BusinessService,
+    business_date,
+)
 from app.application.session.service import CREDENTIAL_SAFE_MESSAGE, SessionService
 from app.application.session.steering import SteeringCoordinator
+from app.domain.business.models import BusinessContext
 from app.domain.session.errors import (
     CredentialDetected,
     EntryNotFound,
@@ -64,6 +78,9 @@ from app.domain.session.models import (
 from app.domain.session.models import (
     SteeringRequest as SteeringParams,
 )
+from app.infrastructure.persistence.sqlite.business_repository import (
+    SqliteBusinessRepository,
+)
 from app.infrastructure.persistence.sqlite.database import open_database
 from app.infrastructure.persistence.sqlite.repository import SqliteSessionRepository
 from app.model_config import load_model_config
@@ -81,13 +98,17 @@ def operation_lock(operation_id: str) -> asyncio.Lock:
     return operation_locks.setdefault(operation_id, asyncio.Lock())
 
 
+# 会话协调入口：新运行受理与会话删除在此串行，覆盖受理提交至内存登记间的竞态窗口。
+session_gates: WeakValueDictionary[str, asyncio.Lock] = WeakValueDictionary()
+
+
+def session_gate(session_id: str) -> asyncio.Lock:
+    return session_gates.setdefault(session_id, asyncio.Lock())
+
+
 TERMINAL_RUN_STATUSES = frozenset(
     {"completed", "failed", "cancelled", "interrupted"}
 )
-
-
-class CredentialDetectedError(Exception):
-    pass
 
 
 class CredentialFilter:
@@ -204,6 +225,7 @@ class RunState:
         self.cancel = Event()
         self.events: Queue[AgentEvent] = Queue()
         self.coordinator: SteeringCoordinator | None = None
+        self.task: asyncio.Task | None = None
         self.closed_without_terminal = False
 
     def publish(self, name: str, data: dict) -> None:
@@ -223,10 +245,21 @@ async def lifespan(app: FastAPI):
     database = await open_database()
     service = SessionService(SqliteSessionRepository(database))
     await service.recover_interrupted()
+    business_repository = SqliteBusinessRepository(database)
+    catalog = Catalog.load()
+    replacements = ReplacementCoordinator()
+    business = BusinessService(business_repository, catalog, service, replacements)
+    service.attach_snapshots(business)
+    # 中断的保存在事务未提交时已随数据库回滚；恢复完成前不接收任何保存请求。
+    await business_repository.recover_interrupted_saves()
+    async with business_repository.transaction():
+        await business_repository.replace_exercises(catalog.all())
     loop = asyncio.get_running_loop()
     executor = ThreadPoolExecutor(max_workers=1)
     app.state.session_service = service
     app.state.steering = SteeringCoordinator(service)
+    app.state.business = business
+    app.state.replacements = replacements
     app.state.loop = loop
     app.state.executor = executor
     app.state.coordination = set()
@@ -254,20 +287,26 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(lifespan=lifespan)
+NO_STORE = {"Cache-Control": "no-store"}
 
 
 @app.exception_handler(RequestValidationError)
 async def invalid_request(request: Request, error: RequestValidationError):
     return JSONResponse(status_code=422, content={
         "detail": {"code": "invalid_request", "message": "请求字段不合法。"},
-    })
+    }, headers=NO_STORE)
+
+
+@app.exception_handler(HTTPException)
+async def http_error(request: Request, error: HTTPException):
+    return JSONResponse({"detail": error.detail}, error.status_code, headers=NO_STORE)
 
 
 @app.exception_handler(Exception)
 async def internal_error(request: Request, error: Exception):
     return JSONResponse(status_code=500, content={
         "detail": {"code": "internal_error", "message": "服务内部错误。"},
-    })
+    }, headers=NO_STORE)
 
 
 def reject(
@@ -323,15 +362,26 @@ def public_content(message: AssistantMessage, secrets: CredentialFilter, truncat
     return content
 
 
-def text_projection(content) -> str:
-    if isinstance(content, str):
-        return content
-    parts: list[str] = []
-    for block in content:
-        if not isinstance(block, TextContent):
-            raise ValueError("消息包含无法公开投影的内容块")
-        parts.append(block.text)
-    return "".join(parts)
+def public_tool_execution_end(event: dict) -> dict:
+    # 内部完成事件到公开字段的映射：content 沿用工具结果的文本投影，不携带持久化节点身份。
+    return {
+        "tool_call_id": event["tool_call_id"],
+        "tool_name": event["name"],
+        "content": event["content"],
+        "is_error": event["is_error"],
+    }
+
+
+def public_tool_execution_update(
+    tool_call_id: str, tool_name: str, content: list, is_error: bool
+) -> dict:
+    # 进度快照：content 使用与最终结果一致的文本投影，前端直接替换；不携带持久化节点身份。
+    return {
+        "tool_call_id": tool_call_id,
+        "tool_name": tool_name,
+        "content": text_projection(content),
+        "is_error": is_error,
+    }
 
 
 def public_message(message: Message) -> dict:
@@ -465,6 +515,7 @@ def execute(
     tools: dict,
     state: RunState,
     service: SessionService,
+    business: BusinessService,
     loop,
     model,
     secrets: tuple[str, ...],
@@ -473,9 +524,101 @@ def execute(
     guard = CredentialFilter(secrets)
     position = {"id": run.request_entry_id}
     parents: dict[str, str] = {}
+    # 可信业务身份与日期：request_entry_id 随 Steering 消费更新，日期取该用户节点
+    # 的真实 created_at，处理期间固定；每批按 source_entry_id 绑定。
+    request_entry = {"id": run.request_entry_id}
+    business_day = {"value": ""}
+    # 本批 prepare_profile_update 调用产生的 proposal_id，按 tool_call_id 记录。
+    prepared: dict[str, str] = {}
 
     def call(coro):
         return asyncio.run_coroutine_threadsafe(coro, loop).result()
+
+    def read_business_date(entry_id: str) -> str:
+        entry = call(service.get_entry(session_id, entry_id))
+        return business_date(entry.created_at)
+
+    business_day["value"] = read_business_date(request_entry["id"])
+
+    def business_context(source_entry_id: str) -> BusinessContext:
+        return BusinessContext(
+            timezone=BUSINESS_TIMEZONE,
+            business_date=business_day["value"],
+            session_id=session_id,
+            run_id=run.id,
+            request_entry_id=request_entry["id"],
+            source_entry_id=source_entry_id,
+        )
+
+    def execution_registry(source_entry_id: str) -> dict:
+        return {
+            **tools,
+            **bind_business_tools(
+                business, business_context(source_entry_id), call, prepared
+            ),
+        }
+
+    def message_nodes(leaf_id: str) -> list[dict]:
+        # 当前消息路径的节点引用：保存工具需要真实展示及确认节点 ID，后端按此校验。
+        nodes = []
+        bindings = call(business.list_confirmation_bindings(session_id))
+        displays = call(business.list_display_bindings(session_id))
+        for entry in call(service.get_branch(session_id, leaf_id)):
+            message = entry.messages[0]
+            if isinstance(message, UserMessage):
+                node = {"entry_id": entry.id, "role": "user"}
+                proposal_id = bindings.get(entry.id)
+                if proposal_id is not None:
+                    node["proposal_id"] = proposal_id
+                nodes.append(node)
+            elif isinstance(message, AssistantMessage):
+                nodes.append(
+                    {
+                        "entry_id": entry.id,
+                        "role": "assistant",
+                        "tool_call_ids": [
+                            block.id
+                            for block in message.content
+                            if isinstance(block, ToolCall)
+                        ],
+                    }
+                )
+            elif isinstance(message, ToolResultMessage):
+                node = {
+                    "entry_id": entry.id,
+                    "role": "toolResult",
+                    "tool_name": message.tool_name,
+                    "tool_call_id": message.tool_call_id,
+                }
+                proposal_id = displays.get(entry.id)
+                if proposal_id is not None:
+                    node["proposal_id"] = proposal_id
+                    node["display_entry_id"] = entry.id
+                nodes.append(node)
+        return nodes
+
+    async def transform_context(messages: list[Message], signal) -> list[Message]:
+        # 临时系统上下文：仅参与模型请求投影，不持久化，保持原提示词与工具声明完整。
+        return [
+            *messages,
+            SystemMessage(
+                role="system",
+                content="",
+                sections={
+                    "business_context": json.dumps(
+                        {
+                            "timezone": BUSINESS_TIMEZONE,
+                            "business_date": business_day["value"],
+                            "request_entry_id": request_entry["id"],
+                            "message_nodes": message_nodes(position["id"]),
+                        },
+                        ensure_ascii=False,
+                        allow_nan=False,
+                    )
+                },
+                timestamp=time_ns() // 1_000_000,
+            ),
+        ]
 
     async def save_message(node_id: str, message: Message) -> None:
         parent_id = position["id"]
@@ -499,6 +642,15 @@ def execute(
             raise CredentialDetectedError()
         parents[node_id] = parent_id
         position["id"] = node_id
+        if (
+            isinstance(message, ToolResultMessage)
+            and message.tool_name == "prepare_profile_update"
+            and not message.is_error
+        ):
+            proposal_id = prepared.get(message.tool_call_id)
+            # 结果节点已提交才形成展示绑定；工具执行完成通知不代表结果已持久化。
+            if proposal_id is not None:
+                call(business.bind_display_entry(proposal_id, node_id))
 
     async def get_steering_messages() -> list[Message]:
         return call(coordinator.take(run.id))
@@ -510,6 +662,9 @@ def execute(
         last_id = call(coordinator.consume(run.id, messages))
         if last_id is not None:
             position["id"] = last_id
+            # Steering 消费后：后续批次的 request_entry_id 与业务日期使用新用户节点。
+            request_entry["id"] = last_id
+            business_day["value"] = read_business_date(last_id)
 
     async def emit(event) -> None:
         kind = event["type"]
@@ -553,16 +708,39 @@ def execute(
             if guard.contains(data):
                 raise CredentialDetectedError()
             state.publish(kind, data)
+        elif kind == "tool_execution_end":
+            # 单工具结果定稿：经现有凭据检查后按实际完成顺序公开；不携带 entry_id、parent_id。
+            data = public_tool_execution_end(event)
+            if guard.contains(data):
+                raise CredentialDetectedError()
+            state.publish(kind, data)
+
+    def on_tool_update(tool_call_id: str, tool_name: str, result) -> None:
+        # 单工具进度快照：中间态，可被完成事件与保存确认覆盖；凭据在 harness 通知前拦截。
+        state.publish(
+            "tool_execution_update",
+            public_tool_execution_update(
+                tool_call_id, tool_name, result.content, result.is_error
+            ),
+        )
 
     loop_config = AgentLoopConfig(
         model=model,
         max_turns=64,
+        transform_context=transform_context,
         get_steering_messages=get_steering_messages,
         get_steering_messages_or_close=get_steering_messages_or_close,
         on_steering_consumed=on_steering_consumed,
         save_message=save_message,
+        bind_tools=execution_registry,
+        on_tool_update=on_tool_update,
+        contains_credentials=guard.contains,
     )
-    context = {"messages": branch[:-1], "tools": tools}
+    # 稳定声明注册表：业务工具实例仅用于声明校验，实际执行按批重新绑定。
+    context = {
+        "messages": branch[:-1],
+        "tools": execution_registry(run.request_entry_id),
+    }
     messages = asyncio.run(
         run_agent_loop([branch[-1]], context, loop_config, emit, state.cancel)
     )
@@ -609,6 +787,7 @@ async def coordinate(
     model,
     secrets: tuple[str, ...],
     service: SessionService,
+    business: BusinessService,
     coordinator: SteeringCoordinator,
     executor: ThreadPoolExecutor,
     loop,
@@ -619,7 +798,8 @@ async def coordinate(
     try:
         branch = await service.get_context(session_id, run.request_entry_id)
         future = executor.submit(
-            execute, run, session_id, branch, tools, state, service, loop, model, secrets
+            execute, run, session_id, branch, tools, state, service, business,
+            loop, model, secrets,
         )
         stop_reason = await asyncio.wrap_future(future)
     except BaseException as error:
@@ -748,6 +928,48 @@ async def list_sessions():
     return JSONResponse(payload, headers={"Cache-Control": "no-store"})
 
 
+async def drain_session_runs(session_id: str) -> None:
+    # 对目标会话的运行发出协作取消，等待执行任务与持久化收尾真正退出后返回。
+    with runs_lock:
+        states = [
+            state for state in runs.values() if state.session_id == UUID(session_id)
+        ]
+    for state in states:
+        state.disconnect()
+    await asyncio.gather(*(state.task for state in states))
+
+
+@app.delete("/api/sessions/{session_id}", dependencies=[Depends(check_boundary)])
+async def delete_session(session_id: PathUUID, request: Request):
+    service: SessionService = request.app.state.session_service
+    replacements: ReplacementCoordinator = request.app.state.replacements
+    if CredentialFilter((load_model_config().OPENAI_API_KEY,)).contains(session_id):
+        reject(422, "credential_detected", CREDENTIAL_SAFE_MESSAGE)
+
+    async def remove() -> None:
+        # 串行新运行受理并登记删除意图，等待目标执行与收尾退出后执行删除事务。
+        async with session_gate(session_id), replacements.register(session_id):
+            await drain_session_runs(session_id)
+            await service.delete_session(session_id)
+
+    task = asyncio.get_running_loop().create_task(remove())
+    track(request.app, task)
+    # 删除任务的生命周期独立于 HTTP 连接：断连取消不影响服务端继续完成删除。
+    await asyncio.shield(task)
+    return JSONResponse({"session_id": session_id, "deleted": True}, headers=NO_STORE)
+
+
+@app.get("/api/profile", dependencies=[Depends(check_boundary)])
+async def get_profile():
+    business: BusinessService = app.state.business
+    guard = CredentialFilter((load_model_config().OPENAI_API_KEY,))
+    response = await business.get_profile()
+    payload = response.model_dump()
+    if guard.contains(payload):
+        reject(422, "credential_detected", CREDENTIAL_SAFE_MESSAGE)
+    return JSONResponse(payload, headers={"Cache-Control": "no-store"})
+
+
 @app.get(
     "/api/sessions/{session_id}/history",
     dependencies=[Depends(check_boundary)],
@@ -837,9 +1059,11 @@ async def launch_run(
         )
         task = loop.create_task(coordinate(
             run, state, session_id, tools, model, secrets,
-            service, coordinator, request.app.state.executor, loop,
+            service, request.app.state.business, coordinator,
+            request.app.state.executor, loop,
         ))
         # 运行登记与独立收尾任务登记同关闭快照互斥，确保已受理运行必被等待。
+        state.task = task
         with runs_lock:
             runs[state.run_id] = state
             track(request.app, task)
@@ -890,7 +1114,9 @@ async def run(payload: RunRequest, request: Request):
     async def accept(svc: SessionService, tools: dict, secrets: tuple[str, ...]):
         system_message = SystemMessage(
             role="system", content=SYSTEM_PROMPT,
-            tools_added=[tool.definition() for tool in tools.values()],
+            tools_added=[
+                tool.definition() for tool in tools.values()
+            ] + business_tool_declarations(),
             timestamp=time_ns() // 1_000_000,
         )
         return await svc.accept_send(
@@ -903,7 +1129,7 @@ async def run(payload: RunRequest, request: Request):
             credentials=secrets,
         )
 
-    async with operation_lock(operation_id):
+    async with operation_lock(operation_id), session_gate(session_id):
         existing = await resolve_existing(
             service, operation_id, session_id, "send", send_request
         )
@@ -924,16 +1150,19 @@ async def edit(payload: EditPayload, request: Request):
     )
 
     async def accept(svc: SessionService, tools: dict, secrets: tuple[str, ...]):
-        return await svc.accept_edit(
-            EditCommand(
-                operation_id=operation_id,
-                session_id=session_id,
-                request=edit_request,
-            ),
-            credentials=secrets,
-        )
+        replacements: ReplacementCoordinator = request.app.state.replacements
+        # 内容替换登记会话替换意图：确认提交在事务提交前检查该意图并让位。
+        async with replacements.register(session_id):
+            return await svc.accept_edit(
+                EditCommand(
+                    operation_id=operation_id,
+                    session_id=session_id,
+                    request=edit_request,
+                ),
+                credentials=secrets,
+            )
 
-    async with operation_lock(operation_id):
+    async with operation_lock(operation_id), session_gate(session_id):
         existing = await resolve_existing(
             service, operation_id, session_id, "edit", edit_request
         )
@@ -954,16 +1183,18 @@ async def regenerate(payload: RegeneratePayload, request: Request):
     )
 
     async def accept(svc: SessionService, tools: dict, secrets: tuple[str, ...]):
-        return await svc.accept_regenerate(
-            RegenerateCommand(
-                operation_id=operation_id,
-                session_id=session_id,
-                request=regenerate_request,
-            ),
-            credentials=secrets,
-        )
+        replacements: ReplacementCoordinator = request.app.state.replacements
+        async with replacements.register(session_id):
+            return await svc.accept_regenerate(
+                RegenerateCommand(
+                    operation_id=operation_id,
+                    session_id=session_id,
+                    request=regenerate_request,
+                ),
+                credentials=secrets,
+            )
 
-    async with operation_lock(operation_id):
+    async with operation_lock(operation_id), session_gate(session_id):
         existing = await resolve_existing(
             service, operation_id, session_id, "regenerate", regenerate_request
         )

@@ -43,9 +43,7 @@ function KpiValue({
           </span>
         )}
       </p>
-      <p className="truncate text-[10px] text-muted-foreground">
-        {date ?? ""}
-      </p>
+      <p className="truncate text-[10px] text-muted-foreground">{date ?? ""}</p>
     </div>
   );
 }
@@ -108,13 +106,7 @@ export default function WeightTrendCard({ trends }: { trends: TrendsWire }) {
                 accessibilityLayer={false}
               >
                 <defs>
-                  <linearGradient
-                    id="weight-fill"
-                    x1="0"
-                    y1="0"
-                    x2="0"
-                    y2="1"
-                  >
+                  <linearGradient id="weight-fill" x1="0" y1="0" x2="0" y2="1">
                     <stop
                       offset="5%"
                       stopColor="var(--primary)"

@@ -26,6 +26,14 @@ _OPERATION_COLUMNS = (
     "operation_id, session_id, kind, request, run_id, steering_id, created_at"
 )
 _SESSION_COLUMNS = "id, title, active_leaf_id, created_at, updated_at"
+# 会话删除时清除聊天关联表；画像快照由业务存储在同一事务内处理，已完成保存幂等记录保留。
+_SESSION_CHILD_TABLES = (
+    "steering_inputs",
+    "session_operations",
+    "session_operation_invalidations",
+    "session_runs",
+    "session_entries",
+)
 
 
 def _placeholders(count: int) -> str:
@@ -138,6 +146,13 @@ class SqliteSessionRepository:
             f"SELECT {_SESSION_COLUMNS} FROM sessions ORDER BY created_at, id", ()
         )
         return [_row_to_session(row) for row in rows]
+
+    async def delete_session(self, session_id: str) -> None:
+        for table in _SESSION_CHILD_TABLES:
+            await self._write(
+                f"DELETE FROM {table} WHERE session_id = ?", (session_id,)
+            )
+        await self._write("DELETE FROM sessions WHERE id = ?", (session_id,))
 
     async def insert_entry(self, entry: SessionMessageEntry) -> None:
         await self._write(

@@ -7,6 +7,9 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "verify:bubble": "node scripts/bubble-tight-width-check.mjs",
+    "verify:profile": "node scripts/profile-natural-confirmation-check.mjs",
+    "verify:runs": "node scripts/session-run-lifecycle-check.mjs",
+    "verify:markdown": "node scripts/streaming-table-check.mjs",
     "preview": "vite preview"
   },
   "dependencies": {
@@ -30,6 +33,7 @@
     "react-markdown": "^10.1.0",
     "react-router-dom": "^7.6.0",
     "recharts": "^3.10.1",
+    "remark-gfm": "^4.0.1",
     "sonner": "^2.0.8",
     "tailwind-merge": "^3.3.1"
   },

@@ -1,5 +1,20 @@
 import { createParser } from "eventsource-parser";
-import type { DiscardReasonWire, ReActContent, ReActEvent, ReActStopReason, RunStatusWire, SteeringReceiveStatusWire, SteeringStatus, SteeringStatusWire } from "@/lib/contract";
+import type {
+  DiscardReasonWire,
+  ProfileContentWire,
+  ReActContent,
+  ReActEvent,
+  ReActStopReason,
+  RunStatusWire,
+  SteeringReceiveStatusWire,
+  SteeringStatus,
+  SteeringStatusWire,
+} from "@/lib/contract";
+import {
+  parseProfileSaveResult,
+  parseProfileStatusResult,
+  preparedProfilePayload,
+} from "@/lib/business";
 import type { ToolCallCardProps } from "../components/ToolCallCard";
 
 /** 已提交节点身份（§8）：message_end（助手消息）与 tool_result（工具结果）确认后写入 */
@@ -10,8 +25,7 @@ interface CommittedNode {
 
 /** Steering 状态（§6.1、§11.6）：终态来自 SSE 通知、接收、撤回或操作查询，pending 表示受理后尚未取得终态 */
 export type SteeringState =
-  | { status: "pending"; entry_id: null; reason: null }
-  | SteeringStatus;
+  { status: "pending"; entry_id: null; reason: null } | SteeringStatus;
 
 export type ReActEntry =
   | {
@@ -26,8 +40,19 @@ export type ReActEntry =
       /** 已提交的真实用户节点 ID（§3.2、session-edit-regenerate-contract §2）：编辑与重新生成的可用性依据 */
       entry_id?: string;
     }
-  | ({ kind: "assistant"; id: string; content: ReActContent[]; stop_reason?: ReActStopReason } & Partial<CommittedNode>)
-  | ({ kind: "tool"; id: string } & ToolCallCardProps & Partial<CommittedNode>);
+  | ({
+      kind: "assistant";
+      id: string;
+      content: ReActContent[];
+      stop_reason?: ReActStopReason;
+    } & Partial<CommittedNode>)
+  /** 画像完整展示（profile-plan §3.2）：仅在准备工具的结果节点提交后携带，实时与历史同一口径 */
+  | ({
+      kind: "tool";
+      id: string;
+      profile?: ProfileContentWire;
+    } & ToolCallCardProps &
+      Partial<CommittedNode>);
 
 /** 结果未知或执行中的操作（§5.5、session-edit-regenerate-contract §8）：保留原 operation_id、所属会话、目标运行与原始正文 */
 export interface PendingOperation {
@@ -66,19 +91,37 @@ export interface ReActRound {
   request_entry_id?: string;
   entries: ReActEntry[];
   error?: string;
-  status: "running" | "completed" | "failed" | "cancelled" | "interrupted" | "unknown";
+  status:
+    | "running"
+    | "completed"
+    | "failed"
+    | "cancelled"
+    | "interrupted"
+    | "unknown";
   /** 结果未知、等待确认或显式重试的操作（§5.5） */
   pending?: PendingOperation[];
 }
 
-export function finishReActRound(round: ReActRound, status: "failed" | "cancelled" | "interrupted", error?: string, toolId?: string | null): ReActRound {
+export function finishReActRound(
+  round: ReActRound,
+  status: "failed" | "cancelled" | "interrupted",
+  error?: string,
+  toolId?: string | null,
+): ReActRound {
   if (round.status !== "running") return round;
   return {
-    ...round, status, error,
+    ...round,
+    status,
+    error,
     entries: round.entries.map((entry) => {
       if (entry.kind !== "tool" || entry.status !== "running") return entry;
-      const failed = status === "failed" && (toolId == null || entry.id === toolId);
-      return { ...entry, status: failed ? "failed" : "cancelled", ...(failed ? { error } : {}) };
+      const failed =
+        status === "failed" && (toolId == null || entry.id === toolId);
+      return {
+        ...entry,
+        status: failed ? "failed" : "cancelled",
+        ...(failed ? { error } : {}),
+      };
     }),
   };
 }
@@ -103,18 +146,69 @@ interface SteeringSnapshot {
  * Steering 状态落地（§11.6）：按 steering_id 去重，首次 accepted 与重复 pending 收敛为待确认；
  * SSE 状态先到时按 steering_id 缓存，后到的 accepted／pending 保持已确认的终态。
  */
-export function applySteeringStatus(round: ReActRound, received: SteeringSnapshot, request?: string): ReActRound {
-  if (round.run_id !== received.run_id) throw new Error("Steering 运行身份不匹配。");
-  const index = round.entries.findIndex((entry) => entry.id === received.steering_id);
+export function applySteeringStatus(
+  round: ReActRound,
+  received: SteeringSnapshot,
+  request?: string,
+): ReActRound {
+  if (round.run_id !== received.run_id)
+    throw new Error("Steering 运行身份不匹配。");
+  const index = round.entries.findIndex(
+    (entry) => entry.id === received.steering_id,
+  );
   const found: ReActEntry | undefined = round.entries[index];
-  if (found !== undefined && found.kind !== "user") throw new Error("Steering 标识冲突。");
-  if (found !== undefined && found.request !== undefined && request !== undefined && found.request !== request) throw new Error("重复 Steering 接受记录。");
-  const next = received.status === "accepted" ? steeringStatus("pending", null, null) : steeringStatus(received.status, received.entry_id, received.reason);
-  const state: SteeringState = found !== undefined && found.steering !== undefined && settledSteering(found.steering) ? found.steering : next;
-  const nodeEntry = state.status === "consumed" ? { entry_id: state.entry_id } : {};
+  if (found !== undefined && found.kind !== "user")
+    throw new Error("Steering 标识冲突。");
+  if (
+    found !== undefined &&
+    found.request !== undefined &&
+    request !== undefined &&
+    found.request !== request
+  )
+    throw new Error("重复 Steering 接受记录。");
+  const next =
+    received.status === "accepted"
+      ? steeringStatus("pending", null, null)
+      : steeringStatus(received.status, received.entry_id, received.reason);
+  const state: SteeringState =
+    found !== undefined &&
+    found.steering !== undefined &&
+    settledSteering(found.steering)
+      ? found.steering
+      : next;
+  const nodeEntry =
+    state.status === "consumed" ? { entry_id: state.entry_id } : {};
   if (found === undefined)
-    return { ...round, entries: [...round.entries, { kind: "user", id: received.steering_id, request, steering: state, ...nodeEntry, operation_id: received.operation_id, steering_id: received.steering_id }] };
-  return { ...round, entries: round.entries.map((item, at) => at !== index ? item : { ...found, request: request ?? found.request, steering: state, ...nodeEntry, operation_id: received.operation_id ?? found.operation_id, steering_id: received.steering_id }) };
+    return {
+      ...round,
+      entries: [
+        ...round.entries,
+        {
+          kind: "user",
+          id: received.steering_id,
+          request,
+          steering: state,
+          ...nodeEntry,
+          operation_id: received.operation_id,
+          steering_id: received.steering_id,
+        },
+      ],
+    };
+  return {
+    ...round,
+    entries: round.entries.map((item, at) =>
+      at !== index
+        ? item
+        : {
+            ...found,
+            request: request ?? found.request,
+            steering: state,
+            ...nodeEntry,
+            operation_id: received.operation_id ?? found.operation_id,
+            steering_id: received.steering_id,
+          },
+    ),
+  };
 }
 
 /* ===== 会话选择、本地草稿与操作账本（session-history-contract §5.1、§5.5）===== */
@@ -128,22 +222,40 @@ function createDraft(): ChatDraft {
 /** 失败分类（§11.5）：4xx 为服务端明确拒绝；网络中断、5xx 与协议解析失败结果未知，
  * 保留操作身份并通过操作查询确认。 */
 export function failureOutcome(failure: unknown): "rejected" | "unknown" {
-  return failure instanceof ReActHttpError && failure.http_status !== null && failure.http_status >= 400 && failure.http_status < 500 ? "rejected" : "unknown";
+  return failure instanceof ReActHttpError &&
+    failure.http_status !== null &&
+    failure.http_status >= 400 &&
+    failure.http_status < 500
+    ? "rejected"
+    : "unknown";
 }
 
-function rememberPending(pending: PendingOperation[] | undefined, operation: PendingOperation): PendingOperation[] {
+function rememberPending(
+  pending: PendingOperation[] | undefined,
+  operation: PendingOperation,
+): PendingOperation[] {
   const current = pending ?? [];
-  return current.some((item) => item.operation_id === operation.operation_id) ? current : [...current, operation];
+  return current.some((item) => item.operation_id === operation.operation_id)
+    ? current
+    : [...current, operation];
 }
 
 /** 登记未确认操作（§3、§6.1）：保留原请求与操作身份，等待查询确认或显式重试 */
-export function withPending(round: ReActRound, operation: PendingOperation): ReActRound {
+export function withPending(
+  round: ReActRound,
+  operation: PendingOperation,
+): ReActRound {
   return { ...round, pending: rememberPending(round.pending, operation) };
 }
 
 /** 受理已确认（§5.5）：移除对应未确认操作 */
-export function resolveReActPending(round: ReActRound, operationId: string): ReActRound {
-  const pending = (round.pending ?? []).filter((item) => item.operation_id !== operationId);
+export function resolveReActPending(
+  round: ReActRound,
+  operationId: string,
+): ReActRound {
+  const pending = (round.pending ?? []).filter(
+    (item) => item.operation_id !== operationId,
+  );
   return { ...round, pending: pending.length > 0 ? pending : undefined };
 }
 
@@ -153,60 +265,131 @@ export function resumeReActRound(round: ReActRound): ReActRound {
 }
 
 /** 运行状态收敛（§7.2、§5.3）：running 保持未确认；中断形成独立终态，其余按运行状态展示 */
-export function concludeReActRound(round: ReActRound, status: RunStatusWire, message?: string): ReActRound {
+export function concludeReActRound(
+  round: ReActRound,
+  status: RunStatusWire,
+  message?: string,
+): ReActRound {
   if (round.status !== "running" && round.status !== "unknown") return round;
   if (status === "running") return round;
   if (status === "completed") return { ...round, status: "completed" };
-  if (status === "interrupted") return finishReActRound({ ...round, status: "running" }, "interrupted", message ?? "运行已中断。");
-  return finishReActRound({ ...round, status: "running" }, status === "cancelled" ? "cancelled" : "failed", message);
+  if (status === "interrupted")
+    return finishReActRound(
+      { ...round, status: "running" },
+      "interrupted",
+      message ?? "运行已中断。",
+    );
+  return finishReActRound(
+    { ...round, status: "running" },
+    status === "cancelled" ? "cancelled" : "failed",
+    message,
+  );
 }
 
 /** Steering 状态字段组合（§6.1、§11.6）：接收、撤回、SSE 通知与操作查询共用同一判别 */
-export function steeringStatus(status: SteeringStatusWire, entryId: string | null, reason: DiscardReasonWire | null): SteeringState {
+export function steeringStatus(
+  status: SteeringStatusWire,
+  entryId: string | null,
+  reason: DiscardReasonWire | null,
+): SteeringState {
   if (status === "pending") {
-    if (entryId !== null || reason !== null) throw new Error("Steering 待确认状态无效。");
+    if (entryId !== null || reason !== null)
+      throw new Error("Steering 待确认状态无效。");
     return { status: "pending", entry_id: null, reason: null };
   }
   if (status === "consumed") {
-    if (entryId === null || reason !== null) throw new Error("Steering 消费状态无效。");
+    if (entryId === null || reason !== null)
+      throw new Error("Steering 消费状态无效。");
     return { status: "consumed", entry_id: entryId, reason: null };
   }
   if (status === "withdrawn") {
-    if (entryId !== null || reason !== null) throw new Error("Steering 撤回状态无效。");
+    if (entryId !== null || reason !== null)
+      throw new Error("Steering 撤回状态无效。");
     return { status: "withdrawn", entry_id: null, reason: null };
   }
-  if (entryId !== null || reason === null) throw new Error("Steering 丢弃状态无效。");
+  if (entryId !== null || reason === null)
+    throw new Error("Steering 丢弃状态无效。");
   return { status: "discarded", entry_id: null, reason };
 }
 
 function parsePendingOperation(value: unknown): PendingOperation {
-  if (!object(value) || !uuid(value.operation_id) || !uuid(value.session_id)) throw new Error("操作账本身份无效。");
-  if (value.kind !== "send" && value.kind !== "edit" && value.kind !== "regenerate" && value.kind !== "steering") throw new Error("操作账本类型无效。");
-  if (!(value.run_id === null || uuid(value.run_id))) throw new Error("操作账本运行身份无效。");
-  if (!(value.request_entry_id === undefined || value.request_entry_id === null || uuid(value.request_entry_id))) throw new Error("操作账本请求节点无效。");
-  if (!(value.steering_id === undefined || value.steering_id === null || uuid(value.steering_id))) throw new Error("操作账本输入身份无效。");
-  if (!(value.target_entry_id === undefined || value.target_entry_id === null || uuid(value.target_entry_id))) throw new Error("操作账本目标节点无效。");
-  if (typeof value.request !== "string" || !Number.isSafeInteger(value.created_at)) throw new Error("操作账本正文无效。");
-  return { operation_id: value.operation_id, session_id: value.session_id, kind: value.kind, run_id: value.run_id as string | null, request: value.request, created_at: value.created_at as number, request_entry_id: (value.request_entry_id ?? null) as string | null, steering_id: (value.steering_id ?? null) as string | null, target_entry_id: (value.target_entry_id ?? null) as string | null };
+  if (!object(value) || !uuid(value.operation_id) || !uuid(value.session_id))
+    throw new Error("操作账本身份无效。");
+  if (
+    value.kind !== "send" &&
+    value.kind !== "edit" &&
+    value.kind !== "regenerate" &&
+    value.kind !== "steering"
+  )
+    throw new Error("操作账本类型无效。");
+  if (!(value.run_id === null || uuid(value.run_id)))
+    throw new Error("操作账本运行身份无效。");
+  if (!(
+    value.request_entry_id === undefined ||
+    value.request_entry_id === null ||
+    uuid(value.request_entry_id)
+  ))
+    throw new Error("操作账本请求节点无效。");
+  if (!(
+    value.steering_id === undefined ||
+    value.steering_id === null ||
+    uuid(value.steering_id)
+  ))
+    throw new Error("操作账本输入身份无效。");
+  if (!(
+    value.target_entry_id === undefined ||
+    value.target_entry_id === null ||
+    uuid(value.target_entry_id)
+  ))
+    throw new Error("操作账本目标节点无效。");
+  if (
+    typeof value.request !== "string" ||
+    !Number.isSafeInteger(value.created_at)
+  )
+    throw new Error("操作账本正文无效。");
+  return {
+    operation_id: value.operation_id,
+    session_id: value.session_id,
+    kind: value.kind,
+    run_id: value.run_id as string | null,
+    request: value.request,
+    created_at: value.created_at as number,
+    request_entry_id: (value.request_entry_id ?? null) as string | null,
+    steering_id: (value.steering_id ?? null) as string | null,
+    target_entry_id: (value.target_entry_id ?? null) as string | null,
+  };
 }
 
 function parseDraft(value: unknown): ChatDraft {
-  if (!object(value) || !uuid(value.session_id) || !(value.pending_title === null || typeof value.pending_title === "string")) throw new Error("本地草稿无效。");
-  return { session_id: value.session_id, pending_title: value.pending_title as string | null };
+  if (
+    !object(value) ||
+    !uuid(value.session_id) ||
+    !(value.pending_title === null || typeof value.pending_title === "string")
+  )
+    throw new Error("本地草稿无效。");
+  return {
+    session_id: value.session_id,
+    pending_title: value.pending_title as string | null,
+  };
 }
 
 function parseLedgers(value: unknown): Record<string, PendingOperation[]> {
   if (!object(value)) throw new Error("会话账本无效。");
   const ledgers: Record<string, PendingOperation[]> = {};
   for (const [sessionId, list] of Object.entries(value)) {
-    if (!uuid(sessionId) || !Array.isArray(list)) throw new Error("会话账本无效。");
+    if (!uuid(sessionId) || !Array.isArray(list))
+      throw new Error("会话账本无效。");
     ledgers[sessionId] = list.map(parsePendingOperation);
   }
   return ledgers;
 }
 
 function parseChatStore(value: unknown): ChatStore {
-  if (!object(value) || !(value.selected_session_id === null || uuid(value.selected_session_id))) throw new Error("会话状态无效。");
+  if (
+    !object(value) ||
+    !(value.selected_session_id === null || uuid(value.selected_session_id))
+  )
+    throw new Error("会话状态无效。");
   return {
     selected_session_id: value.selected_session_id as string | null,
     draft: value.draft === null ? null : parseDraft(value.draft),
@@ -221,10 +404,15 @@ function writeChatStore(store: ChatStore): void {
 
 /** 读取持久化客户端状态（§5.1）：无存储时新建草稿并落盘 */
 export function loadChatStore(): ChatStore {
-  if (typeof localStorage === "undefined") return { selected_session_id: null, draft: createDraft(), ledgers: {} };
+  if (typeof localStorage === "undefined")
+    return { selected_session_id: null, draft: createDraft(), ledgers: {} };
   const raw = localStorage.getItem(CHAT_CLIENT_KEY);
   if (raw === null) {
-    const fresh: ChatStore = { selected_session_id: null, draft: createDraft(), ledgers: {} };
+    const fresh: ChatStore = {
+      selected_session_id: null,
+      draft: createDraft(),
+      ledgers: {},
+    };
     writeChatStore(fresh);
     return fresh;
   }
@@ -240,7 +428,10 @@ export function readLedger(sessionId: string): PendingOperation[] {
  * 变更指定会话的未确认账本并落盘（§5.3、§5.5）：只影响该会话账本，
  * 当前选择与其它会话账本（含尚未创建的草稿）保持原值。
  */
-export function updateLedger(sessionId: string, change: (operations: PendingOperation[]) => PendingOperation[]): PendingOperation[] {
+export function updateLedger(
+  sessionId: string,
+  change: (operations: PendingOperation[]) => PendingOperation[],
+): PendingOperation[] {
   const store = loadChatStore();
   const next = change(store.ledgers[sessionId] ?? []);
   const ledgers = { ...store.ledgers };
@@ -251,31 +442,69 @@ export function updateLedger(sessionId: string, change: (operations: PendingOper
 }
 
 /** 生成并登记一次操作（§5.5）：同 operation_id 已登记时保持原记录 */
-export function rememberOperation(sessionId: string, operation: PendingOperation): PendingOperation[] {
-  return updateLedger(sessionId, (operations) => operations.some((item) => item.operation_id === operation.operation_id) ? operations : [...operations, operation]);
+export function rememberOperation(
+  sessionId: string,
+  operation: PendingOperation,
+): PendingOperation[] {
+  return updateLedger(sessionId, (operations) =>
+    operations.some((item) => item.operation_id === operation.operation_id)
+      ? operations
+      : [...operations, operation],
+  );
 }
 
 /** 受理结果已确认（§5.5）：操作离开未确认集合 */
-export function forgetOperation(sessionId: string, operationId: string): PendingOperation[] {
-  return updateLedger(sessionId, (operations) => operations.filter((item) => item.operation_id !== operationId));
+export function forgetOperation(
+  sessionId: string,
+  operationId: string,
+): PendingOperation[] {
+  return updateLedger(sessionId, (operations) =>
+    operations.filter((item) => item.operation_id !== operationId),
+  );
 }
 
 /** 运行终态确认（§7.2、§9.2）：清理该运行关联的全部未确认操作 */
-export function forgetRunOperations(sessionId: string, runId: string): PendingOperation[] {
-  return updateLedger(sessionId, (operations) => operations.filter((item) => item.run_id !== runId));
+export function forgetRunOperations(
+  sessionId: string,
+  runId: string,
+): PendingOperation[] {
+  return updateLedger(sessionId, (operations) =>
+    operations.filter((item) => item.run_id !== runId),
+  );
 }
 
 /** 记录确认后的所属运行与请求节点（§7.1、§11.4）：刷新后据此恢复运行身份 */
-export function attachOperationRun(sessionId: string, operationId: string, runId: string, requestEntryId?: string | null): PendingOperation[] {
-  return updateLedger(sessionId, (operations) => operations.map((item) => item.operation_id === operationId ? { ...item, run_id: runId, request_entry_id: requestEntryId ?? item.request_entry_id ?? null } : item));
+export function attachOperationRun(
+  sessionId: string,
+  operationId: string,
+  runId: string,
+  requestEntryId?: string | null,
+): PendingOperation[] {
+  return updateLedger(sessionId, (operations) =>
+    operations.map((item) =>
+      item.operation_id === operationId
+        ? {
+            ...item,
+            run_id: runId,
+            request_entry_id: requestEntryId ?? item.request_entry_id ?? null,
+          }
+        : item,
+    ),
+  );
 }
 
 /** 未确认的 Steering 原文（§5.5）：同一文本必须经显式重试，不得作为新操作重发 */
-export function unknownSteeringRequests(operations: PendingOperation[]): string[] {
-  return operations.filter((item) => item.kind === "steering").map((item) => item.request);
+export function unknownSteeringRequests(
+  operations: PendingOperation[],
+): string[] {
+  return operations
+    .filter((item) => item.kind === "steering")
+    .map((item) => item.request);
 }
 
-export function pendingExecOperation(operations: PendingOperation[]): PendingOperation | undefined {
+export function pendingExecOperation(
+  operations: PendingOperation[],
+): PendingOperation | undefined {
   return operations.find((item) => item.kind !== "steering");
 }
 
@@ -284,10 +513,27 @@ export function selectSession(sessionId: string): void {
   writeChatStore({ ...loadChatStore(), selected_session_id: sessionId });
 }
 
+export const SESSION_DELETED_EVENT = "session-deleted";
+
+/** 服务端确认删除后的本地清理（session-delete-contract §5）：移除目标账本与重试请求，选择指向目标时清除，防止首页恢复已删除身份 */
+export function forgetSession(sessionId: string): void {
+  window.dispatchEvent(
+    new CustomEvent(SESSION_DELETED_EVENT, { detail: sessionId }),
+  );
+  const store = loadChatStore();
+  delete store.ledgers[sessionId];
+  if (store.selected_session_id === sessionId) store.selected_session_id = null;
+  writeChatStore(store);
+}
+
 /** 新建会话（§5.1）：生成新 UUID 草稿并清空选择；旧会话账本按原 session_id 保留 */
 export function startNewSession(): ChatStore {
   const store = loadChatStore();
-  const next: ChatStore = { ...store, selected_session_id: null, draft: createDraft() };
+  const next: ChatStore = {
+    ...store,
+    selected_session_id: null,
+    draft: createDraft(),
+  };
   writeChatStore(next);
   return next;
 }
@@ -301,117 +547,338 @@ export function ensureDraft(): ChatStore {
   return next;
 }
 
-/** 保留首条请求原文作为草稿标题（§4）：已保留时保持原值 */
-export function retainDraftTitle(title: string): ChatStore {
+/** 保留首条请求原文作为草稿标题（§4）：仅归属当前草稿，已保留时保持原值 */
+export function retainDraftTitle(sessionId: string, title: string): ChatStore {
   const store = loadChatStore();
-  if (store.draft === null || store.draft.pending_title !== null) return store;
-  const next: ChatStore = { ...store, draft: { ...store.draft, pending_title: title } };
+  if (
+    store.draft === null ||
+    store.draft.session_id !== sessionId ||
+    store.draft.pending_title !== null
+  )
+    return store;
+  const next: ChatStore = {
+    ...store,
+    draft: { ...store.draft, pending_title: title },
+  };
   writeChatStore(next);
   return next;
 }
 
-/** 草稿创建成功（§4）：推进当前选择并清除草稿身份，允许打开对应会话 URL */
-export function confirmDraftCreated(): ChatStore {
+/** 草稿创建成功（§4）：清除该草稿身份；仅在首页未显式选择其他会话时推进当前选择 */
+export function confirmDraftCreated(sessionId: string): ChatStore {
   const store = loadChatStore();
-  if (store.draft === null) throw new Error("缺少本地草稿。");
-  const next: ChatStore = { ...store, selected_session_id: store.draft.session_id, draft: null };
+  if (store.draft === null || store.draft.session_id !== sessionId)
+    return store;
+  const next: ChatStore = {
+    ...store,
+    draft: null,
+    selected_session_id: store.selected_session_id ?? sessionId,
+  };
   writeChatStore(next);
   return next;
 }
 
-export function applyReActEvent(round: ReActRound, event: ReActEvent): ReActRound {
+export function applyReActEvent(
+  round: ReActRound,
+  event: ReActEvent,
+): ReActRound {
   if (round.status !== "running") throw new Error("终止后收到事件。");
   if (round.run_id !== event.data.run_id) throw new Error("运行身份不匹配。");
   const entries = [...round.entries];
   const data = event.data;
   switch (event.event) {
     case "message_start":
-      if (entries.some((entry) => entry.id === event.data.message_id) || entries.some((entry) => entry.kind === "assistant" && !entry.stop_reason)) throw new Error("重复或重叠的助手消息。");
-      entries.push({ kind: "assistant", id: event.data.message_id, content: event.data.content });
+      if (
+        entries.some((entry) => entry.id === event.data.message_id) ||
+        entries.some(
+          (entry) => entry.kind === "assistant" && !entry.stop_reason,
+        )
+      )
+        throw new Error("重复或重叠的助手消息。");
+      entries.push({
+        kind: "assistant",
+        id: event.data.message_id,
+        content: event.data.content,
+      });
       break;
     case "message_update":
     case "message_end": {
-      const index = entries.findIndex((entry) => entry.id === event.data.message_id);
+      const index = entries.findIndex(
+        (entry) => entry.id === event.data.message_id,
+      );
       const entry = entries[index];
-      if (!entry || entry.kind !== "assistant" || entry.stop_reason) throw new Error("助手消息生命周期无效。");
+      if (!entry || entry.kind !== "assistant" || entry.stop_reason)
+        throw new Error("助手消息生命周期无效。");
       if (event.event === "message_update") {
         const { content_index, update_type, content } = event.data;
         const kind = update_type.split("_")[0];
-        const block = content.find((item) => item.content_index === content_index);
-        if (!block || block.type !== (kind === "toolcall" ? "tool_call" : kind)) throw new Error("内容块类型不匹配。");
+        const block = content.find(
+          (item) => item.content_index === content_index,
+        );
+        if (!block || block.type !== (kind === "toolcall" ? "tool_call" : kind))
+          throw new Error("内容块类型不匹配。");
         for (const old of entry.content) {
-          const next = content.find((item) => item.content_index === old.content_index);
-          if (!next || next.type !== old.type || (old.type === "tool_call" && next.type === "tool_call" && next.tool_call_id !== old.tool_call_id)) throw new Error("内容块身份变化。");
+          const next = content.find(
+            (item) => item.content_index === old.content_index,
+          );
+          if (
+            !next ||
+            next.type !== old.type ||
+            (old.type === "tool_call" &&
+              next.type === "tool_call" &&
+              next.tool_call_id !== old.tool_call_id)
+          )
+            throw new Error("内容块身份变化。");
         }
       } else {
         const reason = event.data.stop_reason;
-        if ((reason === "length" || reason === "aborted") && event.data.content.some((block) => block.type === "tool_call")) throw new Error("截断或取消消息包含工具调用。");
+        if (
+          (reason === "length" || reason === "aborted") &&
+          event.data.content.some((block) => block.type === "tool_call")
+        )
+          throw new Error("截断或取消消息包含工具调用。");
       }
-      entries[index] = { ...entry, content: event.data.content, ...(event.event === "message_end" ? { stop_reason: event.data.stop_reason, entry_id: event.data.entry_id, parent_id: event.data.parent_id } : {}) };
+      entries[index] = {
+        ...entry,
+        content: event.data.content,
+        ...(event.event === "message_end"
+          ? {
+              stop_reason: event.data.stop_reason,
+              entry_id: event.data.entry_id,
+              parent_id: event.data.parent_id,
+            }
+          : {}),
+      };
       break;
     }
     case "tool_start": {
       const { tool_call_id, name, arguments: args } = event.data;
-      if (entries.some((entry) => entry.id === tool_call_id)) throw new Error("重复工具执行。");
-      const assistant = entries.filter((entry) => entry.kind === "assistant").at(-1);
-      if (assistant?.kind !== "assistant" || assistant.stop_reason !== "toolUse" || !assistant.content.some((block) => block.type === "tool_call" && block.tool_call_id === tool_call_id && block.name === name)) throw new Error("工具执行缺少最终模型调用。");
-      entries.push({ kind: "tool", id: tool_call_id, name, arguments: args, status: "running" });
+      if (entries.some((entry) => entry.id === tool_call_id))
+        throw new Error("重复工具执行。");
+      const assistant = entries
+        .filter((entry) => entry.kind === "assistant")
+        .at(-1);
+      if (
+        assistant?.kind !== "assistant" ||
+        assistant.stop_reason !== "toolUse" ||
+        !assistant.content.some(
+          (block) =>
+            block.type === "tool_call" &&
+            block.tool_call_id === tool_call_id &&
+            block.name === name,
+        )
+      )
+        throw new Error("工具执行缺少最终模型调用。");
+      entries.push({
+        kind: "tool",
+        id: tool_call_id,
+        name,
+        arguments: args,
+        status: "running",
+      });
+      break;
+    }
+    case "tool_execution_update": {
+      const index = entries.findIndex(
+        (entry) => entry.id === event.data.tool_call_id,
+      );
+      const entry = entries[index];
+      // 中间态快照：完整替换内容；执行结束后的迟到或无关更新忽略，最终结果由完成/保存事件覆盖。
+      if (
+        !entry ||
+        entry.kind !== "tool" ||
+        entry.status !== "running" ||
+        entry.name !== event.data.tool_name
+      )
+        break;
+      entries[index] = { ...entry, content: event.data.content };
+      break;
+    }
+    case "tool_execution_end": {
+      const index = entries.findIndex(
+        (entry) => entry.id === event.data.tool_call_id,
+      );
+      const entry = entries[index];
+      if (
+        !entry ||
+        entry.kind !== "tool" ||
+        entry.status !== "running" ||
+        entry.name !== event.data.tool_name
+      )
+        throw new Error("工具执行完成缺少调用或重复返回。");
+      entries[index] = {
+        ...entry,
+        content: event.data.content,
+        status: event.data.is_error ? "failed" : "completed",
+      };
       break;
     }
     case "tool_result": {
-      const index = entries.findIndex((entry) => entry.id === event.data.tool_call_id);
+      const index = entries.findIndex(
+        (entry) => entry.id === event.data.tool_call_id,
+      );
       const entry = entries[index];
-      if (!entry || entry.kind !== "tool" || entry.status !== "running") throw new Error("工具结果缺少调用或重复返回。");
-      entries[index] = { ...entry, content: event.data.content, status: event.data.is_error ? "failed" : "completed", entry_id: event.data.entry_id, parent_id: event.data.parent_id };
+      if (!entry || entry.kind !== "tool" || entry.entry_id !== undefined)
+        throw new Error("工具结果缺少调用或重复返回。");
+      const profile =
+        !event.data.is_error && entry.name === PREPARE_PROFILE
+          ? { profile: preparedProfilePayload(event.data.content) }
+          : {};
+      entries[index] = {
+        ...entry,
+        content: event.data.content,
+        status: event.data.is_error ? "failed" : "completed",
+        entry_id: event.data.entry_id,
+        parent_id: event.data.parent_id,
+        ...profile,
+      };
       break;
     }
     case "steering_status": {
-      const existing: ReActEntry | undefined = entries.find((entry) => entry.id === event.data.steering_id);
-      if (existing !== undefined && existing.kind !== "user") throw new Error("Steering 标识冲突。");
+      const existing: ReActEntry | undefined = entries.find(
+        (entry) => entry.id === event.data.steering_id,
+      );
+      if (existing !== undefined && existing.kind !== "user")
+        throw new Error("Steering 标识冲突。");
       return applySteeringStatus(round, event.data);
     }
     case "done": {
       const assistants = entries.filter((entry) => entry.kind === "assistant");
-      if (!assistants.length || assistants.some((entry) => !entry.stop_reason) || assistants.at(-1)?.stop_reason !== event.data.stop_reason || entries.some((entry) => entry.kind === "tool" && entry.status === "running") || entries.some((entry) => entry.kind === "user" && entry.steering !== undefined && !settledSteering(entry.steering))) throw new Error("运行未完成。");
+      if (
+        !assistants.length ||
+        assistants.some((entry) => !entry.stop_reason) ||
+        assistants.at(-1)?.stop_reason !== event.data.stop_reason ||
+        entries.some(
+          (entry) => entry.kind === "tool" && entry.entry_id === undefined,
+        ) ||
+        entries.some(
+          (entry) =>
+            entry.kind === "user" &&
+            entry.steering !== undefined &&
+            !settledSteering(entry.steering),
+        )
+      )
+        throw new Error("运行未完成。");
       return { ...round, status: "completed" };
     }
     case "error":
-      if (event.data.tool_call_id !== null && !entries.some((entry) => entry.kind === "tool" && entry.id === event.data.tool_call_id && entry.status === "running")) throw new Error("错误关联工具无效。");
-      return finishReActRound(round, event.data.status, event.data.message, event.data.tool_call_id);
+      if (
+        event.data.tool_call_id !== null &&
+        !entries.some(
+          (entry) =>
+            entry.kind === "tool" &&
+            entry.id === event.data.tool_call_id &&
+            entry.entry_id === undefined,
+        )
+      )
+        throw new Error("错误关联工具无效。");
+      return finishReActRound(
+        round,
+        event.data.status,
+        event.data.message,
+        event.data.tool_call_id,
+      );
   }
   return { ...round, entries, run_id: data.run_id };
 }
 
-function object(value: unknown): value is Record<string, unknown> { return value !== null && typeof value === "object" && !Array.isArray(value); }
-const uuid = (value: unknown): value is string => typeof value === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value);
+/* ===== 画像自然语言确认与保存（profile-natural-confirmation-plan §3.2、§9）===== */
+
+/** 三个画像业务工具的固定名称（profile-plan §4） */
+export const PREPARE_PROFILE = "prepare_profile_update";
+const SAVE_PROFILE = "save_profile_update";
+const PROFILE_UPDATE_STATUS = "get_profile_update_status";
+
+/** 保存落定（§6、§9.1）：仅保存工具成功结果或状态查询核实 saved，且快照标识与本次调用参数一致 */
+export function profileSaved(event: ReActEvent, round: ReActRound): boolean {
+  if (event.event !== "tool_result" || event.data.is_error) return false;
+  const entry = round.entries.find(
+    (item) => item.kind === "tool" && item.id === event.data.tool_call_id,
+  );
+  if (
+    entry?.kind !== "tool" ||
+    (entry.name !== SAVE_PROFILE && entry.name !== PROFILE_UPDATE_STATUS)
+  )
+    return false;
+  const value = JSON.parse(event.data.content) as unknown;
+  const proposalId = entry.arguments.proposal_id;
+  if (entry.name === SAVE_PROFILE)
+    return parseProfileSaveResult(value).proposal_id === proposalId;
+  const status = parseProfileStatusResult(value);
+  return status.status === "saved" && status.proposal_id === proposalId;
+}
+
+function object(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+const uuid = (value: unknown): value is string =>
+  typeof value === "string" &&
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value);
 const stopReasons = ["stop", "toolUse", "length", "error", "aborted"];
-const discardReasons: readonly DiscardReasonWire[] = ["completed", "failed", "cancelled", "interrupted"];
-const updateTypes = ["text_start", "text_delta", "text_end", "thinking_start", "thinking_delta", "thinking_end", "toolcall_start", "toolcall_delta", "toolcall_end"];
+const discardReasons: readonly DiscardReasonWire[] = [
+  "completed",
+  "failed",
+  "cancelled",
+  "interrupted",
+];
+const updateTypes = [
+  "text_start",
+  "text_delta",
+  "text_end",
+  "thinking_start",
+  "thinking_delta",
+  "thinking_end",
+  "toolcall_start",
+  "toolcall_delta",
+  "toolcall_end",
+];
 
 function validateContent(value: unknown): void {
   if (!Array.isArray(value)) throw new Error("消息内容无效。");
   let previous = -1;
   for (const block of value) {
-    if (!object(block) || !Number.isSafeInteger(block.content_index) || (block.content_index as number) <= previous) throw new Error("内容块索引无效。");
+    if (
+      !object(block) ||
+      !Number.isSafeInteger(block.content_index) ||
+      (block.content_index as number) <= previous
+    )
+      throw new Error("内容块索引无效。");
     previous = block.content_index as number;
     const keys = ["content_index", "type"];
-    if (block.type === "text" && typeof block.text === "string") keys.push("text");
-    else if (block.type === "thinking" && typeof block.thinking === "string") keys.push("thinking");
-    else if (block.type === "tool_call" && typeof block.tool_call_id === "string" && block.tool_call_id && typeof block.name === "string" && block.name && object(block.arguments)) keys.push("tool_call_id", "name", "arguments");
+    if (block.type === "text" && typeof block.text === "string")
+      keys.push("text");
+    else if (block.type === "thinking" && typeof block.thinking === "string")
+      keys.push("thinking");
+    else if (
+      block.type === "tool_call" &&
+      typeof block.tool_call_id === "string" &&
+      block.tool_call_id &&
+      typeof block.name === "string" &&
+      block.name &&
+      object(block.arguments)
+    )
+      keys.push("tool_call_id", "name", "arguments");
     else throw new Error("内容块字段无效。");
-    if (Object.keys(block).some((key) => !keys.includes(key))) throw new Error("未知内容块字段。");
+    if (Object.keys(block).some((key) => !keys.includes(key)))
+      throw new Error("未知内容块字段。");
   }
 }
 
-export function createReActParser(onEvent: (event: ReActEvent) => void, runId: string) {
+export function createReActParser(
+  onEvent: (event: ReActEvent) => void,
+  runId: string,
+) {
   if (!uuid(runId)) throw new Error("运行身份无效。");
   let terminal = false;
   const parser = createParser({
-    onError(error) { throw error; },
+    onError(error) {
+      throw error;
+    },
     onEvent(message) {
       if (terminal) throw new Error("终止后收到事件。");
       const data: unknown = JSON.parse(message.data);
-      if (!object(data) || data.run_id !== runId) throw new Error("事件运行身份无效。");
+      if (!object(data) || data.run_id !== runId)
+        throw new Error("事件运行身份无效。");
       const string = (key: string) => typeof data[key] === "string";
       switch (message.event) {
         case "message_start":
@@ -419,43 +886,124 @@ export function createReActParser(onEvent: (event: ReActEvent) => void, runId: s
         case "message_end":
           if (!uuid(data.message_id)) throw new Error("消息身份无效。");
           validateContent(data.content);
-          if (message.event === "message_update" && (!Number.isSafeInteger(data.content_index) || !updateTypes.includes(data.update_type as string) || !(data.content as ReActContent[]).some((block) => block.content_index === data.content_index))) throw new Error("消息更新无效。");
-          if (message.event === "message_end" && (!stopReasons.includes(data.stop_reason as string) || !uuid(data.entry_id) || data.entry_id !== data.message_id || !(data.parent_id === null || uuid(data.parent_id)))) throw new Error("消息结束事件无效。");
+          if (
+            message.event === "message_update" &&
+            (!Number.isSafeInteger(data.content_index) ||
+              !updateTypes.includes(data.update_type as string) ||
+              !(data.content as ReActContent[]).some(
+                (block) => block.content_index === data.content_index,
+              ))
+          )
+            throw new Error("消息更新无效。");
+          if (
+            message.event === "message_end" &&
+            (!stopReasons.includes(data.stop_reason as string) ||
+              !uuid(data.entry_id) ||
+              data.entry_id !== data.message_id ||
+              !(data.parent_id === null || uuid(data.parent_id)))
+          )
+            throw new Error("消息结束事件无效。");
           break;
         case "tool_start":
-          if (!string("tool_call_id") || !data.tool_call_id || !string("name") || !data.name || !object(data.arguments)) throw new Error("工具调用无效。");
+          if (
+            !string("tool_call_id") ||
+            !data.tool_call_id ||
+            !string("name") ||
+            !data.name ||
+            !object(data.arguments)
+          )
+            throw new Error("工具调用无效。");
+          break;
+        case "tool_execution_update":
+          if (
+            !string("tool_call_id") ||
+            !data.tool_call_id ||
+            !string("tool_name") ||
+            !data.tool_name ||
+            typeof data.content !== "string" ||
+            typeof data.is_error !== "boolean"
+          )
+            throw new Error("工具进度事件无效。");
+          break;
+        case "tool_execution_end":
+          if (
+            !string("tool_call_id") ||
+            !data.tool_call_id ||
+            !string("tool_name") ||
+            !data.tool_name ||
+            typeof data.content !== "string" ||
+            typeof data.is_error !== "boolean"
+          )
+            throw new Error("工具执行完成事件无效。");
           break;
         case "tool_result":
-          if (!string("tool_call_id") || !string("content") || typeof data.is_error !== "boolean" || !uuid(data.entry_id) || !(data.parent_id === null || uuid(data.parent_id))) throw new Error("工具结果无效。");
+          if (
+            !string("tool_call_id") ||
+            !string("content") ||
+            typeof data.is_error !== "boolean" ||
+            !uuid(data.entry_id) ||
+            !(data.parent_id === null || uuid(data.parent_id))
+          )
+            throw new Error("工具结果无效。");
           break;
         case "steering_status":
           if (!uuid(data.steering_id)) throw new Error("Steering 状态无效。");
-          else if (data.status === "consumed") { if (!uuid(data.entry_id) || data.reason !== null) throw new Error("Steering 消费状态无效。"); }
-          else if (data.status === "withdrawn") { if (data.entry_id !== null || data.reason !== null) throw new Error("Steering 撤回状态无效。"); }
-          else if (data.status === "discarded") { if (data.entry_id !== null || !discardReasons.includes(data.reason as DiscardReasonWire)) throw new Error("Steering 丢弃状态无效。"); }
-          else throw new Error("Steering 状态无效。");
+          else if (data.status === "consumed") {
+            if (!uuid(data.entry_id) || data.reason !== null)
+              throw new Error("Steering 消费状态无效。");
+          } else if (data.status === "withdrawn") {
+            if (data.entry_id !== null || data.reason !== null)
+              throw new Error("Steering 撤回状态无效。");
+          } else if (data.status === "discarded") {
+            if (
+              data.entry_id !== null ||
+              !discardReasons.includes(data.reason as DiscardReasonWire)
+            )
+              throw new Error("Steering 丢弃状态无效。");
+          } else throw new Error("Steering 状态无效。");
           break;
         case "done":
-          if (data.status !== "completed" || !["stop", "length"].includes(data.stop_reason as string)) throw new Error("终止状态无效。");
+          if (
+            data.status !== "completed" ||
+            !["stop", "length"].includes(data.stop_reason as string)
+          )
+            throw new Error("终止状态无效。");
           terminal = true;
           break;
         case "error":
-          if (!string("message") || !(data.tool_call_id === null || string("tool_call_id")) || !((data.status === "failed" && (data.code === "execution_failed" || data.code === "credential_detected")) || (data.status === "cancelled" && data.code === "cancelled"))) throw new Error("错误事件无效。");
+          if (
+            !string("message") ||
+            !(data.tool_call_id === null || string("tool_call_id")) ||
+            !(
+              (data.status === "failed" &&
+                (data.code === "execution_failed" ||
+                  data.code === "credential_detected")) ||
+              (data.status === "cancelled" && data.code === "cancelled")
+            )
+          )
+            throw new Error("错误事件无效。");
           terminal = true;
           break;
-        default: throw new Error("未知事件。");
+        default:
+          throw new Error("未知事件。");
       }
       onEvent({ event: message.event, data } as ReActEvent);
     },
   });
   return {
     feed: (chunk: string) => parser.feed(chunk),
-    finish() { if (!terminal) throw new Error("连接中断，未收到终止事件。"); },
-    get terminal() { return terminal; },
+    finish() {
+      if (!terminal) throw new Error("连接中断，未收到终止事件。");
+    },
+    get terminal() {
+      return terminal;
+    },
   };
 }
 
-export function validChatInput(text: string): boolean { return !!text.trim() && Array.from(text).length <= 32000; }
+export function validChatInput(text: string): boolean {
+  return !!text.trim() && Array.from(text).length <= 32000;
+}
 
 export class ReActHttpError extends Error {
   constructor(
@@ -471,9 +1019,16 @@ export class ReActHttpError extends Error {
 
 /** 失效操作冲突（用户约定）：operation_conflict 且 reason=operation_expired，前端删除本地账本并重读历史 */
 export function isExpiredOperation(failure: unknown): boolean {
-  return failure instanceof ReActHttpError && failure.code === "operation_conflict" && failure.reason === "operation_expired";
+  return (
+    failure instanceof ReActHttpError &&
+    failure.code === "operation_conflict" &&
+    failure.reason === "operation_expired"
+  );
 }
 
-export function canSubmitChatInput(text: string, unknownRequests: string[]): boolean {
+export function canSubmitChatInput(
+  text: string,
+  unknownRequests: string[],
+): boolean {
   return validChatInput(text) && !unknownRequests.includes(text);
 }

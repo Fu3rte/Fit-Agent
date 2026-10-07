@@ -1,8 +1,27 @@
-// 运行：node --experimental-transform-types scripts/session-edit-regenerate-check.mjs
+// 运行：node scripts/session-edit-regenerate-check.mjs
 // 纯函数检查：编辑/重新生成的删除范围、账本恢复、占位轮次、done 校验与失效操作识别（不触达后端）
 import assert from "node:assert/strict";
-import { applyReActEvent, applySteeringStatus, isExpiredOperation, ReActHttpError } from "../src/features/chat/utils/reactAgent.ts";
-import { historyToRounds, operationRound, pruneFrom, reconcileLedger } from "../src/features/chat/utils/sessionHistory.ts";
+import { createServer } from "vite";
+
+// 被测模块按项目别名引用 @/lib，须经 vite 解析加载
+const server = await createServer({
+  appType: "custom",
+  logLevel: "silent",
+  server: { middlewareMode: true },
+});
+const {
+  applyReActEvent,
+  applySteeringStatus,
+  isExpiredOperation,
+  ReActHttpError,
+} = await server.ssrLoadModule("/src/features/chat/utils/reactAgent.ts");
+const {
+  historyToRounds,
+  operationRound,
+  pruneFrom,
+  reconcileLedger,
+} = await server.ssrLoadModule("/src/features/chat/utils/sessionHistory.ts");
+await server.close();
 
 const u = (n) => `${n.toString(16).padStart(8, "0")}-0000-4000-8000-000000000000`;
 const sessionId = u(1);

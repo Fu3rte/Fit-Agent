@@ -1,18 +1,9 @@
 import { useState } from "react";
-import {
-  useMutation,
-  useQuery,
-  useQueryClient,
-} from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Trash2 } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
-import {
-  Card,
-  CardContent,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { DatePicker } from "@/components/ui/date-picker";
 import { Input } from "@/components/ui/input";
 import {
@@ -28,10 +19,7 @@ import {
   listPlanSessionCandidates,
 } from "@/lib/api";
 import { SET_TYPE_LABELS } from "@/lib/catalogLabels";
-import type {
-  ConfirmWorkoutResponseWire,
-  SetTypeWire,
-} from "@/lib/contract";
+import type { ConfirmWorkoutResponseWire, SetTypeWire } from "@/lib/contract";
 import {
   addSetRow,
   confirmBodyOf,

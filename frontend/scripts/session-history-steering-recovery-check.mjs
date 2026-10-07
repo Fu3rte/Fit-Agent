@@ -46,7 +46,7 @@ const until = async (driver, expression, timeout, label) => {
 const message = "textarea[aria-label='消息']";
 const stop = "button[aria-label='停止']";
 const transcriptText = "document.querySelector('[data-slot=message-scroller-content]').innerText";
-const WITHDRAW = "[...document.querySelectorAll('button')].some((el) => el.textContent.trim() === '撤回')";
+const WITHDRAW = `!!document.querySelector("button[aria-label='撤回']")`;
 const ALERT = "!!document.querySelector('[role=alert]')";
 const activeId = "(JSON.parse(localStorage.getItem('fit-agent:chat-client')||'null')||{}).selected_session_id";
 const send = (driver, text) => { driver("fill", message, text); driver("press", "Enter"); };

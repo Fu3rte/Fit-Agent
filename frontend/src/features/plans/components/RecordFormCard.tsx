@@ -6,12 +6,7 @@ import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { DatePicker } from "@/components/ui/date-picker";
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
-import {
-  Card,
-  CardContent,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import {
   Select,
@@ -168,7 +163,9 @@ function exerciseOptions(
   keyword: string,
 ): { items: ExerciseWire[]; truncated: boolean } {
   if (keyword.trim() === "") {
-    const recommendable = exercises.filter((exercise) => exercise.recommendable);
+    const recommendable = exercises.filter(
+      (exercise) => exercise.recommendable,
+    );
     const items = recommendable.slice(0, DEFAULT_EXERCISE_LIMIT);
     return { items, truncated: recommendable.length > items.length };
   }

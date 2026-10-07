@@ -11,11 +11,7 @@ export interface SessionWire {
 
 /** 运行状态（§11.2） */
 export type RunStatusWire =
-  | "running"
-  | "completed"
-  | "failed"
-  | "cancelled"
-  | "interrupted";
+  "running" | "completed" | "failed" | "cancelled" | "interrupted";
 
 /** 运行对象（§11.2）：``last_entry_id``／``finished_at`` 与错误字段允许 null */
 export interface SessionRunWire {
@@ -32,17 +28,11 @@ export interface SessionRunWire {
 
 /** 输入状态（§11.2） */
 export type SteeringStatusWire =
-  | "pending"
-  | "consumed"
-  | "withdrawn"
-  | "discarded";
+  "pending" | "consumed" | "withdrawn" | "discarded";
 
 /** 丢弃原因（§11.2） */
 export type DiscardReasonWire =
-  | "completed"
-  | "failed"
-  | "cancelled"
-  | "interrupted";
+  "completed" | "failed" | "cancelled" | "interrupted";
 
 /** 输入对象（§11.2）：``entry_id`` 仅 consumed 有值，``reason`` 仅 discarded 有值 */
 export interface SteeringInputWire {
@@ -158,6 +148,12 @@ export interface SessionListWire {
   sessions: SessionWire[];
 }
 
+/** DELETE /api/sessions/{session_id}（session-delete-contract §4.2）：``deleted`` 固定为 true */
+export interface SessionDeleteWire {
+  session_id: string;
+  deleted: true;
+}
+
 /** 助手公开内容块（§3.2）：历史与 SSE 使用同一公开快照规则 */
 export type PublicAssistantContent = ReActContent;
 
@@ -206,6 +202,77 @@ export interface HistorySteeringWire {
   updated_at: number;
 }
 
+/* ===== 画像查询（backend-http-sse-contract §11.9）===== */
+
+/** 画像八个必填字段：文本字段 null 表示未知；限制列表 null 表示未知，[] 表示明确没有限制 */
+export interface ProfileContentWire {
+  goal: string | null;
+  experience: string | null;
+  environment: string | null;
+  availability: string | null;
+  health_notes: string | null;
+  movement_restrictions: string | null;
+  unavailable_equipment: string[] | null;
+  forbidden_exercise_ids: string[] | null;
+}
+
+/** GET /api/profile：未建档时 ``version`` 与 ``content`` 同时为 null */
+export interface ProfileResponseWire {
+  version: number | null;
+  content: ProfileContentWire | null;
+}
+
+/* ===== 画像自然语言确认与保存（backend-http-sse-contract §11.8、§11.9）===== */
+
+/** 快照保存状态：仅 saved 携带完整保存结果 */
+export type ProfileProposalStatusWire =
+  "pending" | "processing" | "saved" | "invalidated" | "conflicted";
+
+/** `prepare_profile_update` 输入：单用户目标画像、查询得到的依据版本与完整待确认内容 */
+export interface ProfileProposalArgumentsWire {
+  /** 目标画像：严格整数且固定 1（单用户本地画像 id） */
+  profile_id: number;
+  base_profile_version: number | null;
+  payload: ProfileContentWire;
+}
+
+/** `prepare_profile_update` 输出：后端生成的快照标识与固定内容，前端完整展示 `payload` */
+export interface ProfileProposalWire {
+  proposal_id: string;
+  profile_id: number;
+  base_profile_version: number | null;
+  payload: ProfileContentWire;
+}
+
+/** `save_profile_update` 输入：快照标识、完整画像展示节点与用户确认节点 */
+export interface ProfileSaveArgumentsWire {
+  proposal_id: string;
+  display_entry_id: string;
+  confirmation_entry_id: string;
+}
+
+/** `save_profile_update` 成功输出，同时是 saved 状态的固定保存结果与幂等记录内容 */
+export interface ProfileSaveResultWire {
+  proposal_id: string;
+  profile_id: number;
+  version: number;
+  content: ProfileContentWire;
+  /** UTC 毫秒；重复保存保持原值 */
+  saved_at: number;
+}
+
+/** `get_profile_update_status` 输入 */
+export interface ProfileStatusArgumentsWire {
+  proposal_id: string;
+}
+
+/** `get_profile_update_status` 输出：`saved` 的 `result` 为完整固定结果，其他状态为 null */
+export interface ProfileStatusResultWire {
+  proposal_id: string;
+  status: ProfileProposalStatusWire;
+  result: ProfileSaveResultWire | null;
+}
+
 /** GET /api/sessions/{session_id}/history：会话头 ＋ 当前分支节点 ＋ 关联运行与输入（§3） */
 export interface SessionHistoryWire {
   session: SessionWire;
@@ -231,18 +298,30 @@ export interface RunSteeringListWire {
 
 /* ===== Agent SSE 事件（backend-http-sse-contract §8、§11.6）===== */
 
-export type ReActStopReason = "stop" | "toolUse" | "length" | "error" | "aborted";
+export type ReActStopReason =
+  "stop" | "toolUse" | "length" | "error" | "aborted";
 
 export type ReActContent = { content_index: number } & (
   | { type: "text"; text: string }
   | { type: "thinking"; thinking: string }
-  | { type: "tool_call"; tool_call_id: string; name: string; arguments: Record<string, unknown> }
+  | {
+      type: "tool_call";
+      tool_call_id: string;
+      name: string;
+      arguments: Record<string, unknown>;
+    }
 );
 
 export type ReActUpdateType =
-  | "text_start" | "text_delta" | "text_end"
-  | "thinking_start" | "thinking_delta" | "thinking_end"
-  | "toolcall_start" | "toolcall_delta" | "toolcall_end";
+  | "text_start"
+  | "text_delta"
+  | "text_end"
+  | "thinking_start"
+  | "thinking_delta"
+  | "thinking_end"
+  | "toolcall_start"
+  | "toolcall_delta"
+  | "toolcall_end";
 
 /** 一条 Steering 状态通知（§11.6）：三种状态的字段组合固定 */
 export type SteeringStatus =
@@ -258,25 +337,88 @@ interface ReActCommittedEntry {
   parent_id: string | null;
 }
 
+/** 单工具进度／完成事件共用的公开快照（§8） */
+interface ReActToolSnapshot {
+  tool_call_id: string;
+  tool_name: string;
+  content: string;
+  is_error: boolean;
+}
+
 export type ReActEvent = { data: { run_id: string } } & (
   | { event: "message_start"; data: ReActMessageData }
-  | { event: "message_update"; data: ReActMessageData & { content_index: number; update_type: ReActUpdateType } }
-  | { event: "message_end"; data: ReActMessageData & ReActCommittedEntry & { stop_reason: ReActStopReason } }
-  | { event: "tool_start"; data: { tool_call_id: string; name: string; arguments: Record<string, unknown> } }
-  | { event: "tool_result"; data: { tool_call_id: string; content: string; is_error: boolean } & ReActCommittedEntry }
+  | {
+      event: "message_update";
+      data: ReActMessageData & {
+        content_index: number;
+        update_type: ReActUpdateType;
+      };
+    }
+  | {
+      event: "message_end";
+      data: ReActMessageData &
+        ReActCommittedEntry & { stop_reason: ReActStopReason };
+    }
+  | {
+      event: "tool_start";
+      data: {
+        tool_call_id: string;
+        name: string;
+        arguments: Record<string, unknown>;
+      };
+    }
+  | { event: "tool_execution_update"; data: ReActToolSnapshot }
+  | { event: "tool_execution_end"; data: ReActToolSnapshot }
+  | {
+      event: "tool_result";
+      data: {
+        tool_call_id: string;
+        content: string;
+        is_error: boolean;
+      } & ReActCommittedEntry;
+    }
   | { event: "steering_status"; data: { steering_id: string } & SteeringStatus }
-  | { event: "done"; data: { status: "completed"; stop_reason: "stop" | "length" } }
-  | { event: "error"; data: { status: "failed" | "cancelled"; code: "execution_failed" | "cancelled" | "credential_detected"; message: string; tool_call_id: string | null } }
+  | {
+      event: "done";
+      data: { status: "completed"; stop_reason: "stop" | "length" };
+    }
+  | {
+      event: "error";
+      data: {
+        status: "failed" | "cancelled";
+        code: "execution_failed" | "cancelled" | "credential_detected";
+        message: string;
+        tool_call_id: string | null;
+      };
+    }
 );
 
-/** 已注册业务接口错误码（§11.5，编辑与重新生成新增 ``entry_not_found`` / ``invalid_target_entry``） */
+/** 已注册业务接口错误码（§11.5，编辑与重新生成新增 ``entry_not_found`` / ``invalid_target_entry``，
+ *  画像自然语言确认新增 §11.9 的八项业务码） */
 export type ErrorCode =
-  | "host_forbidden" | "origin_forbidden"
-  | "session_not_found" | "run_not_found" | "steering_not_found"
-  | "entry_not_found" | "invalid_target_entry"
-  | "session_conflict" | "session_mismatch" | "run_busy" | "run_closed"
-  | "operation_conflict" | "steering_consumption_conflict" | "incomplete_tool_chain"
-  | "invalid_request" | "credential_detected"
+  | "host_forbidden"
+  | "origin_forbidden"
+  | "session_not_found"
+  | "run_not_found"
+  | "steering_not_found"
+  | "entry_not_found"
+  | "invalid_target_entry"
+  | "session_conflict"
+  | "session_mismatch"
+  | "run_busy"
+  | "run_closed"
+  | "operation_conflict"
+  | "steering_consumption_conflict"
+  | "incomplete_tool_chain"
+  | "profile_proposal_not_found"
+  | "profile_proposal_invalidated"
+  | "profile_update_processing"
+  | "profile_version_conflict"
+  | "profile_confirmation_invalid"
+  | "profile_access_denied"
+  | "invalid_request"
+  | "invalid_business_payload"
+  | "credential_detected"
   | "internal_error";
 
 export interface ApiError {
@@ -317,36 +459,6 @@ export interface ExerciseWire {
 export interface ExerciseListWire {
   exercises: ExerciseWire[];
 }
-
-/** 画像单字段三态（无 context_version）：known 带值，unknown／denied 值必须为 null */
-export type FactState = "unknown" | "denied" | "known";
-
-export interface ProfileFactWire<T> {
-  state: FactState;
-  value: T | null;
-}
-
-/** 训练目标的闭集取值（与后端 TRAINING_GOALS 同集合）；计划内容要求按目标分节 */
-export type TrainingGoal = "增肌" | "增力" | "减脂";
-
-/** GET／PUT /api/profile 的 profile 载荷：七字段逐字拼写 */
-export interface ProfileFactsWire {
-  training_goal: ProfileFactWire<TrainingGoal>;
-  weekly_frequency: ProfileFactWire<number>;
-  training_mode: ProfileFactWire<"bodyweight" | "equipment">;
-  explicit_preferences: ProfileFactWire<string[]>;
-  current_level: ProfileFactWire<string>;
-  known_injuries: ProfileFactWire<string[]>;
-  forbidden_exercise_ids: ProfileFactWire<string[]>;
-}
-
-export interface ProfileResponseWire {
-  /** null = 未建档（不得显示成完整画像） */
-  profile: ProfileFactsWire | null;
-}
-
-/** PUT /api/profile 请求体：整份覆盖，未填写用 unknown、明确为空用 denied */
-export type ProfileWriteBody = ProfileFactsWire;
 
 /** 组类型固定三态（与 workout_sets CHECK 同集合；没有「未申报」态） */
 export type SetTypeWire = "work" | "warmup" | "assisted";
@@ -707,12 +819,7 @@ export interface ConversationCreateBody {
 
 /** Run 状态（conversation_runs.status 同集合）：``waiting`` 即该轮在等用户确认 */
 export type ConversationRunStatusWire =
-  | "pending"
-  | "running"
-  | "waiting"
-  | "completed"
-  | "failed"
-  | "cancelled";
+  "pending" | "running" | "waiting" | "completed" | "failed" | "cancelled";
 
 /** 服务端投影的一条 Assistant 文本与状态（message.status 同集合） */
 export interface ConversationAssistantWire {
@@ -869,8 +976,7 @@ export type ProviderApiWire = "openai_compatible" | "anthropic_messages";
 
 /** 结构化输出机制：只决定 with_structured_output 的原生 kwargs（与后端 STRUCTURED_OUTPUTS 同集合） */
 export type ProviderStructuredOutputWire =
-  | "json_schema"
-  | "function_calling_strict";
+  "json_schema" | "function_calling_strict";
 
 /** GET /api/provider 响应：后端不回传 api_key 本体，只给是否已配置的布尔 */
 export type ProviderStatusWire = {

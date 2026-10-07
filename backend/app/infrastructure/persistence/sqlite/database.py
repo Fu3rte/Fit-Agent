@@ -8,16 +8,29 @@ from typing import TypeVar
 
 import aiosqlite
 
+from app.domain.business.errors import CommitVetoed
+
 T = TypeVar("T")
 
-SCHEMA_VERSION = 2
+# 提交否决判据：由连接线程在 COMMIT 执行期间同步调用，返回真值表示本次提交让位。
+CommitVeto = Callable[[], bool]
+
+SCHEMA_VERSION = 5
 
 _MIGRATIONS_DIR = Path(__file__).resolve().parent / "migrations"
 _INITIAL_SCHEMA = _MIGRATIONS_DIR / "001_initial.sql"
 _DELETE_SCHEMA = _MIGRATIONS_DIR / "002_delete_and_invalidation.sql"
+_BUSINESS_SCHEMA = _MIGRATIONS_DIR / "003_business.sql"
+_PROFILE_SNAPSHOT_SCHEMA = _MIGRATIONS_DIR / "004_profile_snapshot.sql"
 
 # 按目标版本应用的迁移脚本：新库从头依次应用，旧库只应用缺失版本。
-_MIGRATIONS: dict[int, Path] = {1: _INITIAL_SCHEMA, 2: _DELETE_SCHEMA}
+_MIGRATIONS: dict[int, Path] = {
+    1: _INITIAL_SCHEMA,
+    2: _DELETE_SCHEMA,
+    3: _BUSINESS_SCHEMA,
+    4: _PROFILE_SNAPSHOT_SCHEMA,
+    5: _MIGRATIONS_DIR / "005_remove_confirmation_cards.sql",
+}
 
 # 当前版本的结构基线：表 -> 列集合。
 _TABLE_COLUMNS: dict[str, frozenset[str]] = {
@@ -65,6 +78,46 @@ _TABLE_COLUMNS: dict[str, frozenset[str]] = {
         }
     ),
     "session_operation_invalidations": frozenset({"operation_id", "session_id"}),
+    "profile": frozenset({"id", "version", "content", "updated_at"}),
+    "exercises": frozenset(
+        {
+            "id",
+            "name",
+            "body_part",
+            "equipment",
+            "target",
+            "muscle_group",
+            "secondary_muscles",
+            "load_convention",
+            "steps",
+        }
+    ),
+    "profile_snapshots": frozenset(
+        {
+            "proposal_id",
+            "session_id",
+            "request_entry_id",
+            "source_entry_id",
+            "profile_id",
+            "base_profile_version",
+            "payload",
+            "display_entry_id",
+            "confirmation_entry_id",
+            "status",
+            "created_at",
+        }
+    ),
+    "profile_save_records": frozenset(
+        {
+            "proposal_id",
+            "session_id",
+            "profile_id",
+            "display_entry_id",
+            "confirmation_entry_id",
+            "result",
+            "saved_at",
+        }
+    ),
 }
 
 # 当前版本中允许为 NULL 的列。
@@ -79,6 +132,10 @@ _NULLABLE_COLUMNS = frozenset({
     ("steering_inputs", "entry_id"),
     ("steering_inputs", "reason"),
     ("session_operations", "steering_id"),
+    ("exercises", "load_convention"),
+    ("profile_snapshots", "base_profile_version"),
+    ("profile_snapshots", "display_entry_id"),
+    ("profile_snapshots", "confirmation_entry_id"),
 })
 
 # 版本 1 的外键基线：表 -> {(被引用表, {(子列, 父列), ...})}。
@@ -136,6 +193,30 @@ _FOREIGN_KEYS: dict[str, set[tuple[str, frozenset[tuple[str, str]]]]] = {
     "session_operation_invalidations": {
         ("sessions", frozenset({("session_id", "id")})),
     },
+    "profile": set(),
+    "exercises": set(),
+    "profile_snapshots": {
+        ("sessions", frozenset({("session_id", "id")})),
+        (
+            "session_entries",
+            frozenset({("session_id", "session_id"), ("request_entry_id", "id")}),
+        ),
+        (
+            "session_entries",
+            frozenset({("session_id", "session_id"), ("source_entry_id", "id")}),
+        ),
+        (
+            "session_entries",
+            frozenset({("session_id", "session_id"), ("display_entry_id", "id")}),
+        ),
+        (
+            "session_entries",
+            frozenset(
+                {("session_id", "session_id"), ("confirmation_entry_id", "id")}
+            ),
+        ),
+    },
+    "profile_save_records": set(),
 }
 
 _INDEXES = frozenset({
@@ -144,6 +225,9 @@ _INDEXES = frozenset({
     "idx_steering_inputs_run",
     "idx_steering_inputs_entry",
     "idx_session_operations_session",
+    "idx_profile_snapshots_pending",
+    "idx_profile_snapshots_confirmation",
+    "idx_profile_save_records_confirmation",
 })
 
 _TRIGGERS = frozenset({
@@ -157,6 +241,11 @@ _TRIGGERS = frozenset({
     "session_operations_steering_run_insert",
     "session_operations_steering_run_update",
     "session_entries_immutable_update",
+    "profile_snapshots_request_entry_user_insert",
+    "profile_snapshots_source_entry_assistant_insert",
+    "profile_snapshots_display_entry_tool_result",
+    "profile_snapshots_confirmation_entry_user",
+    "profile_snapshots_immutable_update",
 })
 
 
@@ -168,6 +257,7 @@ class Database:
     def __init__(self, connection: aiosqlite.Connection) -> None:
         self._connection = connection
         self._lock = asyncio.Lock()
+        self._veto: CommitVeto | None = None
         self._owner: ContextVar[asyncio.Task | None] = ContextVar(
             f"session_database_transaction_{id(self)}", default=None
         )
@@ -190,7 +280,7 @@ class Database:
             return await operation(self._connection)
 
     @asynccontextmanager
-    async def transaction_scope(self) -> AsyncIterator[None]:
+    async def transaction_scope(self, veto: CommitVeto | None = None) -> AsyncIterator[None]:
         if self._owns_transaction():
             yield
             return
@@ -199,12 +289,37 @@ class Database:
             try:
                 await self._statement("BEGIN")
                 yield
-                await self._statement("COMMIT")
+                await self._commit(veto)
             except BaseException:
                 await self._rollback()
                 raise
             finally:
                 self._owner.reset(token)
+
+    def _checking(self) -> int:
+        # progress 回调运行在连接线程：只读取纯 Python 状态，不得进入事件循环。
+        veto = self._veto
+        return 1 if veto is not None and veto() else 0
+
+    async def _commit(self, veto: CommitVeto | None) -> None:
+        if veto is None:
+            await self._statement("COMMIT")
+            return
+        # 意图登记与本次提交在 COMMIT 语句的实际执行瞬间由连接线程裁决：
+        # 否决使 COMMIT 中断且事务保持未提交，落地后才登记的意图按提交在先处理。
+        self._veto = veto
+        try:
+            await self._connection.set_progress_handler(self._checking, 1)
+            try:
+                await self._statement("COMMIT")
+            except sqlite3.OperationalError as error:
+                # 断开钩子必须先于 ROLLBACK 语句，否则回滚同样被打断。
+                if self._connection.in_transaction:
+                    raise CommitVetoed() from error
+                raise
+        finally:
+            await self._connection.set_progress_handler(None, 0)
+            self._veto = None
 
     async def _statement(self, sql: str) -> None:
         # 排队语句必须在连接线程落地后才传播取消；重复取消不得打断等待。
