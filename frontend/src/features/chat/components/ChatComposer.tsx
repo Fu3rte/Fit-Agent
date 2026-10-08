@@ -12,6 +12,7 @@ export default function ChatComposer({
   unknownRequests,
   onSend,
   onStop,
+  centered,
 }: {
   busy: boolean;
   ready: boolean;
@@ -19,6 +20,8 @@ export default function ChatComposer({
   unknownRequests: string[];
   onSend: (text: string) => Promise<boolean>;
   onStop: () => void;
+  /** 空白草稿版式：输入框给出示例问法 */
+  centered: boolean;
 }) {
   const [request, setRequest] = useState("");
   const [submitting, setSubmitting] = useState(false);
@@ -106,6 +109,11 @@ export default function ChatComposer({
               send();
             }}
             aria-label="消息"
+            placeholder={
+              centered
+                ? "说说你的训练目标、当前计划或今天完成的训练"
+                : undefined
+            }
             rows={1}
             className={cn(
               "w-full resize-none overflow-y-auto border-0 bg-transparent py-1 pl-1 focus-visible:ring-0 field-sizing-content scrollbar-none [&::-webkit-scrollbar]:hidden",

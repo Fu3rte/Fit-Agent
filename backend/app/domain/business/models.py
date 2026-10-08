@@ -1,3 +1,4 @@
+from datetime import date
 from typing import Annotated, Literal, Self, TypeAlias
 
 from pydantic import (
@@ -166,6 +167,170 @@ class ProfileSaveRecord(BusinessModel):
     confirmation_entry_id: str = Field(pattern=STANDARD_UUID)
     result: ProfileSaveResult
     saved_at: int = Field(gt=0)
+
+
+WorkoutProposalStatus: TypeAlias = Literal[
+    "pending", "processing", "saved", "invalidated", "conflicted"
+]
+
+
+class WorkoutSet(BusinessModel):
+    reps: int | None = Field(gt=0)
+    weight_kg: float | None = Field(ge=0)
+    duration_seconds: float | None = Field(gt=0)
+
+
+class WorkoutExercise(BusinessModel):
+    exercise_id: str | None
+    name: str
+    load_convention: LoadConvention | None
+    sets: list[WorkoutSet]
+
+    @field_validator("exercise_id", "name")
+    @classmethod
+    def validate_text(cls, value: str | None) -> str | None:
+        if value is not None and not value.strip():
+            raise ValueError("必须包含非空白内容")
+        return value
+
+    @model_validator(mode="after")
+    def validate_load_convention(self) -> Self:
+        if self.load_convention is None and any(
+            item.weight_kg is not None for item in self.sets
+        ):
+            raise ValueError("重量有值时必须明确重量口径。")
+        return self
+
+
+class WorkoutContent(BusinessModel):
+    exercises: list[WorkoutExercise] = Field(min_length=1)
+    notes: str | None
+
+
+class WorkoutDateModel(BusinessModel):
+    performed_on: str = Field(pattern=r"^\d{4}-\d{2}-\d{2}$")
+
+    @field_validator("performed_on")
+    @classmethod
+    def validate_date(cls, value: str) -> str:
+        date.fromisoformat(value)
+        return value
+
+
+class WorkoutRecord(WorkoutDateModel):
+    id: str = Field(pattern=STANDARD_UUID)
+    version: int = Field(gt=0)
+    content: WorkoutContent
+    created_at: int = Field(gt=0)
+    updated_at: int = Field(gt=0)
+
+
+class WorkoutGetArguments(BusinessModel):
+    workout_id: str = Field(pattern=STANDARD_UUID)
+
+
+class WorkoutListArguments(BusinessModel):
+    date_from: str | None = Field(default=None, pattern=r"^\d{4}-\d{2}-\d{2}$")
+    date_to: str | None = Field(default=None, pattern=r"^\d{4}-\d{2}-\d{2}$")
+    page: int = Field(default=1, gt=0)
+    page_size: int = Field(default=10, ge=1, le=100)
+
+    @field_validator("date_from", "date_to")
+    @classmethod
+    def validate_date(cls, value: str | None) -> str | None:
+        if value is not None:
+            date.fromisoformat(value)
+        return value
+
+    @model_validator(mode="after")
+    def validate_range(self) -> Self:
+        if self.date_from is not None and self.date_to is not None:
+            if self.date_from > self.date_to:
+                raise ValueError("起始日期不能晚于结束日期。")
+        return self
+
+
+class WorkoutListResult(BusinessModel):
+    items: list[WorkoutRecord]
+    page: int = Field(gt=0)
+    page_size: int = Field(ge=1, le=100)
+    total: int = Field(ge=0)
+
+
+class WorkoutProposalArguments(WorkoutDateModel):
+    base_workout_id: str | None = Field(pattern=STANDARD_UUID)
+    base_workout_version: int | None = Field(gt=0)
+    payload: WorkoutContent
+
+    @model_validator(mode="after")
+    def validate_base_pair(self) -> Self:
+        if (self.base_workout_id is None) != (self.base_workout_version is None):
+            raise ValueError("基础记录 ID 与版本必须同时为空或同时有值。")
+        return self
+
+
+class WorkoutProposal(WorkoutProposalArguments):
+    proposal_id: str = Field(pattern=STANDARD_UUID)
+
+
+class WorkoutSaveArguments(BusinessModel):
+    proposal_id: str = Field(pattern=STANDARD_UUID)
+    display_entry_id: str = Field(pattern=STANDARD_UUID)
+    confirmation_entry_id: str = Field(pattern=STANDARD_UUID)
+
+
+class WorkoutSaveResult(WorkoutRecord):
+    proposal_id: str = Field(pattern=STANDARD_UUID)
+    saved_at: int = Field(gt=0)
+
+    @model_validator(mode="after")
+    def validate_saved_time(self) -> Self:
+        if self.saved_at != self.updated_at:
+            raise ValueError("保存时间必须与记录更新时间一致。")
+        return self
+
+
+class WorkoutStatusArguments(BusinessModel):
+    proposal_id: str = Field(pattern=STANDARD_UUID)
+
+
+class WorkoutStatusResult(BusinessModel):
+    proposal_id: str = Field(pattern=STANDARD_UUID)
+    status: WorkoutProposalStatus
+    result: WorkoutSaveResult | None
+
+    @model_validator(mode="after")
+    def validate_result_pair(self) -> Self:
+        if (self.status == "saved") != (self.result is not None):
+            raise ValueError("仅 saved 状态携带完整保存结果。")
+        if self.result is not None and self.result.proposal_id != self.proposal_id:
+            raise ValueError("保存结果的快照标识不一致。")
+        return self
+
+
+class WorkoutSnapshot(WorkoutProposal):
+    session_id: str = Field(pattern=STANDARD_UUID)
+    request_entry_id: str = Field(pattern=STANDARD_UUID)
+    source_entry_id: str = Field(pattern=STANDARD_UUID)
+    display_entry_id: str | None = Field(default=None, pattern=STANDARD_UUID)
+    confirmation_entry_id: str | None = Field(default=None, pattern=STANDARD_UUID)
+    status: WorkoutProposalStatus
+    created_at: int = Field(gt=0)
+
+
+class WorkoutSaveRecord(BusinessModel):
+    proposal_id: str = Field(pattern=STANDARD_UUID)
+    session_id: str = Field(pattern=STANDARD_UUID)
+    display_entry_id: str = Field(pattern=STANDARD_UUID)
+    confirmation_entry_id: str = Field(pattern=STANDARD_UUID)
+    result: WorkoutSaveResult
+    saved_at: int = Field(gt=0)
+
+    @model_validator(mode="after")
+    def validate_result_identity(self) -> Self:
+        if self.proposal_id != self.result.proposal_id or self.saved_at != self.result.saved_at:
+            raise ValueError("固定结果的快照标识与保存时间必须一致。")
+        return self
 
 
 class BusinessFieldError(BusinessModel):

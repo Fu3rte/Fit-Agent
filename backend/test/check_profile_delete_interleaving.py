@@ -38,7 +38,7 @@ def save(ids):
     context = BusinessContext(timezone='Asia/Shanghai', business_date='2026-10-07',
                               session_id=ids['session'], run_id=ids['run'],
                               request_entry_id=ids['request'], source_entry_id=ids['source'])
-    tool = bind_business_tools(app.state.business, context, call, {})['save_profile_update']
+    tool = bind_business_tools(app.state.business, context, call, {}, {})['save_profile_update']
     return run_tool(tool, {'proposal_id': ids['proposal'], 'display_entry_id': ids['display'],
                            'confirmation_entry_id': ids['confirmation']})
 

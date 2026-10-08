@@ -7,7 +7,7 @@ import {
   useNavigate,
 } from "react-router-dom";
 import { Toaster, useSonner } from "sonner";
-import { Moon, Plus, Sun, UserRound } from "lucide-react";
+import { Dumbbell, Moon, Plus, Sun, UserRound } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { getTheme, setTheme, type Theme } from "@/lib/theme";
 import { TooltipProvider } from "@/components/ui/tooltip";
@@ -30,6 +30,7 @@ import SessionList, {
   navLinkClass,
 } from "@/features/chat/components/SessionList";
 import ProfilePage from "@/features/profile/ProfilePage";
+import WorkoutRecordsPage from "@/features/workout/WorkoutRecordsPage";
 import {
   ensureDraft,
   loadChatStore,
@@ -113,10 +114,11 @@ function ChatHost() {
   );
 }
 
-/** 页面路由（PRODUCT.md §3.5）：``/profile`` 打开个人画像页，其余路径由会话宿主处理 */
+/** 页面路由（PRODUCT.md §3.5）：``/profile`` 打开个人画像页，``/plans`` 打开训练计划页的训练记录区，其余路径由会话宿主处理 */
 function PageHost() {
   const location = useLocation();
   if (location.pathname === "/profile") return <ProfilePage />;
+  if (location.pathname === "/plans") return <WorkoutRecordsPage />;
   return <ChatHost />;
 }
 
@@ -152,6 +154,12 @@ export default function App() {
                     <NavLink to="/profile" className={navLinkClass}>
                       <UserRound aria-hidden />
                       <span>个人画像</span>
+                    </NavLink>
+                  </SidebarMenuItem>
+                  <SidebarMenuItem>
+                    <NavLink to="/plans" className={navLinkClass}>
+                      <Dumbbell aria-hidden />
+                      <span>训练计划</span>
                     </NavLink>
                   </SidebarMenuItem>
                 </SidebarMenu>

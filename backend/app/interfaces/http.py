@@ -11,7 +11,7 @@ from typing import Annotated
 from uuid import UUID, uuid4
 from weakref import WeakValueDictionary
 
-from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, field_validator
@@ -48,7 +48,8 @@ from app.application.business.service import (
 )
 from app.application.session.service import CREDENTIAL_SAFE_MESSAGE, SessionService
 from app.application.session.steering import SteeringCoordinator
-from app.domain.business.models import BusinessContext
+from app.domain.business.errors import BusinessError
+from app.domain.business.models import BusinessContext, WorkoutListArguments
 from app.domain.session.errors import (
     CredentialDetected,
     EntryNotFound,
@@ -252,6 +253,7 @@ async def lifespan(app: FastAPI):
     service.attach_snapshots(business)
     # 中断的保存在事务未提交时已随数据库回滚；恢复完成前不接收任何保存请求。
     await business_repository.recover_interrupted_saves()
+    await business_repository.recover_interrupted_workout_saves()
     async with business_repository.transaction():
         await business_repository.replace_exercises(catalog.all())
     loop = asyncio.get_running_loop()
@@ -300,6 +302,16 @@ async def invalid_request(request: Request, error: RequestValidationError):
 @app.exception_handler(HTTPException)
 async def http_error(request: Request, error: HTTPException):
     return JSONResponse({"detail": error.detail}, error.status_code, headers=NO_STORE)
+
+
+@app.exception_handler(BusinessError)
+async def business_error(request: Request, error: BusinessError):
+    detail = error.detail()
+    if CredentialFilter((load_model_config().OPENAI_API_KEY,)).contains(detail):
+        return JSONResponse({"detail": {
+            "code": "credential_detected", "message": CREDENTIAL_SAFE_MESSAGE,
+        }}, 422, headers=NO_STORE)
+    return JSONResponse({"detail": detail}, error.http_status, headers=NO_STORE)
 
 
 @app.exception_handler(Exception)
@@ -528,8 +540,9 @@ def execute(
     # 的真实 created_at，处理期间固定；每批按 source_entry_id 绑定。
     request_entry = {"id": run.request_entry_id}
     business_day = {"value": ""}
-    # 本批 prepare_profile_update 调用产生的 proposal_id，按 tool_call_id 记录。
+    # 两类准备调用独立登记；结果节点提交后才绑定展示。
     prepared: dict[str, str] = {}
+    workout_prepared: dict[str, str] = {}
 
     def call(coro):
         return asyncio.run_coroutine_threadsafe(coro, loop).result()
@@ -554,7 +567,7 @@ def execute(
         return {
             **tools,
             **bind_business_tools(
-                business, business_context(source_entry_id), call, prepared
+                business, business_context(source_entry_id), call, prepared, workout_prepared
             ),
         }
 
@@ -563,6 +576,12 @@ def execute(
         nodes = []
         bindings = call(business.list_confirmation_bindings(session_id))
         displays = call(business.list_display_bindings(session_id))
+        workout_bindings = call(business.list_workout_confirmation_bindings(session_id))
+        workout_displays = call(business.list_workout_display_bindings(session_id))
+        if bindings.keys() & workout_bindings.keys():
+            raise RuntimeError("确认节点具有多类业务绑定")
+        if displays.keys() & workout_displays.keys():
+            raise RuntimeError("展示节点具有多类业务绑定")
         for entry in call(service.get_branch(session_id, leaf_id)):
             message = entry.messages[0]
             if isinstance(message, UserMessage):
@@ -570,6 +589,11 @@ def execute(
                 proposal_id = bindings.get(entry.id)
                 if proposal_id is not None:
                     node["proposal_id"] = proposal_id
+                    node["business_kind"] = "profile"
+                workout_proposal_id = workout_bindings.get(entry.id)
+                if workout_proposal_id is not None:
+                    node["proposal_id"] = workout_proposal_id
+                    node["business_kind"] = "workout"
                 nodes.append(node)
             elif isinstance(message, AssistantMessage):
                 nodes.append(
@@ -594,6 +618,12 @@ def execute(
                 if proposal_id is not None:
                     node["proposal_id"] = proposal_id
                     node["display_entry_id"] = entry.id
+                    node["business_kind"] = "profile"
+                workout_proposal_id = workout_displays.get(entry.id)
+                if workout_proposal_id is not None:
+                    node["proposal_id"] = workout_proposal_id
+                    node["display_entry_id"] = entry.id
+                    node["business_kind"] = "workout"
                 nodes.append(node)
         return nodes
 
@@ -644,13 +674,16 @@ def execute(
         position["id"] = node_id
         if (
             isinstance(message, ToolResultMessage)
-            and message.tool_name == "prepare_profile_update"
+            and message.tool_name in {"prepare_profile_update", "prepare_workout"}
             and not message.is_error
         ):
-            proposal_id = prepared.get(message.tool_call_id)
-            # 结果节点已提交才形成展示绑定；工具执行完成通知不代表结果已持久化。
-            if proposal_id is not None:
-                call(business.bind_display_entry(proposal_id, node_id))
+            # 成功结果必须对应本批登记；关联缺失直接终止运行。
+            if message.tool_name == "prepare_profile_update":
+                call(business.bind_display_entry(prepared.pop(message.tool_call_id), node_id))
+            else:
+                call(business.bind_workout_display_entry(
+                    workout_prepared.pop(message.tool_call_id), node_id
+                ))
 
     async def get_steering_messages() -> list[Message]:
         return call(coordinator.take(run.id))
@@ -968,6 +1001,36 @@ async def get_profile():
     if guard.contains(payload):
         reject(422, "credential_detected", CREDENTIAL_SAFE_MESSAGE)
     return JSONResponse(payload, headers={"Cache-Control": "no-store"})
+
+
+class WorkoutQuery(WorkoutListArguments):
+    model_config = ConfigDict(extra="forbid", strict=False, allow_inf_nan=False)
+
+
+def check_workout_query(request: Request, allowed: set[str]) -> None:
+    keys = list(request.query_params.keys())
+    if any(key not in allowed or len(request.query_params.getlist(key)) != 1 for key in keys):
+        reject(422, "invalid_request", "请求字段不合法。")
+
+
+def workout_response(response) -> JSONResponse:
+    payload = response.model_dump()
+    if CredentialFilter((load_model_config().OPENAI_API_KEY,)).contains(payload):
+        reject(422, "credential_detected", CREDENTIAL_SAFE_MESSAGE)
+    return JSONResponse(payload, headers=NO_STORE)
+
+
+@app.get("/api/workouts", dependencies=[Depends(check_boundary)])
+async def list_workouts(request: Request, query: Annotated[WorkoutQuery, Query()]):
+    check_workout_query(request, {"date_from", "date_to", "page", "page_size"})
+    arguments = WorkoutListArguments.model_validate(query.model_dump())
+    return workout_response(await request.app.state.business.list_workouts(arguments))
+
+
+@app.get("/api/workouts/{workout_id}", dependencies=[Depends(check_boundary)])
+async def get_workout(workout_id: PathUUID, request: Request):
+    check_workout_query(request, set())
+    return workout_response(await request.app.state.business.get_workout(workout_id))
 
 
 @app.get(

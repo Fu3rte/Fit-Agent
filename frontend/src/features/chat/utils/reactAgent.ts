@@ -9,11 +9,15 @@ import type {
   SteeringReceiveStatusWire,
   SteeringStatus,
   SteeringStatusWire,
+  WorkoutProposalWire,
 } from "@/lib/contract";
 import {
   parseProfileSaveResult,
   parseProfileStatusResult,
+  parseWorkoutSaveResult,
+  parseWorkoutStatusResult,
   preparedProfilePayload,
+  preparedWorkoutProposal,
 } from "@/lib/business";
 import type { ToolCallCardProps } from "../components/ToolCallCard";
 
@@ -46,11 +50,13 @@ export type ReActEntry =
       content: ReActContent[];
       stop_reason?: ReActStopReason;
     } & Partial<CommittedNode>)
-  /** 画像完整展示（profile-plan §3.2）：仅在准备工具的结果节点提交后携带，实时与历史同一口径 */
+  /** 业务待确认内容的完整展示（profile-plan §3.2、workout-http-sse-contract §5）：
+   *  仅在对应准备工具的结果节点提交后携带，实时与历史同一口径 */
   | ({
       kind: "tool";
       id: string;
       profile?: ProfileContentWire;
+      workout?: WorkoutProposalWire;
     } & ToolCallCardProps &
       Partial<CommittedNode>);
 
@@ -720,17 +726,19 @@ export function applyReActEvent(
       const entry = entries[index];
       if (!entry || entry.kind !== "tool" || entry.entry_id !== undefined)
         throw new Error("工具结果缺少调用或重复返回。");
-      const profile =
+      const displayed =
         !event.data.is_error && entry.name === PREPARE_PROFILE
           ? { profile: preparedProfilePayload(event.data.content) }
-          : {};
+          : !event.data.is_error && entry.name === PREPARE_WORKOUT
+            ? { workout: preparedWorkoutProposal(event.data.content) }
+            : {};
       entries[index] = {
         ...entry,
         content: event.data.content,
         status: event.data.is_error ? "failed" : "completed",
         entry_id: event.data.entry_id,
         parent_id: event.data.parent_id,
-        ...profile,
+        ...displayed,
       };
       break;
     }
@@ -782,30 +790,80 @@ export function applyReActEvent(
   return { ...round, entries, run_id: data.run_id };
 }
 
-/* ===== 画像自然语言确认与保存（profile-natural-confirmation-plan §3.2、§9）===== */
+/* ===== 业务快照的展示与保存落定（profile-natural-confirmation-plan §3.2、§9；workout-record-contract §1）===== */
 
 /** 三个画像业务工具的固定名称（profile-plan §4） */
 export const PREPARE_PROFILE = "prepare_profile_update";
 const SAVE_PROFILE = "save_profile_update";
 const PROFILE_UPDATE_STATUS = "get_profile_update_status";
 
-/** 保存落定（§6、§9.1）：仅保存工具成功结果或状态查询核实 saved，且快照标识与本次调用参数一致 */
-export function profileSaved(event: ReActEvent, round: ReActRound): boolean {
+/** 训练记录的六个工具固定名称（workout-record-contract §5） */
+export const PREPARE_WORKOUT = "prepare_workout";
+const SAVE_WORKOUT = "save_workout";
+const UPDATE_WORKOUT = "update_workout";
+const WORKOUT_SAVE_STATUS = "get_workout_save_status";
+
+/** 保存落定的判定口径：保存工具名集合、状态查询工具名与两类结果的 schema 解析 */
+interface SaveVerification {
+  saveTools: readonly string[];
+  statusTool: string;
+  saveProposalId: (value: unknown) => string;
+  statusResult: (value: unknown) => { proposal_id: string; saved: boolean };
+}
+
+const PROFILE_SAVE: SaveVerification = {
+  saveTools: [SAVE_PROFILE],
+  statusTool: PROFILE_UPDATE_STATUS,
+  saveProposalId: (value) => parseProfileSaveResult(value).proposal_id,
+  statusResult: (value) => {
+    const status = parseProfileStatusResult(value);
+    return { proposal_id: status.proposal_id, saved: status.status === "saved" };
+  },
+};
+
+const WORKOUT_SAVE: SaveVerification = {
+  saveTools: [SAVE_WORKOUT, UPDATE_WORKOUT],
+  statusTool: WORKOUT_SAVE_STATUS,
+  saveProposalId: (value) => parseWorkoutSaveResult(value).proposal_id,
+  statusResult: (value) => {
+    const status = parseWorkoutStatusResult(value);
+    return { proposal_id: status.proposal_id, saved: status.status === "saved" };
+  },
+};
+
+/**
+ * 保存落定（§6、§9.1）：仅保存工具的成功结果或状态查询核实 saved，且快照标识与本次调用参数一致。
+ * 结果不合 schema 在解析位置报错；进度与执行完成事件不作为凭据，由 sessionRunManager 据此刷新查询缓存。
+ */
+function proposalSaved(
+  event: ReActEvent,
+  round: ReActRound,
+  verification: SaveVerification,
+): boolean {
   if (event.event !== "tool_result" || event.data.is_error) return false;
   const entry = round.entries.find(
     (item) => item.kind === "tool" && item.id === event.data.tool_call_id,
   );
   if (
     entry?.kind !== "tool" ||
-    (entry.name !== SAVE_PROFILE && entry.name !== PROFILE_UPDATE_STATUS)
+    (!verification.saveTools.includes(entry.name) &&
+      entry.name !== verification.statusTool)
   )
     return false;
   const value = JSON.parse(event.data.content) as unknown;
   const proposalId = entry.arguments.proposal_id;
-  if (entry.name === SAVE_PROFILE)
-    return parseProfileSaveResult(value).proposal_id === proposalId;
-  const status = parseProfileStatusResult(value);
-  return status.status === "saved" && status.proposal_id === proposalId;
+  if (verification.saveTools.includes(entry.name))
+    return verification.saveProposalId(value) === proposalId;
+  const status = verification.statusResult(value);
+  return status.saved && status.proposal_id === proposalId;
+}
+
+export function profileSaved(event: ReActEvent, round: ReActRound): boolean {
+  return proposalSaved(event, round, PROFILE_SAVE);
+}
+
+export function workoutSaved(event: ReActEvent, round: ReActRound): boolean {
+  return proposalSaved(event, round, WORKOUT_SAVE);
 }
 
 function object(value: unknown): value is Record<string, unknown> {

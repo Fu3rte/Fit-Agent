@@ -3,6 +3,7 @@ import { useLocation, useNavigate } from "react-router-dom";
 import ChatComposer from "./components/ChatComposer";
 import ChatTranscript from "./components/ChatTranscript";
 import { Button } from "@/components/ui/button";
+import { cn } from "@/lib/utils";
 import { unknownSteeringRequests } from "./utils/reactAgent";
 import { sessionRuns } from "./utils/sessionRunManager";
 
@@ -42,17 +43,30 @@ export default function ChatPage({
     [view.operations],
   );
 
+  const blank = isDraft && view.rounds.length === 0;
+
   return (
-    <div className="relative flex h-full w-full flex-col overflow-hidden">
-      <ChatTranscript
-        rounds={view.rounds}
-        onRetry={run.retry}
-        onWithdraw={run.withdraw}
-        retrying={view.retrying}
-        canEdit={view.ready && !view.busy}
-        onEdit={run.editMessage}
-        onRegenerate={run.regenerateMessage}
-      />
+    <div
+      className={cn(
+        "relative flex h-full w-full flex-col overflow-hidden",
+        blank && "justify-center",
+      )}
+    >
+      {blank ? (
+        <h2 className="shrink-0 px-6 pb-6 text-center font-display text-3xl font-light tracking-tight">
+          今天想练点什么？
+        </h2>
+      ) : (
+        <ChatTranscript
+          rounds={view.rounds}
+          onRetry={run.retry}
+          onWithdraw={run.withdraw}
+          retrying={view.retrying}
+          canEdit={view.ready && !view.busy}
+          onEdit={run.editMessage}
+          onRegenerate={run.regenerateMessage}
+        />
+      )}
       {view.history === "failed" && (
         <div className="mx-auto flex w-full max-w-4xl items-center gap-2 px-6 pt-2">
           <Button
@@ -66,6 +80,7 @@ export default function ChatPage({
         </div>
       )}
       <ChatComposer
+        centered={blank}
         busy={view.busy}
         ready={view.ready}
         error={view.error}

@@ -25,6 +25,7 @@ import {
 import ToolCallCard from "./ToolCallCard";
 import MarkdownContent from "./MarkdownContent";
 import ProfileFields from "@/features/profile/ProfileFields";
+import { WorkoutProposalFields } from "@/features/workout/WorkoutFields";
 import type { ReActEntry, ReActRound } from "../utils/reactAgent";
 
 /** 就地编辑状态（用户约定）：正在编辑的消息节点及其文本 */
@@ -50,9 +51,15 @@ function Entry({
   onRegenerate: (entryId: string) => void;
 }) {
   if (entry.kind === "tool") {
-    /* 画像完整展示（profile-plan §3.2）：准备工具的结果节点以 AI 一侧普通消息样式呈现全部字段，
-     * 无确认入口；其余工具沿用通用工具展示。 */
-    if (entry.profile === undefined) return <ToolCallCard {...entry} />;
+    /* 业务待确认内容的完整展示（profile-plan §3.2、workout-http-sse-contract §5）：准备工具的结果节点
+     * 以 AI 一侧普通消息样式呈现全部字段，无确认入口；其余工具沿用通用工具展示。 */
+    const prepared =
+      entry.profile !== undefined ? (
+        <ProfileFields content={entry.profile} />
+      ) : entry.workout !== undefined ? (
+        <WorkoutProposalFields proposal={entry.workout} />
+      ) : null;
+    if (prepared === null) return <ToolCallCard {...entry} />;
     return (
       <Message align="start">
         <MessageContent>
@@ -61,9 +68,7 @@ function Entry({
             align="start"
             className="w-full max-w-full"
           >
-            <BubbleContent className="w-full">
-              <ProfileFields content={entry.profile} />
-            </BubbleContent>
+            <BubbleContent className="w-full">{prepared}</BubbleContent>
           </Bubble>
         </MessageContent>
       </Message>

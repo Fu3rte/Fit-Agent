@@ -17,16 +17,19 @@ function DatePicker({
   value,
   onChange,
   label,
+  emptyText,
   className,
 }: {
   value: string;
   onChange: (iso: string) => void;
   /** 触发器可访问名（表单里同一页可能有多个日期控件） */
   label: string;
+  /** 允许空值的调用方给出的空值文案；省略时值为空不出现，再次点选已选日期也不可取消 */
+  emptyText?: string;
   className?: string;
 }) {
   const [open, setOpen] = useState(false);
-  const selected = dateFromIso(value);
+  const selected = value === "" ? undefined : dateFromIso(value);
 
   return (
     <Popover open={open} onOpenChange={setOpen}>
@@ -36,22 +39,22 @@ function DatePicker({
           aria-label={label}
           className={cn(
             "w-44 justify-start gap-2 text-left font-normal tabular-nums",
+            value === "" && "text-muted-foreground",
             className,
           )}
         >
           <CalendarIcon className="text-muted-foreground" aria-hidden />
-          {value.replaceAll("-", "/")}
+          {value === "" ? emptyText : value.replaceAll("-", "/")}
         </Button>
       </PopoverTrigger>
       <PopoverContent className="w-auto p-0">
         <Calendar
           mode="single"
-          required
+          required={emptyText === undefined}
           selected={selected}
           defaultMonth={selected}
-          onSelect={(next) => {
-            if (next === undefined) return;
-            onChange(isoFromDate(next));
+          onSelect={(next: Date | undefined) => {
+            onChange(next === undefined ? "" : isoFromDate(next));
             setOpen(false);
           }}
         />

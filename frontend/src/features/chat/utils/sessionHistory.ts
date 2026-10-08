@@ -4,9 +4,13 @@ import type {
   HistorySteeringWire,
   SessionHistoryWire,
 } from "@/lib/contract";
-import { preparedProfilePayload } from "@/lib/business";
+import {
+  preparedProfilePayload,
+  preparedWorkoutProposal,
+} from "@/lib/business";
 import {
   PREPARE_PROFILE,
+  PREPARE_WORKOUT,
   type PendingOperation,
   type ReActEntry,
   type ReActRound,
@@ -39,7 +43,7 @@ function pickRequestRun(
   );
 }
 
-/** 已提交节点 → 展示条目（§3.2、§3.4）：系统节点返回 null，消费输入只挂到关联用户节点；准备工具结果附带完整画像 */
+/** 已提交节点 → 展示条目（§3.2、§3.4）：系统节点返回 null，消费输入只挂到关联用户节点；准备工具结果附带完整待确认内容 */
 function convertEntry(
   entry: HistoryEntryWire,
   consumedByEntry: Map<string, HistorySteeringWire>,
@@ -86,6 +90,9 @@ function convertEntry(
     parent_id: entry.parent_id,
     ...(message.tool_name === PREPARE_PROFILE && !message.is_error
       ? { profile: preparedProfilePayload(message.content) }
+      : {}),
+    ...(message.tool_name === PREPARE_WORKOUT && !message.is_error
+      ? { workout: preparedWorkoutProposal(message.content) }
       : {}),
   };
 }

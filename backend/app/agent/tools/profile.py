@@ -3,10 +3,9 @@ from app.agent.tool import (
     ExecuteFunction,
     ToolDeclaration,
 )
-from app.agent.tools.common import MainLoopCall, envelope, unbound
+from app.agent.tools.common import MainLoopCall, business_result, unbound
 from app.ai.messages import JsonObject
 from app.application.business.service import BusinessService
-from app.domain.business.errors import BusinessError
 from app.domain.business.models import (
     BusinessContext,
     BusinessModel,
@@ -107,41 +106,29 @@ def bind_profile_tools(
 ) -> dict[str, AgentTool]:
     # call 将业务协程投递到数据库所在主循环；prepared 记录本批快照展示绑定。
     def get_profile(tool_call_id, params: GetProfileArguments, signal, on_update):
-        try:
-            response = call(service.get_profile())
-        except BusinessError as error:
-            return envelope(error.detail(), True)
-        return envelope(response.model_dump())
+        return business_result(service.get_profile(), call)
 
     def prepare_profile_update(
         tool_call_id, params: ProfileProposalArguments, signal, on_update
     ):
-        try:
-            proposal = call(service.prepare_profile_update(context, params, signal))
-        except BusinessError as error:
-            return envelope(error.detail(), True)
-        prepared[tool_call_id] = proposal.proposal_id
-        return envelope(proposal.model_dump())
+        def register(proposal):
+            prepared[tool_call_id] = proposal.proposal_id
+
+        return business_result(
+            service.prepare_profile_update(context, params, signal), call, register
+        )
 
     def save_profile_update(
         tool_call_id, params: ProfileSaveArguments, signal, on_update
     ):
-        try:
-            result = call(service.save_profile_update(context, params, signal))
-        except BusinessError as error:
-            return envelope(error.detail(), True)
-        return envelope(result.model_dump())
+        return business_result(service.save_profile_update(context, params, signal), call)
 
     def get_profile_update_status(
         tool_call_id, params: ProfileStatusArguments, signal, on_update
     ):
-        try:
-            status = call(
-                service.get_profile_update_status(context, params.proposal_id, signal)
-            )
-        except BusinessError as error:
-            return envelope(error.detail(), True)
-        return envelope(status.model_dump())
+        return business_result(
+            service.get_profile_update_status(context, params.proposal_id, signal), call
+        )
 
     return _tools(
         get_profile,

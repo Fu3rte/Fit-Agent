@@ -2,13 +2,14 @@ from app.agent.tool import AgentTool, ToolDeclaration
 from app.agent.tools.common import MainLoopCall
 from app.agent.tools.exercises import bind_exercise_tools, exercise_tool_declarations
 from app.agent.tools.profile import bind_profile_tools, profile_tool_declarations
+from app.agent.tools.workouts import bind_workout_tools, workout_tool_declarations
 from app.application.business.service import BusinessService
 from app.domain.business.models import BusinessContext
 
 
 def business_tool_declarations() -> list[ToolDeclaration]:
     profile = profile_tool_declarations()
-    return [profile[0], *exercise_tool_declarations(), *profile[1:]]
+    return [profile[0], *exercise_tool_declarations(), *profile[1:], *workout_tool_declarations()]
 
 
 def bind_business_tools(
@@ -16,10 +17,12 @@ def bind_business_tools(
     context: BusinessContext,
     call: MainLoopCall,
     prepared: dict[str, str],
+    workout_prepared: dict[str, str],
 ) -> dict[str, AgentTool]:
     profile = bind_profile_tools(service, context, call, prepared)
     return {
         "get_profile": profile["get_profile"],
         **bind_exercise_tools(service),
         **profile,
+        **bind_workout_tools(service, context, call, workout_prepared),
     }

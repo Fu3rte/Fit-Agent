@@ -11,6 +11,13 @@ from app.domain.business.models import (
     ProfileRecord,
     ProfileSaveRecord,
     ProfileSnapshot,
+    WorkoutContent,
+    WorkoutListArguments,
+    WorkoutListResult,
+    WorkoutProposalStatus,
+    WorkoutRecord,
+    WorkoutSaveRecord,
+    WorkoutSnapshot,
 )
 from app.infrastructure.persistence.sqlite.database import CommitVeto, Database
 
@@ -24,6 +31,35 @@ _SAVE_RECORD_COLUMNS = (
     "proposal_id, session_id, profile_id, display_entry_id, confirmation_entry_id, "
     "result, saved_at"
 )
+
+
+_WORKOUT_COLUMNS = "id, performed_on, version, content, created_at, updated_at"
+_WORKOUT_SNAPSHOT_COLUMNS = (
+    "proposal_id, session_id, request_entry_id, source_entry_id, performed_on, "
+    "base_workout_id, base_workout_version, payload, display_entry_id, "
+    "confirmation_entry_id, status, created_at"
+)
+_WORKOUT_SAVE_COLUMNS = (
+    "proposal_id, session_id, display_entry_id, confirmation_entry_id, result, saved_at"
+)
+
+
+def _row_to_workout(row: sqlite3.Row) -> WorkoutRecord:
+    data = dict(row)
+    data["content"] = json.loads(data["content"])
+    return WorkoutRecord.model_validate(data)
+
+
+def _row_to_workout_snapshot(row: sqlite3.Row) -> WorkoutSnapshot:
+    data = dict(row)
+    data["payload"] = json.loads(data["payload"])
+    return WorkoutSnapshot.model_validate(data)
+
+
+def _row_to_workout_save_record(row: sqlite3.Row) -> WorkoutSaveRecord:
+    data = dict(row)
+    data["result"] = json.loads(data["result"])
+    return WorkoutSaveRecord.model_validate(data)
 
 
 def _placeholders(count: int) -> str:
@@ -260,6 +296,182 @@ class SqliteBusinessRepository:
             "UPDATE profile_snapshots SET status = 'pending' "
             "WHERE status = 'processing'",
             (),
+        )
+
+    async def get_workout(self, workout_id: str) -> WorkoutRecord | None:
+        row = await self._fetch_one(
+            f"SELECT {_WORKOUT_COLUMNS} FROM workouts WHERE id = ?", (workout_id,)
+        )
+        return None if row is None else _row_to_workout(row)
+
+    async def get_workout_by_date(self, performed_on: str) -> WorkoutRecord | None:
+        row = await self._fetch_one(
+            f"SELECT {_WORKOUT_COLUMNS} FROM workouts WHERE performed_on = ?", (performed_on,)
+        )
+        return None if row is None else _row_to_workout(row)
+
+    async def list_workouts(self, arguments: WorkoutListArguments) -> WorkoutListResult:
+        clauses: list[str] = []
+        parameters: list[object] = []
+        for column, operator, value in (
+            ("performed_on", ">=", arguments.date_from),
+            ("performed_on", "<=", arguments.date_to),
+        ):
+            if value is not None:
+                clauses.append(f"{column} {operator} ?")
+                parameters.append(value)
+        where = " WHERE " + " AND ".join(clauses) if clauses else ""
+        # total 与分页内容使用同一事务快照。
+        async with self.transaction():
+            count = await self._fetch_one("SELECT COUNT(*) FROM workouts" + where, tuple(parameters))
+            assert count is not None
+            total = int(count[0])
+            offset = (arguments.page - 1) * arguments.page_size
+            if offset >= total:
+                return WorkoutListResult(
+                    items=[], page=arguments.page, page_size=arguments.page_size, total=total,
+                )
+            rows = await self._fetch_all(
+                f"SELECT {_WORKOUT_COLUMNS} FROM workouts" + where
+                + " ORDER BY performed_on DESC, id DESC LIMIT ? OFFSET ?",
+                (*parameters, arguments.page_size, offset),
+            )
+            return WorkoutListResult(
+                items=[_row_to_workout(row) for row in rows], page=arguments.page,
+                page_size=arguments.page_size, total=total,
+            )
+
+    async def insert_workout(self, record: WorkoutRecord) -> None:
+        if record.version != 1 or record.created_at != record.updated_at:
+            raise ValueError("首次训练记录版本必须为 1，创建与更新时间必须一致。")
+        await self._write(
+            f"INSERT INTO workouts ({_WORKOUT_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?)",
+            (record.id, record.performed_on, record.version,
+             _dump_json(record.content.model_dump()), record.created_at, record.updated_at),
+        )
+
+    async def update_workout(
+        self, workout_id: str, base_version: int, content: WorkoutContent, updated_at: int
+    ) -> bool:
+        count = await self._write(
+            "UPDATE workouts SET content = ?, version = version + 1, updated_at = ? "
+            "WHERE id = ? AND version = ?",
+            (_dump_json(content.model_dump()), updated_at, workout_id, base_version),
+        )
+        return count == 1
+
+    async def insert_workout_snapshot(self, snapshot: WorkoutSnapshot) -> None:
+        await self._write(
+            f"INSERT INTO workout_snapshots ({_WORKOUT_SNAPSHOT_COLUMNS}) "
+            f"VALUES ({_placeholders(12)})",
+            (snapshot.proposal_id, snapshot.session_id, snapshot.request_entry_id,
+             snapshot.source_entry_id, snapshot.performed_on, snapshot.base_workout_id,
+             snapshot.base_workout_version, _dump_json(snapshot.payload.model_dump()),
+             snapshot.display_entry_id, snapshot.confirmation_entry_id,
+             snapshot.status, snapshot.created_at),
+        )
+
+    async def get_workout_snapshot(self, proposal_id: str) -> WorkoutSnapshot | None:
+        row = await self._fetch_one(
+            f"SELECT {_WORKOUT_SNAPSHOT_COLUMNS} FROM workout_snapshots WHERE proposal_id = ?",
+            (proposal_id,),
+        )
+        return None if row is None else _row_to_workout_snapshot(row)
+
+    async def list_workout_snapshots(self, session_id: str) -> list[WorkoutSnapshot]:
+        rows = await self._fetch_all(
+            f"SELECT {_WORKOUT_SNAPSHOT_COLUMNS} FROM workout_snapshots "
+            "WHERE session_id = ? ORDER BY created_at, proposal_id", (session_id,),
+        )
+        return [_row_to_workout_snapshot(row) for row in rows]
+
+    async def find_workout_snapshot_by_confirmation(
+        self, session_id: str, confirmation_entry_id: str
+    ) -> WorkoutSnapshot | None:
+        row = await self._fetch_one(
+            f"SELECT {_WORKOUT_SNAPSHOT_COLUMNS} FROM workout_snapshots "
+            "WHERE session_id = ? AND confirmation_entry_id = ?",
+            (session_id, confirmation_entry_id),
+        )
+        return None if row is None else _row_to_workout_snapshot(row)
+
+    async def bind_workout_display_entry(self, proposal_id: str, display_entry_id: str) -> None:
+        await self._write(
+            "UPDATE workout_snapshots SET display_entry_id = ? WHERE proposal_id = ?",
+            (display_entry_id, proposal_id),
+        )
+
+    async def begin_workout_save(self, proposal_id: str, confirmation_entry_id: str) -> None:
+        await self._write(
+            "UPDATE workout_snapshots SET confirmation_entry_id = ?, status = 'processing' "
+            "WHERE proposal_id = ?", (confirmation_entry_id, proposal_id),
+        )
+
+    async def set_workout_snapshot_status(self, proposal_id: str, status: WorkoutProposalStatus) -> None:
+        await self._write(
+            "UPDATE workout_snapshots SET status = ? WHERE proposal_id = ?", (status, proposal_id),
+        )
+
+    async def invalidate_pending_workouts(
+        self, session_id: str, performed_on: str, keep_proposal_id: str
+    ) -> None:
+        await self._write(
+            "UPDATE workout_snapshots SET status = 'invalidated' "
+            "WHERE session_id = ? AND performed_on = ? AND status = 'pending' AND proposal_id <> ?",
+            (session_id, performed_on, keep_proposal_id),
+        )
+
+    # 调用方事务保证记录写入、状态与固定结果原子提交。
+    async def complete_workout_save(self, record: WorkoutSaveRecord) -> None:
+        await self._write(
+            "UPDATE workout_snapshots SET status = 'saved' WHERE proposal_id = ?", (record.proposal_id,),
+        )
+        await self._write(
+            f"INSERT INTO workout_save_records ({_WORKOUT_SAVE_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?)",
+            (record.proposal_id, record.session_id, record.display_entry_id,
+             record.confirmation_entry_id, _dump_json(record.result.model_dump()), record.saved_at),
+        )
+
+    async def get_workout_save_record(self, proposal_id: str) -> WorkoutSaveRecord | None:
+        row = await self._fetch_one(
+            f"SELECT {_WORKOUT_SAVE_COLUMNS} FROM workout_save_records WHERE proposal_id = ?", (proposal_id,),
+        )
+        return None if row is None else _row_to_workout_save_record(row)
+
+    async def list_workout_save_records(self, session_id: str) -> list[WorkoutSaveRecord]:
+        rows = await self._fetch_all(
+            f"SELECT {_WORKOUT_SAVE_COLUMNS} FROM workout_save_records "
+            "WHERE session_id = ? ORDER BY saved_at, proposal_id", (session_id,),
+        )
+        return [_row_to_workout_save_record(row) for row in rows]
+
+    async def find_workout_save_record_by_confirmation(
+        self, session_id: str, confirmation_entry_id: str
+    ) -> WorkoutSaveRecord | None:
+        row = await self._fetch_one(
+            f"SELECT {_WORKOUT_SAVE_COLUMNS} FROM workout_save_records "
+            "WHERE session_id = ? AND confirmation_entry_id = ?", (session_id, confirmation_entry_id),
+        )
+        return None if row is None else _row_to_workout_save_record(row)
+
+    async def delete_workout_snapshots_for_entries(self, session_id: str, entry_ids: set[str]) -> None:
+        if not entry_ids:
+            return
+        ids = tuple(entry_ids)
+        marks = _placeholders(len(ids))
+        await self._write(
+            "DELETE FROM workout_snapshots WHERE session_id = ? AND ("
+            f"request_entry_id IN ({marks}) OR source_entry_id IN ({marks}) "
+            f"OR display_entry_id IN ({marks}) OR confirmation_entry_id IN ({marks}))",
+            (session_id, *ids, *ids, *ids, *ids),
+        )
+
+    async def delete_workout_snapshots_for_session(self, session_id: str) -> None:
+        await self._write("DELETE FROM workout_snapshots WHERE session_id = ?", (session_id,))
+
+    async def recover_interrupted_workout_saves(self) -> int:
+        return await self._write(
+            "UPDATE workout_snapshots SET status = 'pending' WHERE status = 'processing'", (),
         )
 
     async def replace_exercises(self, exercises: list[CatalogExercise]) -> None:

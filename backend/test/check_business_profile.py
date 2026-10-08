@@ -14,6 +14,7 @@ from app.agent.tool import CredentialDetectedError, run_tool_batch
 from app.agent.tools.business import bind_business_tools, business_tool_declarations
 from app.agent.tools.exercises import exercise_tool_declarations
 from app.agent.tools.profile import profile_tool_declarations
+from app.agent.tools.workouts import workout_tool_declarations
 from app.ai.messages import ToolCall
 from app.application.business.catalog import Catalog
 from app.domain.business.errors import BusinessError, ProfileUpdateProcessing
@@ -59,7 +60,8 @@ EXERCISE_FIELDS = {
     "load_convention",
     "steps",
 }
-BUSINESS_TOOLS = {GET_PROFILE, SEARCH_EXERCISES, PREPARE, SAVE, STATUS}
+WORKOUT_TOOLS = [item.name for item in workout_tool_declarations()]
+BUSINESS_TOOLS = {GET_PROFILE, SEARCH_EXERCISES, PREPARE, SAVE, STATUS, *WORKOUT_TOOLS}
 
 
 async def check_catalog(directory: Path) -> dict:
@@ -98,12 +100,13 @@ async def check_declarations() -> dict:
         PREPARE,
         SAVE,
         STATUS,
+        *WORKOUT_TOOLS,
     ]
     profile = profile_tool_declarations()
     exercises = exercise_tool_declarations()
     assert {item.name for item in profile} == {GET_PROFILE, PREPARE, SAVE, STATUS}
     assert [item.name for item in exercises] == [SEARCH_EXERCISES]
-    assert {item.name: item for item in profile + exercises} == DECLARED
+    assert {item.name: item for item in profile + exercises + workout_tool_declarations()} == DECLARED
     serialized = json.dumps(
         [item.model_dump() for item in declarations], ensure_ascii=False
     )
@@ -208,7 +211,7 @@ async def check_argument_preparation(root: Path) -> dict:
         assert (await fixture.business.get_profile()).version is None
 
         context = fixture.save_context(ids)
-        tools = bind_business_tools(fixture.business, context, fixture.call, {})
+        tools = bind_business_tools(fixture.business, context, fixture.call, {}, {})
         assert tools[PREPARE].prepare_arguments is not None
         assert tools[PREPARE].prepare_arguments.__module__ == "app.agent.tools.profile"
         assert tools[SEARCH_EXERCISES].execute.__module__ == "app.agent.tools.exercises"
@@ -216,7 +219,7 @@ async def check_argument_preparation(root: Path) -> dict:
         assert all(
             tool.prepare_arguments is None
             for name, tool in tools.items()
-            if name != PREPARE
+            if name not in {PREPARE, "prepare_workout"}
         )
         for version in (None, 1, 2):
             valid = prepare_arguments(version, payload())
@@ -330,7 +333,7 @@ async def check_long_output_and_credentials(root: Path) -> dict:
             prepare_arguments(None, payload(health_notes=long_notes)),
         )
         context = fixture.save_context(ids)
-        tools = bind_business_tools(fixture.business, context, fixture.call, {})
+        tools = bind_business_tools(fixture.business, context, fixture.call, {}, {})
         declared = {name: tool.definition() for name, tool in tools.items()}
         assert declared == DECLARED
         # 画像结果为业务事实：完整可解析，禁止截断。
@@ -578,7 +581,7 @@ async def check_migration(root: Path) -> dict:
     await database.close()
     reopened = await open_database(path)
     await reopened.close()
-    assert SCHEMA_VERSION == 5
+    assert SCHEMA_VERSION == 6
     return {"from": 3, "to": SCHEMA_VERSION}
 
 
@@ -602,7 +605,7 @@ def check() -> None:
         json.dumps(evidence, ensure_ascii=False, indent=2, default=str), encoding="utf-8"
     )
     print(
-        "PASS: 版本 5 迁移、动作目录导入与检索、五工具声明与参数 schema、画像读取与"
+        "PASS: 版本 6 迁移、动作目录导入与检索、统一工具声明与参数 schema、画像读取与"
         "参数校验、None 字符串转换与完整保存流程、目录引用与字段级错误、"
         "超长画像完整输出、凭据保护、并发保存幂等、"
         "提交竞争边界与替换优先级、幂等记录保留"

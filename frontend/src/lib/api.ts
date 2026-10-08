@@ -53,6 +53,8 @@ import type {
   SteeringWithdrawBody,
   SteeringWithdrawWire,
   TrendsResponseWire,
+  WorkoutListWire,
+  WorkoutRecordWire,
 } from "@/lib/contract";
 import {
   isObject,
@@ -60,6 +62,8 @@ import {
   nullableString,
   nullableUuid,
   parseProfileResponse,
+  parseWorkoutList,
+  parseWorkoutRecord,
   requireArray,
   requireBoolean,
   requireEnum,
@@ -825,6 +829,44 @@ export const getProfile = (signal?: AbortSignal) =>
     "/api/profile",
     { method: "GET", signal },
     parseProfileResponse,
+  );
+
+/* ===== 训练记录查询（workout-http-sse-contract §2、§3）===== */
+
+/** GET /api/workouts 查询参数：省略日期即对应方向不限日期，page 默认 1，page_size 默认 10 且范围 1–100 */
+export interface WorkoutListQuery {
+  date_from?: string;
+  date_to?: string;
+  page?: number;
+  page_size?: number;
+}
+
+/** 训练记录列表：完整记录按 performed_on、id 降序，无结果或超出总页数时 items 为空数组 */
+export const listWorkouts = (
+  query: WorkoutListQuery = {},
+  signal?: AbortSignal,
+) => {
+  // 空日期为该方向不限；其余取值原样送出，非法参数由后端按协议拒绝
+  const params = new URLSearchParams();
+  if (query.date_from) params.set("date_from", query.date_from);
+  if (query.date_to) params.set("date_to", query.date_to);
+  if (query.page !== undefined) params.set("page", String(query.page));
+  if (query.page_size !== undefined)
+    params.set("page_size", String(query.page_size));
+  const search = params.toString();
+  return sessionRequest<WorkoutListWire>(
+    search === "" ? "/api/workouts" : `/api/workouts?${search}`,
+    { method: "GET", signal },
+    parseWorkoutList,
+  );
+};
+
+/** 按 ID 查询完整训练记录：不存在时返回 404 workout_not_found */
+export const getWorkout = (workoutId: string, signal?: AbortSignal) =>
+  sessionRequest<WorkoutRecordWire>(
+    `/api/workouts/${encodeURIComponent(workoutId)}`,
+    { method: "GET", signal },
+    parseWorkoutRecord,
   );
 
 /* ===== 会话运行及 Steering 独立列表（session-list-contract §2、§3）===== */

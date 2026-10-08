@@ -289,7 +289,7 @@ async def check_migration(root: Path) -> dict:
     upgraded = await open_database(legacy)
     tables = await _tables(await _connect(legacy))
     await upgraded.close()
-    assert version == SCHEMA_VERSION == 5
+    assert version == SCHEMA_VERSION == 6
     assert {"profile_snapshots", "profile_save_records"} <= tables
     assert not {"confirmations", "confirmation_receipts"} & tables
     guarded = root / "guarded.db"

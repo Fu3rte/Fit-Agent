@@ -265,7 +265,7 @@ class Fixture:
         call_id: str | None = None,
     ) -> ToolResultMessage:
         tools = bind_business_tools(
-            self.business, context, self.call, {} if prepared is None else prepared
+            self.business, context, self.call, {} if prepared is None else prepared, {}
         )
         return await run_tool_call(
             ToolCall(
@@ -407,11 +407,12 @@ async def check_first_build(root: Path) -> dict:
     try:
         session_id = await fixture.session()
 
-        # 声明协议：五个业务工具，准备输入含 profile_id 且无旧卡片字段。
+        # 声明协议：画像、目录及训练工具统一注册。
         tools = bind_business_tools(
             fixture.business,
             fixture.context(session_id, session_id, session_id),
             fixture.call,
+            {},
             {},
         )
         assert set(tools) == {
@@ -420,6 +421,8 @@ async def check_first_build(root: Path) -> dict:
             PREPARE,
             SAVE,
             STATUS,
+            "get_workout", "list_workouts", "prepare_workout", "save_workout",
+            "update_workout", "get_workout_save_status",
         }
         assert {name: tool.definition() for name, tool in tools.items()} == DECLARED
         assert set(DECLARED[PREPARE].parameters["properties"]) == {
@@ -1154,7 +1157,7 @@ def check_legacy_http() -> dict:
             source_entry_id=source_id,
         )
         prepared: dict[str, str] = {}
-        tools = bind_business_tools(business, context, run, prepared)
+        tools = bind_business_tools(business, context, run, prepared, {})
         message = asyncio.run(
             run_tool_call(
                 ToolCall(type="toolCall", id=call_id, name=PREPARE, arguments=arguments),
@@ -1238,6 +1241,8 @@ def check() -> None:
         PREPARE,
         SAVE,
         STATUS,
+        "get_workout", "list_workouts", "prepare_workout", "save_workout",
+        "update_workout", "get_workout_save_status",
     }
     evidence: dict = {}
     with TemporaryDirectory(dir=EVIDENCE, ignore_cleanup_errors=True) as directory:

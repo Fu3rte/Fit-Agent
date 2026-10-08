@@ -94,7 +94,7 @@ async def run_scenario(
         return {
             **static_tools,
             **bind_business_tools(
-                business, context_for(source_entry_id), call, prepared
+                business, context_for(source_entry_id), call, prepared, {}
             ),
         }
 
@@ -161,7 +161,7 @@ async def run_scenario(
         "tools": {
             **static_tools,
             **bind_business_tools(
-                business, context_for(run.request_entry_id), call, prepared
+                business, context_for(run.request_entry_id), call, prepared, {}
             ),
         },
     }

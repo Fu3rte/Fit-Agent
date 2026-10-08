@@ -273,6 +273,89 @@ export interface ProfileStatusResultWire {
   result: ProfileSaveResultWire | null;
 }
 
+/* ===== 实际训练记录（workout-http-sse-contract §2、§3、§5）===== */
+
+/** 训练记录重量口径七值（与 domain/business/models.py 的 LoadConvention 同集合；目录口径 §11.7） */
+export type WorkoutLoadConvention =
+  | "per_implement"
+  | "barbell_total"
+  | "machine_display"
+  | "plates_total"
+  | "per_side"
+  | "added_weight"
+  | "assistance_weight";
+
+/** 已知完成的一组：三个数值允许全部为 null，表示该组具体数据未知 */
+export interface WorkoutSetWire {
+  reps: number | null;
+  weight_kg: number | null;
+  duration_seconds: number | null;
+}
+
+/** 一个实际动作：``exercise_id`` 为已核实目录 ID，目录外动作为 null 并保留名称；``sets=[]`` 表示组数未知 */
+export interface WorkoutExerciseWire {
+  exercise_id: string | null;
+  name: string;
+  load_convention: WorkoutLoadConvention | null;
+  sets: WorkoutSetWire[];
+}
+
+/** 完整训练内容：至少一个动作，``notes`` 为感受或 null */
+export interface WorkoutContentWire {
+  exercises: WorkoutExerciseWire[];
+  notes: string | null;
+}
+
+/** 一条训练记录（§3）：更新保持 id，version 递增，时间戳为 UTC 毫秒 */
+export interface WorkoutRecordWire {
+  id: string;
+  performed_on: string;
+  version: number;
+  content: WorkoutContentWire;
+  created_at: number;
+  updated_at: number;
+}
+
+/** 快照保存状态：仅 saved 携带完整保存结果 */
+export type WorkoutProposalStatusWire =
+  "pending" | "processing" | "saved" | "invalidated" | "conflicted";
+
+/** `prepare_workout` 输出：新增时基础记录 ID 与版本同时为 null，``payload`` 为完整训练内容 */
+export interface WorkoutProposalWire {
+  proposal_id: string;
+  performed_on: string;
+  base_workout_id: string | null;
+  base_workout_version: number | null;
+  payload: WorkoutContentWire;
+}
+
+/** 固定保存结果，同时是幂等记录内容：重复提交返回原结果 */
+export interface WorkoutSaveResultWire {
+  proposal_id: string;
+  id: string;
+  performed_on: string;
+  version: number;
+  content: WorkoutContentWire;
+  created_at: number;
+  updated_at: number;
+  saved_at: number;
+}
+
+/** `get_workout_save_status` 输出：`saved` 的 `result` 为完整固定结果，其他状态为 null */
+export interface WorkoutStatusResultWire {
+  proposal_id: string;
+  status: WorkoutProposalStatusWire;
+  result: WorkoutSaveResultWire | null;
+}
+
+/** GET /api/workouts 响应（workout-http-sse-contract §2）：items 为完整记录，按 performed_on、id 降序 */
+export interface WorkoutListWire {
+  items: WorkoutRecordWire[];
+  page: number;
+  page_size: number;
+  total: number;
+}
+
 /** GET /api/sessions/{session_id}/history：会话头 ＋ 当前分支节点 ＋ 关联运行与输入（§3） */
 export interface SessionHistoryWire {
   session: SessionWire;
@@ -394,7 +477,7 @@ export type ReActEvent = { data: { run_id: string } } & (
 );
 
 /** 已注册业务接口错误码（§11.5，编辑与重新生成新增 ``entry_not_found`` / ``invalid_target_entry``，
- *  画像自然语言确认新增 §11.9 的八项业务码） */
+ *  画像自然语言确认新增 §11.9 的八项业务码，训练记录新增 workout-http-sse-contract §7 的 ``workout_not_found``） */
 export type ErrorCode =
   | "host_forbidden"
   | "origin_forbidden"
@@ -410,6 +493,7 @@ export type ErrorCode =
   | "operation_conflict"
   | "steering_consumption_conflict"
   | "incomplete_tool_chain"
+  | "workout_not_found"
   | "profile_proposal_not_found"
   | "profile_proposal_invalidated"
   | "profile_update_processing"

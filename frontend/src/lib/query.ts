@@ -6,3 +6,6 @@ export const queryClient = new QueryClient({
     queries: { staleTime: 30_000, retry: 1 },
   },
 });
+
+/** 训练记录查询前缀（workout-http-sse-contract §2、§3）：列表与详情共用，保存落定后整体失效 */
+export const WORKOUT_QUERY_KEY = ["workout"] as const;

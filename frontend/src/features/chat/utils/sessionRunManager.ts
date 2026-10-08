@@ -7,7 +7,7 @@ import {
   submitSteering,
   withdrawSteering,
 } from "@/lib/api";
-import { queryClient } from "@/lib/query";
+import { WORKOUT_QUERY_KEY, queryClient } from "@/lib/query";
 import type {
   DiscardReasonWire,
   EditRunBody,
@@ -42,6 +42,7 @@ import {
   selectSession,
   unknownSteeringRequests,
   updateLedger,
+  workoutSaved,
   withPending,
   type PendingOperation,
   type ReActEntry,
@@ -595,13 +596,17 @@ class SessionRunRecord {
         this.update(operation.operation_id, (round) =>
           applyReActEvent(round, event),
         );
-        /* 保存落定才使 ["profile"] 查询失效：个人页重取当前画像，失败与结果未知保持原内容（§6、§9.1）。
-         * 页面未挂载同样生效，画像保存发生在后台运行时。 */
+        /* 保存落定才使业务查询失效：个人页重取当前画像，训练记录页重取列表与详情，
+         * 失败与结果未知保持原内容（§6、§9.1）。页面未挂载同样生效，保存发生在后台运行时。 */
         const executed = this.view.rounds.find(
           (round) => round.id === operation.operation_id,
         );
-        if (executed !== undefined && profileSaved(event, executed))
-          queryClient.invalidateQueries({ queryKey: ["profile"] });
+        if (executed !== undefined) {
+          if (profileSaved(event, executed))
+            queryClient.invalidateQueries({ queryKey: ["profile"] });
+          if (workoutSaved(event, executed))
+            queryClient.invalidateQueries({ queryKey: WORKOUT_QUERY_KEY });
+        }
         if (event.event === "done" || event.event === "error") {
           this.exec = null;
           this.patch({ busy: false, ready: true });

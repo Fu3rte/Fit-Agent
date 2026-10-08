@@ -187,7 +187,7 @@ async def check_loop(directory: Path) -> dict:
 
         def bind_tools(source_entry_id: str) -> dict[str, AgentTool]:
             return bind_business_tools(
-                business, context_for(source_entry_id), call, prepared
+                business, context_for(source_entry_id), call, prepared, {}
             )
 
         async def transform_context(messages, signal):
@@ -239,7 +239,7 @@ async def check_loop(directory: Path) -> dict:
         context = {
             "messages": branch[:-1],
             "tools": bind_business_tools(
-                business, context_for(run.request_entry_id), call, prepared
+                business, context_for(run.request_entry_id), call, prepared, {}
             ),
         }
         messages = await run_agent_loop(
