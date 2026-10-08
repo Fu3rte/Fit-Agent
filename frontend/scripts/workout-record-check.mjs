@@ -1,7 +1,8 @@
 // 运行：node scripts/workout-record-check.mjs
 // 纯函数检查（workout-record-contract、workout-http-sse-contract §2–§6）：待确认快照的完整展示仅在结果节点提交后出现、
 // 实时与历史同一解析口径且无重复展示、保存与状态查询核实落定才刷新查询缓存、
-// 逐组未知值不补 0、协议异常在解析位置报错（不触达后端）。
+// 逐组未知值不补 0、协议异常在解析位置报错（不触达后端）、
+// 记录页的日期筛选边界阻断、选中项按当前结果保持有效及组数摘要口径。
 import assert from "node:assert/strict";
 import { createServer } from "vite";
 
@@ -17,6 +18,7 @@ const { historyToRounds, mergeHistoryRounds } = await server.ssrLoadModule(
   "/src/features/chat/utils/sessionHistory.ts",
 );
 const business = await server.ssrLoadModule("/src/lib/business.ts");
+const browse = await server.ssrLoadModule("/src/features/workout/workoutBrowse.ts");
 await server.close();
 
 const u = (n) => `${n.toString(16).padStart(8, "0")}-0000-4000-8000-000000000000`;
@@ -241,4 +243,31 @@ assert.throws(() => business.parseWorkoutList({ items: [record], page: 1, page_s
 assert.deepEqual(business.parseWorkoutRecord(record), record, "完整记录通过校验并保留全部字段");
 assert.throws(() => business.parseWorkoutRecord({ ...record, version: 0 }), /version 无效/, "非正整数版本被拒绝");
 
-console.log("PASS: 训练记录待确认完整展示、实时与历史一致、保存与状态查询落定刷新、未知值保持 null、协议异常就地报错");
+/** 7. 记录页浏览状态：日期筛选边界就地阻断、选中项按当前结果保持有效、组数摘要标注未知语义 */
+const today = "2026-06-01";
+assert.equal(browse.isRejectedDateRange("", ""), false, "起止均不限日期");
+assert.equal(browse.isRejectedDateRange(today, ""), false, "仅起始日期");
+assert.equal(browse.isRejectedDateRange("", today), false, "仅结束日期");
+assert.equal(browse.isRejectedDateRange(today, today), false, "查询当天时起止同日");
+assert.equal(browse.isRejectedDateRange("2026-06-02", today), true, "起始晚于结束阻断查询");
+
+const onPage = [
+  { ...record, id: u(50), performed_on: "2026-06-03" },
+  { ...record, id: u(51), performed_on: "2026-06-02" },
+  { ...record, id: u(52), performed_on: today },
+];
+assert.equal(browse.resolveSelectedRecord(onPage, null).id, onPage[0].id, "首次查询成功默认选中第一条");
+assert.equal(browse.resolveSelectedRecord(onPage, onPage[1].id).id, onPage[1].id, "选中记录仍在本页时保持选中");
+assert.equal(browse.resolveSelectedRecord(onPage, u(60)).id, onPage[0].id, "选中记录不在当前结果时回到第一条");
+assert.equal(browse.resolveSelectedRecord([], null), null, "空结果没有选中记录");
+const refreshed = [{ ...onPage[1], version: 4, content: { ...payload, notes: "状态良好" } }, onPage[0]];
+assert.equal(browse.resolveSelectedRecord(refreshed, onPage[1].id).content.notes, "状态良好", "保存刷新后展示该记录的最新内容");
+
+const oneKnownSet = { ...payload.exercises[0], sets: payload.exercises[0].sets.slice(0, 1) };
+const noSet = { ...payload.exercises[0], sets: [] };
+assert.equal(browse.describeWorkoutContent(payload), "2 个动作 · 已知 2 组 · 1 个动作组数未知", "含组数未知动作时标注已知组数");
+assert.equal(browse.describeWorkoutContent({ exercises: [oneKnownSet, noSet, noSet], notes: null }), "3 个动作 · 已知 1 组 · 2 个动作组数未知", "多数动作组数未知时仍标注已知组数");
+assert.equal(browse.describeWorkoutContent({ exercises: [noSet, noSet], notes: null }), "2 个动作 · 组数未知", "全部动作组数未知时不出现已知组数");
+assert.equal(browse.describeWorkoutContent({ exercises: [payload.exercises[0], oneKnownSet], notes: null }), "2 个动作 · 3 组", "无组数未知动作时直接给出组数");
+
+console.log("PASS: 训练记录待确认完整展示、实时与历史一致、保存与状态查询落定刷新、未知值保持 null、协议异常就地报错、日期筛选边界与列表选中保持有效");
