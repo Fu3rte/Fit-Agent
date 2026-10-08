@@ -30,11 +30,29 @@ from app.domain.business.errors import (
     WorkoutProposalNotFound,
     WorkoutSaveProcessing,
     WorkoutVersionConflict,
+    PlanAccessDenied,
+    PlanConfirmationInvalid,
+    PlanNotFound,
+    PlanProposalInvalidated,
+    PlanProposalNotFound,
+    PlanSaveProcessing,
+    PlanVersionConflict,
+    ProfileRequired,
 )
 from app.domain.business.models import (
     BusinessContext,
     BusinessFieldError,
     CatalogExercise,
+    CurrentPlan,
+    PlanContent,
+    PlanProposal,
+    PlanProposalArguments,
+    PlanRecord,
+    PlanSaveArguments,
+    PlanSaveRecord,
+    PlanSaveResult,
+    PlanSnapshot,
+    PlanStatusResult,
     ProfileContent,
     ProfileProposal,
     ProfileProposalArguments,
@@ -191,7 +209,7 @@ class BusinessService:
             check_cancelled(signal)
             async with self._repository.transaction():
                 started = await begin(context, arguments)
-            if isinstance(started, (ProfileSaveResult, WorkoutSaveResult)):
+            if isinstance(started, (ProfileSaveResult, WorkoutSaveResult, PlanSaveResult)):
                 return started
             snapshot, bound = started
             try:
@@ -206,6 +224,8 @@ class BusinessService:
                     await reset(snapshot.proposal_id, "pending")
                 await self._replacements.wait_clear(context.session_id)
                 continue
+            if isinstance(result, BusinessError):
+                raise result
             if result is not None:
                 return result
             raise conflict_type()
@@ -267,10 +287,12 @@ class BusinessService:
     ) -> None:
         await self._repository.delete_snapshots_for_entries(session_id, entry_ids)
         await self._repository.delete_workout_snapshots_for_entries(session_id, entry_ids)
+        await self._repository.delete_plan_snapshots_for_entries(session_id, entry_ids)
 
     async def remove_for_session(self, session_id: str) -> None:
         await self._repository.delete_snapshots_for_session(session_id)
         await self._repository.delete_workout_snapshots_for_session(session_id)
+        await self._repository.delete_plan_snapshots_for_session(session_id)
 
     # 内部协作。
 
@@ -380,6 +402,12 @@ class BusinessService:
                 context.session_id, arguments.confirmation_entry_id
             ),
             await self._repository.find_workout_save_record_by_confirmation(
+                context.session_id, arguments.confirmation_entry_id
+            ),
+            await self._repository.find_plan_snapshot_by_confirmation(
+                context.session_id, arguments.confirmation_entry_id
+            ),
+            await self._repository.find_plan_save_record_by_confirmation(
                 context.session_id, arguments.confirmation_entry_id
             ),
         ]:
@@ -502,6 +530,274 @@ class BusinessService:
         if failures:
             raise InvalidBusinessPayload(failures)
         return content
+
+    async def get_current_plan(self) -> CurrentPlan:
+        async with self._repository.transaction():
+            record = await self._repository.get_current_plan()
+            return CurrentPlan(id=None, content=None) if record is None else CurrentPlan(
+                id=record.id, content=record.content,
+            )
+
+    async def get_plan(self, plan_id: str) -> PlanRecord:
+        async with self._repository.transaction():
+            record = await self._repository.get_plan(plan_id)
+            if record is None:
+                raise PlanNotFound()
+            return record
+
+    async def list_plans(self) -> list[PlanRecord]:
+        async with self._repository.transaction():
+            return await self._repository.list_plans()
+
+    def _validate_plan(self, payload: object, profile: ProfileContent) -> PlanContent:
+        content = self._validate_content(PlanContent, payload)
+        failures: list[BusinessFieldError] = []
+        for day_index, day in enumerate(content.days):
+            path = f"/payload/days/{day_index}/exercises"
+            if day.kind == "training" and not day.exercises:
+                failures.append(BusinessFieldError(path=path, message="生成训练日必须包含具体动作。"))
+            for index, exercise in enumerate(day.exercises):
+                prefix = f"{path}/{index}"
+                if exercise.sets is None:
+                    failures.append(BusinessFieldError(path=prefix + "/sets", message="生成动作必须明确组数。"))
+                if exercise.reps is None and exercise.duration_seconds is None:
+                    failures.append(BusinessFieldError(path=prefix + "/reps", message="生成动作必须明确次数或时长。"))
+                if exercise.exercise_id is None:
+                    continue
+                referenced = self._catalog.get(exercise.exercise_id)
+                if referenced is None:
+                    failures.append(BusinessFieldError(path=prefix + "/exercise_id", message="动作 ID 必须存在于动作目录中。"))
+                elif (exercise.exercise_id in (profile.forbidden_exercise_ids or [])
+                      or referenced.equipment in (profile.unavailable_equipment or [])):
+                    failures.append(BusinessFieldError(path=prefix + "/exercise_id", message="动作不符合已保存画像的动作或器械限制。"))
+        if failures:
+            raise InvalidBusinessPayload(failures)
+        return content
+
+    def _plan_role(self, entries: dict[str, SessionMessageEntry], entry_id: str, role: str) -> None:
+        entry = entries.get(entry_id)
+        if entry is None or entry.messages[0].role != role:
+            raise PlanConfirmationInvalid("消息节点角色或当前路径不合法。")
+
+    async def prepare_plan(
+        self, context: BusinessContext, arguments: PlanProposalArguments,
+        signal: Event | None = None,
+    ) -> PlanProposal:
+        check_cancelled(signal)
+        async with self._repository.transaction():
+            entries = self._entries(await self._require_branch(context.session_id))
+            self._plan_role(entries, context.request_entry_id, "user")
+            self._plan_role(entries, context.source_entry_id, "assistant")
+            order = {entry_id: index for index, entry_id in enumerate(entries)}
+            if order[context.request_entry_id] >= order[context.source_entry_id]:
+                raise PlanConfirmationInvalid("请求与来源节点时序不合法。")
+            profile = await self._repository.get_profile()
+            if profile is None:
+                raise ProfileRequired()
+            if profile.version != arguments.base_profile_version:
+                raise ProfileVersionConflict()
+            current = await self._repository.get_current_plan()
+            if arguments.base_plan_id != (None if current is None else current.id):
+                raise PlanVersionConflict()
+            content = self._validate_plan(arguments.payload, profile.content)
+            snapshot = PlanSnapshot(
+                **arguments.model_dump(exclude={"payload"}), payload=content,
+                proposal_id=str(uuid4()), session_id=context.session_id,
+                request_entry_id=context.request_entry_id, source_entry_id=context.source_entry_id,
+                status="pending", created_at=_now_ms(),
+            )
+            await self._repository.insert_plan_snapshot(snapshot)
+            await self._repository.invalidate_pending_plans(context.session_id, snapshot.proposal_id)
+            return self._plan_proposal(snapshot)
+
+    def _plan_proposal(self, snapshot: PlanSnapshot) -> PlanProposal:
+        return PlanProposal.model_validate(snapshot.model_dump(include={
+            "proposal_id", "base_profile_version", "base_plan_id", "payload",
+        }))
+
+    def _require_plan_result(
+        self, display: SessionMessageEntry, snapshot: PlanSnapshot,
+        source: SessionMessageEntry, entries: dict[str, SessionMessageEntry],
+    ) -> None:
+        self._require_batch_result(display, source, entries, PlanConfirmationInvalid)
+        result = display.messages[0]
+        if result.is_error or result.tool_name != "prepare_plan":
+            raise PlanConfirmationInvalid("展示节点不是该准备工具的结果节点。")
+        if len(result.content) != 1 or not isinstance(result.content[0], TextContent):
+            raise PlanConfirmationInvalid("展示结果须为完整 JSON text。")
+        displayed = PlanProposal.model_validate(json.loads(result.content[0].text))
+        if displayed != self._plan_proposal(snapshot):
+            raise PlanConfirmationInvalid("展示内容与快照不一致。")
+
+    async def bind_plan_display_entry(self, proposal_id: str, display_entry_id: str) -> None:
+        async with self._repository.transaction():
+            snapshot = await self._repository.get_plan_snapshot(proposal_id)
+            if snapshot is None:
+                raise PlanProposalNotFound()
+            entries = self._entries(await self._require_branch(snapshot.session_id))
+            self._plan_role(entries, snapshot.source_entry_id, "assistant")
+            display = entries.get(display_entry_id)
+            if display is None:
+                raise PlanConfirmationInvalid("展示节点须在当前消息路径中。")
+            self._require_plan_result(display, snapshot, entries[snapshot.source_entry_id], entries)
+            await self._repository.bind_plan_display_entry(proposal_id, display_entry_id)
+
+    def _plan_saved_result(
+        self, context: BusinessContext, snapshot: PlanSnapshot | None, record: PlanSaveRecord | None,
+    ) -> PlanSaveResult | None:
+        owner = snapshot if record is None else record
+        if owner is None:
+            return None
+        if owner.session_id != context.session_id:
+            raise PlanAccessDenied()
+        if record is not None:
+            return record.result
+        if snapshot.status == "saved":
+            raise PlanProposalNotFound("已保存快照缺少幂等记录。")
+        return None
+
+    async def save_plan(
+        self, context: BusinessContext, arguments: PlanSaveArguments,
+        signal: Event | None = None,
+    ) -> PlanSaveResult:
+        return await self._save_with_replacement(
+            context, arguments, signal, self._begin_plan_save, self._commit_plan_save,
+            self._repository.set_plan_snapshot_status, PlanVersionConflict,
+        )
+
+    async def _begin_plan_save(
+        self, context: BusinessContext, arguments: PlanSaveArguments,
+    ) -> PlanSaveResult | tuple[PlanSnapshot, PlanSnapshot]:
+        branch = await self._require_branch(context.session_id)
+        snapshot = await self._repository.get_plan_snapshot(arguments.proposal_id)
+        record = await self._repository.get_plan_save_record(arguments.proposal_id)
+        saved = self._plan_saved_result(context, snapshot, record)
+        if saved is not None:
+            return saved
+        if snapshot is None:
+            raise PlanProposalNotFound()
+        if snapshot.status == "processing":
+            raise PlanSaveProcessing()
+        if snapshot.status == "invalidated":
+            raise PlanProposalInvalidated()
+        if snapshot.status == "conflicted":
+            profile = await self._repository.get_profile()
+            if profile is None:
+                raise ProfileRequired()
+            if profile.version != snapshot.base_profile_version:
+                raise ProfileVersionConflict()
+            raise PlanVersionConflict()
+        bound = await self._check_plan_binding(context, branch, snapshot, arguments)
+        await self._repository.begin_plan_save(snapshot.proposal_id, arguments.confirmation_entry_id)
+        return snapshot, bound
+
+    async def _check_plan_binding(
+        self, context: BusinessContext, branch: list[SessionMessageEntry],
+        snapshot: PlanSnapshot, arguments: PlanSaveArguments,
+    ) -> PlanSnapshot:
+        if snapshot.display_entry_id != arguments.display_entry_id:
+            raise PlanConfirmationInvalid("展示节点与后端绑定不一致。")
+        if snapshot.confirmation_entry_id not in {None, arguments.confirmation_entry_id}:
+            raise PlanConfirmationInvalid("快照已绑定其他确认消息。")
+        for located in [
+            await self._repository.find_snapshot_by_confirmation(context.session_id, arguments.confirmation_entry_id),
+            await self._repository.find_save_record_by_confirmation(context.session_id, arguments.confirmation_entry_id),
+            await self._repository.find_workout_snapshot_by_confirmation(context.session_id, arguments.confirmation_entry_id),
+            await self._repository.find_workout_save_record_by_confirmation(context.session_id, arguments.confirmation_entry_id),
+            await self._repository.find_plan_snapshot_by_confirmation(context.session_id, arguments.confirmation_entry_id),
+            await self._repository.find_plan_save_record_by_confirmation(context.session_id, arguments.confirmation_entry_id),
+        ]:
+            if located is not None and located.proposal_id != snapshot.proposal_id:
+                raise PlanConfirmationInvalid("确认消息已绑定其他快照。")
+        entries = self._entries(branch)
+        for entry_id, role in [
+            (snapshot.request_entry_id, "user"), (snapshot.source_entry_id, "assistant"),
+            (context.request_entry_id, "user"), (context.source_entry_id, "assistant"),
+            (arguments.confirmation_entry_id, "user"),
+        ]:
+            self._plan_role(entries, entry_id, role)
+        display = entries.get(arguments.display_entry_id)
+        if display is None:
+            raise PlanConfirmationInvalid("展示节点须在当前消息路径中。")
+        self._require_plan_result(display, snapshot, entries[snapshot.source_entry_id], entries)
+        order = {entry.id: index for index, entry in enumerate(branch)}
+        if not (order[snapshot.request_entry_id] < order[snapshot.source_entry_id]
+                < order[display.id] < order[arguments.confirmation_entry_id]
+                <= order[context.request_entry_id] < order[context.source_entry_id]):
+            raise PlanConfirmationInvalid("展示、确认及当前请求时序不合法。")
+        return snapshot.model_copy(update={
+            "status": "processing", "confirmation_entry_id": arguments.confirmation_entry_id,
+        })
+
+    async def _commit_plan_save(
+        self, snapshot: PlanSnapshot, bound: PlanSnapshot, context: BusinessContext,
+    ) -> PlanSaveResult | BusinessError:
+        if await self._repository.get_plan_snapshot(snapshot.proposal_id) != bound:
+            raise PlanSaveProcessing()
+        await self._check_plan_binding(context, await self._require_branch(context.session_id), bound,
+            PlanSaveArguments(proposal_id=bound.proposal_id, display_entry_id=bound.display_entry_id,
+                              confirmation_entry_id=bound.confirmation_entry_id))
+        profile = await self._repository.get_profile()
+        current = await self._repository.get_current_plan()
+        conflict = None
+        if profile is None:
+            conflict = ProfileRequired()
+        elif profile.version != snapshot.base_profile_version:
+            conflict = ProfileVersionConflict()
+        elif snapshot.base_plan_id != (None if current is None else current.id):
+            conflict = PlanVersionConflict()
+        if conflict is not None:
+            await self._repository.set_plan_snapshot_status(snapshot.proposal_id, "conflicted")
+            return conflict
+        content = self._validate_plan(snapshot.payload, profile.content)
+        saved_at = _now_ms()
+        record = PlanRecord(id=str(uuid4()), is_current=True, content=content, created_at=saved_at)
+        await self._repository.insert_plan(record)
+        result = PlanSaveResult(proposal_id=snapshot.proposal_id, id=record.id, content=content,
+                                created_at=saved_at, saved_at=saved_at)
+        await self._repository.complete_plan_save(PlanSaveRecord(
+            proposal_id=snapshot.proposal_id, session_id=snapshot.session_id,
+            display_entry_id=bound.display_entry_id, confirmation_entry_id=bound.confirmation_entry_id,
+            result=result, saved_at=saved_at,
+        ))
+        return result
+
+    async def get_plan_save_status(
+        self, context: BusinessContext, proposal_id: str, signal: Event | None = None,
+    ) -> PlanStatusResult:
+        check_cancelled(signal)
+        async with self._repository.transaction():
+            await self._require_session(context.session_id)
+            snapshot = await self._repository.get_plan_snapshot(proposal_id)
+            record = await self._repository.get_plan_save_record(proposal_id)
+            saved = self._plan_saved_result(context, snapshot, record)
+            if saved is not None:
+                return PlanStatusResult(proposal_id=proposal_id, status="saved", result=saved)
+            if snapshot is None:
+                raise PlanProposalNotFound()
+            return PlanStatusResult(proposal_id=proposal_id, status=snapshot.status, result=None)
+
+    async def list_plan_display_bindings(self, session_id: str) -> dict[str, str]:
+        async with self._repository.transaction():
+            await self._require_session(session_id)
+            return {
+                item.display_entry_id: item.proposal_id
+                for item in await self._repository.list_plan_snapshots(session_id)
+                if item.display_entry_id is not None and item.status in {"pending", "processing", "saved"}
+            }
+
+    async def list_plan_confirmation_bindings(self, session_id: str) -> dict[str, str]:
+        async with self._repository.transaction():
+            await self._require_session(session_id)
+            bindings: dict[str, str] = {}
+            for item in [*await self._repository.list_plan_snapshots(session_id),
+                         *await self._repository.list_plan_save_records(session_id)]:
+                entry_id = item.confirmation_entry_id
+                if entry_id is not None:
+                    if entry_id in bindings and bindings[entry_id] != item.proposal_id:
+                        raise PlanConfirmationInvalid()
+                    bindings[entry_id] = item.proposal_id
+            return bindings
 
     async def get_workout(self, workout_id: str) -> WorkoutRecord:
         async with self._repository.transaction():
@@ -678,6 +974,8 @@ class BusinessService:
             await self._repository.find_save_record_by_confirmation(context.session_id, arguments.confirmation_entry_id),
             await self._repository.find_workout_snapshot_by_confirmation(context.session_id, arguments.confirmation_entry_id),
             await self._repository.find_workout_save_record_by_confirmation(context.session_id, arguments.confirmation_entry_id),
+            await self._repository.find_plan_snapshot_by_confirmation(context.session_id, arguments.confirmation_entry_id),
+            await self._repository.find_plan_save_record_by_confirmation(context.session_id, arguments.confirmation_entry_id),
         ]:
             if located is not None and located.proposal_id != snapshot.proposal_id:
                 raise WorkoutConfirmationInvalid("确认消息已绑定其他快照。")

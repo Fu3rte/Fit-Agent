@@ -13,6 +13,7 @@ from pydantic import ValidationError
 from app.agent.tool import CredentialDetectedError, run_tool_batch
 from app.agent.tools.business import bind_business_tools, business_tool_declarations
 from app.agent.tools.exercises import exercise_tool_declarations
+from app.agent.tools.plans import plan_tool_declarations
 from app.agent.tools.profile import profile_tool_declarations
 from app.agent.tools.workouts import workout_tool_declarations
 from app.ai.messages import ToolCall
@@ -61,7 +62,8 @@ EXERCISE_FIELDS = {
     "steps",
 }
 WORKOUT_TOOLS = [item.name for item in workout_tool_declarations()]
-BUSINESS_TOOLS = {GET_PROFILE, SEARCH_EXERCISES, PREPARE, SAVE, STATUS, *WORKOUT_TOOLS}
+PLAN_TOOLS = [item.name for item in plan_tool_declarations()]
+BUSINESS_TOOLS = {GET_PROFILE, SEARCH_EXERCISES, PREPARE, SAVE, STATUS, *WORKOUT_TOOLS, *PLAN_TOOLS}
 
 
 async def check_catalog(directory: Path) -> dict:
@@ -101,14 +103,15 @@ async def check_declarations() -> dict:
         SAVE,
         STATUS,
         *WORKOUT_TOOLS,
+        *PLAN_TOOLS,
     ]
     profile = profile_tool_declarations()
     exercises = exercise_tool_declarations()
     assert {item.name for item in profile} == {GET_PROFILE, PREPARE, SAVE, STATUS}
     assert [item.name for item in exercises] == [SEARCH_EXERCISES]
-    assert {item.name: item for item in profile + exercises + workout_tool_declarations()} == DECLARED
+    assert {item.name: item for item in profile + exercises + workout_tool_declarations() + plan_tool_declarations()} == DECLARED
     serialized = json.dumps(
-        [item.model_dump() for item in declarations], ensure_ascii=False
+        [item.model_dump() for item in profile + exercises + workout_tool_declarations()], ensure_ascii=False
     )
     # 旧确认卡片工具与卡片协议字段整体移除。
     for stale in ("confirm_profile_update", "replaces_id", "confirmation_id", '"kind"'):
@@ -581,7 +584,7 @@ async def check_migration(root: Path) -> dict:
     await database.close()
     reopened = await open_database(path)
     await reopened.close()
-    assert SCHEMA_VERSION == 6
+    assert SCHEMA_VERSION == 7
     return {"from": 3, "to": SCHEMA_VERSION}
 
 
@@ -605,7 +608,7 @@ def check() -> None:
         json.dumps(evidence, ensure_ascii=False, indent=2, default=str), encoding="utf-8"
     )
     print(
-        "PASS: 版本 6 迁移、动作目录导入与检索、统一工具声明与参数 schema、画像读取与"
+        "PASS: 版本 7 迁移、动作目录导入与检索、统一工具声明与参数 schema、画像读取与"
         "参数校验、None 字符串转换与完整保存流程、目录引用与字段级错误、"
         "超长画像完整输出、凭据保护、并发保存幂等、"
         "提交竞争边界与替换优先级、幂等记录保留"

@@ -185,7 +185,7 @@ async def prepare_tool_call(
         return _finalized(
             index,
             tool_call,
-            _validation_message(call_name, tool_call.arguments, error),
+            _validation_message(call_name, tool_call.arguments, error, declaration.parameters),
             timestamp,
         )
     if before_tool_call is not None:
@@ -559,14 +559,20 @@ def _finalized(
 
 
 def _validation_message(
-    call_name: str, arguments: JsonObject, error: ValidationError
+    call_name: str, arguments: JsonObject, error: ValidationError, parameters: JsonObject
 ) -> str:
+    constraints = {}
+    properties = parameters.get("properties", {})
+    for item in error.errors():
+        root = str(item["loc"][0]) if item["loc"] else "root"
+        constraints[root] = properties[root] if root in properties else parameters
+    allowed = json.dumps(constraints, ensure_ascii=False, indent=2)
     details = "\n".join(
         f"  - {'.'.join(str(part) for part in item['loc']) or 'root'}: {item['msg']}"
         for item in error.errors()
     )
     received = json.dumps(arguments, ensure_ascii=False, indent=2)
-    return f'工具 "{call_name}" 参数校验失败：\n{details}\n收到的参数：\n{received}'
+    return f'工具 "{call_name}" 参数校验失败：\n{details}\n允许的参数约束：\n{allowed}\n收到的参数：\n{received}'
 
 
 def _truncate(tool: AgentTool, result: AgentToolResult) -> AgentToolResult:

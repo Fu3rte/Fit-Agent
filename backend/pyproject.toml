@@ -18,6 +18,7 @@ dependencies = [
     "httpx>=0.28,<1",
     "aiosqlite>=0.22.1",
     "jsonschema>=4",
+    "jsonpointer>=3,<4",
 ]
 
 # 源码以 backend/ 下的 app namespace package 直接导入。

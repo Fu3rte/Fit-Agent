@@ -254,6 +254,7 @@ async def lifespan(app: FastAPI):
     # 中断的保存在事务未提交时已随数据库回滚；恢复完成前不接收任何保存请求。
     await business_repository.recover_interrupted_saves()
     await business_repository.recover_interrupted_workout_saves()
+    await business_repository.recover_interrupted_plan_saves()
     async with business_repository.transaction():
         await business_repository.replace_exercises(catalog.all())
     loop = asyncio.get_running_loop()
@@ -540,9 +541,10 @@ def execute(
     # 的真实 created_at，处理期间固定；每批按 source_entry_id 绑定。
     request_entry = {"id": run.request_entry_id}
     business_day = {"value": ""}
-    # 两类准备调用独立登记；结果节点提交后才绑定展示。
+    # 准备调用按业务独立登记；结果节点提交后才绑定展示。
     prepared: dict[str, str] = {}
     workout_prepared: dict[str, str] = {}
+    plan_prepared: dict[str, str] = {}
 
     def call(coro):
         return asyncio.run_coroutine_threadsafe(coro, loop).result()
@@ -567,7 +569,8 @@ def execute(
         return {
             **tools,
             **bind_business_tools(
-                business, business_context(source_entry_id), call, prepared, workout_prepared
+                business, business_context(source_entry_id), call, prepared,
+                workout_prepared, plan_prepared
             ),
         }
 
@@ -578,9 +581,13 @@ def execute(
         displays = call(business.list_display_bindings(session_id))
         workout_bindings = call(business.list_workout_confirmation_bindings(session_id))
         workout_displays = call(business.list_workout_display_bindings(session_id))
-        if bindings.keys() & workout_bindings.keys():
+        plan_bindings = call(business.list_plan_confirmation_bindings(session_id))
+        plan_displays = call(business.list_plan_display_bindings(session_id))
+        if (bindings.keys() & workout_bindings.keys()
+                or (bindings.keys() | workout_bindings.keys()) & plan_bindings.keys()):
             raise RuntimeError("确认节点具有多类业务绑定")
-        if displays.keys() & workout_displays.keys():
+        if (displays.keys() & workout_displays.keys()
+                or (displays.keys() | workout_displays.keys()) & plan_displays.keys()):
             raise RuntimeError("展示节点具有多类业务绑定")
         for entry in call(service.get_branch(session_id, leaf_id)):
             message = entry.messages[0]
@@ -594,6 +601,10 @@ def execute(
                 if workout_proposal_id is not None:
                     node["proposal_id"] = workout_proposal_id
                     node["business_kind"] = "workout"
+                plan_proposal_id = plan_bindings.get(entry.id)
+                if plan_proposal_id is not None:
+                    node["proposal_id"] = plan_proposal_id
+                    node["business_kind"] = "plan"
                 nodes.append(node)
             elif isinstance(message, AssistantMessage):
                 nodes.append(
@@ -624,6 +635,11 @@ def execute(
                     node["proposal_id"] = workout_proposal_id
                     node["display_entry_id"] = entry.id
                     node["business_kind"] = "workout"
+                plan_proposal_id = plan_displays.get(entry.id)
+                if plan_proposal_id is not None:
+                    node["proposal_id"] = plan_proposal_id
+                    node["display_entry_id"] = entry.id
+                    node["business_kind"] = "plan"
                 nodes.append(node)
         return nodes
 
@@ -674,15 +690,19 @@ def execute(
         position["id"] = node_id
         if (
             isinstance(message, ToolResultMessage)
-            and message.tool_name in {"prepare_profile_update", "prepare_workout"}
+            and message.tool_name in {"prepare_profile_update", "prepare_workout", "prepare_plan"}
             and not message.is_error
         ):
             # 成功结果必须对应本批登记；关联缺失直接终止运行。
             if message.tool_name == "prepare_profile_update":
                 call(business.bind_display_entry(prepared.pop(message.tool_call_id), node_id))
-            else:
+            elif message.tool_name == "prepare_workout":
                 call(business.bind_workout_display_entry(
                     workout_prepared.pop(message.tool_call_id), node_id
+                ))
+            else:
+                call(business.bind_plan_display_entry(
+                    plan_prepared.pop(message.tool_call_id), node_id
                 ))
 
     async def get_steering_messages() -> list[Message]:
@@ -1018,6 +1038,27 @@ def workout_response(response) -> JSONResponse:
     if CredentialFilter((load_model_config().OPENAI_API_KEY,)).contains(payload):
         reject(422, "credential_detected", CREDENTIAL_SAFE_MESSAGE)
     return JSONResponse(payload, headers=NO_STORE)
+
+
+@app.get("/api/plans/current", dependencies=[Depends(check_boundary)])
+async def get_current_plan(request: Request):
+    check_workout_query(request, set())
+    return workout_response(await request.app.state.business.get_current_plan())
+
+
+@app.get("/api/plans", dependencies=[Depends(check_boundary)])
+async def list_plans(request: Request):
+    check_workout_query(request, set())
+    payload = [record.model_dump() for record in await request.app.state.business.list_plans()]
+    if CredentialFilter((load_model_config().OPENAI_API_KEY,)).contains(payload):
+        reject(422, "credential_detected", CREDENTIAL_SAFE_MESSAGE)
+    return JSONResponse(payload, headers=NO_STORE)
+
+
+@app.get("/api/plans/{plan_id}", dependencies=[Depends(check_boundary)])
+async def get_plan(plan_id: PathUUID, request: Request):
+    check_workout_query(request, set())
+    return workout_response(await request.app.state.business.get_plan(plan_id))
 
 
 @app.get("/api/workouts", dependencies=[Depends(check_boundary)])

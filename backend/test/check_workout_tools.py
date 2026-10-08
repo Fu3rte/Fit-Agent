@@ -1,6 +1,9 @@
 import asyncio
 import json
+import shlex
+import sys
 from datetime import date, timedelta
+from pathlib import Path
 from uuid import uuid4
 
 from app.agent.tool import run_tool_batch
@@ -9,7 +12,7 @@ from app.agent.tools.business import bind_business_tools, business_tool_declarat
 from app.ai.messages import ToolCall
 from app.domain.business.models import WorkoutListArguments
 from app.domain.session.models import SendCommand, SendRequest
-from test.check_profile_confirmation import Fixture, SYSTEM, new_id, payload
+from test.check_profile_confirmation import SYSTEM, Fixture, new_id, payload
 from test.check_workout_service_http import CONTENT, assistant
 from test.regression_support import run_tool, temporary_root
 
@@ -163,7 +166,7 @@ def main():
     for day, offset, expected in [("2026-01-01", 1, "2025-12-31"),
                                   ("2024-03-01", 1, "2024-02-29"),
                                   ("2026-03-01", 3, "2026-02-26")]:
-        command = ("../.venv/Scripts/python.exe -c 'from datetime import date,timedelta; "
+        command = (shlex.quote(Path(sys.executable).as_posix()) + " -c 'from datetime import date,timedelta; "
                    f'print((date.fromisoformat("{day}")-timedelta(days={offset})).isoformat())' + "'")
         result = run_tool(bash, {"command": command})
         assert not result.is_error and result.content[0].text.strip() == expected

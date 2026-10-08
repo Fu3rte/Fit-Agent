@@ -117,6 +117,54 @@ class WorkoutAccessDenied(BusinessError):
     message = "训练记录快照归属校验失败。"
 
 
+class PlanNotFound(BusinessError):
+    code = "plan_not_found"
+    http_status = 404
+    message = "计划不存在。"
+
+
+class PlanProposalNotFound(BusinessError):
+    code = "plan_proposal_not_found"
+    http_status = 404
+    message = "计划快照不存在。"
+
+
+class PlanProposalInvalidated(BusinessError):
+    code = "plan_proposal_invalidated"
+    http_status = 409
+    message = "该计划快照已失效。"
+
+
+class PlanSaveProcessing(BusinessError):
+    code = "plan_save_processing"
+    http_status = 409
+    message = "该计划快照正在保存，请查询原操作状态。"
+
+
+class PlanVersionConflict(BusinessError):
+    code = "plan_version_conflict"
+    http_status = 409
+    message = "当前计划已变化，需要重新准备并展示完整计划。"
+
+
+class ProfileRequired(BusinessError):
+    code = "profile_required"
+    http_status = 409
+    message = "生成计划需要已保存画像。"
+
+
+class PlanConfirmationInvalid(BusinessError):
+    code = "plan_confirmation_invalid"
+    http_status = 409
+    message = "展示与确认消息的关联、角色、时序或有效路径不满足要求。"
+
+
+class PlanAccessDenied(BusinessError):
+    code = "plan_access_denied"
+    http_status = 403
+    message = "计划快照归属校验失败。"
+
+
 class ProfileSessionNotFound(BusinessError):
     code = "session_not_found"
     http_status = 404

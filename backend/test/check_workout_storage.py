@@ -225,7 +225,7 @@ async def check_migration() -> dict:
     assert [tuple(row) for row in await cursor.fetchall()] == before_catalog
     await cursor.close()
     cursor = await database.connection.execute("PRAGMA user_version")
-    assert (await cursor.fetchone())[0] == SCHEMA_VERSION == 6
+    assert (await cursor.fetchone())[0] == SCHEMA_VERSION == 7
     await cursor.close()
     with pytest.raises(sqlite3.OperationalError):
         await apply_schema(database.connection, "CREATE TABLE migration_guard (id INTEGER); SELECT * FROM absent_table;", 7)
@@ -235,7 +235,7 @@ async def check_migration() -> dict:
     await database.close()
     reopened = await open_database(path)
     await reopened.close()
-    return {"upgraded_from": 5, "schema_version": 6, "catalog_rows_preserved": len(exercises),
+    return {"upgraded_from": 5, "schema_version": SCHEMA_VERSION, "catalog_rows_preserved": len(exercises),
             "profile_and_session_preserved": True, "migration_failure_rolled_back": True, "reopen_verified": True}
 
 
@@ -456,7 +456,7 @@ def check() -> None:
     evidence = {"models": check_models(), "migration": asyncio.run(check_migration()),
                 "store": asyncio.run(check_store()), "pagination": check_pagination()}
     (ROOT / "evidence.json").write_text(json.dumps(evidence, ensure_ascii=False, indent=2), encoding="utf-8")
-    print("PASS: workout strict schema; SQLite migration 5→6 and rollback; profile/session/catalog preserved; unique date; stable ID/version CAS; snapshots/bindings; atomic rollback/recovery; pagination; fixed results; cleanup/restart")
+    print("PASS: workout strict schema; SQLite migration 5→7 and rollback; profile/session/catalog preserved; unique date; stable ID/version CAS; snapshots/bindings; atomic rollback/recovery; pagination; fixed results; cleanup/restart")
 
 
 if __name__ == "__main__":

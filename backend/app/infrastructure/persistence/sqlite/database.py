@@ -15,7 +15,7 @@ T = TypeVar("T")
 # 提交否决判据：由连接线程在 COMMIT 执行期间同步调用，返回真值表示本次提交让位。
 CommitVeto = Callable[[], bool]
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 _MIGRATIONS_DIR = Path(__file__).resolve().parent / "migrations"
 _INITIAL_SCHEMA = _MIGRATIONS_DIR / "001_initial.sql"
@@ -31,6 +31,7 @@ _MIGRATIONS: dict[int, Path] = {
     4: _PROFILE_SNAPSHOT_SCHEMA,
     5: _MIGRATIONS_DIR / "005_remove_confirmation_cards.sql",
     6: _MIGRATIONS_DIR / "006_workouts.sql",
+    7: _MIGRATIONS_DIR / "007_plans.sql",
 }
 
 # 当前版本的结构基线：表 -> 列集合。
@@ -119,6 +120,14 @@ _TABLE_COLUMNS: dict[str, frozenset[str]] = {
             "saved_at",
         }
     ),
+    "plans": frozenset({"id", "is_current", "content", "created_at"}),
+    "plan_snapshots": frozenset({
+        "proposal_id", "session_id", "request_entry_id", "source_entry_id", "base_profile_version",
+        "base_plan_id", "payload", "display_entry_id", "confirmation_entry_id", "status", "created_at",
+    }),
+    "plan_save_records": frozenset({
+        "proposal_id", "session_id", "display_entry_id", "confirmation_entry_id", "result", "saved_at",
+    }),
     "workouts": frozenset({"id", "performed_on", "version", "content", "created_at", "updated_at"}),
     "workout_snapshots": frozenset({
         "proposal_id", "session_id", "request_entry_id", "source_entry_id", "performed_on",
@@ -146,6 +155,9 @@ _NULLABLE_COLUMNS = frozenset({
     ("profile_snapshots", "base_profile_version"),
     ("profile_snapshots", "display_entry_id"),
     ("profile_snapshots", "confirmation_entry_id"),
+    ("plan_snapshots", "base_plan_id"),
+    ("plan_snapshots", "display_entry_id"),
+    ("plan_snapshots", "confirmation_entry_id"),
     ("workout_snapshots", "base_workout_id"),
     ("workout_snapshots", "base_workout_version"),
     ("workout_snapshots", "display_entry_id"),
@@ -231,6 +243,15 @@ _FOREIGN_KEYS: dict[str, set[tuple[str, frozenset[tuple[str, str]]]]] = {
         ),
     },
     "profile_save_records": set(),
+    "plans": set(),
+    "plan_snapshots": {
+        ("sessions", frozenset({("session_id", "id")})),
+        ("session_entries", frozenset({("session_id", "session_id"), ("request_entry_id", "id")})),
+        ("session_entries", frozenset({("session_id", "session_id"), ("source_entry_id", "id")})),
+        ("session_entries", frozenset({("session_id", "session_id"), ("display_entry_id", "id")})),
+        ("session_entries", frozenset({("session_id", "session_id"), ("confirmation_entry_id", "id")})),
+    },
+    "plan_save_records": set(),
     "workouts": set(),
     "workout_snapshots": {
         ("sessions", frozenset({("session_id", "id")})),
@@ -251,6 +272,11 @@ _INDEXES = frozenset({
     "idx_profile_snapshots_pending",
     "idx_profile_snapshots_confirmation",
     "idx_profile_save_records_confirmation",
+    "idx_plans_current",
+    "idx_plans_created_at",
+    "idx_plan_snapshots_pending",
+    "idx_plan_snapshots_confirmation",
+    "idx_plan_save_records_confirmation",
     "idx_workouts_performed_on",
     "idx_workout_snapshots_pending",
     "idx_workout_snapshots_confirmation",
@@ -281,6 +307,15 @@ _TRIGGERS = frozenset({
     "workout_snapshots_confirmation_entry_user",
     "workout_snapshots_immutable_update",
     "workout_save_records_immutable_update",
+    "plans_immutable_update",
+    "plan_snapshots_immutable_update",
+    "plan_save_records_immutable_update",
+    "plan_snapshots_request_entry_user_insert",
+    "plan_snapshots_source_entry_assistant_insert",
+    "plan_snapshots_display_entry_tool_result_insert",
+    "plan_snapshots_display_entry_tool_result",
+    "plan_snapshots_confirmation_entry_user_insert",
+    "plan_snapshots_confirmation_entry_user",
 })
 
 

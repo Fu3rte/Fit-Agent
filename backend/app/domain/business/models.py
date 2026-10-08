@@ -1,7 +1,10 @@
 from datetime import date
 from typing import Annotated, Literal, Self, TypeAlias
 
+from jsonpointer import JsonPointer, JsonPointerException
+from jsonschema import FormatChecker
 from pydantic import (
+    AfterValidator,
     BaseModel,
     ConfigDict,
     Field,
@@ -324,6 +327,165 @@ class WorkoutSaveRecord(BusinessModel):
     display_entry_id: str = Field(pattern=STANDARD_UUID)
     confirmation_entry_id: str = Field(pattern=STANDARD_UUID)
     result: WorkoutSaveResult
+    saved_at: int = Field(gt=0)
+
+    @model_validator(mode="after")
+    def validate_result_identity(self) -> Self:
+        if self.proposal_id != self.result.proposal_id or self.saved_at != self.result.saved_at:
+            raise ValueError("固定结果的快照标识与保存时间必须一致。")
+        return self
+
+
+PlanProposalStatus: TypeAlias = Literal[
+    "pending", "processing", "saved", "invalidated", "conflicted"
+]
+
+
+# suggested_fields 标记助手补充或修改的字段，沿用 RFC 6901 JSON Pointer；jsonpointer 完整解析语法，
+# jsonschema 格式检查器以不抛异常的 conforms 暴露判定结果。
+_JSON_POINTER_FORMAT = FormatChecker()
+_JSON_POINTER_FORMAT.checks("json-pointer", raises=JsonPointerException)(JsonPointer)
+
+
+def _validate_json_pointer(value: str) -> str:
+    if not _JSON_POINTER_FORMAT.conforms(value, "json-pointer"):
+        raise ValueError("必须为合法的 JSON Pointer 字段路径。")
+    return value
+
+
+PlanFieldPath: TypeAlias = Annotated[str, AfterValidator(_validate_json_pointer)]
+
+
+class PlanExercise(BusinessModel):
+    exercise_id: str | None
+    name: str
+    sets: int | None = Field(gt=0)
+    reps: int | None = Field(gt=0)
+    duration_seconds: float | None = Field(gt=0)
+    weight_kg: float | None = Field(ge=0)
+    load_convention: LoadConvention | None
+    rest_seconds: float | None = Field(ge=0)
+
+    @field_validator("exercise_id", "name")
+    @classmethod
+    def validate_text(cls, value: str | None) -> str | None:
+        if value is not None and not value.strip():
+            raise ValueError("必须包含非空白内容")
+        return value
+
+    @model_validator(mode="after")
+    def validate_load_convention(self) -> Self:
+        if self.weight_kg is not None and self.load_convention is None:
+            raise ValueError("重量有值时必须明确重量口径。")
+        return self
+
+
+class PlanDay(BusinessModel):
+    kind: Literal["training", "rest"]
+    focus: str | None
+    exercises: list[PlanExercise]
+    notes: str | None
+
+    @model_validator(mode="after")
+    def validate_rest(self) -> Self:
+        if self.kind == "rest" and self.exercises:
+            raise ValueError("休息日动作列表必须为空。")
+        return self
+
+
+class PlanContent(BusinessModel):
+    repeat: bool | None
+    days: list[PlanDay] = Field(min_length=1)
+    notes: str | None
+    suggested_fields: list[PlanFieldPath]
+
+
+class CurrentPlan(BusinessModel):
+    id: str | None = Field(pattern=STANDARD_UUID)
+    content: PlanContent | None
+
+    @model_validator(mode="after")
+    def validate_content_pair(self) -> Self:
+        if (self.id is None) != (self.content is None):
+            raise ValueError("当前计划 ID 与内容必须同时为空或同时有值。")
+        return self
+
+
+class PlanRecord(BusinessModel):
+    id: str = Field(pattern=STANDARD_UUID)
+    is_current: bool
+    created_at: int = Field(gt=0)
+    content: PlanContent
+
+
+class PlanGetArguments(BusinessModel):
+    plan_id: str = Field(pattern=STANDARD_UUID)
+
+
+class PlanProposalArguments(BusinessModel):
+    base_profile_version: int = Field(gt=0)
+    base_plan_id: str | None = Field(pattern=STANDARD_UUID)
+    payload: PlanContent
+
+
+class PlanProposal(PlanProposalArguments):
+    proposal_id: str = Field(pattern=STANDARD_UUID)
+
+
+class PlanSaveArguments(BusinessModel):
+    proposal_id: str = Field(pattern=STANDARD_UUID)
+    display_entry_id: str = Field(pattern=STANDARD_UUID)
+    confirmation_entry_id: str = Field(pattern=STANDARD_UUID)
+
+
+class PlanSaveResult(BusinessModel):
+    proposal_id: str = Field(pattern=STANDARD_UUID)
+    id: str = Field(pattern=STANDARD_UUID)
+    content: PlanContent
+    created_at: int = Field(gt=0)
+    saved_at: int = Field(gt=0)
+
+    @model_validator(mode="after")
+    def validate_saved_time(self) -> Self:
+        if self.created_at != self.saved_at:
+            raise ValueError("创建与保存时间必须一致。")
+        return self
+
+
+class PlanStatusArguments(BusinessModel):
+    proposal_id: str = Field(pattern=STANDARD_UUID)
+
+
+class PlanStatusResult(BusinessModel):
+    proposal_id: str = Field(pattern=STANDARD_UUID)
+    status: PlanProposalStatus
+    result: PlanSaveResult | None
+
+    @model_validator(mode="after")
+    def validate_result_pair(self) -> Self:
+        if (self.status == "saved") != (self.result is not None):
+            raise ValueError("仅 saved 状态携带完整保存结果。")
+        if self.result is not None and self.result.proposal_id != self.proposal_id:
+            raise ValueError("保存结果的快照标识不一致。")
+        return self
+
+
+class PlanSnapshot(PlanProposal):
+    session_id: str = Field(pattern=STANDARD_UUID)
+    request_entry_id: str = Field(pattern=STANDARD_UUID)
+    source_entry_id: str = Field(pattern=STANDARD_UUID)
+    display_entry_id: str | None = Field(default=None, pattern=STANDARD_UUID)
+    confirmation_entry_id: str | None = Field(default=None, pattern=STANDARD_UUID)
+    status: PlanProposalStatus
+    created_at: int = Field(gt=0)
+
+
+class PlanSaveRecord(BusinessModel):
+    proposal_id: str = Field(pattern=STANDARD_UUID)
+    session_id: str = Field(pattern=STANDARD_UUID)
+    display_entry_id: str = Field(pattern=STANDARD_UUID)
+    confirmation_entry_id: str = Field(pattern=STANDARD_UUID)
+    result: PlanSaveResult
     saved_at: int = Field(gt=0)
 
     @model_validator(mode="after")

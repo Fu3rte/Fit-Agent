@@ -407,7 +407,7 @@ async def check_first_build(root: Path) -> dict:
     try:
         session_id = await fixture.session()
 
-        # 声明协议：画像、目录及训练工具统一注册。
+        # 声明协议：画像、目录、训练及计划工具统一注册。
         tools = bind_business_tools(
             fixture.business,
             fixture.context(session_id, session_id, session_id),
@@ -423,6 +423,7 @@ async def check_first_build(root: Path) -> dict:
             STATUS,
             "get_workout", "list_workouts", "prepare_workout", "save_workout",
             "update_workout", "get_workout_save_status",
+            "get_current_plan", "get_plan", "list_plans", "prepare_plan", "save_plan", "get_plan_save_status",
         }
         assert {name: tool.definition() for name, tool in tools.items()} == DECLARED
         assert set(DECLARED[PREPARE].parameters["properties"]) == {
@@ -1243,6 +1244,7 @@ def check() -> None:
         STATUS,
         "get_workout", "list_workouts", "prepare_workout", "save_workout",
         "update_workout", "get_workout_save_status",
+        "get_current_plan", "get_plan", "list_plans", "prepare_plan", "save_plan", "get_plan_save_status",
     }
     evidence: dict = {}
     with TemporaryDirectory(dir=EVIDENCE, ignore_cleanup_errors=True) as directory:

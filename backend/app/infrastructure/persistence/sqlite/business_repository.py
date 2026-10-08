@@ -6,6 +6,10 @@ import aiosqlite
 
 from app.domain.business.models import (
     CatalogExercise,
+    PlanRecord,
+    PlanSnapshot,
+    PlanSaveRecord,
+    PlanProposalStatus,
     ProfileContent,
     ProfileProposalStatus,
     ProfileRecord,
@@ -42,6 +46,35 @@ _WORKOUT_SNAPSHOT_COLUMNS = (
 _WORKOUT_SAVE_COLUMNS = (
     "proposal_id, session_id, display_entry_id, confirmation_entry_id, result, saved_at"
 )
+
+
+_PLAN_COLUMNS = "id, is_current, content, created_at"
+_PLAN_SNAPSHOT_COLUMNS = (
+    "proposal_id, session_id, request_entry_id, source_entry_id, base_profile_version, "
+    "base_plan_id, payload, display_entry_id, confirmation_entry_id, status, created_at"
+)
+_PLAN_SAVE_COLUMNS = (
+    "proposal_id, session_id, display_entry_id, confirmation_entry_id, result, saved_at"
+)
+
+
+def _row_to_plan(row: sqlite3.Row) -> PlanRecord:
+    data = dict(row)
+    data["content"] = json.loads(data["content"])
+    data["is_current"] = bool(data["is_current"])
+    return PlanRecord.model_validate(data)
+
+
+def _row_to_plan_snapshot(row: sqlite3.Row) -> PlanSnapshot:
+    data = dict(row)
+    data["payload"] = json.loads(data["payload"])
+    return PlanSnapshot.model_validate(data)
+
+
+def _row_to_plan_save_record(row: sqlite3.Row) -> PlanSaveRecord:
+    data = dict(row)
+    data["result"] = json.loads(data["result"])
+    return PlanSaveRecord.model_validate(data)
 
 
 def _row_to_workout(row: sqlite3.Row) -> WorkoutRecord:
@@ -473,6 +506,127 @@ class SqliteBusinessRepository:
         return await self._write(
             "UPDATE workout_snapshots SET status = 'pending' WHERE status = 'processing'", (),
         )
+
+    async def get_current_plan(self) -> PlanRecord | None:
+        row = await self._fetch_one(f"SELECT {_PLAN_COLUMNS} FROM plans WHERE is_current = 1", ())
+        return None if row is None else _row_to_plan(row)
+
+    async def get_plan(self, plan_id: str) -> PlanRecord | None:
+        row = await self._fetch_one(f"SELECT {_PLAN_COLUMNS} FROM plans WHERE id = ?", (plan_id,))
+        return None if row is None else _row_to_plan(row)
+
+    async def list_plans(self) -> list[PlanRecord]:
+        rows = await self._fetch_all(
+            f"SELECT {_PLAN_COLUMNS} FROM plans ORDER BY created_at DESC, id DESC", ()
+        )
+        return [_row_to_plan(row) for row in rows]
+
+    async def insert_plan(self, record: PlanRecord) -> None:
+        async with self.transaction():
+            if record.is_current:
+                await self._write("UPDATE plans SET is_current = 0 WHERE is_current = 1", ())
+            await self._write(
+                f"INSERT INTO plans ({_PLAN_COLUMNS}) VALUES (?, ?, ?, ?)",
+                (record.id, int(record.is_current), _dump_json(record.content.model_dump()), record.created_at),
+            )
+
+    async def insert_plan_snapshot(self, snapshot: PlanSnapshot) -> None:
+        await self._write(
+            f"INSERT INTO plan_snapshots ({_PLAN_SNAPSHOT_COLUMNS}) VALUES ({_placeholders(11)})",
+            (snapshot.proposal_id, snapshot.session_id, snapshot.request_entry_id,
+             snapshot.source_entry_id, snapshot.base_profile_version, snapshot.base_plan_id,
+             _dump_json(snapshot.payload.model_dump()), snapshot.display_entry_id,
+             snapshot.confirmation_entry_id, snapshot.status, snapshot.created_at),
+        )
+
+    async def get_plan_snapshot(self, proposal_id: str) -> PlanSnapshot | None:
+        row = await self._fetch_one(
+            f"SELECT {_PLAN_SNAPSHOT_COLUMNS} FROM plan_snapshots WHERE proposal_id = ?", (proposal_id,)
+        )
+        return None if row is None else _row_to_plan_snapshot(row)
+
+    async def list_plan_snapshots(self, session_id: str) -> list[PlanSnapshot]:
+        rows = await self._fetch_all(
+            f"SELECT {_PLAN_SNAPSHOT_COLUMNS} FROM plan_snapshots WHERE session_id = ? "
+            "ORDER BY created_at, proposal_id", (session_id,),
+        )
+        return [_row_to_plan_snapshot(row) for row in rows]
+
+    async def find_plan_snapshot_by_confirmation(
+        self, session_id: str, confirmation_entry_id: str
+    ) -> PlanSnapshot | None:
+        row = await self._fetch_one(
+            f"SELECT {_PLAN_SNAPSHOT_COLUMNS} FROM plan_snapshots "
+            "WHERE session_id = ? AND confirmation_entry_id = ?", (session_id, confirmation_entry_id),
+        )
+        return None if row is None else _row_to_plan_snapshot(row)
+
+    async def bind_plan_display_entry(self, proposal_id: str, display_entry_id: str) -> None:
+        await self._write("UPDATE plan_snapshots SET display_entry_id = ? WHERE proposal_id = ?",
+                          (display_entry_id, proposal_id))
+
+    async def begin_plan_save(self, proposal_id: str, confirmation_entry_id: str) -> None:
+        await self._write(
+            "UPDATE plan_snapshots SET confirmation_entry_id = ?, status = 'processing' WHERE proposal_id = ?",
+            (confirmation_entry_id, proposal_id),
+        )
+
+    async def set_plan_snapshot_status(self, proposal_id: str, status: PlanProposalStatus) -> None:
+        await self._write("UPDATE plan_snapshots SET status = ? WHERE proposal_id = ?", (status, proposal_id))
+
+    async def invalidate_pending_plans(self, session_id: str, keep_proposal_id: str) -> None:
+        await self._write(
+            "UPDATE plan_snapshots SET status = 'invalidated' WHERE session_id = ? "
+            "AND status = 'pending' AND proposal_id <> ?", (session_id, keep_proposal_id),
+        )
+
+    async def complete_plan_save(self, record: PlanSaveRecord) -> None:
+        await self._write("UPDATE plan_snapshots SET status = 'saved' WHERE proposal_id = ?", (record.proposal_id,))
+        await self._write(
+            f"INSERT INTO plan_save_records ({_PLAN_SAVE_COLUMNS}) VALUES ({_placeholders(6)})",
+            (record.proposal_id, record.session_id, record.display_entry_id,
+             record.confirmation_entry_id, _dump_json(record.result.model_dump()), record.saved_at),
+        )
+
+    async def get_plan_save_record(self, proposal_id: str) -> PlanSaveRecord | None:
+        row = await self._fetch_one(
+            f"SELECT {_PLAN_SAVE_COLUMNS} FROM plan_save_records WHERE proposal_id = ?", (proposal_id,)
+        )
+        return None if row is None else _row_to_plan_save_record(row)
+
+    async def list_plan_save_records(self, session_id: str) -> list[PlanSaveRecord]:
+        rows = await self._fetch_all(
+            f"SELECT {_PLAN_SAVE_COLUMNS} FROM plan_save_records WHERE session_id = ? "
+            "ORDER BY saved_at, proposal_id", (session_id,),
+        )
+        return [_row_to_plan_save_record(row) for row in rows]
+
+    async def find_plan_save_record_by_confirmation(
+        self, session_id: str, confirmation_entry_id: str
+    ) -> PlanSaveRecord | None:
+        row = await self._fetch_one(
+            f"SELECT {_PLAN_SAVE_COLUMNS} FROM plan_save_records "
+            "WHERE session_id = ? AND confirmation_entry_id = ?", (session_id, confirmation_entry_id),
+        )
+        return None if row is None else _row_to_plan_save_record(row)
+
+    async def delete_plan_snapshots_for_entries(self, session_id: str, entry_ids: set[str]) -> None:
+        if not entry_ids:
+            return
+        ids = tuple(entry_ids)
+        marks = _placeholders(len(ids))
+        await self._write(
+            "DELETE FROM plan_snapshots WHERE session_id = ? AND ("
+            f"request_entry_id IN ({marks}) OR source_entry_id IN ({marks}) "
+            f"OR display_entry_id IN ({marks}) OR confirmation_entry_id IN ({marks}))",
+            (session_id, *ids, *ids, *ids, *ids),
+        )
+
+    async def delete_plan_snapshots_for_session(self, session_id: str) -> None:
+        await self._write("DELETE FROM plan_snapshots WHERE session_id = ?", (session_id,))
+
+    async def recover_interrupted_plan_saves(self) -> int:
+        return await self._write("UPDATE plan_snapshots SET status = 'pending' WHERE status = 'processing'", ())
 
     async def replace_exercises(self, exercises: list[CatalogExercise]) -> None:
         await self._write("DELETE FROM exercises", ())
