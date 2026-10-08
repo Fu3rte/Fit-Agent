@@ -1,7 +1,7 @@
 from app.agent.tool import AgentTool, ExecuteFunction, ToolDeclaration
 from app.agent.tools.common import MainLoopCall, business_result, unbound
-from app.application.business.service import BusinessService
 from app.ai.messages import JsonObject
+from app.application.business.service import BusinessService
 from app.domain.business.models import (
     BusinessContext,
     WorkoutGetArguments,
