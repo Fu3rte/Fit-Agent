@@ -7,8 +7,9 @@ import {
   submitSteering,
   withdrawSteering,
 } from "@/lib/api";
-import { WORKOUT_QUERY_KEY, queryClient } from "@/lib/query";
+import { PLAN_QUERY_KEY, WORKOUT_QUERY_KEY, queryClient } from "@/lib/query";
 import type {
+  AttachmentWire,
   DiscardReasonWire,
   EditRunBody,
   ReActRunBody,
@@ -19,11 +20,18 @@ import type {
   SteeringReceiveStatusWire,
 } from "@/lib/contract";
 import {
+  attachmentInputs,
+  draftSessionTitle,
+  retainedAttachmentDrafts,
+  type AttachmentDraft,
+} from "./attachments";
+import {
   ReActHttpError,
   SESSION_DELETED_EVENT,
   applyReActEvent,
   applySteeringStatus,
   attachOperationRun,
+  attachmentDisplay,
   canSubmitChatInput,
   concludeReActRound,
   confirmDraftCreated,
@@ -33,6 +41,7 @@ import {
   forgetRunOperations,
   isExpiredOperation,
   pendingExecOperation,
+  planSaved,
   profileSaved,
   readLedger,
   rememberOperation,
@@ -40,7 +49,7 @@ import {
   resumeReActRound,
   retainDraftTitle,
   selectSession,
-  unknownSteeringRequests,
+  unknownSteeringKeys,
   updateLedger,
   workoutSaved,
   withPending,
@@ -67,13 +76,15 @@ type RunSnapshot = {
   error_message?: string | null;
 };
 
-/** Steering 状态快照（§6.1、§7.1）：接收、撤回与操作查询共用同一形状 */
+/** Steering 状态快照（§6.1、§7.1、附件契约 §4）：接收、撤回与操作查询共用同一形状 */
 type SteeringSnapshot = {
   run_id: string;
   steering_id: string;
   status: SteeringReceiveStatusWire;
   entry_id: string | null;
   reason: DiscardReasonWire | null;
+  /** 受理时的有序附件集合，撤回响应与列表查询按契约不含该投影 */
+  attachments?: AttachmentWire[];
 };
 
 /** 页面渲染所需的会话运行快照（§5.1）：管理层持有，页面只读订阅 */
@@ -425,6 +436,9 @@ class SessionRunRecord {
         pruned,
         { ...snapshot, operation_id: operationId },
         operation?.request,
+        snapshot.attachments !== undefined
+          ? retainedAttachmentDrafts(snapshot.attachments)
+          : operation?.attachments,
       );
       const entry = next.entries.find(
         (item) => item.kind === "user" && item.id === snapshot.steering_id,
@@ -535,6 +549,7 @@ class SessionRunRecord {
               kind: "user",
               id: operation.operation_id,
               request: operation.request,
+              ...attachmentDisplay(operation.attachments),
             },
           ]
         : target !== undefined
@@ -570,6 +585,7 @@ class SessionRunRecord {
     this.stopWatch();
     this.update(operation.operation_id, (round) => resumeReActRound(round));
     this.patch({ busy: true, ready: false });
+    const attachments = attachmentInputs(operation.attachments);
     const body: ReActRunBody | EditRunBody | RegenerateRunBody =
       operation.kind === "edit"
         ? {
@@ -577,6 +593,7 @@ class SessionRunRecord {
             operation_id: operation.operation_id,
             target_entry_id: operation.target_entry_id ?? "",
             request: operation.request,
+            ...(operation.legacy_edit ? {} : { attachments }),
           }
         : operation.kind === "regenerate"
           ? {
@@ -588,6 +605,7 @@ class SessionRunRecord {
               session_id: operation.session_id,
               operation_id: operation.operation_id,
               request: operation.request,
+              attachments,
             };
     void runReActStream(
       body,
@@ -597,7 +615,8 @@ class SessionRunRecord {
           applyReActEvent(round, event),
         );
         /* 保存落定才使业务查询失效：个人页重取当前画像，训练记录页重取列表与详情，
-         * 失败与结果未知保持原内容（§6、§9.1）。页面未挂载同样生效，保存发生在后台运行时。 */
+         * 计划页重取当前计划、版本列表与已加载版本详情，失败与结果未知保持原内容（§6、§9.1）。
+         * 页面未挂载同样生效，保存发生在后台运行时。 */
         const executed = this.view.rounds.find(
           (round) => round.id === operation.operation_id,
         );
@@ -606,6 +625,8 @@ class SessionRunRecord {
             queryClient.invalidateQueries({ queryKey: ["profile"] });
           if (workoutSaved(event, executed))
             queryClient.invalidateQueries({ queryKey: WORKOUT_QUERY_KEY });
+          if (planSaved(event, executed))
+            queryClient.invalidateQueries({ queryKey: PLAN_QUERY_KEY });
         }
         if (event.event === "done" || event.event === "error") {
           this.exec = null;
@@ -668,11 +689,12 @@ class SessionRunRecord {
     );
   }
 
-  /** 一次发送（§5）：先确认会话，再按服务端响应处理执行流 */
+  /** 一次发送（§5、附件契约 §3.1）：先确认会话，再按服务端响应处理执行流；
+   *  草稿标题在文本含非空白内容时沿用原文，纯文件消息按附件顺序以换行连接文件名 */
   private dispatchSend(operation: PendingOperation): void {
-    if (!this.view.persistent)
-      retainDraftTitle(this.sessionId, operation.request);
-    void this.ensureSession(operation.request).then((outcome) => {
+    const title = draftSessionTitle(operation.request, operation.attachments);
+    if (!this.view.persistent) retainDraftTitle(this.sessionId, title);
+    void this.ensureSession(title).then((outcome) => {
       if (this.removed) return;
       if (outcome.state === "created") {
         this.beginExec(operation, EXEC_ENDPOINT.send);
@@ -699,33 +721,41 @@ class SessionRunRecord {
     });
   }
 
-  /** 一次 Steering 提交（§6.1）：首次 accepted，重复返回原输入当前持久化状态 */
-  private dispatchSteering(roundId: string, operation: PendingOperation): void {
+  /** 一次 Steering 提交（§6.1、附件契约 §3.4）：首次 accepted，重复返回原输入当前持久化状态。
+   *  返回 false 表示服务端明确拒绝该输入（如目标运行已 run_closed 停止接收），
+   *  此时账本已清理且调用方保留输入草稿；受理或结果未知返回 true，未确认输入走显式重试。 */
+  private dispatchSteering(
+    roundId: string,
+    operation: PendingOperation,
+  ): Promise<boolean> {
     const target = operation.run_id;
     if (target === null) {
       this.patch({ error: "缺少 Steering 目标运行。" });
-      return;
+      return Promise.resolve(false);
     }
     const controller = new AbortController();
     this.steering = controller;
-    void submitSteering(
+    return submitSteering(
       target,
       {
         session_id: operation.session_id,
         operation_id: operation.operation_id,
         message: operation.request,
+        attachments: attachmentInputs(operation.attachments),
       },
       controller.signal,
     ).then(
       (received) => {
-        if (this.removed || this.steering !== controller) return;
+        if (this.removed || this.steering !== controller) return true;
         this.steering = null;
         this.applySteering(roundId, operation, received);
+        return true;
       },
       (failure: unknown) => {
-        if (this.removed || this.steering !== controller) return;
+        if (this.removed || this.steering !== controller) return true;
         this.steering = null;
         this.handleFailure(roundId, operation, failure, "Steering 提交");
+        return failureOutcome(failure) !== "rejected";
       },
     );
   }
@@ -811,8 +841,17 @@ class SessionRunRecord {
     this.patch({ ready: false, error: "该操作已受理，运行仍在执行。" });
   }
 
-  editMessage = (entryId: string, text: string): Promise<boolean> => {
-    if (!this.view.ready || this.view.busy || !canSubmitChatInput(text, []))
+  /** 编辑用户消息（附件契约 §3.2）：提交编辑后的完整附件集合，保留项为引用、新增或替换项为上传，全部移除为 `[]` */
+  editMessage = (
+    entryId: string,
+    text: string,
+    attachments: AttachmentDraft[],
+  ): Promise<boolean> => {
+    if (
+      !this.view.ready ||
+      this.view.busy ||
+      !canSubmitChatInput(text, attachments, [])
+    )
       return Promise.resolve(false);
     this.patch({ error: undefined });
     const operation: PendingOperation = {
@@ -821,6 +860,7 @@ class SessionRunRecord {
       kind: "edit",
       run_id: null,
       request: text,
+      attachments,
       created_at: Date.now(),
       target_entry_id: entryId,
     };
@@ -839,6 +879,7 @@ class SessionRunRecord {
       kind: "regenerate",
       run_id: null,
       request: "",
+      attachments: [],
       created_at: Date.now(),
       target_entry_id: entryId,
     };
@@ -922,7 +963,7 @@ class SessionRunRecord {
           return;
         }
         if (operation.kind === "steering")
-          this.dispatchSteering(roundId, operation);
+          void this.dispatchSteering(roundId, operation);
         else if (operation.kind === "send") this.dispatchSend(operation);
         else this.beginExec(operation, EXEC_ENDPOINT[operation.kind]);
       },
@@ -966,13 +1007,19 @@ class SessionRunRecord {
     this.loadHistory(this.inquiry.signal, "initial");
   };
 
-  send = (request: string): Promise<boolean> => {
+  /** 输入提交（§5、§6.1、附件契约 §3）：运行中作为 Steering 进入该运行，空闲时作为普通发送；
+   *  两者均支持文字与附件及纯附件输入 */
+  send = (
+    request: string,
+    attachments: AttachmentDraft[],
+  ): Promise<boolean> => {
     if (
       this.steering !== null ||
       this.watch !== null ||
       !canSubmitChatInput(
         request,
-        unknownSteeringRequests(this.view.operations),
+        attachments,
+        unknownSteeringKeys(this.view.operations),
       )
     )
       return Promise.resolve(false);
@@ -986,11 +1033,11 @@ class SessionRunRecord {
         kind: "steering",
         run_id: run.run_id,
         request,
+        attachments,
         created_at: Date.now(),
       };
       this.setOperations(rememberOperation(this.sessionId, operation));
-      this.dispatchSteering(run.operation.operation_id, operation);
-      return Promise.resolve(true);
+      return this.dispatchSteering(run.operation.operation_id, operation);
     }
     if (
       !this.view.ready ||
@@ -1003,6 +1050,7 @@ class SessionRunRecord {
       kind: "send",
       run_id: null,
       request,
+      attachments,
       created_at: Date.now(),
     };
     this.generation += 1;
@@ -1012,7 +1060,14 @@ class SessionRunRecord {
       ...this.view.rounds,
       {
         id: operation.operation_id,
-        entries: [{ kind: "user", id: operation.operation_id, request }],
+        entries: [
+          {
+            kind: "user",
+            id: operation.operation_id,
+            request,
+            ...attachmentDisplay(operation.attachments),
+          },
+        ],
         status: "running",
       },
     ]);

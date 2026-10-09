@@ -432,6 +432,29 @@ class PlanProposal(PlanProposalArguments):
     proposal_id: str = Field(pattern=STANDARD_UUID)
 
 
+class PlanImportArguments(BusinessModel):
+    base_profile_version: int | None = Field(gt=0)
+    base_plan_id: str | None = Field(pattern=STANDARD_UUID)
+    payload: PlanContent
+
+
+class PlanAdjustmentArguments(PlanImportArguments):
+    pass
+
+
+class PlanImportProposal(PlanImportArguments):
+    proposal_id: str = Field(pattern=STANDARD_UUID)
+    preparation_kind: Literal["import"]
+
+
+class PlanAdjustmentProposal(PlanAdjustmentArguments):
+    proposal_id: str = Field(pattern=STANDARD_UUID)
+    preparation_kind: Literal["adjustment"]
+
+
+PlanPreparationKind: TypeAlias = Literal["generation", "import", "adjustment"]
+
+
 class PlanSaveArguments(BusinessModel):
     proposal_id: str = Field(pattern=STANDARD_UUID)
     display_entry_id: str = Field(pattern=STANDARD_UUID)
@@ -470,7 +493,9 @@ class PlanStatusResult(BusinessModel):
         return self
 
 
-class PlanSnapshot(PlanProposal):
+class PlanSnapshot(PlanImportArguments):
+    proposal_id: str = Field(pattern=STANDARD_UUID)
+    preparation_kind: PlanPreparationKind
     session_id: str = Field(pattern=STANDARD_UUID)
     request_entry_id: str = Field(pattern=STANDARD_UUID)
     source_entry_id: str = Field(pattern=STANDARD_UUID)
@@ -478,6 +503,13 @@ class PlanSnapshot(PlanProposal):
     confirmation_entry_id: str | None = Field(default=None, pattern=STANDARD_UUID)
     status: PlanProposalStatus
     created_at: int = Field(gt=0)
+
+
+    @model_validator(mode="after")
+    def validate_generation_basis(self) -> Self:
+        if self.preparation_kind == "generation" and self.base_profile_version is None:
+            raise ValueError("生成快照必须有已保存画像版本。")
+        return self
 
 
 class PlanSaveRecord(BusinessModel):

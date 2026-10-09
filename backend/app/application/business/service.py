@@ -16,10 +16,18 @@ from app.domain.business.errors import (
     BusinessError,
     CommitVetoed,
     InvalidBusinessPayload,
+    PlanAccessDenied,
+    PlanConfirmationInvalid,
+    PlanNotFound,
+    PlanProposalInvalidated,
+    PlanProposalNotFound,
+    PlanSaveProcessing,
+    PlanVersionConflict,
     ProfileAccessDenied,
     ProfileConfirmationInvalid,
     ProfileProposalInvalidated,
     ProfileProposalNotFound,
+    ProfileRequired,
     ProfileSessionNotFound,
     ProfileUpdateProcessing,
     ProfileVersionConflict,
@@ -30,21 +38,18 @@ from app.domain.business.errors import (
     WorkoutProposalNotFound,
     WorkoutSaveProcessing,
     WorkoutVersionConflict,
-    PlanAccessDenied,
-    PlanConfirmationInvalid,
-    PlanNotFound,
-    PlanProposalInvalidated,
-    PlanProposalNotFound,
-    PlanSaveProcessing,
-    PlanVersionConflict,
-    ProfileRequired,
 )
 from app.domain.business.models import (
     BusinessContext,
     BusinessFieldError,
     CatalogExercise,
     CurrentPlan,
+    PlanAdjustmentArguments,
+    PlanAdjustmentProposal,
     PlanContent,
+    PlanImportArguments,
+    PlanImportProposal,
+    PlanPreparationKind,
     PlanProposal,
     PlanProposalArguments,
     PlanRecord,
@@ -56,6 +61,7 @@ from app.domain.business.models import (
     ProfileContent,
     ProfileProposal,
     ProfileProposalArguments,
+    ProfileRecord,
     ProfileResponse,
     ProfileSaveArguments,
     ProfileSaveRecord,
@@ -549,25 +555,26 @@ class BusinessService:
         async with self._repository.transaction():
             return await self._repository.list_plans()
 
-    def _validate_plan(self, payload: object, profile: ProfileContent) -> PlanContent:
+    def _validate_plan(self, payload: object, profile: ProfileContent | None,
+                       preparation_kind: PlanPreparationKind = "generation") -> PlanContent:
         content = self._validate_content(PlanContent, payload)
         failures: list[BusinessFieldError] = []
         for day_index, day in enumerate(content.days):
             path = f"/payload/days/{day_index}/exercises"
-            if day.kind == "training" and not day.exercises:
+            if preparation_kind == "generation" and day.kind == "training" and not day.exercises:
                 failures.append(BusinessFieldError(path=path, message="生成训练日必须包含具体动作。"))
             for index, exercise in enumerate(day.exercises):
                 prefix = f"{path}/{index}"
-                if exercise.sets is None:
+                if preparation_kind == "generation" and exercise.sets is None:
                     failures.append(BusinessFieldError(path=prefix + "/sets", message="生成动作必须明确组数。"))
-                if exercise.reps is None and exercise.duration_seconds is None:
+                if preparation_kind == "generation" and exercise.reps is None and exercise.duration_seconds is None:
                     failures.append(BusinessFieldError(path=prefix + "/reps", message="生成动作必须明确次数或时长。"))
                 if exercise.exercise_id is None:
                     continue
                 referenced = self._catalog.get(exercise.exercise_id)
                 if referenced is None:
                     failures.append(BusinessFieldError(path=prefix + "/exercise_id", message="动作 ID 必须存在于动作目录中。"))
-                elif (exercise.exercise_id in (profile.forbidden_exercise_ids or [])
+                elif profile is not None and (exercise.exercise_id in (profile.forbidden_exercise_ids or [])
                       or referenced.equipment in (profile.unavailable_equipment or [])):
                     failures.append(BusinessFieldError(path=prefix + "/exercise_id", message="动作不符合已保存画像的动作或器械限制。"))
         if failures:
@@ -583,6 +590,30 @@ class BusinessService:
         self, context: BusinessContext, arguments: PlanProposalArguments,
         signal: Event | None = None,
     ) -> PlanProposal:
+        return await self._prepare_plan(context, arguments, "generation", signal)
+
+    async def prepare_plan_import(self, context: BusinessContext, arguments: PlanImportArguments,
+                                  signal: Event | None = None) -> PlanImportProposal:
+        return await self._prepare_plan(context, arguments, "import", signal)
+
+    async def prepare_plan_adjustment(self, context: BusinessContext, arguments: PlanAdjustmentArguments,
+                                      signal: Event | None = None) -> PlanAdjustmentProposal:
+        return await self._prepare_plan(context, arguments, "adjustment", signal)
+
+    def _plan_profile_conflict(
+        self, profile: ProfileRecord | None, version: int | None,
+        preparation_kind: PlanPreparationKind,
+    ) -> BusinessError | None:
+        if profile is None and preparation_kind == "generation":
+            return ProfileRequired()
+        if (None if profile is None else profile.version) != version:
+            return ProfileVersionConflict()
+        return None
+
+    async def _prepare_plan(self, context: BusinessContext,
+                            arguments: PlanProposalArguments | PlanImportArguments,
+                            preparation_kind: PlanPreparationKind, signal: Event | None
+                            ) -> PlanProposal | PlanImportProposal | PlanAdjustmentProposal:
         check_cancelled(signal)
         async with self._repository.transaction():
             entries = self._entries(await self._require_branch(context.session_id))
@@ -592,16 +623,16 @@ class BusinessService:
             if order[context.request_entry_id] >= order[context.source_entry_id]:
                 raise PlanConfirmationInvalid("请求与来源节点时序不合法。")
             profile = await self._repository.get_profile()
-            if profile is None:
-                raise ProfileRequired()
-            if profile.version != arguments.base_profile_version:
-                raise ProfileVersionConflict()
+            conflict = self._plan_profile_conflict(profile, arguments.base_profile_version, preparation_kind)
+            if conflict is not None:
+                raise conflict
             current = await self._repository.get_current_plan()
             if arguments.base_plan_id != (None if current is None else current.id):
                 raise PlanVersionConflict()
-            content = self._validate_plan(arguments.payload, profile.content)
+            content = self._validate_plan(arguments.payload, None if profile is None else profile.content, preparation_kind)
             snapshot = PlanSnapshot(
                 **arguments.model_dump(exclude={"payload"}), payload=content,
+                preparation_kind=preparation_kind,
                 proposal_id=str(uuid4()), session_id=context.session_id,
                 request_entry_id=context.request_entry_id, source_entry_id=context.source_entry_id,
                 status="pending", created_at=_now_ms(),
@@ -610,10 +641,13 @@ class BusinessService:
             await self._repository.invalidate_pending_plans(context.session_id, snapshot.proposal_id)
             return self._plan_proposal(snapshot)
 
-    def _plan_proposal(self, snapshot: PlanSnapshot) -> PlanProposal:
-        return PlanProposal.model_validate(snapshot.model_dump(include={
-            "proposal_id", "base_profile_version", "base_plan_id", "payload",
-        }))
+    def _plan_proposal(self, snapshot: PlanSnapshot) -> PlanProposal | PlanImportProposal | PlanAdjustmentProposal:
+        model = {"generation": PlanProposal, "import": PlanImportProposal,
+                 "adjustment": PlanAdjustmentProposal}[snapshot.preparation_kind]
+        fields = {"proposal_id", "base_profile_version", "base_plan_id", "payload"}
+        if snapshot.preparation_kind != "generation":
+            fields.add("preparation_kind")
+        return model.model_validate(snapshot.model_dump(include=fields))
 
     def _require_plan_result(
         self, display: SessionMessageEntry, snapshot: PlanSnapshot,
@@ -621,12 +655,15 @@ class BusinessService:
     ) -> None:
         self._require_batch_result(display, source, entries, PlanConfirmationInvalid)
         result = display.messages[0]
-        if result.is_error or result.tool_name != "prepare_plan":
+        tool_name = {"generation": "prepare_plan", "import": "prepare_plan_import",
+                     "adjustment": "prepare_plan_adjustment"}[snapshot.preparation_kind]
+        if result.is_error or result.tool_name != tool_name:
             raise PlanConfirmationInvalid("展示节点不是该准备工具的结果节点。")
         if len(result.content) != 1 or not isinstance(result.content[0], TextContent):
             raise PlanConfirmationInvalid("展示结果须为完整 JSON text。")
-        displayed = PlanProposal.model_validate(json.loads(result.content[0].text))
-        if displayed != self._plan_proposal(snapshot):
+        expected = self._plan_proposal(snapshot)
+        displayed = type(expected).model_validate(json.loads(result.content[0].text))
+        if displayed != expected:
             raise PlanConfirmationInvalid("展示内容与快照不一致。")
 
     async def bind_plan_display_entry(self, proposal_id: str, display_entry_id: str) -> None:
@@ -682,10 +719,9 @@ class BusinessService:
             raise PlanProposalInvalidated()
         if snapshot.status == "conflicted":
             profile = await self._repository.get_profile()
-            if profile is None:
-                raise ProfileRequired()
-            if profile.version != snapshot.base_profile_version:
-                raise ProfileVersionConflict()
+            conflict = self._plan_profile_conflict(profile, snapshot.base_profile_version, snapshot.preparation_kind)
+            if conflict is not None:
+                raise conflict
             raise PlanVersionConflict()
         bound = await self._check_plan_binding(context, branch, snapshot, arguments)
         await self._repository.begin_plan_save(snapshot.proposal_id, arguments.confirmation_entry_id)
@@ -739,17 +775,13 @@ class BusinessService:
                               confirmation_entry_id=bound.confirmation_entry_id))
         profile = await self._repository.get_profile()
         current = await self._repository.get_current_plan()
-        conflict = None
-        if profile is None:
-            conflict = ProfileRequired()
-        elif profile.version != snapshot.base_profile_version:
-            conflict = ProfileVersionConflict()
-        elif snapshot.base_plan_id != (None if current is None else current.id):
+        conflict = self._plan_profile_conflict(profile, snapshot.base_profile_version, snapshot.preparation_kind)
+        if conflict is None and snapshot.base_plan_id != (None if current is None else current.id):
             conflict = PlanVersionConflict()
         if conflict is not None:
             await self._repository.set_plan_snapshot_status(snapshot.proposal_id, "conflicted")
             return conflict
-        content = self._validate_plan(snapshot.payload, profile.content)
+        content = self._validate_plan(snapshot.payload, None if profile is None else profile.content, snapshot.preparation_kind)
         saved_at = _now_ms()
         record = PlanRecord(id=str(uuid4()), is_current=True, content=content, created_at=saved_at)
         await self._repository.insert_plan(record)

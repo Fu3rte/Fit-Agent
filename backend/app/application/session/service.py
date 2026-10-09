@@ -1,10 +1,28 @@
+import asyncio
+import base64
 import time
 import uuid
-from collections.abc import Sequence
+from collections.abc import AsyncIterator, Sequence
+from contextlib import asynccontextmanager
+from functools import partial
+from pathlib import Path
 from typing import Protocol
 
 from app.ai.context import validate_tool_pairs
 from app.ai.messages import Message, SystemMessage, UserMessage, serialize_message
+from app.application.session.attachment_files import (
+    AttachmentFiles,
+    CreatedAttachment,
+    PreparedUpload,
+)
+from app.domain.session.attachments import (
+    PROJECT_ROOT,
+    AttachmentError,
+    AttachmentInput,
+    AttachmentMetadata,
+    AttachmentReference,
+    AttachmentUpload,
+)
 from app.domain.session.branch import build_session_context, build_session_path
 from app.domain.session.errors import (
     CredentialDetected,
@@ -13,6 +31,7 @@ from app.domain.session.errors import (
     InvalidTargetEntry,
     OperationConflict,
     OperationExpired,
+    RunBusy,
     RunClosed,
     RunNotFound,
     SessionConflict,
@@ -99,9 +118,26 @@ def _reject_credentials(value: object, credentials: Sequence[str]) -> None:
         raise CredentialDetected("请求命中受保护凭据")
 
 
+def _reject_request_credentials(request: object, credentials: Sequence[str]) -> None:
+    _reject_credentials(request.model_dump(exclude_unset=True), credentials)
+    for item in getattr(request, "attachments", []):
+        if isinstance(item, AttachmentUpload):
+            _reject_credentials({
+                "file_name": item.file_name,
+                "text": base64.b64decode(item.data_base64, validate=True).decode("utf-8", errors="strict"),
+            }, credentials)
+
+
 def _same_request(kind: str, stored_request: object, incoming: object) -> bool:
     model = _REQUEST_MODELS[kind]
-    return model.model_validate(stored_request) == incoming
+    stored = model.model_validate({
+        key: value for key, value in stored_request.items() if key != "accepted_attachments"
+    })
+    if kind == "edit" and (
+        ("attachments" in stored.model_fields_set) != ("attachments" in incoming.model_fields_set)
+    ):
+        return False
+    return stored == incoming
 
 
 def _is_role(entry: SessionMessageEntry, role: str) -> bool:
@@ -132,9 +168,98 @@ class SessionService:
         self,
         repository: SessionRepository,
         snapshots: SnapshotStore | None = None,
+        *, project_root: Path | None = None,
     ) -> None:
         self._repository = repository
         self._snapshots = snapshots
+        self._project_root = project_root or PROJECT_ROOT
+
+    def _files(self, credentials: Sequence[str]) -> AttachmentFiles:
+        return AttachmentFiles(
+            self._project_root,
+            check_credentials=partial(_reject_credentials, credentials=credentials),
+        )
+
+    @asynccontextmanager
+    async def _attachment_transaction(
+        self, command: SendCommand | EditCommand | SteeringCommand, kind: str,
+        credentials: Sequence[str],
+    ) -> AsyncIterator[list[CreatedAttachment]]:
+        created: list[CreatedAttachment] = []
+        try:
+            async with self._repository.transaction():
+                yield created
+        except BaseException:
+            if not created:
+                raise
+
+            async def verify() -> None:
+                async with self._repository.transaction():
+                    if await self._repository.get_session(command.session_id) is None:
+                        raise AttachmentError("internal_error", "会话受理事实无法核实")
+                    operation = await self._repository.get_operation(command.operation_id)
+                    invalidated = await self._repository.get_operation_invalidation(command.operation_id)
+                    if invalidated is not None:
+                        raise AttachmentError("internal_error", "受理事实无法核实")
+                    committed = await self._repository.get_attachments(
+                        [item.attachment_id for item in created]
+                    )
+                    if operation is not None:
+                        if operation.session_id != command.session_id or operation.kind != kind or not _same_request(kind, operation.request, command.request):
+                            raise AttachmentError("internal_error", "受理身份无法核实")
+                        run = await self._require_run(operation.session_id, operation.run_id)
+                        if kind == "steering":
+                            steering = await self._require_steering(operation.session_id, operation.steering_id)
+                            if steering.run_id != run.id:
+                                raise AttachmentError("internal_error", "受理关联无法核实")
+                            actual = steering.attachments
+                        else:
+                            await self._require_entry(operation.session_id, run.request_entry_id)
+                            actual = await self._repository.list_entry_attachments(operation.session_id, run.request_entry_id)
+                        expected = [AttachmentMetadata.model_validate(item) for item in operation.request["accepted_attachments"]]
+                        if actual != expected or any(item.attachment_id not in committed for item in created):
+                            raise AttachmentError("internal_error", "受理附件事实无法核实")
+                        return
+                    if committed:
+                        raise AttachmentError("internal_error", "附件提交事实无法核实")
+                    for item in created:
+                        self._files(credentials).remove_created(item)
+            pending = asyncio.create_task(verify())
+            while not pending.done():
+                try:
+                    await asyncio.shield(pending)
+                except asyncio.CancelledError:
+                    asyncio.current_task().uncancel()
+            pending.result()
+            raise
+
+    async def _accept_attachments(
+        self, session_id: str, inputs: list[AttachmentInput],
+        created: list[CreatedAttachment], now: int, credentials: Sequence[str],
+    ) -> list[AttachmentMetadata]:
+        if not inputs:
+            return []
+        files = self._files(credentials)
+        existing = await self._repository.get_attachments(
+            [item.attachment_id for item in inputs]
+        )
+        prepared = files.prepare(
+            session_id, [item.model_dump() for item in inputs], existing=existing,
+        )
+        metadata: list[AttachmentMetadata] = []
+        for item in prepared:
+            if isinstance(item, PreparedUpload):
+                try:
+                    stored = files.write(
+                        session_id, item, created_at=now, on_created=created.append,
+                    )
+                except FileExistsError as error:
+                    raise AttachmentError("attachment_conflict", "附件 ID 已被占用") from error
+                await self._repository.insert_attachment(stored)
+                metadata.append(stored)
+            else:
+                metadata.append(item)
+        return metadata
 
     def attach_snapshots(self, snapshots: SnapshotStore) -> None:
         self._snapshots = snapshots
@@ -196,7 +321,8 @@ class SessionService:
             await self._repository.delete_session(session_id)
 
     async def get_entry(self, session_id: str, entry_id: str) -> SessionMessageEntry:
-        return await self._require_entry(session_id, entry_id)
+        async with self._repository.transaction():
+            return await self._require_entry(session_id, entry_id)
 
     async def list_entries(self, session_id: str) -> list[SessionMessageEntry]:
         await self._require_session(session_id)
@@ -213,8 +339,7 @@ class SessionService:
         # 单次读取事务内取得会话、当前分支、关联运行及输入，保证同一快照。
         async with self._repository.transaction():
             session = await self._require_session(session_id)
-            entries = await self._repository.list_entries(session_id)
-            branch = build_session_path(session_id, entries, session.active_leaf_id)
+            branch = await self._branch(session_id, session.active_leaf_id)
             branch_ids = {entry.id for entry in branch}
             referenced = {
                 entry.run_id for entry in branch if entry.run_id is not None
@@ -235,6 +360,12 @@ class SessionService:
                     await self._repository.list_steering(session_id, run.id)
                 )
             steering.sort(key=lambda item: (item.created_at, item.id))
+            for item in steering:
+                item.attachments = await self._repository.list_steering_attachments(session_id, item.id)
+                if item.status == "consumed":
+                    consumed = next(entry for entry in branch if entry.id == item.entry_id)
+                    if consumed.attachments != item.attachments or serialize_message(consumed.messages[0]) != serialize_message(item.message):
+                        raise AttachmentError("internal_error", "Steering 附件关联损坏")
             return SessionHistory(
                 session=session,
                 entries=branch,
@@ -266,7 +397,19 @@ class SessionService:
             return await self._repository.list_runs(session_id)
 
     async def get_steering(self, session_id: str, steering_id: str) -> SteeringInput:
-        return await self._require_steering(session_id, steering_id)
+        async with self._repository.transaction():
+            return await self._require_steering(session_id, steering_id)
+
+    async def get_attachment_content(
+        self, session_id: str, attachment_id: str, *, credentials: Sequence[str] = (),
+    ) -> tuple[AttachmentMetadata, str]:
+        async with self._repository.transaction():
+            await self._require_session(session_id)
+            metadata = (await self._repository.get_attachments([attachment_id])).get(attachment_id)
+            if metadata is None:
+                raise AttachmentError("attachment_not_found", "附件不存在")
+            text = self._files(credentials).read(session_id, metadata)
+            return metadata, text
 
     async def list_steering(
         self, session_id: str, run_id: str
@@ -275,10 +418,29 @@ class SessionService:
         async with self._repository.transaction():
             await self._require_session(session_id)
             await self._require_run(session_id, run_id)
-            return await self._repository.list_steering(session_id, run_id)
+            inputs = await self._repository.list_steering(session_id, run_id)
+            for item in inputs:
+                item.attachments = await self._repository.list_steering_attachments(session_id, item.id)
+            return inputs
 
     async def get_operation(self, operation_id: str) -> SessionOperation | None:
         return await self._repository.get_operation(operation_id)
+
+    async def get_operation_outcome(
+        self, session_id: str, operation_id: str,
+    ) -> OperationOutcome | None:
+        async with self._repository.transaction():
+            await self._require_session(session_id)
+            if await self._repository.get_operation_invalidation(operation_id) == session_id:
+                raise OperationExpired("该操作已失效")
+            operation = await self._repository.get_operation(operation_id)
+            if operation is None or operation.session_id != session_id:
+                return None
+            run = await self._require_run(session_id, operation.run_id)
+            steering = None
+            if operation.kind == "steering":
+                steering = await self._require_steering(session_id, operation.steering_id)
+            return OperationOutcome(created=False, operation=operation, run=run, steering=steering)
 
     async def get_operation_invalidation(self, operation_id: str) -> str | None:
         # 返回失效记录所属会话 ID；None 表示未失效。
@@ -296,9 +458,9 @@ class SessionService:
         _reject_credentials(
             system_message.model_dump(exclude_unset=True), credentials
         )
-        async with self._repository.transaction():
+        async with self._attachment_transaction(command, "send", credentials) as created:
             resolved = await self.resolve_operation(
-                command.operation_id, command.session_id, "send", request
+                command.operation_id, command.session_id, "send", request, credentials=credentials
             )
             if resolved is not None:
                 return resolved
@@ -307,6 +469,9 @@ class SessionService:
             entries = await self._repository.list_entries(command.session_id)
             await self._ensure_pairable(command.session_id, entries, session.active_leaf_id)
             now = _now_ms()
+            attachments = await self._accept_attachments(
+                command.session_id, request.attachments, created, now, credentials,
+            )
             parent_id = session.active_leaf_id
             user_timestamp = now
             if parent_id is None:
@@ -337,9 +502,13 @@ class SessionService:
             )
             run = self._new_run(command.session_id, user_entry.id, now)
             await self._repository.insert_entry(user_entry)
+            await self._repository.bind_entry_attachments(
+                command.session_id, user_entry.id, [item.attachment_id for item in attachments],
+            )
             await self._repository.insert_run(run)
             operation = await self._record_operation(
-                command.operation_id, command.session_id, "send", request, run.id
+                command.operation_id, command.session_id, "send", request, run.id,
+                accepted_attachments=attachments,
             )
             await self._set_leaf(session, user_entry.id, now)
             return OperationOutcome(
@@ -355,9 +524,9 @@ class SessionService:
         # 编辑：删除目标用户消息及其全部后续内容，在原父节点下保存修改后的用户节点。
         request = command.request
         _reject_credentials(command.model_dump(exclude_unset=True), credentials)
-        async with self._repository.transaction():
+        async with self._attachment_transaction(command, "edit", credentials) as created:
             resolved = await self.resolve_operation(
-                command.operation_id, command.session_id, "edit", request
+                command.operation_id, command.session_id, "edit", request, credentials=credentials
             )
             if resolved is not None:
                 return resolved
@@ -372,10 +541,19 @@ class SessionService:
             await self._ensure_pairable(
                 command.session_id, entries, target.parent_id
             )
+            now = _now_ms()
+            inputs = request.attachments
+            if "attachments" not in request.model_fields_set:
+                inputs = [AttachmentReference(kind="reference", attachment_id=item.attachment_id)
+                          for item in await self._repository.list_entry_attachments(command.session_id, target.id)]
+            if not inputs and not request.text.strip():
+                raise AttachmentError("invalid_request", "请求必须包含文字或附件")
+            attachments = await self._accept_attachments(
+                command.session_id, inputs, created, now, credentials,
+            )
             await self._remove_content(
                 command.session_id, target.id, entries, include_target=True
             )
-            now = _now_ms()
             user_entry = SessionMessageEntry(
                 session_id=command.session_id,
                 id=_new_id(),
@@ -389,9 +567,13 @@ class SessionService:
             )
             run = self._new_run(command.session_id, user_entry.id, now)
             await self._repository.insert_entry(user_entry)
+            await self._repository.bind_entry_attachments(
+                command.session_id, user_entry.id, [item.attachment_id for item in attachments],
+            )
             await self._repository.insert_run(run)
             operation = await self._record_operation(
-                command.operation_id, command.session_id, "edit", request, run.id
+                command.operation_id, command.session_id, "edit", request, run.id,
+                accepted_attachments=attachments,
             )
             await self._set_leaf(session, user_entry.id, now)
             return OperationOutcome(
@@ -409,7 +591,7 @@ class SessionService:
         _reject_credentials(command.model_dump(exclude_unset=True), credentials)
         async with self._repository.transaction():
             resolved = await self.resolve_operation(
-                command.operation_id, command.session_id, "regenerate", request
+                command.operation_id, command.session_id, "regenerate", request, credentials=credentials
             )
             if resolved is not None:
                 return resolved
@@ -420,6 +602,12 @@ class SessionService:
             )
             if not _is_role(target, "user"):
                 raise InvalidTargetEntry("重新生成目标必须是同会话用户消息节点")
+            _reject_credentials(target.model_dump(), credentials)
+            attachments = await self._accept_attachments(
+                command.session_id,
+                [AttachmentReference(kind="reference", attachment_id=item.attachment_id) for item in target.attachments],
+                [], _now_ms(), credentials,
+            )
             entries = await self._repository.list_entries(command.session_id)
             await self._ensure_pairable(command.session_id, entries, target.id)
             await self._remove_content(
@@ -434,6 +622,7 @@ class SessionService:
                 "regenerate",
                 request,
                 run.id,
+                accepted_attachments=attachments,
             )
             await self._set_leaf(session, target.id, now)
             return OperationOutcome(
@@ -448,9 +637,9 @@ class SessionService:
     ) -> OperationOutcome:
         request = command.request
         _reject_credentials(command.model_dump(exclude_unset=True), credentials)
-        async with self._repository.transaction():
+        async with self._attachment_transaction(command, "steering", credentials) as created:
             resolved = await self.resolve_operation(
-                command.operation_id, command.session_id, "steering", request
+                command.operation_id, command.session_id, "steering", request, credentials=credentials
             )
             if resolved is not None:
                 return resolved
@@ -461,6 +650,9 @@ class SessionService:
             if run.status != "running":
                 raise RunClosed("目标运行未在接受输入")
             now = _now_ms()
+            attachments = await self._accept_attachments(
+                command.session_id, request.attachments, created, now, credentials,
+            )
             steering = SteeringInput(
                 session_id=command.session_id,
                 id=_new_id(),
@@ -475,6 +667,9 @@ class SessionService:
                 updated_at=now,
             )
             await self._repository.insert_steering(steering)
+            await self._repository.bind_steering_attachments(
+                command.session_id, steering.id, [item.attachment_id for item in attachments],
+            )
             operation = await self._record_operation(
                 command.operation_id,
                 command.session_id,
@@ -482,7 +677,9 @@ class SessionService:
                 request,
                 run.id,
                 steering_id=steering.id,
+                accepted_attachments=attachments,
             )
+            steering.attachments = attachments
             return OperationOutcome(
                 created=True, operation=operation, run=None, steering=steering
             )
@@ -564,6 +761,9 @@ class SessionService:
                 raise SessionConflict("Steering 输入不属于指定运行")
             if steering.status == "consumed":
                 entry = await self._require_entry(session_id, steering.entry_id)
+                entry.attachments = await self._repository.list_entry_attachments(session_id, entry.id)
+                if entry.attachments != steering.attachments:
+                    raise AttachmentError("internal_error", "Steering 附件关系损坏")
                 return SteeringConsumption(
                     created=False, steering=steering, entry=entry
                 )
@@ -590,7 +790,12 @@ class SessionService:
                 messages=[steering.message],
                 created_at=now,
             )
+            attachments = steering.attachments
+            entry.attachments = attachments
             await self._repository.insert_entry(entry)
+            await self._repository.bind_entry_attachments(
+                session_id, entry.id, [item.attachment_id for item in attachments],
+            )
             run = run.model_copy(update={"last_entry_id": entry.id})
             await self._repository.update_run(run)
             await self._set_leaf(session, entry.id, now)
@@ -699,12 +904,16 @@ class SessionService:
         request: object,
         run_id: str,
         steering_id: str | None = None,
+        accepted_attachments: list[AttachmentMetadata] | None = None,
     ) -> SessionOperation:
+        recorded_request = request.model_dump(exclude_unset=True)
+        if accepted_attachments is not None:
+            recorded_request["accepted_attachments"] = [item.model_dump() for item in accepted_attachments]
         operation = SessionOperation(
             operation_id=operation_id,
             session_id=session_id,
             kind=kind,
-            request=request.model_dump(exclude_unset=True),
+            request=recorded_request,
             run_id=run_id,
             steering_id=steering_id,
             created_at=_now_ms(),
@@ -721,12 +930,16 @@ class SessionService:
         self, session_id: str, leaf_id: str | None
     ) -> list[SessionMessageEntry]:
         entries = await self._repository.list_entries(session_id)
-        return build_session_path(session_id, entries, leaf_id)
+        branch = build_session_path(session_id, entries, leaf_id)
+        for entry in branch:
+            if _is_role(entry, "user"):
+                entry.attachments = await self._repository.list_entry_attachments(session_id, entry.id)
+        return branch
 
     async def _ensure_idle(self) -> None:
         running = await self._repository.find_running_run()
         if running is not None:
-            raise SessionConflict(f"已有运行正在执行: {running.id}")
+            raise RunBusy(f"已有运行正在执行: {running.id}")
 
     async def _ensure_pairable(
         self,
@@ -888,6 +1101,8 @@ class SessionService:
         entry = await self._repository.get_entry(session_id, entry_id)
         if entry is None:
             raise EntryNotFound(f"节点不存在: {entry_id}")
+        if _is_role(entry, "user"):
+            entry.attachments = await self._repository.list_entry_attachments(session_id, entry_id)
         return entry
 
     async def _require_run(self, session_id: str, run_id: str) -> SessionRun:
@@ -902,9 +1117,19 @@ class SessionService:
         steering = await self._repository.get_steering(session_id, steering_id)
         if steering is None:
             raise SessionNotFound(f"Steering 输入不存在: {steering_id}")
+        steering.attachments = await self._repository.list_steering_attachments(session_id, steering_id)
         return steering
 
     async def resolve_operation(
+        self, operation_id: str, session_id: str, kind: str, request: object,
+        *, credentials: Sequence[str] = (),
+    ) -> OperationOutcome | None:
+        _reject_credentials({"session_id": session_id, "operation_id": operation_id}, credentials)
+        _reject_request_credentials(request, credentials)
+        async with self._repository.transaction():
+            return await self._resolve_operation(operation_id, session_id, kind, request)
+
+    async def _resolve_operation(
         self,
         operation_id: str,
         session_id: str,

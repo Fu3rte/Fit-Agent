@@ -320,7 +320,7 @@ async def scenario_send(service, repository) -> None:
 
     operation = await service.get_operation(SEND_OP)
     assert operation is not None and operation.kind == "send"
-    assert operation.run_id == run.id and operation.request == {"text": "你好"}
+    assert operation.run_id == run.id and operation.request == {"text": "你好", "accepted_attachments": []}
     assert operation.session_id == "s-send"
 
     # 同键同请求只产生一份初始数据
@@ -1149,8 +1149,8 @@ async def scenario_request_validation(service) -> None:
         lambda: SendRequest(text=""),
         lambda: SendRequest(text="\t  \n"),
         lambda: SendRequest(text="x" * 32001),
-        lambda: EditRequest(target_entry_id="e", text=""),
-        lambda: EditRequest(target_entry_id="e", text=" \n "),
+        lambda: EditRequest(target_entry_id="e", text="", attachments=[]),
+        lambda: EditRequest(target_entry_id="e", text=" \n ", attachments=[]),
         lambda: RegenerateRequest(),
         lambda: SteeringRequest(target_run_id="r", text=""),
         lambda: SteeringRequest(target_run_id="r", text="\t"),

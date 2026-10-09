@@ -20,6 +20,7 @@ from app.ai.messages import (
     SystemMessage,
     TextContent,
     ToolResultMessage,
+    UserMessage,
 )
 from app.application.business.catalog import Catalog
 from app.application.business.coordination import ReplacementCoordinator
@@ -32,6 +33,7 @@ from app.infrastructure.persistence.sqlite.business_repository import (
 )
 from app.infrastructure.persistence.sqlite.database import open_database
 from app.infrastructure.persistence.sqlite.repository import SqliteSessionRepository
+from app.interfaces import http as interface
 from app.model_config import load_model_config
 from test.regression_support import temporary_root
 
@@ -47,12 +49,15 @@ PROMPTS = [
 async def run_scenario(
     service: SessionService,
     business: BusinessService,
-    static_tools: dict[str, AgentTool],
     config,
     prompt: str,
 ) -> tuple[list, str]:
     session_id = str(uuid4())
     await service.create_session(session_id, f"prompt-{session_id[:8]}")
+    static_tools = {
+        **create_file_tools(session_id),
+        "bash": create_bash_tool(session_id),
+    }
     system_message = SystemMessage(
         role="system",
         content=SYSTEM_PROMPT,
@@ -75,7 +80,9 @@ async def run_scenario(
 
     loop = asyncio.get_running_loop()
     position = {"id": run.request_entry_id}
+    # 准备调用按业务独立登记，结果节点提交后才绑定展示；与 http.execute 的运行接入同构。
     prepared: dict[str, str] = {}
+    plan_prepared: dict[str, str] = {}
 
     def call(coro):
         return asyncio.run_coroutine_threadsafe(coro, loop).result()
@@ -94,12 +101,33 @@ async def run_scenario(
         return {
             **static_tools,
             **bind_business_tools(
-                business, context_for(source_entry_id), call, prepared, {}
+                business, context_for(source_entry_id), call, prepared, {}, plan_prepared
             ),
         }
 
+    async def message_nodes(leaf_id: str) -> list[dict]:
+        # 后端事实提供展示与确认绑定，模型据此引用真实节点，保存仍由后端校验。
+        displays = await business.list_plan_display_bindings(session_id)
+        bindings = await business.list_plan_confirmation_bindings(session_id)
+        nodes = []
+        for node in await service.get_branch(session_id, leaf_id):
+            message = node.messages[0]
+            item: dict = {"entry_id": node.id, "role": message.role}
+            if isinstance(message, ToolResultMessage):
+                item["tool_name"] = message.tool_name
+                item["tool_call_id"] = message.tool_call_id
+                proposal_id = displays.get(node.id)
+                if proposal_id is not None:
+                    item.update({"proposal_id": proposal_id, "display_entry_id": node.id,
+                                 "business_kind": "plan"})
+            elif isinstance(message, UserMessage):
+                proposal_id = bindings.get(node.id)
+                if proposal_id is not None:
+                    item.update({"proposal_id": proposal_id, "business_kind": "plan"})
+            nodes.append(item)
+        return nodes
+
     async def transform_context(messages, signal):
-        branch_nodes = await service.get_branch(session_id, position["id"])
         return [
             *messages,
             SystemMessage(
@@ -110,10 +138,8 @@ async def run_scenario(
                         {
                             "timezone": "Asia/Shanghai",
                             "business_date": business_date(request_entry.created_at),
-                            "message_nodes": [
-                                {"entry_id": node.id, "role": node.messages[0].role}
-                                for node in branch_nodes
-                            ],
+                            "request_entry_id": run.request_entry_id,
+                            "message_nodes": await message_nodes(position["id"]),
                         },
                         ensure_ascii=False,
                     )
@@ -135,14 +161,14 @@ async def run_scenario(
             )
         )
         position["id"] = node_id
-        if (
-            isinstance(message, ToolResultMessage)
-            and message.tool_name == "prepare_profile_update"
-            and not message.is_error
-        ):
+        if not isinstance(message, ToolResultMessage) or message.is_error:
+            return
+        if message.tool_name == "prepare_profile_update":
             proposal_id = prepared.get(message.tool_call_id)
             if proposal_id is not None:
                 await business.bind_display_entry(proposal_id, node_id)
+        elif message.tool_name in interface.PLAN_PREPARE_TOOLS:
+            await business.bind_plan_display_entry(plan_prepared.pop(message.tool_call_id), node_id)
 
     events: list = []
 
@@ -158,12 +184,7 @@ async def run_scenario(
     )
     context = {
         "messages": branch[:-1],
-        "tools": {
-            **static_tools,
-            **bind_business_tools(
-                business, context_for(run.request_entry_id), call, prepared, {}
-            ),
-        },
+        "tools": bind_tools(run.request_entry_id),
     }
     messages = await run_agent_loop([branch[-1]], context, loop_config, emit)
     await service.finish_run(session_id, run.id, "completed")
@@ -190,41 +211,32 @@ async def _scenarios(root: Path) -> list[str]:
         service.attach_snapshots(business)
         async with repository.transaction():
             await repository.replace_exercises(catalog.all())
-        static_tools = {**create_file_tools(), "bash": create_bash_tool()}
         config = load_model_config()
         evidence = []
         for index, prompt in enumerate(PROMPTS):
-            events, text = await run_scenario(
-                service, business, static_tools, config, prompt
-            )
+            events, text = await run_scenario(service, business, config, prompt)
             names = {
                 event["name"] for event in events if event["type"] == "tool_start"
             }
-            assert names <= {
-                "get_profile",
-                "search_exercises",
-                "prepare_profile_update",
-                "save_profile_update",
-                "get_profile_update_status",
-                "bash",
-                "read",
-                "write",
-                "edit",
+            # 允许当前生产注册表内的工具与文件/日期工具；任何保存类调用都构成越权确认。
+            assert names <= {item.name for item in business_tool_declarations()} | {
+                "bash", "read", "write", "edit"
             }, names
+            writes = names & {"save_profile_update", "save_plan", "save_workout", "update_workout"}
+            assert not writes, writes
             if index == 0:
                 assert all(word in text for word in ("推", "拉", "腿", "休"))
             elif index == 1:
-                assert "保存" in text and any(
-                    word in text
-                    for word in ("无法", "不能", "不具备", "未提供", "尚未", "不支持", "确认")
-                )
-                # 业务保存必须由确认触发：不因对话直接落库。
-                profile = await business.get_profile()
-                assert profile.version is None
+                # 录入需先准备并完整展示，保存授权来自展示之后的确认消息。
+                assert "保存" in text and "确认" in text, text
+                assert not await business.list_plans()
+                assert (await business.get_current_plan()).id is None
+                assert (await business.get_profile()).version is None
             else:
                 assert "停止" in text and any(
                     word in text for word in ("急救", "120", "就医")
                 )
+                assert not await business.list_plans()
             evidence.append(text)
         return evidence
     finally:

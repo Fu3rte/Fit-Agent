@@ -84,7 +84,7 @@ def check_tool_cancel(config, database_path):
             service = SessionService(SqliteSessionRepository(database))
             session_id = str(uuid4())
             await service.create_session(session_id, "取消注入")
-            tools = {"bash": create_bash_tool()}
+            tools = {"bash": create_bash_tool(session_id)}
             prompt = "必须调用 bash，command 精确为 sleep 3，timeout 为 10；完成后报告。"
             send = await service.accept_send(
                 SendCommand(
@@ -190,7 +190,7 @@ def check_commit_failure(config, database_path):
             service = SessionService(SqliteSessionRepository(database))
             session_id = str(uuid4())
             await service.create_session(session_id, "提交异常")
-            tools = {"bash": create_bash_tool()}
+            tools = {"bash": create_bash_tool(session_id)}
             prompt = "必须调用 bash，command 精确为 echo ok，timeout 为 5；完成后报告。"
             send = await service.accept_send(
                 SendCommand(

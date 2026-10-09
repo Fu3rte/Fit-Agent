@@ -17,7 +17,6 @@ from app.agent.tool import (
     BeforeToolCallResult,
     run_tool_call,
 )
-from app.agent.tools.files import WORKSPACE
 from app.ai.messages import (
     AssistantMessage,
     SystemMessage,
@@ -43,8 +42,7 @@ def call(name: str, arguments: dict, **options):
 
 
 def check() -> None:
-    WORKSPACE.mkdir(exist_ok=True)
-    with TemporaryDirectory(dir=WORKSPACE) as directory:
+    with TemporaryDirectory() as directory:
         root = Path(directory)
 
         def execute(tool_call_id, params: ProbeArguments, signal, on_update):
@@ -261,8 +259,7 @@ def check() -> None:
 
 
 def check_loop_hooks() -> None:
-    WORKSPACE.mkdir(exist_ok=True)
-    with TemporaryDirectory(dir=WORKSPACE) as directory:
+    with TemporaryDirectory() as directory:
         root = Path(directory)
 
         def execute(tool_call_id, params: ProbeArguments, signal, on_update):

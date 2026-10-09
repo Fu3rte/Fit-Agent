@@ -14,9 +14,20 @@ from pydantic import ValidationError
 from app.ai.messages import TextContent, ToolResultMessage
 from app.domain.business.errors import BusinessError, PlanConfirmationInvalid
 from app.domain.business.models import (
-    CurrentPlan, PlanContent, PlanDay, PlanExercise, PlanGetArguments,
-    PlanProposalArguments, PlanRecord, PlanSaveArguments, PlanSaveRecord,
-    PlanSaveResult, PlanSnapshot, PlanStatusArguments, PlanStatusResult, ProfileContent,
+    CurrentPlan,
+    PlanContent,
+    PlanDay,
+    PlanExercise,
+    PlanGetArguments,
+    PlanProposalArguments,
+    PlanRecord,
+    PlanSaveArguments,
+    PlanSaveRecord,
+    PlanSaveResult,
+    PlanSnapshot,
+    PlanStatusArguments,
+    PlanStatusResult,
+    ProfileContent,
     WorkoutListArguments,
 )
 from app.domain.session.models import SendCommand, SendRequest
@@ -30,11 +41,19 @@ from app.infrastructure.persistence.sqlite.database import (
     apply_schema,
     open_database,
 )
-from test.check_business_profile import _StatementSync, _paused_save, _regenerate
+from test.check_business_profile import _paused_save, _regenerate, _StatementSync
 from test.check_profile_confirmation import (
-    Fixture, SYSTEM, assert_rejected, count_rows, new_id, now_ms, payload, propose,
+    SYSTEM,
+    Fixture,
+    assert_rejected,
+    count_rows,
+    new_id,
+    now_ms,
+    payload,
+    propose,
 )
-from test.check_workout_service_http import assistant, prepare as prepare_workout
+from test.check_workout_service_http import assistant
+from test.check_workout_service_http import prepare as prepare_workout
 from test.check_workout_storage import make_record, raw, seed
 from test.regression_support import temporary_root
 
@@ -127,7 +146,7 @@ async def prepare(f, session, *, content=None, base_profile_version=1, base_plan
     display = None
     try:
         if direct_snapshot:
-            snapshot = PlanSnapshot(**args.model_dump(), proposal_id=new_id(), session_id=session,
+            snapshot = PlanSnapshot(**args.model_dump(), preparation_kind="generation", proposal_id=new_id(), session_id=session,
                 request_entry_id=run.request_entry_id, source_entry_id=source, status="pending", created_at=now_ms())
             async with f.repository.transaction():
                 await f.repository.insert_plan_snapshot(snapshot)
@@ -329,12 +348,12 @@ async def check_migration_and_store():
     db = await open_database(path)
     repo = SqliteBusinessRepository(db)
     try:
-        assert SCHEMA_VERSION == 7
+        assert (await rows(db, "pragma_user_version")) == [(SCHEMA_VERSION,)]
         for table in tables:
             assert await rows(db, table) == before[table]
         content = PlanContent.model_validate(CONTENT)
         record = PlanRecord(id=new_id(), is_current=True, content=content, created_at=now_ms())
-        snap = PlanSnapshot(proposal_id=new_id(), session_id=ids["session"], request_entry_id=ids["request"],
+        snap = PlanSnapshot(preparation_kind="generation", proposal_id=new_id(), session_id=ids["session"], request_entry_id=ids["request"],
             source_entry_id=ids["source"], base_profile_version=1, base_plan_id=None, payload=content,
             status="pending", created_at=now_ms())
         await repo.insert_plan_snapshot(snap)
@@ -401,7 +420,7 @@ async def check_migration_and_store():
         cursor = await db.connection.execute("PRAGMA foreign_key_check")
         assert await cursor.fetchall() == []
         await cursor.close()
-        return {"migration": "6→7", "catalog_rows_preserved": len(before["exercises"]), "tables_preserved": tables,
+        return {"migration": f"6→{SCHEMA_VERSION}", "catalog_rows_preserved": len(before["exercises"]), "tables_preserved": tables,
                 "atomic_rollback": True, "unique_current": True, "immutable_history": True, "reopen_verified": True}
     finally:
         await db.close()
@@ -549,7 +568,7 @@ def check():
                 "replacement_delete": asyncio.run(check_replacement_and_delete()),
                 "preservation": asyncio.run(check_preservation_and_cancellation())}
     (ROOT / "evidence.json").write_text(json.dumps(evidence, ensure_ascii=False, indent=2), encoding="utf-8")
-    print("PASS: plan strict models; migration 6→7; preserved profile/workout/catalog/session; SQLite rollback/current/history; real message binding; "
+    print(f"PASS: plan strict models; migration 6→{SCHEMA_VERSION}; preserved profile/workout/catalog/session; SQLite rollback/current/history; real message binding; "
           "save/version/conflict/idempotency; cross-business confirmation; recovery/replacement/delete; cancellation writes nothing; "
           "profile/workouts/catalog preserved across plan saves and restart; binding maps disjoint; SQLite FK and integrity")
     print("Evidence:", ROOT)

@@ -17,7 +17,7 @@ from app.agent.tool import (
     ExecutionMode,
     run_tool_batch,
 )
-from app.agent.tools.files import WORKSPACE, create_file_tools
+from app.agent.tools.files import create_file_tools
 from app.ai.messages import (
     AssistantMessage,
     SystemMessage,
@@ -28,6 +28,7 @@ from app.ai.messages import (
 )
 from app.interfaces.http import CredentialFilter
 from test.check_tool_scheduling import single, usage
+from test.regression_support import TEST_SESSION, session_workspace
 
 MARKER = "REVIEW-CREDENTIAL-MARKER"
 MODEL = SimpleNamespace(
@@ -70,11 +71,12 @@ def batch(calls, **options):
 
 
 def check_async_execute() -> None:
-    with TemporaryDirectory(dir=WORKSPACE) as directory:
-        root = Path(directory)
-        (root / "note.txt").write_text("hello async\n", encoding="utf-8")
-        read = create_file_tools()["read"]
-        call = make_call("read", {"path": f"{root.name}/note.txt"}, "c-async")
+    with TemporaryDirectory() as directory:
+        root = Path(directory).resolve()
+        workspace, prefix = session_workspace(root)
+        (workspace / "note.txt").write_text("hello async\n", encoding="utf-8")
+        read = create_file_tools(TEST_SESSION, tmp_root=root)["read"]
+        call = make_call("read", {"path": f"{prefix}/note.txt"}, "c-async")
 
         async def read_async(tool_call_id, params, signal, on_update):
             return await asyncio.to_thread(
@@ -391,7 +393,6 @@ def check_progress_callback() -> None:
 
 
 def check() -> None:
-    WORKSPACE.mkdir(exist_ok=True)
     check_async_execute()
     check_async_cancel_cleanup()
     check_full_output_credentials()

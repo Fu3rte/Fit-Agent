@@ -22,8 +22,10 @@ from test.regression_support import temporary_root
 ROOT = temporary_root("plan-tools") / uuid4().hex
 ROOT.mkdir()
 NAMES = ["get_current_plan", "get_plan", "list_plans", "prepare_plan", "save_plan", "get_plan_save_status"]
+IMPORT_NAMES = ["prepare_plan_import", "prepare_plan_adjustment"]
 DECLARED = {item.name: item for item in business_tool_declarations()}
-PREPARE_KIND = {"prepare_profile_update": "profile", "prepare_workout": "workout", "prepare_plan": "plan"}
+PREPARE_KIND = {"prepare_profile_update": "profile", "prepare_workout": "workout", "prepare_plan": "plan",
+                "prepare_plan_import": "plan", "prepare_plan_adjustment": "plan"}
 DISPLAY_BINDER = {
     "profile": "bind_display_entry",
     "workout": "bind_workout_display_entry",
@@ -78,7 +80,7 @@ async def batch(f, session, calls, *, confirmation=None, bind=True):
     tools = bind_business_tools(f.business, context, f.call, registrations["profile"],
                                 registrations["workout"], registrations["plan"])
     assert {name: tool.definition() for name, tool in tools.items()} == DECLARED
-    assert list(tools)[-6:] == NAMES
+    assert list(tools)[-8:][:6] == NAMES and list(tools)[-2:] == IMPORT_NAMES
     for name in NAMES:
         assert tools[name].execution_mode == ("sequential" if name in {"prepare_plan", "save_plan"} else "parallel")
         assert tools[name].max_output_chars is None

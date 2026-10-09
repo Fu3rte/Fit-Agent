@@ -2,7 +2,7 @@ from datetime import date, timedelta
 
 from app.agent.prompts import PYTHON_BASH_COMMAND, SYSTEM_PROMPT
 from app.agent.tools.bash import create_bash_tool
-from test.regression_support import run_tool, text
+from test.regression_support import TEST_SESSION, run_tool, text
 
 # 计划提示口径必须与实际契约、真实工具参数校验一致；这里逐条核对可行动约束，不做语义判定。
 PLAN_REQUIRED = [
@@ -26,6 +26,18 @@ PLAN_REQUIRED = [
     "历史与实际训练记录保持完整",
     "出现明确医疗风险停止相关建议并提示就医",
     "禁止在工具参数中传入 session_id、run_id、request_entry_id、source_entry_id 等身份字段",
+    "用户提供自己编写或他人给出的现有计划并要求录入或保存该计划时使用prepare_plan_import",
+    "用户要求调整本次提供的计划内容或已保存的当前计划时使用prepare_plan_adjustment",
+    "prepare_plan仅用于用户要求生成新的计划建议，用户提供既有计划内容时禁止改用prepare_plan",
+    "不含preparation_kind，准备类型由后端按实际工具确定",
+    '禁止字符串"null"、空字符串、数字0或省略；参数预处理仅将两依据字段精确字符串"None"转为null，其他字段和值原样严格校验',
+    '无画像且无当前计划的基础字段准确示例：{"base_profile_version":null,"base_plan_id":null}',
+    "无画像时base_profile_version写JSON null；已有画像时写get_profile返回的真实版本，禁止用null跳过依据及限制检查",
+    "未知动作详情用exercises=[]",
+    "理由与依据写入整体notes和训练日notes完整展示",
+    "准备前先get_profile读取真实画像状态与版本、get_current_plan读取真实当前计划ID",
+    "完整展示之后等待后续用户明确确认",
+    "按修改处理，重新准备并完整展示新快照，等待再次确认",
 ]
 
 
@@ -41,7 +53,7 @@ def check():
     day = "2026-01-01"
     command = (f"{PYTHON_BASH_COMMAND} -c 'from datetime import date,timedelta; "
                f'print((date.fromisoformat("{day}")-timedelta(days=6)).isoformat())' + "'")
-    message = run_tool(create_bash_tool(), {"command": command})
+    message = run_tool(create_bash_tool(TEST_SESSION), {"command": command})
     assert not message.is_error
     assert text(message).strip() == (date.fromisoformat(day) - timedelta(days=6)).isoformat()
     print("PASS: actual system prompt trusted Python command, JSON null literal, JSON Pointer, plan tool constraints "

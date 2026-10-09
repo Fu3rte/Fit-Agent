@@ -16,7 +16,18 @@ uv sync --project backend
 npm run dev
 ```
 
-打开 `http://localhost:5173`。后端监听 `127.0.0.1:8000`，Vite 将 `/api` 请求代理到后端。保持默认端口；HTTP Host/Origin 校验允许本地 8000、5173 端口。
+默认打开 `http://localhost:5173`。后端监听 `127.0.0.1:8000`，Vite 将 `/api` 请求代理到后端。
+
+前端端口由启动环境变量 `FIT_AGENT_FRONTEND_PORT` 统一配置，默认 `5173`，合法范围为 `1–65535`。前后端继承同一个配置，后端仅允许本地 8000 和配置端口的 Host/Origin。Vite 启用 `strictPort`，端口占用时明确报错。
+
+PowerShell 中使用自定义端口：
+
+```powershell
+$env:FIT_AGENT_FRONTEND_PORT = "5176"
+npm run dev
+```
+
+打开 `http://localhost:5176`。独立启动前后端时，在两个终端设置相同的环境变量。端口配置在进程启动时读取，修改后重启前后端；通过该环境变量配置 Vite 端口。
 
 独立启动时，在两个终端分别执行：
 

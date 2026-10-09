@@ -6,7 +6,7 @@ from uuid import uuid4
 
 from app.agent.agent_loop import run_agent_loop, run_loop
 from app.agent.config import AgentLoopConfig
-from app.agent.tools.files import WORKSPACE, create_file_tools
+from app.agent.tools.files import create_file_tools
 from app.ai.api.openai_completions import to_openai_request
 from app.ai.messages import (
     AssistantMessage,
@@ -16,12 +16,12 @@ from app.ai.messages import (
 )
 from app.ai.stream import stream
 from app.model_config import load_model_config
+from test.regression_support import TEST_SESSION, session_workspace
 
 
 def check():
     config = load_model_config()
     assert config.MODEL_API == "openai-completions"
-    tools = create_file_tools()
     loop_config = AgentLoopConfig(model=config, max_turns=8)
     limits = []
 
@@ -33,9 +33,11 @@ def check():
         limits.append(options["max_tokens"])
         return stream(model, context, options)
 
-    with TemporaryDirectory(dir=WORKSPACE) as directory:
+    with TemporaryDirectory() as directory:
         root = Path(directory)
-        path = f"{root.name}/react.txt"
+        tools = create_file_tools(TEST_SESSION, tmp_root=root)
+        workspace, prefix = session_workspace(root)
+        path = f"{prefix}/react.txt"
         token = uuid4().hex
         events = []
         trace = []
@@ -59,7 +61,7 @@ def check():
         prompts = [
             UserMessage(
                 role="user",
-                content=f"只操作 {root.name}/ 内的文件。必须调用 write 在 {path} 写入精确文本 "
+                content=f"只使用文件工具操作工作文件。必须调用 write 在 {path} 写入精确文本 "
                 f"{token}，随后必须调用 read 读取该文件，最后回答文件内容。禁止添加空白或换行。",
                 timestamp=time_ns() // 1_000_000,
             )
@@ -79,7 +81,7 @@ def check():
         )
         assert context["messages"] == [system]
         assert messages[:1] == prompts and len(prompts) == 1
-        assert (root / "react.txt").read_text(encoding="utf-8") == token
+        assert (workspace / "react.txt").read_text(encoding="utf-8") == token
         results = [
             message for message in messages if isinstance(message, ToolResultMessage)
         ]

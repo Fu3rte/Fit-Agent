@@ -12,8 +12,8 @@ import uvicorn
 
 from app.agent.agent_loop import run_agent_loop
 from app.agent.config import AgentLoopConfig
-from app.agent.tools.files import WORKSPACE
 from app.ai.messages import AssistantMessage, UserMessage
+from app.domain.session.attachments import TMP_ROOT
 from app.interfaces.http import active, app, runs
 from app.model_config import load_model_config
 from test.check_http import (
@@ -258,7 +258,7 @@ def check() -> None:
             length_session = str(uuid4())
             create_session(client, length_session)
             large_text = "".join(uuid4().hex for _ in range(970))
-            length_path = f"length-{uuid4().hex}.txt"
+            length_path = f"sessions/{length_session}/workspace/length-{uuid4().hex}.txt"
             with client.stream("POST", "/api/agent/run", json={
                 "session_id": length_session,
                 "operation_id": str(uuid4()),
@@ -273,7 +273,7 @@ def check() -> None:
             last_assistant = next(message for message in reversed(stored_messages(length_session)) if isinstance(message, AssistantMessage))
             assert last_assistant.usage is not None and last_assistant.usage.output > 0
             assert not any(item["event"] in {"tool_start", "tool_result"} for item in limited)
-            assert not (WORKSPACE / length_path).exists()
+            assert not (TMP_ROOT / length_path).exists()
             evidence["length"] = limited
 
             for _ in range(2):

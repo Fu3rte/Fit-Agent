@@ -6,10 +6,10 @@ import aiosqlite
 
 from app.domain.business.models import (
     CatalogExercise,
-    PlanRecord,
-    PlanSnapshot,
-    PlanSaveRecord,
     PlanProposalStatus,
+    PlanRecord,
+    PlanSaveRecord,
+    PlanSnapshot,
     ProfileContent,
     ProfileProposalStatus,
     ProfileRecord,
@@ -51,7 +51,7 @@ _WORKOUT_SAVE_COLUMNS = (
 _PLAN_COLUMNS = "id, is_current, content, created_at"
 _PLAN_SNAPSHOT_COLUMNS = (
     "proposal_id, session_id, request_entry_id, source_entry_id, base_profile_version, "
-    "base_plan_id, payload, display_entry_id, confirmation_entry_id, status, created_at"
+    "base_plan_id, payload, display_entry_id, confirmation_entry_id, status, created_at, preparation_kind"
 )
 _PLAN_SAVE_COLUMNS = (
     "proposal_id, session_id, display_entry_id, confirmation_entry_id, result, saved_at"
@@ -532,11 +532,11 @@ class SqliteBusinessRepository:
 
     async def insert_plan_snapshot(self, snapshot: PlanSnapshot) -> None:
         await self._write(
-            f"INSERT INTO plan_snapshots ({_PLAN_SNAPSHOT_COLUMNS}) VALUES ({_placeholders(11)})",
+            f"INSERT INTO plan_snapshots ({_PLAN_SNAPSHOT_COLUMNS}) VALUES ({_placeholders(12)})",
             (snapshot.proposal_id, snapshot.session_id, snapshot.request_entry_id,
              snapshot.source_entry_id, snapshot.base_profile_version, snapshot.base_plan_id,
              _dump_json(snapshot.payload.model_dump()), snapshot.display_entry_id,
-             snapshot.confirmation_entry_id, snapshot.status, snapshot.created_at),
+             snapshot.confirmation_entry_id, snapshot.status, snapshot.created_at, snapshot.preparation_kind),
         )
 
     async def get_plan_snapshot(self, proposal_id: str) -> PlanSnapshot | None:

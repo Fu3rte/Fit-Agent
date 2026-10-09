@@ -1,4 +1,4 @@
-import { Fragment, useState, type Dispatch, type SetStateAction } from "react";
+import { Fragment, useState } from "react";
 import { ChevronDown, Loader2, Pencil, RefreshCw, Undo2 } from "lucide-react";
 import { Bubble, BubbleContent } from "@/components/ui/bubble";
 import { Button } from "@/components/ui/button";
@@ -24,40 +24,64 @@ import {
 } from "@/components/ui/tooltip";
 import ToolCallCard from "./ToolCallCard";
 import MarkdownContent from "./MarkdownContent";
+import {
+  AttachmentChips,
+  AttachmentList,
+  AttachmentPicker,
+  useAttachmentDrafts,
+} from "./Attachments";
 import ProfileFields from "@/features/profile/ProfileFields";
+import PlanFields from "@/features/plans/PlanFields";
 import { WorkoutProposalFields } from "@/features/workout/WorkoutFields";
-import type { ReActEntry, ReActRound } from "../utils/reactAgent";
+import {
+  canSubmitChatInput,
+  type ReActEntry,
+  type ReActRound,
+} from "../utils/reactAgent";
+import type { AttachmentDraft } from "../utils/attachments";
 
-/** 就地编辑状态（用户约定）：正在编辑的消息节点及其文本 */
+/** 就地编辑状态（用户约定）：正在编辑的消息节点、文本；附件草稿由本页统一的草稿状态持有 */
 type EditState = { entryId: string; text: string } | null;
+
+type DraftState = ReturnType<typeof useAttachmentDrafts>;
 
 function Entry({
   entry,
   roundId,
+  sessionId,
   onWithdraw,
   canEdit,
   editing,
-  setEditing,
+  drafts,
+  onStartEdit,
+  onEditTextChange,
+  onCloseEdit,
   onEdit,
   onRegenerate,
 }: {
   entry: ReActEntry;
   roundId: string;
+  sessionId: string;
   onWithdraw: (roundId: string, steeringId: string) => void;
   canEdit: boolean;
   editing: EditState;
-  setEditing: Dispatch<SetStateAction<EditState>>;
-  onEdit: (entryId: string, text: string) => Promise<boolean>;
+  drafts: DraftState;
+  onStartEdit: (entry: ReActEntry) => void;
+  onEditTextChange: (text: string) => void;
+  onCloseEdit: () => void;
+  onEdit: (entryId: string, text: string) => void;
   onRegenerate: (entryId: string) => void;
 }) {
   if (entry.kind === "tool") {
-    /* 业务待确认内容的完整展示（profile-plan §3.2、workout-http-sse-contract §5）：准备工具的结果节点
-     * 以 AI 一侧普通消息样式呈现全部字段，无确认入口；其余工具沿用通用工具展示。 */
+    /* 业务待确认内容的完整展示（profile-plan §3.2、workout-http-sse-contract §5、plan-generation-contract §6）：
+     * 准备工具的结果节点以 AI 一侧普通消息样式呈现全部字段，无确认入口；其余工具沿用通用工具展示。 */
     const prepared =
       entry.profile !== undefined ? (
         <ProfileFields content={entry.profile} />
       ) : entry.workout !== undefined ? (
         <WorkoutProposalFields proposal={entry.workout} />
+      ) : entry.plan !== undefined ? (
+        <PlanFields content={entry.plan.payload} />
       ) : null;
     if (prepared === null) return <ToolCallCard {...entry} />;
     return (
@@ -77,6 +101,7 @@ function Entry({
   if (entry.kind === "user") {
     if (entry.request === undefined) return null;
     const request = entry.request;
+    const attachments = entry.attachments ?? [];
     const nodeId = entry.entry_id;
     const activeEdit =
       editing !== null && nodeId !== undefined && editing.entryId === nodeId
@@ -89,52 +114,56 @@ function Entry({
             <div className="flex w-full flex-col gap-2">
               <Textarea
                 value={activeEdit.text}
-                onChange={(event) =>
-                  setEditing({
-                    entryId: activeEdit.entryId,
-                    text: event.target.value,
-                  })
-                }
+                onChange={(event) => onEditTextChange(event.target.value)}
                 aria-label="编辑消息"
                 rows={2}
                 className="min-h-0 resize-none"
               />
-              <div className="flex justify-end gap-2">
-                <Button
-                  type="button"
-                  variant="secondary"
-                  size="sm"
-                  onClick={() => setEditing(null)}
-                >
-                  取消
-                </Button>
-                <Button
-                  type="button"
-                  size="sm"
-                  disabled={
-                    !canEdit ||
-                    !activeEdit.text.trim() ||
-                    Array.from(activeEdit.text).length > 32000
-                  }
-                  onClick={() => {
-                    void onEdit(activeEdit.entryId, activeEdit.text).then(
-                      (accepted) => {
-                        if (accepted) setEditing(null);
-                      },
-                    );
-                  }}
-                >
-                  提交编辑
-                </Button>
+              <AttachmentChips
+                drafts={drafts.drafts}
+                error={drafts.error}
+                onRemove={drafts.remove}
+              />
+              <div className="flex items-center justify-between gap-2">
+                <AttachmentPicker onPick={drafts.pick} />
+                <div className="flex justify-end gap-2">
+                  <Button
+                    type="button"
+                    variant="secondary"
+                    size="sm"
+                    onClick={onCloseEdit}
+                  >
+                    取消
+                  </Button>
+                  <Button
+                    type="button"
+                    size="sm"
+                    disabled={
+                      !canEdit ||
+                      !canSubmitChatInput(activeEdit.text, drafts.drafts, [])
+                    }
+                    onClick={() => onEdit(activeEdit.entryId, activeEdit.text)}
+                  >
+                    提交编辑
+                  </Button>
+                </div>
               </div>
             </div>
           ) : (
             <Bubble variant="default" align="end">
-              <BubbleContent className="whitespace-pre-wrap">
-                {request}
-              </BubbleContent>
+              {attachments.length > 0 && (
+                <AttachmentList
+                  sessionId={sessionId}
+                  attachments={attachments}
+                />
+              )}
+              {request !== "" && (
+                <BubbleContent className="whitespace-pre-wrap">
+                  {request}
+                </BubbleContent>
+              )}
               {canEdit && nodeId !== undefined && (
-                <div className="absolute right-0 top-full z-10 hidden gap-1 pt-1 group-hover/bubble:flex">
+                <div className="absolute right-0 top-full z-10 hidden gap-1 pt-1 group-hover/bubble:flex group-focus-within/bubble:flex">
                   <Tooltip>
                     <TooltipTrigger asChild>
                       <Button
@@ -143,9 +172,7 @@ function Entry({
                         size="icon"
                         className="size-7 text-muted-foreground hover:text-foreground"
                         aria-label="编辑消息"
-                        onClick={() =>
-                          setEditing({ entryId: nodeId, text: request })
-                        }
+                        onClick={() => onStartEdit(entry)}
                       >
                         <Pencil />
                       </Button>
@@ -284,6 +311,7 @@ function Entry({
 }
 
 export default function ChatTranscript({
+  sessionId,
   rounds,
   onRetry,
   onWithdraw,
@@ -292,15 +320,40 @@ export default function ChatTranscript({
   onEdit,
   onRegenerate,
 }: {
+  sessionId: string;
   rounds: ReActRound[];
   onRetry: (roundId: string, operationId: string) => void;
   onWithdraw: (roundId: string, steeringId: string) => void;
   retrying?: string;
   canEdit: boolean;
-  onEdit: (entryId: string, text: string) => Promise<boolean>;
+  /** 编辑提交完整附件集合：保留项为引用，新增或替换项为上传，全部移除为空集合 */
+  onEdit: (
+    entryId: string,
+    text: string,
+    attachments: AttachmentDraft[],
+  ) => Promise<boolean>;
   onRegenerate: (entryId: string) => void;
 }) {
   const [editing, setEditing] = useState<EditState>(null);
+  const drafts = useAttachmentDrafts();
+  const startEdit = (entry: ReActEntry) => {
+    if (entry.kind !== "user" || entry.entry_id === undefined) return;
+    setEditing({
+      entryId: entry.entry_id,
+      text: entry.request ?? "",
+    });
+    // 编辑界面默认载入并保留原附件（附件契约 §3.2）
+    drafts.reset(entry.attachments ?? []);
+  };
+  const closeEdit = () => {
+    setEditing(null);
+    drafts.clear();
+  };
+  const submitEdit = (entryId: string, text: string) => {
+    void onEdit(entryId, text, drafts.drafts).then((accepted) => {
+      if (accepted) closeEdit();
+    });
+  };
   return (
     <MessageScrollerProvider
       autoScroll
@@ -320,7 +373,8 @@ export default function ChatTranscript({
                     (entry) =>
                       entry.kind === "tool" ||
                       (entry.kind === "user"
-                        ? !!entry.request
+                        ? !!entry.request ||
+                          (entry.attachments?.length ?? 0) > 0
                         : entry.content.some((block) =>
                             block.type === "text"
                               ? !!block.text
@@ -336,11 +390,19 @@ export default function ChatTranscript({
                       <Entry
                         entry={entry}
                         roundId={round.id}
+                        sessionId={sessionId}
                         onWithdraw={onWithdraw}
                         canEdit={canEdit}
                         editing={editing}
-                        setEditing={setEditing}
-                        onEdit={onEdit}
+                        drafts={drafts}
+                        onStartEdit={startEdit}
+                        onEditTextChange={(text) =>
+                          setEditing((current) =>
+                            current === null ? null : { ...current, text },
+                          )
+                        }
+                        onCloseEdit={closeEdit}
+                        onEdit={submitEdit}
                         onRegenerate={onRegenerate}
                       />
                     </MessageScrollerItem>

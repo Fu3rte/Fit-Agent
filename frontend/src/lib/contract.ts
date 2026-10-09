@@ -34,7 +34,7 @@ export type SteeringStatusWire =
 export type DiscardReasonWire =
   "completed" | "failed" | "cancelled" | "interrupted";
 
-/** 输入对象（§11.2）：``entry_id`` 仅 consumed 有值，``reason`` 仅 discarded 有值 */
+/** 输入对象（§11.2）：``entry_id`` 仅 consumed 有值，``reason`` 仅 discarded 有值，``attachments`` 按受理顺序 */
 export interface SteeringInputWire {
   session_id: string;
   run_id: string;
@@ -44,10 +44,43 @@ export interface SteeringInputWire {
   reason: DiscardReasonWire | null;
   created_at: number;
   updated_at: number;
+  attachments: AttachmentWire[];
 }
 
 /** 操作类型（§11.2） */
 export type OperationKindWire = "send" | "edit" | "regenerate" | "steering";
+
+/* ===== 附件 wire（plan-import-adjustment-contract §2）===== */
+
+/** 新上传文件：``attachment_id`` 由前端生成并在显式重试时沿用，``data_base64`` 为原始字节的标准 Base64 */
+export interface AttachmentUploadWire {
+  kind: "upload";
+  attachment_id: string;
+  file_name: string;
+  data_base64: string;
+}
+
+/** 引用同会话已保存附件：编辑保留项使用该输入 */
+export interface AttachmentReferenceWire {
+  kind: "reference";
+  attachment_id: string;
+}
+
+export type AttachmentInputWire =
+  AttachmentUploadWire | AttachmentReferenceWire;
+
+/** 已受理附件的公开元数据（§4）：顺序来自节点关联顺序，响应不含存储引用 */
+export interface AttachmentWire {
+  attachment_id: string;
+  file_name: string;
+  size_bytes: number;
+  created_at: number;
+}
+
+/** ``GET /api/sessions/{session_id}/attachments/{attachment_id}`` 响应（§4）：元数据加严格 UTF-8 解码正文 */
+export interface AttachmentContentWire extends AttachmentWire {
+  text: string;
+}
 
 /** 创建会话请求体（§4）：``session_id`` 标准 UUID，``title`` 为首条请求原文 */
 export interface SessionCreateBody {
@@ -55,19 +88,21 @@ export interface SessionCreateBody {
   title: string;
 }
 
-/** 发送请求体（§5）：``operation_id`` 为同一次操作的幂等键，显式重试沿用原值 */
+/** 发送请求体（§5）：``operation_id`` 为同一次操作的幂等键，显式重试沿用原值；新前端始终提交 ``attachments`` */
 export interface ReActRunBody {
   session_id: string;
   operation_id: string;
   request: string;
+  attachments: AttachmentInputWire[];
 }
 
-/** 编辑请求体（session-edit-regenerate-contract §3）：``target_entry_id`` 为被编辑的用户节点 */
+/** 编辑请求体：新操作提供完整附件集合；旧账本重试省略该字段，沿用目标原附件。 */
 export interface EditRunBody {
   session_id: string;
   operation_id: string;
   target_entry_id: string;
   request: string;
+  attachments?: AttachmentInputWire[];
 }
 
 /** 重新生成请求体（session-edit-regenerate-contract §4）：``target_entry_id`` 为执行起点的用户节点 */
@@ -86,11 +121,12 @@ export interface SendRunRepeatWire {
   status: RunStatusWire;
 }
 
-/** 接收 Steering 请求体（§6.1） */
+/** 接收 Steering 请求体（§6.1）：文字与附件一并受理，附件非空时允许空文字 */
 export interface SteeringBody {
   session_id: string;
   operation_id: string;
   message: string;
+  attachments: AttachmentInputWire[];
 }
 
 /** 接收 Steering 响应状态（§11.3）：首次为 accepted，重复为原输入当前持久化状态 */
@@ -160,7 +196,12 @@ export type PublicAssistantContent = ReActContent;
 /** 历史消息公开投影（§3.2）：系统消息不含可见字段，前端不产生可见消息 */
 export type PublicMessageWire =
   | { role: "system" }
-  | { role: "user"; text: string; timestamp: number }
+  | {
+      role: "user";
+      text: string;
+      timestamp: number;
+      attachments: AttachmentWire[];
+    }
   | {
       role: "assistant";
       content: PublicAssistantContent[];
@@ -188,12 +229,13 @@ export interface HistoryEntryWire {
 /** 历史运行对象（§3.3）：与运行接口契约的运行对象同形 */
 export type HistoryRunWire = SessionRunWire;
 
-/** 历史输入状态（§3.4）：consumed 关联用户节点，其余状态不伪造节点 */
+/** 历史输入状态（§3.4）：consumed 关联用户节点，其余状态不伪造节点；``attachments`` 为受理时集合 */
 export interface HistorySteeringWire {
   session_id: string;
   run_id: string;
   steering_id: string;
   text: string;
+  attachments: AttachmentWire[];
   timestamp: number;
   status: SteeringStatusWire;
   entry_id: string | null;
@@ -275,7 +317,7 @@ export interface ProfileStatusResultWire {
 
 /* ===== 实际训练记录（workout-http-sse-contract §2、§3、§5）===== */
 
-/** 训练记录重量口径七值（与 domain/business/models.py 的 LoadConvention 同集合；目录口径 §11.7） */
+/** 训练记录实际采用的七种重量口径（与 domain/business/models.py 的 LoadConvention 同集合；目录口径 §11.7） */
 export type WorkoutLoadConvention =
   | "per_implement"
   | "barbell_total"
@@ -356,6 +398,165 @@ export interface WorkoutListWire {
   total: number;
 }
 
+/* ===== 训练计划生成与采纳（plan-generation-contract §2、§4、§5）===== */
+
+/** 计划重量口径与训练记录共用同一枚举集合（契约 §2 尾注） */
+export type PlanLoadConvention = WorkoutLoadConvention;
+
+/** 计划里的一个动作：目录外动作 ``exercise_id`` 为 null 并保留名称；数值 null 保持未知 */
+export interface PlanExerciseWire {
+  exercise_id: string | null;
+  name: string;
+  sets: number | null;
+  reps: number | null;
+  duration_seconds: number | null;
+  weight_kg: number | null;
+  load_convention: PlanLoadConvention | null;
+  rest_seconds: number | null;
+}
+
+/** 一个训练日：``kind=rest`` 时 ``exercises`` 必须为空数组，通用结构允许训练日为空 */
+export interface PlanDayWire {
+  kind: "training" | "rest";
+  focus: string | null;
+  exercises: PlanExerciseWire[];
+  notes: string | null;
+}
+
+/** 计划内容：``repeat=null`` 为循环方式未知，``days`` 顺序即训练日顺序 */
+export interface PlanContentWire {
+  repeat: boolean | null;
+  days: PlanDayWire[];
+  notes: string | null;
+  /** JSON Pointer 字段路径，标记助手补充或修改的字段 */
+  suggested_fields: string[];
+}
+
+/** GET /api/plans/current：没有当前计划时 ``id`` 与 ``content`` 同时为 null */
+export type CurrentPlanWire =
+  | { id: null; content: null }
+  | { id: string; content: PlanContentWire };
+
+/** 一个已保存计划版本（§4）：固定内容，``is_current`` 由实时查询给出 */
+export interface PlanRecordWire {
+  id: string;
+  is_current: boolean;
+  created_at: number;
+  content: PlanContentWire;
+}
+
+/** GET /api/plans：直接数组，按 created_at 降序、同时间按 id 降序 */
+export type PlanListWire = PlanRecordWire[];
+
+/** `get_plan` 输入 */
+export interface PlanGetArgumentsWire {
+  plan_id: string;
+}
+
+/** `prepare_plan` 输入：画像已保存版本、查询得到的当前计划 ID 原值与完整内容 */
+export interface PlanProposalArgumentsWire {
+  base_profile_version: number;
+  base_plan_id: string | null;
+  payload: PlanContentWire;
+}
+
+/** `prepare_plan` 输出：快照标识、依据字段与完整 ``payload``，``display_entry_id`` 来自持久化节点 */
+export interface PlanProposalWire extends PlanProposalArgumentsWire {
+  proposal_id: string;
+}
+
+/** `prepare_plan_import` 与 `prepare_plan_adjustment` 共用输入（plan-import-adjustment-contract §7）：
+ *  ``base_profile_version`` 允许 null 表示准备时没有画像 */
+export interface PlanImportArgumentsWire {
+  base_profile_version: number | null;
+  base_plan_id: string | null;
+  payload: PlanContentWire;
+}
+
+export type PlanAdjustmentArgumentsWire = PlanImportArgumentsWire;
+
+/** `prepare_plan_import` 输出 */
+export interface PlanImportProposalWire extends PlanImportArgumentsWire {
+  proposal_id: string;
+  preparation_kind: "import";
+}
+
+/** `prepare_plan_adjustment` 输出 */
+export interface PlanAdjustmentProposalWire extends PlanAdjustmentArgumentsWire {
+  proposal_id: string;
+  preparation_kind: "adjustment";
+}
+
+/** 三类计划准备结果：录入与调整按实际工具校验，生成快照保持生成契约原值 */
+export type PreparedPlanProposalWire =
+  PlanProposalWire | PlanImportProposalWire | PlanAdjustmentProposalWire;
+
+/** `save_plan` 输入：快照标识、完整展示节点与用户确认节点 */
+export interface PlanSaveArgumentsWire {
+  proposal_id: string;
+  display_entry_id: string;
+  confirmation_entry_id: string;
+}
+
+/** `save_plan` 固定保存结果：不携带动态 ``is_current``，重复提交保持原值 */
+export interface PlanSaveResultWire {
+  proposal_id: string;
+  id: string;
+  content: PlanContentWire;
+  created_at: number;
+  saved_at: number;
+}
+
+/** `get_plan_save_status` 输入 */
+export interface PlanStatusArgumentsWire {
+  proposal_id: string;
+}
+
+/** `get_plan_save_status` 输出：``proposal_id`` 与查询参数一致，saved 时结果的快照标识也一致；
+ *  保存状态沿用画像与训练记录的 `pending / processing / saved / invalidated / conflicted` */
+export type PlanStatusResultWire =
+  | {
+      proposal_id: string;
+      status: "saved";
+      result: PlanSaveResultWire;
+    }
+  | {
+      proposal_id: string;
+      status: "pending" | "processing" | "invalidated" | "conflicted";
+      result: null;
+    };
+
+/** 内容校验错误的字段定位：点号与数组索引形式，如 ``payload.days.0.exercises.0.sets`` */
+export interface PlanFieldErrorWire {
+  path: string;
+  message: string;
+}
+
+/** 计划业务错误码（契约 §8） */
+export type PlanBusinessErrorCode =
+  | "plan_not_found"
+  | "plan_proposal_not_found"
+  | "plan_proposal_invalidated"
+  | "plan_save_processing"
+  | "plan_version_conflict"
+  | "profile_required"
+  | "profile_version_conflict"
+  | "plan_confirmation_invalid"
+  | "plan_access_denied"
+  | "session_not_found";
+
+/** 工具失败结果内容：仅 invalid_business_payload 携带 ``errors`` */
+export type PlanBusinessErrorWire =
+  | {
+      code: "invalid_business_payload";
+      message: string;
+      errors: PlanFieldErrorWire[];
+    }
+  | {
+      code: PlanBusinessErrorCode;
+      message: string;
+    };
+
 /** GET /api/sessions/{session_id}/history：会话头 ＋ 当前分支节点 ＋ 关联运行与输入（§3） */
 export interface SessionHistoryWire {
   session: SessionWire;
@@ -372,11 +573,14 @@ export interface SessionRunListWire {
   runs: SessionRunWire[];
 }
 
+/** 指定运行的 Steering 列表项（session-list-contract §3）：十个必填字段，不含附件投影 */
+export type RunSteeringItemWire = Omit<HistorySteeringWire, "attachments">;
+
 /** GET /api/sessions/{session_id}/runs/{run_id}/steering：指定运行的全部保留输入，按 created_at、steering_id 升序（§3） */
 export interface RunSteeringListWire {
   session_id: string;
   run_id: string;
-  steering: HistorySteeringWire[];
+  steering: RunSteeringItemWire[];
 }
 
 /* ===== Agent SSE 事件（backend-http-sse-contract §8、§11.6）===== */
@@ -477,7 +681,9 @@ export type ReActEvent = { data: { run_id: string } } & (
 );
 
 /** 已注册业务接口错误码（§11.5，编辑与重新生成新增 ``entry_not_found`` / ``invalid_target_entry``，
- *  画像自然语言确认新增 §11.9 的八项业务码，训练记录新增 workout-http-sse-contract §7 的 ``workout_not_found``） */
+ *  画像自然语言确认新增 §11.9 的八项业务码，训练记录新增 workout-http-sse-contract §7 的 ``workout_not_found``，
+ *  训练计划新增 plan-generation-contract §8 的十项业务码，
+ *  附件新增 plan-import-adjustment-contract §9 的五项附件码） */
 export type ErrorCode =
   | "host_forbidden"
   | "origin_forbidden"
@@ -500,6 +706,19 @@ export type ErrorCode =
   | "profile_version_conflict"
   | "profile_confirmation_invalid"
   | "profile_access_denied"
+  | "plan_not_found"
+  | "plan_proposal_not_found"
+  | "plan_proposal_invalidated"
+  | "plan_save_processing"
+  | "plan_version_conflict"
+  | "profile_required"
+  | "plan_confirmation_invalid"
+  | "plan_access_denied"
+  | "attachment_format_invalid"
+  | "attachment_size_exceeded"
+  | "attachment_not_found"
+  | "attachment_access_denied"
+  | "attachment_conflict"
   | "invalid_request"
   | "invalid_business_payload"
   | "credential_detected"
@@ -511,549 +730,7 @@ export interface ApiError {
   message: string;
 }
 
-/** 目录记录口径恰三类（与 001_initial.sql exercises CHECK 同集合） */
-export type CatalogRecordType = "reps_weight" | "reps_bodyweight" | "time";
-
-/** 负重口径六种（自重／计时型为 null，不虚构口径）；
- *  external_added_weight = 外加重量（不含体重），用于独立负重引体 */
-export type LoadConvention =
-  | "barbell_includes_bar_total"
-  | "dumbbell_per_hand"
-  | "machine_pin_displayed_value"
-  | "plate_loaded_total_excluding_empty"
-  | "unilateral_setting_per_side"
-  | "external_added_weight";
-
-/** 动作目录一行（exercise_dto）：表单动作选择与负重口径来源 */
-export interface ExerciseWire {
-  id: string;
-  standard_name_zh: string;
-  /** 常见别名：中文变式名与英文原名；自然语言匹配与搜索都命中它们 */
-  aliases: string[];
-  equipment_variant: string;
-  record_type: CatalogRecordType;
-  load_convention: LoadConvention | null;
-  min_load_increment_kg: number | null;
-  recommendable: boolean;
-  modes: string[];
-  source_ref: string;
-  attribution: string;
-}
-
-export interface ExerciseListWire {
-  exercises: ExerciseWire[];
-}
-
-/** 组类型固定三态（与 workout_sets CHECK 同集合；没有「未申报」态） */
-export type SetTypeWire = "work" | "warmup" | "assisted";
-
-/** 提交的一组训练事实；set_no 由后端按提交顺序对同一动作分配 1,2,3…（前端不送）
- *  reps 与 duration_seconds 按所选动作的记录口径二选一：外加重量／自重回填 reps，计时回填秒数 */
-export interface WorkoutSetInputWire {
-  exercise_id: string;
-  set_type: SetTypeWire;
-  reps: number | null;
-  /** 目录 load_convention：自重／计时型必须为 null（与目录不符后端拒绝） */
-  load_convention: LoadConvention | null;
-  weight_kg: number | null;
-  /** 计时动作的单组秒数（不小于 1、无业务上限）；非计时动作为 null */
-  duration_seconds: number | null;
-}
-
-/** POST／PUT /api/records 请求体；plan_session_id 为 null 即额外训练 */
-export interface RecordWriteBody {
-  performed_on: string;
-  plan_session_id?: number | null;
-  auto_link?: boolean;
-  sets: WorkoutSetInputWire[];
-}
-
-/** 一次训练（record_dto） */
-export interface RecordWire {
-  id: number;
-  performed_on: string;
-  plan_session_id: number | null;
-  sets: Array<{
-    exercise_id: string;
-    set_no: number;
-    set_type: SetTypeWire;
-    load_convention: LoadConvention | null;
-    weight_kg: number | null;
-    /** 计时组为 null（不补 0） */
-    reps: number | null;
-    /** 非计时组为 null（不补 0） */
-    duration_seconds: number | null;
-  }>;
-}
-
-export interface RecordListWire {
-  records: RecordWire[];
-}
-
-export interface RecordItemWire {
-  record: RecordWire;
-}
-
-/** 当天可关联的计划日程候选（未取消且未被其他训练关联） */
-export interface PlanSessionCandidateWire {
-  id: number;
-  plan_id: number;
-  scheduled_on: string;
-}
-
-export interface PlanSessionCandidatesWire {
-  sessions: PlanSessionCandidateWire[];
-}
-
-/** 一条身体指标（body_metric_dto）；body_fat_pct 为 null 表示该次未记录体脂 */
-export interface BodyMetricWire {
-  id: number;
-  measured_on: string;
-  weight_kg: number;
-  body_fat_pct: number | null;
-}
-
-/** POST／PUT /api/body-metrics 请求体；体脂留空即不记录（不补 0） */
-export interface BodyMetricWriteBody {
-  measured_on: string;
-  weight_kg: number;
-  body_fat_pct?: number | null;
-}
-
-export interface BodyMetricListWire {
-  metrics: BodyMetricWire[];
-}
-
-export interface BodyMetricItemWire {
-  metric: BodyMetricWire;
-}
-
-/** 一个计划版本（plan_dto） */
-export interface PlanWire {
-  id: number;
-  version: number;
-  status: "draft" | "active" | "archived" | "rejected";
-  source_plan_id: number | null;
-  /** 结构化计划内容：形状即 PlanDraftWire（与 domain/plans/schema.py 的 PlanDraft 同一 Schema） */
-  structured_content: unknown;
-  evaluator_result: unknown | null;
-  created_at: string;
-  confirmed_at: string | null;
-  archived_at: string | null;
-}
-
-export interface PlanListWire {
-  plans: PlanWire[];
-}
-
-/* 计划内容的判别联合（plan_draft_schema）：字段与 domain/plans/schema.py 逐字对应 */
-
-/** 负荷判别联合：``status`` 是判别键；没有有效历史时为 needs_calibration，不带任何重量 */
-export type LoadWire =
-  | {
-      status: "known";
-      weight_kg: number;
-      source_workout_session_id: number;
-      source_set_no: number;
-    }
-  | { status: "needs_calibration" };
-
-/** 三类处方：``type`` 是判别键，字段严格互斥（只有外加负重次数处方携带 load） */
-export type PrescriptionWire =
-  | {
-      type: "weighted_reps";
-      reps_min: number;
-      reps_max: number;
-      progression_note: string | null;
-      load: LoadWire;
-    }
-  | {
-      type: "bodyweight_reps";
-      reps_min: number;
-      reps_max: number;
-      progression_note: string | null;
-    }
-  | {
-      type: "timed";
-      duration_seconds_min: number;
-      duration_seconds_max: number;
-      progression_note: string | null;
-    };
-
-/** 计划里的一个动作：稳定身份、组数与一个处方 */
-export interface PlannedExerciseWire {
-  exercise_id: string;
-  sets: number;
-  prescription: PrescriptionWire;
-}
-
-/** 一个训练日：窗口内的一个日期与它的动作（同日不重复同一动作） */
-export interface TrainingDayWire {
-  scheduled_on: string;
-  exercises: PlannedExerciseWire[];
-}
-
-/** 统一计划草案：``weekly_frequency`` 与 ``training_days`` 数量由后端强约束相等 */
-export interface PlanDraftWire {
-  goal: string;
-  starts_on: string;
-  explanation: string;
-  weekly_frequency: number;
-  training_days: TrainingDayWire[];
-}
-
-export interface PlanItemWire {
-  /** null = 没有正式启用（或未启用的）计划 */
-  plan: PlanWire | null;
-}
-
-/** 一条计划日程（plan_session_dto） */
-export interface PlanSessionWire {
-  id: number;
-  plan_id: number;
-  scheduled_on: string;
-  cancelled_at: string | null;
-}
-
-export interface PlanSessionListWire {
-  sessions: PlanSessionWire[];
-}
-
-/** 三类 PB（与 dto.personal_best_dto 同集合）；没有容量 PB，也没有估算 1RM */
-export type PersonalBestTypeWire = "weight_pb" | "reps_pb" | "duration_pb";
-
-/** 一条现算 PB：数值、适用重量／负重口径，加来源训练、组序号与来源日期 */
-export interface PersonalBestWire {
-  exercise_id: string;
-  exercise_name: string;
-  pb_type: PersonalBestTypeWire;
-  /** 单位随 pb_type：weight_pb 为 kg、reps_pb 为次数、duration_pb 为秒数 */
-  value: number;
-  load_convention: LoadConvention | null;
-  /** weight_pb 时等于 value；纯自重次数 PB 与计时 PB 为 null */
-  weight_kg: number | null;
-  workout_session_id: number;
-  set_no: number;
-  performed_on: string;
-}
-
-/** 数据是否足够给出变化值：ok 有最近两条记录，insufficient_data 只有一条，no_data 无记录 */
-export type TrendStatusWire = "ok" | "no_data" | "insufficient_data";
-
-/** 最近两条记录的变化；status 不是 ok 时取值字段全为 null（不补 0，也不把单条记录当变化） */
-export interface MetricChangeWire {
-  status: TrendStatusWire;
-  current: number | null;
-  current_on: string | null;
-  previous: number | null;
-  previous_on: string | null;
-  change: number | null;
-}
-
-/** 距上次训练天数；无训练历史时 status 为 no_data 且 days 为 null */
-export interface WorkoutGapWire {
-  status: TrendStatusWire;
-  days: number | null;
-  last_performed_on: string | null;
-}
-
-/** 趋势折线上的一个原始点：只在真实存在记录（体脂为非空）的日期出点，不按日补 0 */
-export interface MetricPointWire {
-  measured_on: string;
-  value: number;
-}
-
-/** 力量趋势上的一点：value 为截至该日期的累计 PB（历史最好成绩，曲线不下降） */
-export interface StrengthPointWire {
-  performed_on: string;
-  value: number;
-}
-
-/** 一个力量趋势系列：看板只透传不渲染，不提供动作选择 UI */
-export interface StrengthTrendWire {
-  exercise_id: string;
-  exercise_name: string;
-  pb_type: PersonalBestTypeWire;
-  load_convention: LoadConvention | null;
-  /** 三类系列都不带分组重量：weight_pb 的累计值本身就是重量，此处恒为 null */
-  weight_kg: number | null;
-  points: StrengthPointWire[];
-}
-
-/** 确定性趋势摘要：只含体重变化、体脂变化与停训天数，不含容量／完成率／效果评价 */
-export interface TrendSummaryWire {
-  weight_change: MetricChangeWire;
-  body_fat_change: MetricChangeWire;
-  days_since_last_workout: WorkoutGapWire;
-}
-
-/** GET /api/stats/trends 的 trends 载荷：窗口、两类原始点、力量系列与摘要 */
-export interface TrendsWire {
-  window_days: number;
-  from: string;
-  to: string;
-  weight: MetricPointWire[];
-  /** 体脂未记录的日期不出点，不用 0 补线 */
-  body_fat: MetricPointWire[];
-  /** 后端按截至各日期的累计 PB 计算；看板不展示该字段 */
-  strength: StrengthTrendWire[];
-  trend_summary: TrendSummaryWire;
-}
-
-/** 单次日程状态（与后端 CalendarSessionStatus 同集合） */
-export type CalendarSessionStatusWire = "cancelled" | "incomplete" | "complete";
-
-/** 月历上的一条计划日程事实；落在 scheduled_on 当天，完成状态由关联训练现算 */
-export interface CalendarPlanSessionWire {
-  id: number;
-  scheduled_on: string;
-  status: CalendarSessionStatusWire;
-  /** 非空即已完成该日程 */
-  workout_session_id: number | null;
-  /** 完成该日程的真实训练日期，跨月时仍返回 */
-  actual_performed_on: string | null;
-}
-
-/** 月历上的一次实际训练事实；plan_session_id 为 null 即额外训练 */
-export interface CalendarWorkoutWire {
-  id: number;
-  performed_on: string;
-  plan_session_id: number | null;
-}
-
-/** 月历上的一天：只含当天真实发生的日程与训练，空白日期不出条目（不生成「休息日」） */
-export interface CalendarDayWire {
-  date: string;
-  plan_sessions: CalendarPlanSessionWire[];
-  workouts: CalendarWorkoutWire[];
-}
-
-/** GET /api/stats/calendar 的 calendar 载荷：只读当前 active 计划的日程 */
-export interface CalendarMonthWire {
-  month: string;
-  from: string;
-  to: string;
-  days: CalendarDayWire[];
-}
-
-export interface PersonalBestListWire {
-  personal_bests: PersonalBestWire[];
-}
-
-export interface TrendsResponseWire {
-  trends: TrendsWire;
-}
-
-export interface CalendarResponseWire {
-  calendar: CalendarMonthWire;
-}
-
-/** POST /api/agent/confirm 与 /api/agent/reject 请求体：会话身份 + 目标计划身份 */
-export interface AgentPlanBody {
-  chat_id: string;
-  conversation_id: string;
-  plan_id: number;
-}
-
-/** confirm／reject 的响应：落库后的计划行（激活成功或幂等返回既有行） */
-export interface AgentPlanResponseWire {
-  plan: PlanWire;
-}
-
-/**
- * POST /api/agent/confirm-workout 请求体：用户修改后的完整确认载荷。
- *
- * 只提交 `waiting` 结构化字段，不从 `message.text` 反解；本端点不要求服务端证明该
- * conversation_id 此前完成过一次自然语言解析。
- */
-export interface ConfirmWorkoutBody {
-  chat_id: string;
-  conversation_id: string;
-  performed_on: string;
-  sets: WorkoutSetConfirmWire[];
-  plan_session_id: number | null;
-  auto_link: boolean;
-}
-
-/** confirm-workout 响应：落库训练事实 ＋ 重新现算的 PB（与表单写入的传输对象同一形状） */
-export interface ConfirmWorkoutResponseWire {
-  workout_session: RecordWire;
-  personal_bests: PersonalBestWire[];
-}
-
-/* 会话历史 REST：GET 列表／POST 新建／GET 详情／DELETE 删除（conversation_dto 系列） */
-
-/** 一条会话头（conversation_dto）：稳定身份、展示标题与两个时间戳 */
-export interface ConversationWire {
-  id: string;
-  title: string;
-  created_at: string;
-  updated_at: string;
-}
-
-/** GET /api/conversations：服务端已按 ``updated_at`` 降序排列 */
-export interface ConversationListWire {
-  conversations: ConversationWire[];
-}
-
-/** POST /api/conversations 请求体：标题由客户端提供，空白标题由后端按 400 拒绝 */
-export interface ConversationCreateBody {
-  title: string;
-}
-
-/** Run 状态（conversation_runs.status 同集合）：``waiting`` 即该轮在等用户确认 */
-export type ConversationRunStatusWire =
-  "pending" | "running" | "waiting" | "completed" | "failed" | "cancelled";
-
-/** 服务端投影的一条 Assistant 文本与状态（message.status 同集合） */
-export interface ConversationAssistantWire {
-  entry_id: string;
-  content: string;
-  /** 不是 ``complete`` 时只用于展示，不进入后续模型上下文 */
-  status: "complete" | "partial" | "failed" | "aborted";
-}
-
-/** 一条确认投影：动作与面向用户的稳定文本（已确认／已拒绝／已打卡） */
-export interface ConversationConfirmationWire {
-  entry_id: string;
-  action: "plan_confirmed" | "plan_rejected" | "workout_confirmed";
-  text: string;
-}
-
-/** 一条 Run Event：``sequence`` 升序，``event``／``data`` 与 SSE 事件逐字同形 */
-export type ConversationRunEventWire = { sequence: number } & AgentEventWire;
-
-/** GET /api/conversations/{id} 详情里的一条轮次（与前端 ChatRound 同形，另带服务端身份与状态） */
-export interface ConversationRoundWire {
-  run_id: string;
-  /** 该轮的 LangGraph thread 身份，等于发起该轮时的 conversation_id */
-  conversation_id: string;
-  status: ConversationRunStatusWire;
-  request: string;
-  assistants: ConversationAssistantWire[];
-  confirmations: ConversationConfirmationWire[];
-  events: ConversationRunEventWire[];
-}
-
-/** 单条受限运行轨迹：只含阶段与工具诊断元数据 */
-export interface ConversationRunTraceEntryWire {
-  sequence: number;
-  created_at: string;
-  stage: string;
-  tool_call_id: string | null;
-  tool_name: string | null;
-  status: string;
-  error_code: string | null;
-}
-
-/** GET /api/conversations/{chat_id}/runs/{thread_id}/trace */
-export interface ConversationRunTraceWire {
-  run_id: string;
-  entries: ConversationRunTraceEntryWire[];
-}
-
-/** 一次压缩的展示分隔：摘要与保留起点（原始 Entry 不受影响） */
-export interface ConversationCompactionWire {
-  entry_id: string;
-  summary: string;
-  first_kept_entry_id: string;
-}
-
-/** GET /api/conversations/{id}：会话头 ＋ 会话全部 Entry 重建的轮次与压缩分隔 */
-export interface ConversationDetailWire {
-  conversation: ConversationWire;
-  rounds: ConversationRoundWire[];
-  compactions: ConversationCompactionWire[];
-}
-
-/** 五类 SSE 产品事件名（与后端 AgentEventName 同一封闭集合，不发送别的名字） */
-export type AgentEventNameWire =
-  "node" | "message" | "waiting" | "done" | "error";
-
-/** 当前 Graph 节点／阶段名 */
-export interface AgentNodeEventWire {
-  event: "node";
-  data: { name: string };
-}
-
-/** 面向用户的可见文本（安全提示、表单引导、统计解释、二次阻断说明） */
-export interface AgentMessageEventWire {
-  event: "message";
-  data: { text: string };
-}
-
-/** 计划确认路径的 `waiting`：已持久化 draft，只带 draft 身份 */
-export interface AgentWaitingEventWire {
-  event: "waiting";
-  data: { draft_plan_id: number };
-}
-
-/**
- * 自然语言打卡的一条组事实：`waiting.workout.sets` 与 confirm-workout 请求体共用同一形状。
- *
- * 与表单 `WorkoutSetInputWire` 的差别只有 `set_no`：自然语言提取结果已给出组序号，确认 UI 提交的
- * 是用户修改后的完整值（表单路径的组序号由后端按提交顺序分配，前端不送）。
- */
-export interface WorkoutSetConfirmWire {
-  exercise_id: string;
-  set_no: number;
-  set_type: SetTypeWire;
-  reps: number | null;
-  load_convention: LoadConvention | null;
-  weight_kg: number | null;
-  duration_seconds: number | null;
-}
-
-/**
- * 自然语言打卡确认 UI 的编辑数据源 `waiting.workout`：日期、组事实与日程关联默认值。
- */
-export interface ConfirmWorkoutDraftWire {
-  performed_on: string;
-  sets: WorkoutSetConfirmWire[];
-  /** 初始 null：用户可在确认 UI 改选具体日程；服务端不替用户选择候选 */
-  plan_session_id: number | null;
-  /**
-   * 初始 true：恰一个未完成日程时由既有服务自动关联；零候选或多候选且未显式选择时由既有领域规则
-   * 产生日程歧义错误，不写库
-   */
-  auto_link: boolean;
-}
-
-/** 自然语言打卡路径的 `waiting`：结构化训练结果 ＋ 数据库候选日程 */
-export interface AgentWaitingWorkoutEventWire {
-  event: "waiting";
-  data: {
-    workout: ConfirmWorkoutDraftWire;
-    /** 数据库查询结果；模型不得重新生成候选 ID 或候选集合 */
-    candidate_plan_sessions: PlanSessionCandidateWire[];
-  };
-}
-
-/** Run 正常结束；安全命中先于 Router 时没有分类结论，intent 因此可为 null */
-export interface AgentDoneEventWire {
-  event: "done";
-  data: {
-    ok: true;
-    intent: string | null;
-    termination_reason: string | null;
-    draft_plan_id: number | null;
-  };
-}
-
-/** 运行错误；message 是后端已脱敏的可见文本，不含密钥、Provider 配置或堆栈 */
-export interface AgentErrorEventWire {
-  event: "error";
-  data: { message: string };
-}
-
-/** 五类事件的判别联合：data 键集合与后端逐字一致，不增不减 */
-export type AgentEventWire =
-  | AgentNodeEventWire
-  | AgentMessageEventWire
-  | AgentWaitingEventWire
-  | AgentWaitingWorkoutEventWire
-  | AgentDoneEventWire
-  | AgentErrorEventWire;
+/* 模型配置（PRODUCT.md §3.4） */
 
 /** 客户端 transport：只决定后端用哪个 Chat 客户端（与后端 APIS 同集合） */
 export type ProviderApiWire = "openai_compatible" | "anthropic_messages";

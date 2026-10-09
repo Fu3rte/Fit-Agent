@@ -1,6 +1,8 @@
 import { createParser } from "eventsource-parser";
 import type {
+  AttachmentInputWire,
   DiscardReasonWire,
+  PreparedPlanProposalWire,
   ProfileContentWire,
   ReActContent,
   ReActEvent,
@@ -12,14 +14,26 @@ import type {
   WorkoutProposalWire,
 } from "@/lib/contract";
 import {
+  isObject,
+  parsePlanBusinessError,
+  parsePlanSaveResult,
+  parsePlanStatusResult,
   parseProfileSaveResult,
   parseProfileStatusResult,
   parseWorkoutSaveResult,
   parseWorkoutStatusResult,
+  preparedPlanAdjustmentProposal,
+  preparedPlanImportProposal,
+  preparedPlanProposal,
   preparedProfilePayload,
   preparedWorkoutProposal,
 } from "@/lib/business";
 import type { ToolCallCardProps } from "../components/ToolCallCard";
+import {
+  attachmentInputs,
+  fromAttachmentDraft,
+  type AttachmentDraft,
+} from "./attachments";
 
 /** 已提交节点身份（§8）：message_end（助手消息）与 tool_result（工具结果）确认后写入 */
 interface CommittedNode {
@@ -36,6 +50,8 @@ export type ReActEntry =
       kind: "user";
       id: string;
       request?: string;
+      /** 有序附件（附件契约 §4）：无附件为 `[]`，纯文件消息 `request` 可为空；编辑默认按此集合载入 */
+      attachments?: AttachmentDraft[];
       steering?: SteeringState;
       /** 受理该输入的操作身份（§7.1）：状态补查沿用 */
       operation_id?: string;
@@ -50,17 +66,19 @@ export type ReActEntry =
       content: ReActContent[];
       stop_reason?: ReActStopReason;
     } & Partial<CommittedNode>)
-  /** 业务待确认内容的完整展示（profile-plan §3.2、workout-http-sse-contract §5）：
-   *  仅在对应准备工具的结果节点提交后携带，实时与历史同一口径 */
+  /** 业务待确认内容的完整展示（profile-plan §3.2、workout-http-sse-contract §5、plan-generation-contract §6、
+   *  plan-import-adjustment-contract §7）：仅在对应准备工具的结果节点提交后携带，实时与历史同一口径 */
   | ({
       kind: "tool";
       id: string;
       profile?: ProfileContentWire;
       workout?: WorkoutProposalWire;
+      plan?: PreparedPlanProposalWire;
     } & ToolCallCardProps &
       Partial<CommittedNode>);
 
-/** 结果未知或执行中的操作（§5.5、session-edit-regenerate-contract §8）：保留原 operation_id、所属会话、目标运行与原始正文 */
+/** 结果未知或执行中的操作（§5.5、session-edit-regenerate-contract §8、附件契约 §2）：
+ *  保留原 operation_id、所属会话、目标运行、原始正文与完整有序附件集合，显式重试逐字沿用 */
 export interface PendingOperation {
   operation_id: string;
   session_id: string;
@@ -68,6 +86,8 @@ export interface PendingOperation {
   /** 发送未取得 run_id 时为 null，Steering 为目标运行 */
   run_id: string | null;
   request: string;
+  attachments: AttachmentDraft[];
+  legacy_edit?: true;
   created_at: number;
   /** 受理后服务端确认的请求节点（§11.4）：刷新后据此恢复运行身份 */
   request_entry_id?: string | null;
@@ -156,6 +176,7 @@ export function applySteeringStatus(
   round: ReActRound,
   received: SteeringSnapshot,
   request?: string,
+  attachments?: AttachmentDraft[],
 ): ReActRound {
   if (round.run_id !== received.run_id)
     throw new Error("Steering 运行身份不匹配。");
@@ -184,6 +205,7 @@ export function applySteeringStatus(
       : next;
   const nodeEntry =
     state.status === "consumed" ? { entry_id: state.entry_id } : {};
+  const displayed = attachmentDisplay(attachments ?? found?.attachments);
   if (found === undefined)
     return {
       ...round,
@@ -193,6 +215,7 @@ export function applySteeringStatus(
           kind: "user",
           id: received.steering_id,
           request,
+          ...displayed,
           steering: state,
           ...nodeEntry,
           operation_id: received.operation_id,
@@ -208,6 +231,7 @@ export function applySteeringStatus(
         : {
             ...found,
             request: request ?? found.request,
+            ...displayed,
             steering: state,
             ...nodeEntry,
             operation_id: received.operation_id ?? found.operation_id,
@@ -215,6 +239,13 @@ export function applySteeringStatus(
           },
     ),
   };
+}
+
+/** 附件展示字段：无附件的文本输入保持字段缺省，避免与已受理集合混淆 */
+export function attachmentDisplay(drafts: AttachmentDraft[] | undefined) {
+  return drafts === undefined || drafts.length === 0
+    ? {}
+    : { attachments: drafts };
 }
 
 /* ===== 会话选择、本地草稿与操作账本（session-history-contract §5.1、§5.5）===== */
@@ -353,12 +384,23 @@ function parsePendingOperation(value: unknown): PendingOperation {
     !Number.isSafeInteger(value.created_at)
   )
     throw new Error("操作账本正文无效。");
+  // 旧版纯文本账本迁移为空附件；旧编辑重试保留原请求的缺省字段语义。
+  const legacy = !Object.hasOwn(value, "attachments");
+  if (legacy && value.request.trim() === "") throw new Error("操作账本正文无效。");
+  const attachments = legacy ? [] : value.attachments;
+  if (!Array.isArray(attachments)) throw new Error("操作账本附件无效。");
+  if (value.legacy_edit !== undefined &&
+      (value.legacy_edit !== true || value.kind !== "edit" || attachments.length !== 0))
+    throw new Error("操作账本编辑版本无效。");
   return {
     operation_id: value.operation_id,
     session_id: value.session_id,
     kind: value.kind,
     run_id: value.run_id as string | null,
     request: value.request,
+    attachments: attachments.map(fromAttachmentDraft),
+    ...((legacy && value.kind === "edit") || value.legacy_edit === true
+      ? { legacy_edit: true as const } : {}),
     created_at: value.created_at as number,
     request_entry_id: (value.request_entry_id ?? null) as string | null,
     steering_id: (value.steering_id ?? null) as string | null,
@@ -422,7 +464,9 @@ export function loadChatStore(): ChatStore {
     writeChatStore(fresh);
     return fresh;
   }
-  return parseChatStore(JSON.parse(raw));
+  const store = parseChatStore(JSON.parse(raw));
+  writeChatStore(store);
+  return store;
 }
 
 /** 读取指定会话的未确认账本（§5.2） */
@@ -499,13 +543,36 @@ export function attachOperationRun(
   );
 }
 
-/** 未确认的 Steering 原文（§5.5）：同一文本必须经显式重试，不得作为新操作重发 */
-export function unknownSteeringRequests(
-  operations: PendingOperation[],
-): string[] {
+/** 文本与附件的受理条件（附件契约 §1、§3.1、§3.4）：文本最多 32000 个 Unicode 字符并保留原值，
+ *  空白或缺省文本要求附件集合非空 */
+export function validMessageInput(
+  text: string,
+  attachments: readonly unknown[],
+): boolean {
+  return (
+    Array.from(text).length <= 32000 &&
+    (!!text.trim() || attachments.length > 0)
+  );
+}
+
+/** 未确认输入的身份（§5.5）：同一文本与同一有序附件集合视为同一输入，只能显式重试原操作 */
+export function messageInputKey(
+  text: string,
+  attachments: readonly AttachmentInputWire[],
+): string {
+  return JSON.stringify([
+    text,
+    attachments.map((item) => [item.kind, item.attachment_id]),
+  ]);
+}
+
+/** 未确认的 Steering 输入身份（§5.5）：同身份输入必须经显式重试，不得作为新操作重发 */
+export function unknownSteeringKeys(operations: PendingOperation[]): string[] {
   return operations
     .filter((item) => item.kind === "steering")
-    .map((item) => item.request);
+    .map((item) =>
+      messageInputKey(item.request, attachmentInputs(item.attachments)),
+    );
 }
 
 export function pendingExecOperation(
@@ -726,12 +793,16 @@ export function applyReActEvent(
       const entry = entries[index];
       if (!entry || entry.kind !== "tool" || entry.entry_id !== undefined)
         throw new Error("工具结果缺少调用或重复返回。");
+      if (event.data.is_error)
+        assertPlanBusinessError(entry.name, event.data.content);
       const displayed =
         !event.data.is_error && entry.name === PREPARE_PROFILE
           ? { profile: preparedProfilePayload(event.data.content) }
           : !event.data.is_error && entry.name === PREPARE_WORKOUT
             ? { workout: preparedWorkoutProposal(event.data.content) }
-            : {};
+            : !event.data.is_error
+              ? (preparedPlanDisplay(entry.name, event.data.content) ?? {})
+              : {};
       entries[index] = {
         ...entry,
         content: event.data.content,
@@ -790,18 +861,67 @@ export function applyReActEvent(
   return { ...round, entries, run_id: data.run_id };
 }
 
-/* ===== 业务快照的展示与保存落定（profile-natural-confirmation-plan §3.2、§9；workout-record-contract §1）===== */
+/* ===== 业务快照的展示与保存落定（profile-natural-confirmation-plan §3.2、§9；workout-record-contract §1；plan-generation-contract §4、§6）===== */
 
 /** 三个画像业务工具的固定名称（profile-plan §4） */
 export const PREPARE_PROFILE = "prepare_profile_update";
 const SAVE_PROFILE = "save_profile_update";
 const PROFILE_UPDATE_STATUS = "get_profile_update_status";
 
-/** 训练记录的六个工具固定名称（workout-record-contract §5） */
+/** 训练记录工具的固定名称（workout-record-contract §5） */
 export const PREPARE_WORKOUT = "prepare_workout";
 const SAVE_WORKOUT = "save_workout";
 const UPDATE_WORKOUT = "update_workout";
 const WORKOUT_SAVE_STATUS = "get_workout_save_status";
+
+/** 计划工具的固定名称（plan-generation-contract §4、plan-import-adjustment-contract §7） */
+export const PREPARE_PLAN = "prepare_plan";
+export const PREPARE_PLAN_IMPORT = "prepare_plan_import";
+export const PREPARE_PLAN_ADJUSTMENT = "prepare_plan_adjustment";
+const SAVE_PLAN = "save_plan";
+const PLAN_SAVE_STATUS = "get_plan_save_status";
+const PLAN_BUSINESS_TOOLS = [
+  "get_current_plan",
+  "get_plan",
+  "list_plans",
+  PREPARE_PLAN,
+  PREPARE_PLAN_IMPORT,
+  PREPARE_PLAN_ADJUSTMENT,
+  SAVE_PLAN,
+  PLAN_SAVE_STATUS,
+];
+
+/**
+ * 计划准备结果的展示投影（附件契约 §7、plan-generation-contract §6）：按实际工具名选择对应 schema，
+ * 生成快照要求生成完整度，录入与调整快照使用通用内容完整度并携带后端确定的准备类型；
+ * 实时 `tool_result` 与历史 `toolResult` 共用本口径，非准备工具返回 null 走通用工具展示。
+ */
+export function preparedPlanDisplay(
+  name: string,
+  content: string,
+): { plan: PreparedPlanProposalWire } | null {
+  if (name === PREPARE_PLAN) return { plan: preparedPlanProposal(content) };
+  if (name === PREPARE_PLAN_IMPORT)
+    return { plan: preparedPlanImportProposal(content) };
+  if (name === PREPARE_PLAN_ADJUSTMENT)
+    return { plan: preparedPlanAdjustmentProposal(content) };
+  return null;
+}
+
+/**
+ * 计划工具的失败结果（契约 §8）：业务失败与内容校验错误以 JSON 对象返回，在解析位置严格校验；
+ * 参数预处理、参数校验、权限拒绝、执行与后处理失败是 harness 的说明文本，原样进入通用工具展示。
+ */
+function assertPlanBusinessError(name: string, content: string): void {
+  if (!PLAN_BUSINESS_TOOLS.includes(name)) return;
+  let value: unknown;
+  try {
+    value = JSON.parse(content) as unknown;
+  } catch {
+    return;
+  }
+  if (isObject(value)) parsePlanBusinessError(value);
+}
 
 /** 保存落定的判定口径：保存工具名集合、状态查询工具名与两类结果的 schema 解析 */
 interface SaveVerification {
@@ -827,6 +947,16 @@ const WORKOUT_SAVE: SaveVerification = {
   saveProposalId: (value) => parseWorkoutSaveResult(value).proposal_id,
   statusResult: (value) => {
     const status = parseWorkoutStatusResult(value);
+    return { proposal_id: status.proposal_id, saved: status.status === "saved" };
+  },
+};
+
+const PLAN_SAVE: SaveVerification = {
+  saveTools: [SAVE_PLAN],
+  statusTool: PLAN_SAVE_STATUS,
+  saveProposalId: (value) => parsePlanSaveResult(value).proposal_id,
+  statusResult: (value) => {
+    const status = parsePlanStatusResult(value);
     return { proposal_id: status.proposal_id, saved: status.status === "saved" };
   },
 };
@@ -864,6 +994,10 @@ export function profileSaved(event: ReActEvent, round: ReActRound): boolean {
 
 export function workoutSaved(event: ReActEvent, round: ReActRound): boolean {
   return proposalSaved(event, round, WORKOUT_SAVE);
+}
+
+export function planSaved(event: ReActEvent, round: ReActRound): boolean {
+  return proposalSaved(event, round, PLAN_SAVE);
 }
 
 function object(value: unknown): value is Record<string, unknown> {
@@ -1059,8 +1193,15 @@ export function createReActParser(
   };
 }
 
-export function validChatInput(text: string): boolean {
-  return !!text.trim() && Array.from(text).length <= 32000;
+export function canSubmitChatInput(
+  text: string,
+  attachments: readonly AttachmentDraft[],
+  unknownKeys: string[],
+): boolean {
+  return (
+    validMessageInput(text, attachments) &&
+    !unknownKeys.includes(messageInputKey(text, attachmentInputs(attachments)))
+  );
 }
 
 export class ReActHttpError extends Error {
@@ -1082,11 +1223,4 @@ export function isExpiredOperation(failure: unknown): boolean {
     failure.code === "operation_conflict" &&
     failure.reason === "operation_expired"
   );
-}
-
-export function canSubmitChatInput(
-  text: string,
-  unknownRequests: string[],
-): boolean {
-  return validChatInput(text) && !unknownRequests.includes(text);
 }

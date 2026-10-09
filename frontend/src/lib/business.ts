@@ -1,6 +1,26 @@
-/* ===== 共享 wire 校验原语与业务 schema（backend-http-sse-contract §11.8、§11.9，workout-http-sse-contract §2–§5）===== */
+/* ===== 共享 wire 校验原语与业务 schema（backend-http-sse-contract §11.8、§11.9，workout-http-sse-contract §2–§5，plan-generation-contract §2–§8）===== */
 
 import type {
+  AttachmentContentWire,
+  AttachmentInputWire,
+  AttachmentWire,
+  CurrentPlanWire,
+  PlanBusinessErrorWire,
+  PlanContentWire,
+  PlanDayWire,
+  PlanExerciseWire,
+  PlanGetArgumentsWire,
+  PlanAdjustmentProposalWire,
+  PlanImportArgumentsWire,
+  PlanImportProposalWire,
+  PlanListWire,
+  PlanProposalArgumentsWire,
+  PlanProposalWire,
+  PlanRecordWire,
+  PlanSaveArgumentsWire,
+  PlanSaveResultWire,
+  PlanStatusArgumentsWire,
+  PlanStatusResultWire,
   ProfileContentWire,
   ProfileProposalArgumentsWire,
   ProfileProposalWire,
@@ -37,6 +57,12 @@ export function nullableUuid(value: unknown, field: string): string | null {
 export function requireString(value: unknown, field: string): string {
   if (typeof value !== "string" || value === "")
     throw new Error(`${field} 无效。`);
+  return value;
+}
+
+/** 用户文本投影：保留原值，允许纯文件输入的缺省空文本 */
+export function requireText(value: unknown, field: string): string {
+  if (typeof value !== "string") throw new Error(`${field} 无效。`);
   return value;
 }
 export function nullableString(value: unknown, field: string): string | null {
@@ -90,6 +116,23 @@ function requirePositiveInt(value: unknown, field: string): number {
     throw new Error(`${field} 无效。`);
   return value as number;
 }
+
+/** 非负安全整数（附件原始字节大小）：0 为合法的空文件 */
+export function requireNonNegativeInt(value: unknown, field: string): number {
+  if (!Number.isSafeInteger(value) || (value as number) < 0)
+    throw new Error(`${field} 无效。`);
+  return value as number;
+}
+
+/** 标准 Base64 字符串：四位一组、字母表与填充位置固定，空串表示零字节原始内容 */
+function requireBase64(value: unknown, field: string): string {
+  if (typeof value !== "string" || !BASE64_PATTERN.test(value))
+    throw new Error(`${field} 无效。`);
+  return value;
+}
+
+const BASE64_PATTERN =
+  /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
 
 /** 文本必须包含非空白内容并保留原文本；列表的 null 为未知，[] 为明确没有限制（§11.9） */
 function requireNonBlank(value: unknown, field: string): string {
@@ -509,4 +552,500 @@ export function parseWorkoutStatusResult(
     status,
     result: null,
   };
+}
+
+/* ===== 训练计划（plan-generation-contract §2–§5、§8）===== */
+
+const PLAN_DAY_KINDS = ["training", "rest"] as const;
+const PLAN_ERROR_CODES = [
+  "plan_not_found",
+  "plan_proposal_not_found",
+  "plan_proposal_invalidated",
+  "plan_save_processing",
+  "plan_version_conflict",
+  "profile_required",
+  "profile_version_conflict",
+  "plan_confirmation_invalid",
+  "plan_access_denied",
+  "session_not_found",
+] as const;
+
+/** JSON Pointer 字段路径：以 ``/`` 开头的非空白字符串，前端按路径显示建议来源 */
+function requireFieldPath(value: unknown, field: string): string {
+  const text = requireNonBlank(value, field);
+  if (!text.startsWith("/")) throw new Error(`${field} 无效。`);
+  return text;
+}
+
+/** 计划动作（§2、§3.1）：目录 ID 是保留前导零的字符串；``rest_seconds`` 的 0 与 null 分别表示不安排休息与未结构化指定 */
+function parsePlanExercise(value: unknown): PlanExerciseWire {
+  if (!isObject(value)) throw new Error("计划动作无效。");
+  exactKeys(
+    value,
+    [
+      "exercise_id",
+      "name",
+      "sets",
+      "reps",
+      "duration_seconds",
+      "weight_kg",
+      "load_convention",
+      "rest_seconds",
+    ],
+    "计划动作",
+  );
+  const loadConvention =
+    value.load_convention === null
+      ? null
+      : requireEnum(
+          value.load_convention,
+          WORKOUT_LOAD_CONVENTIONS,
+          "load_convention",
+        );
+  const weightKg =
+    value.weight_kg === null
+      ? null
+      : requireNonNegative(value.weight_kg, "weight_kg");
+  // 重量有值（含 0）必须明确口径，重量为空时允许保留已知口径（§3.1）
+  if (loadConvention === null && weightKg !== null)
+    throw new Error("计划动作缺少重量口径。");
+  return {
+    exercise_id: nullableNonBlank(value.exercise_id, "exercise_id"),
+    name: requireNonBlank(value.name, "name"),
+    sets: value.sets === null ? null : requirePositiveInt(value.sets, "sets"),
+    reps: value.reps === null ? null : requirePositiveInt(value.reps, "reps"),
+    duration_seconds:
+      value.duration_seconds === null
+        ? null
+        : requirePositiveNumber(value.duration_seconds, "duration_seconds"),
+    weight_kg: weightKg,
+    load_convention: loadConvention,
+    rest_seconds:
+      value.rest_seconds === null
+        ? null
+        : requireNonNegative(value.rest_seconds, "rest_seconds"),
+  };
+}
+
+/** 计划训练日（§3.1）：休息日动作列表必须为空，通用结构允许训练日 ``exercises=[]`` */
+function parsePlanDay(value: unknown): PlanDayWire {
+  if (!isObject(value)) throw new Error("计划训练日无效。");
+  exactKeys(value, ["kind", "focus", "exercises", "notes"], "计划训练日");
+  const kind = requireEnum(value.kind, PLAN_DAY_KINDS, "kind");
+  const exercises = requireArray(value.exercises, "exercises").map(
+    parsePlanExercise,
+  );
+  if (kind === "rest" && exercises.length > 0)
+    throw new Error("休息日含动作。");
+  return {
+    kind,
+    focus: nullableNonBlank(value.focus, "focus"),
+    exercises,
+    notes: nullableNonBlank(value.notes, "notes"),
+  };
+}
+
+/** 通用计划内容（§3.1）：至少一个训练日，数组顺序即展示与保存顺序 */
+export function parsePlanContent(value: unknown): PlanContentWire {
+  if (!isObject(value)) throw new Error("计划内容无效。");
+  exactKeys(
+    value,
+    ["repeat", "days", "notes", "suggested_fields"],
+    "计划内容",
+  );
+  const days = requireArray(value.days, "days").map(parsePlanDay);
+  if (days.length === 0) throw new Error("计划缺少训练日。");
+  return {
+    repeat:
+      value.repeat === null ? null : requireBoolean(value.repeat, "repeat"),
+    days,
+    notes: nullableNonBlank(value.notes, "notes"),
+    suggested_fields: requireArray(
+      value.suggested_fields,
+      "suggested_fields",
+    ).map((item) => requireFieldPath(item, "suggested_fields")),
+  };
+}
+
+/** 本次生成快照的附加完整度（§3.2）：训练日必须有动作，动作必须有组数且次数或时长至少一个有值 */
+function requireGeneratedPlanContent(content: PlanContentWire): void {
+  for (const day of content.days) {
+    if (day.kind === "training" && day.exercises.length === 0)
+      throw new Error("生成的计划训练日缺少具体动作。");
+    for (const exercise of day.exercises) {
+      if (exercise.sets === null) throw new Error("生成的计划动作缺少组数。");
+      if (exercise.reps === null && exercise.duration_seconds === null)
+        throw new Error("生成的计划动作缺少目标次数或时长。");
+    }
+  }
+}
+
+function parseGeneratedPlanPayload(value: unknown): PlanContentWire {
+  const content = parsePlanContent(value);
+  requireGeneratedPlanContent(content);
+  return content;
+}
+
+/** GET /api/plans/current（§5）：``id`` 与 ``content`` 同时为空或同时有值 */
+export function parseCurrentPlan(body: unknown): CurrentPlanWire {
+  if (!isObject(body)) throw new Error("当前计划响应无效。");
+  exactKeys(body, ["id", "content"], "当前计划响应");
+  if (body.id === null && body.content === null)
+    return { id: null, content: null };
+  return {
+    id: requireUuid(body.id, "id"),
+    content: parsePlanContent(body.content),
+  };
+}
+
+/** 已保存版本（§4）：固定内容加实时当前标记与保存时间 */
+export function parsePlanRecord(value: unknown): PlanRecordWire {
+  if (!isObject(value)) throw new Error("计划版本无效。");
+  exactKeys(value, ["id", "is_current", "created_at", "content"], "计划版本");
+  return {
+    id: requireUuid(value.id, "id"),
+    is_current: requireBoolean(value.is_current, "is_current"),
+    created_at: requireMillis(value.created_at, "created_at"),
+    content: parsePlanContent(value.content),
+  };
+}
+
+/** GET /api/plans（§5）：直接数组，顺序由后端给出，无版本时为空数组 */
+export function parsePlanList(body: unknown): PlanListWire {
+  return requireArray(body, "计划列表响应").map(parsePlanRecord);
+}
+
+export function parsePlanGetArguments(value: unknown): PlanGetArgumentsWire {
+  if (!isObject(value)) throw new Error("计划查询输入无效。");
+  exactKeys(value, ["plan_id"], "计划查询输入");
+  return { plan_id: requireUuid(value.plan_id, "plan_id") };
+}
+
+/** `prepare_plan` 输出与生成完整度（§4）：生成快照必须已建档，依据当前计划 ID 使用查询原值 */
+function planProposalFields(
+  value: Record<string, unknown>,
+): PlanProposalArgumentsWire {
+  return {
+    base_profile_version: requirePositiveInt(
+      value.base_profile_version,
+      "base_profile_version",
+    ),
+    base_plan_id: nullableUuid(value.base_plan_id, "base_plan_id"),
+    payload: parseGeneratedPlanPayload(value.payload),
+  };
+}
+
+export function parsePlanProposalArguments(
+  value: unknown,
+): PlanProposalArgumentsWire {
+  if (!isObject(value)) throw new Error("计划准备输入无效。");
+  exactKeys(
+    value,
+    ["base_profile_version", "base_plan_id", "payload"],
+    "计划准备输入",
+  );
+  return planProposalFields(value);
+}
+
+export function parsePlanProposal(value: unknown): PlanProposalWire {
+  if (!isObject(value)) throw new Error("计划快照无效。");
+  exactKeys(
+    value,
+    ["proposal_id", "base_profile_version", "base_plan_id", "payload"],
+    "计划快照",
+  );
+  return {
+    proposal_id: requireUuid(value.proposal_id, "proposal_id"),
+    ...planProposalFields(value),
+  };
+}
+
+/** 准备工具的成功结果内容（§4、§6）：单个 text 内容块里的完整快照 JSON，不合 schema 属协议异常 */
+export function preparedPlanProposal(text: string): PlanProposalWire {
+  return parsePlanProposal(JSON.parse(text) as unknown);
+}
+
+/** 录入与调整快照共用依据字段（录入契约 §7）：画像不存在时 ``base_profile_version`` 为 null，
+ *  内容完整度沿用通用计划结构，训练日动作详情可以为空 */
+function planImportProposalFields(
+  value: Record<string, unknown>,
+): PlanImportArgumentsWire {
+  return {
+    base_profile_version:
+      value.base_profile_version === null
+        ? null
+        : requirePositiveInt(
+            value.base_profile_version,
+            "base_profile_version",
+          ),
+    base_plan_id: nullableUuid(value.base_plan_id, "base_plan_id"),
+    payload: parsePlanContent(value.payload),
+  };
+}
+
+/** `prepare_plan_import` 输出：准备类型由实际工具确定为 import，输入不接受该字段 */
+export function parsePlanImportProposal(
+  value: unknown,
+): PlanImportProposalWire {
+  if (!isObject(value)) throw new Error("计划录入快照无效。");
+  exactKeys(
+    value,
+    [
+      "proposal_id",
+      "preparation_kind",
+      "base_profile_version",
+      "base_plan_id",
+      "payload",
+    ],
+    "计划录入快照",
+  );
+  return {
+    proposal_id: requireUuid(value.proposal_id, "proposal_id"),
+    preparation_kind: requireEnum(
+      value.preparation_kind,
+      ["import"] as const,
+      "preparation_kind",
+    ),
+    ...planImportProposalFields(value),
+  };
+}
+
+/** `prepare_plan_adjustment` 输出：准备类型由实际工具确定为 adjustment */
+export function parsePlanAdjustmentProposal(
+  value: unknown,
+): PlanAdjustmentProposalWire {
+  if (!isObject(value)) throw new Error("计划调整快照无效。");
+  exactKeys(
+    value,
+    [
+      "proposal_id",
+      "preparation_kind",
+      "base_profile_version",
+      "base_plan_id",
+      "payload",
+    ],
+    "计划调整快照",
+  );
+  return {
+    proposal_id: requireUuid(value.proposal_id, "proposal_id"),
+    preparation_kind: requireEnum(
+      value.preparation_kind,
+      ["adjustment"] as const,
+      "preparation_kind",
+    ),
+    ...planImportProposalFields(value),
+  };
+}
+
+export function preparedPlanImportProposal(
+  text: string,
+): PlanImportProposalWire {
+  return parsePlanImportProposal(JSON.parse(text) as unknown);
+}
+
+export function preparedPlanAdjustmentProposal(
+  text: string,
+): PlanAdjustmentProposalWire {
+  return parsePlanAdjustmentProposal(JSON.parse(text) as unknown);
+}
+
+export function parsePlanSaveArguments(
+  value: unknown,
+): PlanSaveArgumentsWire {
+  if (!isObject(value)) throw new Error("计划保存输入无效。");
+  exactKeys(
+    value,
+    ["proposal_id", "display_entry_id", "confirmation_entry_id"],
+    "计划保存输入",
+  );
+  return {
+    proposal_id: requireUuid(value.proposal_id, "proposal_id"),
+    display_entry_id: requireUuid(value.display_entry_id, "display_entry_id"),
+    confirmation_entry_id: requireUuid(
+      value.confirmation_entry_id,
+      "confirmation_entry_id",
+    ),
+  };
+}
+
+/** 固定保存结果（§4）：不携带动态当前标记，``created_at`` 与 ``saved_at`` 为同一次保存时间 */
+export function parsePlanSaveResult(value: unknown): PlanSaveResultWire {
+  if (!isObject(value)) throw new Error("计划保存结果无效。");
+  exactKeys(
+    value,
+    ["proposal_id", "id", "content", "created_at", "saved_at"],
+    "计划保存结果",
+  );
+  const createdAt = requireMillis(value.created_at, "created_at");
+  const savedAt = requireMillis(value.saved_at, "saved_at");
+  if (createdAt !== savedAt) throw new Error("计划保存时间不一致。");
+  return {
+    proposal_id: requireUuid(value.proposal_id, "proposal_id"),
+    id: requireUuid(value.id, "id"),
+    content: parsePlanContent(value.content),
+    created_at: createdAt,
+    saved_at: savedAt,
+  };
+}
+
+export function parsePlanStatusArguments(
+  value: unknown,
+): PlanStatusArgumentsWire {
+  if (!isObject(value)) throw new Error("计划状态查询输入无效。");
+  exactKeys(value, ["proposal_id"], "计划状态查询输入");
+  return { proposal_id: requireUuid(value.proposal_id, "proposal_id") };
+}
+
+/** 状态查询输出（§4）：仅 saved 携带完整固定结果，其他状态 result 为 null */
+export function parsePlanStatusResult(
+  value: unknown,
+): PlanStatusResultWire {
+  if (!isObject(value)) throw new Error("计划保存状态无效。");
+  exactKeys(value, ["proposal_id", "status", "result"], "计划保存状态");
+  const status = requireEnum(value.status, PROPOSAL_STATUSES, "计划保存状态");
+  if (status === "saved") {
+    if (value.result === null) throw new Error("已保存快照缺少固定结果。");
+    const result = parsePlanSaveResult(value.result);
+    if (result.proposal_id !== value.proposal_id)
+      throw new Error("固定结果的快照标识不一致。");
+    return { proposal_id: result.proposal_id, status, result };
+  }
+  if (value.result !== null) throw new Error("未保存快照携带保存结果。");
+  return {
+    proposal_id: requireUuid(value.proposal_id, "proposal_id"),
+    status,
+    result: null,
+  };
+}
+
+/** 工具失败结果内容（§8）：仅 invalid_business_payload 携带字段错误列表 */
+export function parsePlanBusinessError(
+  value: unknown,
+): PlanBusinessErrorWire {
+  if (!isObject(value)) throw new Error("计划业务错误无效。");
+  const code = requireString(value.code, "code");
+  const message = requireString(value.message, "message");
+  if (code === "invalid_business_payload") {
+    exactKeys(value, ["code", "message", "errors"], "计划业务错误");
+    return {
+      code,
+      message,
+      errors: requireArray(value.errors, "errors").map((item) => {
+        if (!isObject(item)) throw new Error("计划字段错误无效。");
+        exactKeys(item, ["path", "message"], "计划字段错误");
+        return {
+          path: requireString(item.path, "path"),
+          message: requireString(item.message, "message"),
+        };
+      }),
+    };
+  }
+  exactKeys(value, ["code", "message"], "计划业务错误");
+  return { code: requireEnum(code, PLAN_ERROR_CODES, "code"), message };
+}
+
+/* ===== 附件（plan-import-adjustment-contract §1、§2、§4）===== */
+
+/** 单条消息最终附件集合的原始字节合计上限（§1） */
+export const ATTACHMENT_TOTAL_BYTES = 100_000;
+
+/** 支持的文本附件扩展名，匹配忽略大小写（§1） */
+const ATTACHMENT_EXTENSIONS = ["md", "txt"] as const;
+
+/** 扩展名判定（§1）：仅按 ``.md``／``.txt`` 结尾识别，大小写均可 */
+export function hasAttachmentExtension(fileName: string): boolean {
+  const at = fileName.lastIndexOf(".");
+  if (at <= 0) return false;
+  const extension = fileName.slice(at + 1).toLowerCase();
+  return (ATTACHMENT_EXTENSIONS as readonly string[]).includes(extension);
+}
+
+/** 文件名为非空文件名，拒绝路径分隔符、NUL、驱动器与路径形式（§2）；仅用于展示，服务器路径使用 UUID */
+export function requireAttachmentName(value: unknown, field: string): string {
+  const text = requireString(value, field);
+  if (text.trim() === "") throw new Error(`${field} 无效。`);
+  if (/[\\/\0:]|\.\./.test(text)) throw new Error(`${field} 含路径形式。`);
+  return text;
+}
+
+const ATTACHMENT_WIRE_KEYS = [
+  "attachment_id",
+  "file_name",
+  "size_bytes",
+  "created_at",
+] as const;
+
+/** 附件元数据字段（§4）：``size_bytes`` 为原始字节数 */
+function attachmentWireFields(value: Record<string, unknown>): AttachmentWire {
+  return {
+    attachment_id: requireUuid(value.attachment_id, "attachment_id"),
+    file_name: requireAttachmentName(value.file_name, "file_name"),
+    size_bytes: requireNonNegativeInt(value.size_bytes, "size_bytes"),
+    created_at: requireMillis(value.created_at, "created_at"),
+  };
+}
+
+/** 已受理附件的公开元数据：响应不返回存储引用等内部字段 */
+export function parseAttachmentWire(value: unknown): AttachmentWire {
+  if (!isObject(value)) throw new Error("附件元数据无效。");
+  exactKeys(value, ATTACHMENT_WIRE_KEYS, "附件元数据");
+  return attachmentWireFields(value);
+}
+
+/** 有序附件集合：无附件为 ``[]``，同一集合内附件 ID 不得重复（§2、§4） */
+export function parseAttachmentWireList(
+  value: unknown,
+  field: string,
+): AttachmentWire[] {
+  const list = requireArray(value, field).map(parseAttachmentWire);
+  if (new Set(list.map((item) => item.attachment_id)).size !== list.length)
+    throw new Error(`${field} 含重复附件。`);
+  return list;
+}
+
+/** 附件读取响应（§4）：元数据加严格 UTF-8 解码正文，不含存储引用 */
+export function parseAttachmentContent(value: unknown): AttachmentContentWire {
+  if (!isObject(value)) throw new Error("附件内容响应无效。");
+  exactKeys(value, [...ATTACHMENT_WIRE_KEYS, "text"], "附件内容响应");
+  return {
+    ...attachmentWireFields(value),
+    text: requireText(value.text, "text"),
+  };
+}
+
+/** 附件请求输入（§2）：上传项带文件名与标准 Base64 原始字节，引用项只有同会话附件 ID */
+export function parseAttachmentInputWire(value: unknown): AttachmentInputWire {
+  if (!isObject(value)) throw new Error("附件输入无效。");
+  if (value.kind === "upload") {
+    exactKeys(
+      value,
+      ["kind", "attachment_id", "file_name", "data_base64"],
+      "附件上传输入",
+    );
+    return {
+      kind: "upload",
+      attachment_id: requireUuid(value.attachment_id, "attachment_id"),
+      file_name: requireAttachmentName(value.file_name, "file_name"),
+      data_base64: requireBase64(value.data_base64, "data_base64"),
+    };
+  }
+  if (value.kind === "reference") {
+    exactKeys(value, ["kind", "attachment_id"], "附件引用输入");
+    return {
+      kind: "reference",
+      attachment_id: requireUuid(value.attachment_id, "attachment_id"),
+    };
+  }
+  throw new Error("附件输入类型无效。");
+}
+
+/** 请求附件集合：顺序即提交顺序，重复附件 ID 就地拒绝（§2） */
+export function parseAttachmentInputList(
+  value: unknown,
+  field = "attachments",
+): AttachmentInputWire[] {
+  const list = requireArray(value, field).map(parseAttachmentInputWire);
+  if (new Set(list.map((item) => item.attachment_id)).size !== list.length)
+    throw new Error(`${field} 含重复附件。`);
+  return list;
 }

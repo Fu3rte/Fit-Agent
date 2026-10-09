@@ -16,7 +16,7 @@ from app.agent.tool import (
     run_tool_batch,
     run_tool_call,
 )
-from app.agent.tools.files import WORKSPACE, create_file_tools
+from app.agent.tools.files import create_file_tools
 from app.ai.messages import (
     TextContent,
     ToolCall,
@@ -32,6 +32,7 @@ from app.interfaces.http import (
     public_tool_execution_end,
     public_tool_execution_update,
 )
+from test.regression_support import TEST_SESSION, session_workspace
 
 
 class ProbeArguments(BaseModel):
@@ -64,11 +65,11 @@ def drain(state: RunState) -> list[AgentEvent]:
 
 
 def check_projection() -> None:
-    WORKSPACE.mkdir(exist_ok=True)
-    with TemporaryDirectory(dir=WORKSPACE) as directory:
-        root = Path(directory)
-        (root / "note.txt").write_text("hello world", encoding="utf-8")
-        tools = create_file_tools()
+    with TemporaryDirectory() as directory:
+        root = Path(directory).resolve()
+        workspace, prefix = session_workspace(root)
+        (workspace / "note.txt").write_text("hello world", encoding="utf-8")
+        tools = create_file_tools(TEST_SESSION, tmp_root=root)
         read = tools["read"]
         message = asyncio.run(
             run_tool_call(
@@ -76,7 +77,7 @@ def check_projection() -> None:
                     type="toolCall",
                     id="tc-read",
                     name="read",
-                    arguments={"path": f"{root.name}/note.txt"},
+                    arguments={"path": f"{prefix}/note.txt"},
                 ),
                 tools={"read": read},
                 declared={"read": read.definition()},

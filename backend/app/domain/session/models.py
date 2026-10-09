@@ -10,6 +10,7 @@ from app.ai.messages import (
     Model,
     UserMessage,
 )
+from app.domain.session.attachments import AttachmentInput, AttachmentMetadata
 
 _MAX_TEXT_LENGTH = 32000
 
@@ -21,7 +22,7 @@ _OPERATION_ID_PATTERN = re.compile(
 def _validate_operation_id(value: str) -> str:
     if _OPERATION_ID_PATTERN.fullmatch(value) is None:
         raise ValueError("operation_id 必须为标准 UUID")
-    return value
+    return value.lower()
 
 
 def _validate_text(value: str) -> str:
@@ -46,6 +47,7 @@ class SessionMessageEntry(Model):
     type: Literal["message"]
     messages: list[Message]
     created_at: int
+    attachments: list[AttachmentMetadata] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def validate_messages(self) -> Self:
@@ -99,6 +101,7 @@ class SteeringInput(Model):
     reason: str | None
     created_at: int
     updated_at: int
+    attachments: list[AttachmentMetadata] = Field(default_factory=list)
 
 
 OperationKind: TypeAlias = Literal["send", "edit", "regenerate", "steering"]
@@ -115,21 +118,34 @@ class SessionOperation(Model):
 
 
 class SendRequest(Model):
-    text: RequestText
+    text: str = Field(max_length=_MAX_TEXT_LENGTH)
+    attachments: list[AttachmentInput] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def validate_content(self) -> Self:
+        if not self.text.strip() and not self.attachments:
+            raise ValueError("请求必须包含文字或附件")
+        return self
 
 
 class EditRequest(Model):
     target_entry_id: str
-    text: RequestText
+    text: str = Field(max_length=_MAX_TEXT_LENGTH)
+    attachments: list[AttachmentInput] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def validate_content(self) -> Self:
+        if "attachments" in self.model_fields_set and not self.text.strip() and not self.attachments:
+            raise ValueError("请求必须包含文字或附件")
+        return self
 
 
 class RegenerateRequest(Model):
     target_entry_id: str
 
 
-class SteeringRequest(Model):
+class SteeringRequest(SendRequest):
     target_run_id: str
-    text: RequestText
 
 
 class SendCommand(Model):

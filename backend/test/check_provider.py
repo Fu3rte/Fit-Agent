@@ -16,7 +16,7 @@ from pydantic import ValidationError
 from app.agent.agent_loop import run_agent_loop
 from app.agent.config import AgentLoopConfig
 from app.agent.tools.bash import create_bash_tool
-from app.agent.tools.files import WORKSPACE, create_file_tools
+from app.agent.tools.files import create_file_tools
 from app.agent.usage import summarize_usage
 from app.ai.api.openai_completions import (
     REASONING_FIELDS,
@@ -39,11 +39,10 @@ from app.ai.messages import (
 from app.ai.stream import complete, stream
 from app.ai.types import ModelSpec, StreamOptions
 from app.model_config import load_model_config
-from test.regression_support import run_tool
+from test.regression_support import TEST_SESSION, run_tool, session_workspace
 
 
 def check() -> None:
-    registry = {**create_file_tools(), "bash": create_bash_tool()}
     config = load_model_config()
     spec = ModelSpec(
         api="openai-completions",
@@ -53,19 +52,24 @@ def check() -> None:
     )
     options: StreamOptions = {"api_key": config.OPENAI_API_KEY}
     timestamp = time_ns() // 1_000_000
-    system = SystemMessage(
-        role="system",
-        content="按用户请求执行。",
-        timestamp=timestamp,
-        sections={"current": "工具参数必须遵循声明。", "gone": None},
-        tools_added=[registry["read"].definition()],
-    )
     with (
-        TemporaryDirectory(dir=WORKSPACE) as directory,
+        TemporaryDirectory() as directory,
         config.create_client() as client,
     ):
         root = Path(directory)
-        path = root / "input.txt"
+        registry = {
+            **create_file_tools(TEST_SESSION, tmp_root=root),
+            "bash": create_bash_tool(TEST_SESSION, tmp_root=root),
+        }
+        workspace, prefix = session_workspace(root)
+        system = SystemMessage(
+            role="system",
+            content="按用户请求执行。",
+            timestamp=timestamp,
+            sections={"current": "工具参数必须遵循声明。", "gone": None},
+            tools_added=[registry["read"].definition()],
+        )
+        path = workspace / "input.txt"
         path.write_text("provider-check", encoding="utf-8")
         image_path = root / "red.png"
         drawing = (
@@ -126,7 +130,7 @@ def check() -> None:
             system,
             UserMessage(
                 role="user",
-                content=f"使用 read 读取 {root.name}/input.txt，只调用一次。",
+                content=f"使用 read 读取 {prefix}/input.txt，只调用一次。",
                 timestamp=timestamp,
             ),
         ]

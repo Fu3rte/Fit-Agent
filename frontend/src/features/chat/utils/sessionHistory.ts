@@ -8,9 +8,12 @@ import {
   preparedProfilePayload,
   preparedWorkoutProposal,
 } from "@/lib/business";
+import { retainedAttachmentDrafts } from "./attachments";
 import {
   PREPARE_PROFILE,
   PREPARE_WORKOUT,
+  attachmentDisplay,
+  preparedPlanDisplay,
   type PendingOperation,
   type ReActEntry,
   type ReActRound,
@@ -58,6 +61,7 @@ function convertEntry(
       id: entry.entry_id,
       entry_id: entry.entry_id,
       request: message.text,
+      ...attachmentDisplay(retainedAttachmentDrafts(message.attachments)),
       ...(consumed !== undefined
         ? {
             steering: {
@@ -94,6 +98,9 @@ function convertEntry(
     ...(message.tool_name === PREPARE_WORKOUT && !message.is_error
       ? { workout: preparedWorkoutProposal(message.content) }
       : {}),
+    ...(message.is_error
+      ? {}
+      : (preparedPlanDisplay(message.tool_name, message.content) ?? {})),
   };
 }
 
@@ -178,6 +185,7 @@ export function historyToRounds(history: SessionHistoryWire): ReActRound[] {
       id: input.steering_id,
       steering_id: input.steering_id,
       request: input.text,
+      ...attachmentDisplay(retainedAttachmentDrafts(input.attachments)),
       steering:
         input.status === "pending"
           ? { status: "pending", entry_id: null, reason: null }
@@ -212,6 +220,7 @@ export function operationRound(operation: PendingOperation): ReActRound {
           id: operation.steering_id ?? operation.operation_id,
           steering_id: operation.steering_id ?? operation.operation_id,
           request: operation.request,
+          ...attachmentDisplay(operation.attachments),
           steering: { status: "pending", entry_id: null, reason: null },
           operation_id: operation.operation_id,
         }
@@ -219,6 +228,7 @@ export function operationRound(operation: PendingOperation): ReActRound {
           kind: "user",
           id: operation.operation_id,
           request: operation.request,
+          ...attachmentDisplay(operation.attachments),
         };
   return { ...base, entries: [entry], status: "unknown", pending: [operation] };
 }

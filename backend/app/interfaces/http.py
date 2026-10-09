@@ -1,12 +1,15 @@
 import asyncio
 import json
 import logging
+import os
+import re
 from collections.abc import AsyncIterator, Awaitable, Callable
 from concurrent.futures import CancelledError, ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from queue import Queue
 from threading import Event, Lock
 from time import time_ns
+from traceback import walk_tb
 from typing import Annotated
 from uuid import UUID, uuid4
 from weakref import WeakValueDictionary
@@ -14,7 +17,16 @@ from weakref import WeakValueDictionary
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, StreamingResponse
-from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, field_validator
+from pydantic import (
+    BaseModel,
+    BeforeValidator,
+    ConfigDict,
+    Field,
+    field_validator,
+    model_validator,
+)
+from starlette.routing import compile_path
+from starlette.types import ASGIApp, Receive, Scope, Send
 
 from app.agent.agent_loop import run_agent_loop
 from app.agent.config import AgentLoopConfig
@@ -46,10 +58,16 @@ from app.application.business.service import (
     BusinessService,
     business_date,
 )
+from app.application.session.attachment_files import AttachmentFiles
 from app.application.session.service import CREDENTIAL_SAFE_MESSAGE, SessionService
 from app.application.session.steering import SteeringCoordinator
 from app.domain.business.errors import BusinessError
 from app.domain.business.models import BusinessContext, WorkoutListArguments
+from app.domain.session.attachments import (
+    AttachmentError,
+    AttachmentInput,
+    attachment_storage_ref,
+)
 from app.domain.session.errors import (
     CredentialDetected,
     EntryNotFound,
@@ -57,6 +75,7 @@ from app.domain.session.errors import (
     InvalidTargetEntry,
     OperationConflict,
     OperationExpired,
+    RunBusy,
     RunClosed,
     RunNotFound,
     SessionConflict,
@@ -86,7 +105,11 @@ from app.infrastructure.persistence.sqlite.database import open_database
 from app.infrastructure.persistence.sqlite.repository import SqliteSessionRepository
 from app.model_config import load_model_config
 
-ALLOWED_HOSTS = {"127.0.0.1:8000", "localhost:8000", "127.0.0.1:5173", "localhost:5173"}
+frontend_port = os.environ.get("FIT_AGENT_FRONTEND_PORT", "5173")
+if re.fullmatch(r"[0-9]+", frontend_port) is None or not 1 <= int(frontend_port) <= 65535:
+    raise ValueError("FIT_AGENT_FRONTEND_PORT 必须是 1–65535 的整数")
+FRONTEND_PORT = int(frontend_port)
+ALLOWED_HOSTS = {f"{host}:{port}" for host in ("127.0.0.1", "localhost") for port in (8000, FRONTEND_PORT)}
 ALLOWED_ORIGINS = {f"http://{host}" for host in ALLOWED_HOSTS}
 logger = logging.getLogger(__name__)
 active = Lock()
@@ -140,6 +163,8 @@ _NO_CREDENTIALS = CredentialFilter(())
 
 def path_uuid(value: str) -> str:
     # 路径身份只接受标准带连字符 UUID；紧凑、URN 及花括号形式按非法请求拒绝。
+    if not isinstance(value, str):
+        raise ValueError("身份必须为字符串")
     canonical = str(UUID(value))
     if value.lower() != canonical:
         raise ValueError("路径身份必须为标准带连字符的 UUID")
@@ -151,7 +176,7 @@ PathUUID = Annotated[str, BeforeValidator(path_uuid)]
 
 class CreateSessionRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    session_id: UUID
+    session_id: PathUUID
     title: str = Field(strict=True, min_length=1, max_length=32000)
 
     @field_validator("title")
@@ -163,58 +188,58 @@ class CreateSessionRequest(BaseModel):
 
 
 class RunRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    session_id: UUID
-    operation_id: UUID
-    request: str = Field(strict=True, min_length=1, max_length=32000)
+    model_config = ConfigDict(extra="forbid", strict=True)
+    session_id: PathUUID
+    operation_id: PathUUID
+    request: str = Field(max_length=32000)
+    attachments: list[AttachmentInput] = Field(default_factory=list)
 
-    @field_validator("request")
-    @classmethod
-    def nonempty(cls, value: str) -> str:
-        if not value.strip():
-            raise ValueError("request 必须包含非空文本")
-        return value
+    @model_validator(mode="after")
+    def validate_content(self):
+        if not self.request.strip() and not self.attachments:
+            raise ValueError("请求必须包含文字或附件")
+        return self
 
 
 class EditPayload(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    session_id: UUID
-    operation_id: UUID
-    target_entry_id: UUID
-    request: str = Field(strict=True, min_length=1, max_length=32000)
+    model_config = ConfigDict(extra="forbid", strict=True)
+    session_id: PathUUID
+    operation_id: PathUUID
+    target_entry_id: PathUUID
+    request: str = Field(max_length=32000)
+    attachments: list[AttachmentInput] = Field(default_factory=list)
 
-    @field_validator("request")
-    @classmethod
-    def nonempty(cls, value: str) -> str:
-        if not value.strip():
-            raise ValueError("request 必须包含非空文本")
-        return value
+    @model_validator(mode="after")
+    def validate_content(self):
+        if "attachments" in self.model_fields_set and not self.request.strip() and not self.attachments:
+            raise ValueError("请求必须包含文字或附件")
+        return self
 
 
 class RegeneratePayload(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    session_id: UUID
-    operation_id: UUID
-    target_entry_id: UUID
+    model_config = ConfigDict(extra="forbid", strict=True)
+    session_id: PathUUID
+    operation_id: PathUUID
+    target_entry_id: PathUUID
 
 
 class SteeringRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    session_id: UUID
-    operation_id: UUID
-    message: str = Field(strict=True, min_length=1, max_length=32000)
+    model_config = ConfigDict(extra="forbid", strict=True)
+    session_id: PathUUID
+    operation_id: PathUUID
+    message: str = Field(max_length=32000)
+    attachments: list[AttachmentInput] = Field(default_factory=list)
 
-    @field_validator("message")
-    @classmethod
-    def nonempty(cls, value: str) -> str:
-        if not value.strip():
-            raise ValueError("message 必须包含非空文本")
-        return value
+    @model_validator(mode="after")
+    def validate_content(self):
+        if not self.message.strip() and not self.attachments:
+            raise ValueError("请求必须包含文字或附件")
+        return self
 
 
 class WithdrawRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    session_id: UUID
+    session_id: PathUUID
 
 
 class RunState:
@@ -295,8 +320,14 @@ NO_STORE = {"Cache-Control": "no-store"}
 
 @app.exception_handler(RequestValidationError)
 async def invalid_request(request: Request, error: RequestValidationError):
+    code = "invalid_request"
+    if any(item["type"] == "attachment_format_invalid" or (
+        item["type"] == "value_error" and "attachments" in item["loc"]
+        and item["loc"][-1] == "data_base64"
+    ) for item in error.errors()):
+        code = "attachment_format_invalid"
     return JSONResponse(status_code=422, content={
-        "detail": {"code": "invalid_request", "message": "请求字段不合法。"},
+        "detail": {"code": code, "message": "请求字段不合法。"},
     }, headers=NO_STORE)
 
 
@@ -313,6 +344,58 @@ async def business_error(request: Request, error: BusinessError):
             "code": "credential_detected", "message": CREDENTIAL_SAFE_MESSAGE,
         }}, 422, headers=NO_STORE)
     return JSONResponse({"detail": detail}, error.http_status, headers=NO_STORE)
+
+
+def stored_attachment_read_error(error: BaseException) -> bool:
+    codes = {
+        SqliteSessionRepository.get_attachments.__code__,
+        SqliteSessionRepository.list_entry_attachments.__code__,
+        SqliteSessionRepository.list_steering_attachments.__code__,
+    }
+    return any(frame.f_code in codes for frame, _ in walk_tb(error.__traceback__))
+
+
+@app.exception_handler(ValueError)
+async def attachment_metadata_error(request: Request, error: ValueError):
+    if not stored_attachment_read_error(error):
+        raise error
+    return JSONResponse({"detail": {
+        "code": "internal_error", "message": "服务内部错误。",
+    }}, 500, headers=NO_STORE)
+
+
+@app.exception_handler(AttachmentError)
+async def attachment_error(request: Request, error: AttachmentError):
+    code = error.code
+    if code == "attachment_format_invalid" and (
+        stored_attachment_read_error(error)
+        or any(frame.f_code is AttachmentFiles.read.__code__ for frame, _ in walk_tb(error.__traceback__))
+    ):
+        code = "internal_error"
+    status = {
+        "invalid_request": 422, "attachment_format_invalid": 422,
+        "attachment_size_exceeded": 413, "attachment_not_found": 404,
+        "attachment_access_denied": 403, "attachment_conflict": 409,
+        "internal_error": 500,
+    }[code]
+    return JSONResponse({"detail": {"code": code, "message": "附件操作失败。"}}, status, headers=NO_STORE)
+
+
+@app.exception_handler(OSError)
+@app.exception_handler(UnicodeDecodeError)
+async def attachment_native_error(request: Request, error: OSError | UnicodeDecodeError):
+    frames = {frame.f_code for frame, _ in walk_tb(error.__traceback__)}
+    boundary = AttachmentFiles.read.__code__ in frames
+    if isinstance(error, OSError):
+        boundary = boundary or bool(frames & {
+            AttachmentFiles.write.__code__, AttachmentFiles.prepare.__code__,
+            AttachmentFiles.remove_created.__code__,
+        })
+    if not boundary:
+        raise error
+    return JSONResponse({"detail": {
+        "code": "internal_error", "message": "服务内部错误。",
+    }}, 500, headers=NO_STORE)
 
 
 @app.exception_handler(Exception)
@@ -403,6 +486,7 @@ def public_message(message: Message) -> dict:
     if isinstance(message, UserMessage):
         return {
             "role": "user",
+            "attachments": [],
             "text": text_projection(message.content),
             "timestamp": message.timestamp,
         }
@@ -425,13 +509,37 @@ def public_message(message: Message) -> dict:
     raise ValueError("未知消息角色")
 
 
+def attachment_object(metadata) -> dict:
+    return {
+        "attachment_id": metadata.attachment_id, "file_name": metadata.file_name,
+        "size_bytes": metadata.size_bytes, "created_at": metadata.created_at,
+    }
+
+
+def entry_attachments(entry: SessionMessageEntry) -> list[dict]:
+    # 真实用户节点的有序附件投影：读取路径相对统一 tmp 根，来源为后端元数据。
+    return [
+        {
+            "attachment_id": item.attachment_id,
+            "file_name": item.file_name,
+            "path": attachment_storage_ref(
+                item.session_id, item.attachment_id, item.file_name
+            ).removeprefix("tmp/"),
+        }
+        for item in entry.attachments
+    ]
+
+
 def history_entry(entry: SessionMessageEntry) -> dict:
+    message = public_message(entry.messages[0])
+    if message["role"] == "user":
+        message["attachments"] = [attachment_object(item) for item in entry.attachments]
     return {
         "entry_id": entry.id,
         "parent_id": entry.parent_id,
         "run_id": entry.run_id,
         "created_at": entry.created_at,
-        "message": public_message(entry.messages[0]),
+        "message": message,
     }
 
 
@@ -441,6 +549,7 @@ def history_steering(steering: SteeringInput) -> dict:
         "run_id": steering.run_id,
         "steering_id": steering.id,
         "text": text_projection(steering.message.content),
+        "attachments": [attachment_object(item) for item in steering.attachments],
         "timestamp": steering.message.timestamp,
         "status": steering.status,
         "entry_id": steering.entry_id,
@@ -476,6 +585,7 @@ def run_object(run) -> dict:
 
 def steering_object(steering) -> dict:
     return {
+        "attachments": [attachment_object(item) for item in steering.attachments],
         "session_id": steering.session_id,
         "run_id": steering.run_id,
         "steering_id": steering.id,
@@ -506,7 +616,49 @@ async def check_boundary(request: Request) -> None:
         reject(403, "origin_forbidden", "Origin 不允许")
 
 
-async def require_run(service: SessionService, run_id: UUID, session_id: UUID) -> None:
+class AttachmentBodyLimit:
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+        self.steering_path = compile_path("/api/agent/runs/{run_id}/steering")[0]
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        protected = scope["type"] == "http" and scope["method"] == "POST" and (
+            scope["path"] in ("/api/agent/run", "/api/agent/edit")
+            or self.steering_path.fullmatch(scope["path"]) is not None
+        )
+        if not protected:
+            await self.app(scope, receive, send)
+            return
+        request = Request(scope, receive)
+        try:
+            await check_boundary(request)
+        except HTTPException as error:
+            await JSONResponse({"detail": error.detail}, error.status_code, headers=NO_STORE)(scope, receive, send)
+            return
+        body = bytearray()
+        async for chunk in request.stream():
+            if len(body) + len(chunk) > 1048576:
+                await JSONResponse({"detail": {
+                    "code": "request_size_exceeded", "message": "请求体大小超过限制。",
+                }}, 413, headers=NO_STORE)(scope, receive, send)
+                return
+            body.extend(chunk)
+        delivered = False
+
+        async def buffered_receive():
+            nonlocal delivered
+            if not delivered:
+                delivered = True
+                return {"type": "http.request", "body": bytes(body), "more_body": False}
+            return await receive()
+
+        await self.app(scope, buffered_receive, send)
+
+
+app.add_middleware(AttachmentBodyLimit)
+
+
+async def require_run(service: SessionService, run_id: str, session_id: str) -> None:
     # 数据库为运行存在与会话归属的权威，重启后原键重试仍可定位。
     run = await service.find_run_any(str(run_id))
     if run is None:
@@ -519,6 +671,10 @@ def retire(state: RunState) -> None:
     with runs_lock:
         runs.pop(state.run_id, None)
     active.release()
+
+
+# 计划域准备工具：成功结果持久化后均按 plan_prepared 登记绑定展示节点。
+PLAN_PREPARE_TOOLS = {"prepare_plan", "prepare_plan_import", "prepare_plan_adjustment"}
 
 
 def execute(
@@ -593,6 +749,9 @@ def execute(
             message = entry.messages[0]
             if isinstance(message, UserMessage):
                 node = {"entry_id": entry.id, "role": "user"}
+                if entry.attachments:
+                    # 附件只在真实用户节点投影，读取仍由后端元数据决定。
+                    node["attachments"] = entry_attachments(entry)
                 proposal_id = bindings.get(entry.id)
                 if proposal_id is not None:
                     node["proposal_id"] = proposal_id
@@ -690,7 +849,7 @@ def execute(
         position["id"] = node_id
         if (
             isinstance(message, ToolResultMessage)
-            and message.tool_name in {"prepare_profile_update", "prepare_workout", "prepare_plan"}
+            and message.tool_name in {*PLAN_PREPARE_TOOLS, "prepare_profile_update", "prepare_workout"}
             and not message.is_error
         ):
             # 成功结果必须对应本批登记；关联缺失直接终止运行。
@@ -1074,11 +1233,32 @@ async def get_workout(workout_id: PathUUID, request: Request):
     return workout_response(await request.app.state.business.get_workout(workout_id))
 
 
+@app.get("/api/sessions/{session_id}/attachments/{attachment_id}", dependencies=[Depends(check_boundary)])
+async def get_attachment(session_id: PathUUID, attachment_id: PathUUID, request: Request):
+    check_workout_query(request, set())
+    credentials = (load_model_config().OPENAI_API_KEY,)
+    if CredentialFilter(credentials).contains({"session_id": session_id, "attachment_id": attachment_id}):
+        reject(422, "credential_detected", CREDENTIAL_SAFE_MESSAGE)
+    try:
+        metadata, text = await request.app.state.session_service.get_attachment_content(
+            session_id, attachment_id, credentials=credentials,
+        )
+    except SessionNotFound:
+        reject(404, "session_not_found", "会话不存在。")
+    except CredentialDetected:
+        reject(422, "credential_detected", CREDENTIAL_SAFE_MESSAGE)
+    payload = {**attachment_object(metadata), "text": text}
+    if CredentialFilter(credentials).contains(payload):
+        reject(422, "credential_detected", CREDENTIAL_SAFE_MESSAGE)
+    return JSONResponse(payload, headers=NO_STORE)
+
+
 @app.get(
     "/api/sessions/{session_id}/history",
     dependencies=[Depends(check_boundary)],
 )
-async def get_history(session_id: UUID):
+async def get_history(session_id: PathUUID, request: Request):
+    check_workout_query(request, set())
     service: SessionService = app.state.session_service
     guard = CredentialFilter((load_model_config().OPENAI_API_KEY,))
     try:
@@ -1115,7 +1295,15 @@ async def resolve_existing(
 ) -> OperationOutcome | None:
     # 先按 operation_id 查重：已失效编号返回冲突，已受理操作返回持久化原结果。
     try:
-        return await service.resolve_operation(operation_id, session_id, kind, request)
+        outcome = await service.resolve_operation(
+            operation_id, session_id, kind, request,
+            credentials=(load_model_config().OPENAI_API_KEY,),
+        )
+        if outcome is not None and CredentialFilter((load_model_config().OPENAI_API_KEY,)).contains(outcome.model_dump()):
+            reject(422, "credential_detected", CREDENTIAL_SAFE_MESSAGE)
+        return outcome
+    except CredentialDetected:
+        reject(422, "credential_detected", CREDENTIAL_SAFE_MESSAGE)
     except OperationExpired:
         reject_operation_expired()
     except OperationConflict:
@@ -1147,7 +1335,7 @@ async def launch_run(
         await service.get_session(session_id)
         model = load_model_config()
         secrets = (model.OPENAI_API_KEY,)
-        tools = {**create_file_tools(), "bash": create_bash_tool()}
+        tools = {**create_file_tools(session_id), "bash": create_bash_tool(session_id)}
         outcome = await accept(service, tools, secrets)
         if not outcome.created:
             active.release()
@@ -1184,6 +1372,9 @@ async def launch_run(
     except CredentialDetected:
         active.release()
         reject(422, "credential_detected", CREDENTIAL_SAFE_MESSAGE)
+    except RunBusy:
+        active.release()
+        reject(409, "run_busy", "已有任务正在执行。")
     except InvalidTargetEntry:
         active.release()
         reject(409, "invalid_target_entry", "目标节点必须是用户消息。")
@@ -1210,10 +1401,11 @@ async def launch_run(
 
 @app.post("/api/agent/run", dependencies=[Depends(check_boundary)])
 async def run(payload: RunRequest, request: Request):
+    check_workout_query(request, set())
     service: SessionService = request.app.state.session_service
     session_id = str(payload.session_id)
     operation_id = str(payload.operation_id)
-    send_request = SendRequest(text=payload.request)
+    send_request = SendRequest(text=payload.request, attachments=payload.attachments)
 
     async def accept(svc: SessionService, tools: dict, secrets: tuple[str, ...]):
         system_message = SystemMessage(
@@ -1246,11 +1438,13 @@ async def run(payload: RunRequest, request: Request):
 
 @app.post("/api/agent/edit", dependencies=[Depends(check_boundary)])
 async def edit(payload: EditPayload, request: Request):
+    check_workout_query(request, set())
     service: SessionService = request.app.state.session_service
     session_id = str(payload.session_id)
     operation_id = str(payload.operation_id)
     edit_request = EditRequest(
-        target_entry_id=str(payload.target_entry_id), text=payload.request
+        target_entry_id=str(payload.target_entry_id), text=payload.request,
+        **({"attachments": payload.attachments} if "attachments" in payload.model_fields_set else {}),
     )
 
     async def accept(svc: SessionService, tools: dict, secrets: tuple[str, ...]):
@@ -1279,6 +1473,7 @@ async def edit(payload: EditPayload, request: Request):
 
 @app.post("/api/agent/regenerate", dependencies=[Depends(check_boundary)])
 async def regenerate(payload: RegeneratePayload, request: Request):
+    check_workout_query(request, set())
     service: SessionService = request.app.state.session_service
     session_id = str(payload.session_id)
     operation_id = str(payload.operation_id)
@@ -1310,14 +1505,16 @@ async def regenerate(payload: RegeneratePayload, request: Request):
 
 
 @app.post("/api/agent/runs/{run_id}/steering", dependencies=[Depends(check_boundary)])
-async def steering(run_id: UUID, payload: SteeringRequest):
+async def steering(run_id: PathUUID, payload: SteeringRequest, request: Request):
+    check_workout_query(request, set())
     coordinator: SteeringCoordinator = app.state.steering
     service: SessionService = app.state.session_service
-    # 失效编号先于目标运行检查，已失效操作永远不能重新执行。
-    await reject_if_expired(
-        service, str(payload.operation_id), str(payload.session_id)
+    steering_request = SteeringParams(target_run_id=run_id, text=payload.message, attachments=payload.attachments)
+    existing = await resolve_existing(
+        service, payload.operation_id, payload.session_id, "steering", steering_request,
     )
-    await require_run(service, run_id, payload.session_id)
+    if existing is None:
+        await require_run(service, run_id, payload.session_id)
     credentials = (load_model_config().OPENAI_API_KEY,)
     try:
         created, steering_input = await coordinator.accept(
@@ -1325,7 +1522,7 @@ async def steering(run_id: UUID, payload: SteeringRequest):
             SteeringCommand(
                 operation_id=str(payload.operation_id),
                 session_id=str(payload.session_id),
-                request=SteeringParams(target_run_id=str(run_id), text=payload.message),
+                request=steering_request,
             ),
             credentials=credentials,
         )
@@ -1340,6 +1537,8 @@ async def steering(run_id: UUID, payload: SteeringRequest):
     except SessionNotFound:
         reject(404, "run_not_found", "运行不存在。")
     except CredentialDetected:
+        reject(422, "credential_detected", CREDENTIAL_SAFE_MESSAGE)
+    if CredentialFilter(credentials).contains(steering_input.model_dump()):
         reject(422, "credential_detected", CREDENTIAL_SAFE_MESSAGE)
     return {
         "operation_id": str(payload.operation_id),
@@ -1357,7 +1556,8 @@ async def steering(run_id: UUID, payload: SteeringRequest):
     "/api/agent/runs/{run_id}/steering/{steering_id}/withdraw",
     dependencies=[Depends(check_boundary)],
 )
-async def withdraw(run_id: UUID, steering_id: UUID, payload: WithdrawRequest):
+async def withdraw(run_id: PathUUID, steering_id: PathUUID, payload: WithdrawRequest, request: Request):
+    check_workout_query(request, set())
     coordinator: SteeringCoordinator = app.state.steering
     await require_run(app.state.session_service, run_id, payload.session_id)
     try:
@@ -1371,6 +1571,8 @@ async def withdraw(run_id: UUID, steering_id: UUID, payload: WithdrawRequest):
     except SessionNotFound:
         reject(404, "steering_not_found", "输入不存在。")
     steering_input = withdrawal.steering
+    if CredentialFilter((load_model_config().OPENAI_API_KEY,)).contains(steering_input.model_dump()):
+        reject(422, "credential_detected", CREDENTIAL_SAFE_MESSAGE)
     return {
         "session_id": str(payload.session_id),
         "run_id": str(run_id),
@@ -1385,46 +1587,37 @@ async def withdraw(run_id: UUID, steering_id: UUID, payload: WithdrawRequest):
     "/api/sessions/{session_id}/operations/{operation_id}",
     dependencies=[Depends(check_boundary)],
 )
-async def get_operation(session_id: UUID, operation_id: UUID):
+async def get_operation(session_id: PathUUID, operation_id: PathUUID, request: Request):
+    check_workout_query(request, set())
     service: SessionService = app.state.session_service
     try:
-        await service.get_session(str(session_id))
+        outcome = await service.get_operation_outcome(session_id, operation_id)
+    except OperationExpired:
+        reject_operation_expired()
     except SessionNotFound:
         reject(404, "session_not_found", "会话不存在。")
-    await reject_if_expired(service, str(operation_id), str(session_id))
-    operation = await service.get_operation(str(operation_id))
-    if operation is None or operation.session_id != str(session_id):
-        return {
-            "operation_id": str(operation_id),
-            "session_id": str(session_id),
-            "accepted": False,
-            "kind": None,
-            "run": None,
-            "steering": None,
-        }
-    run = None
-    steering = None
-    if operation.run_id is not None:
-        run = run_object(await service.get_run(str(session_id), operation.run_id))
-    if operation.kind == "steering" and operation.steering_id is not None:
-        steering = steering_object(
-            await service.get_steering(str(session_id), operation.steering_id)
-        )
-    return {
-        "operation_id": str(operation_id),
-        "session_id": str(session_id),
-        "accepted": True,
-        "kind": operation.kind,
-        "run": run,
-        "steering": steering,
+    guard = CredentialFilter((load_model_config().OPENAI_API_KEY,))
+    if guard.contains({"session_id": session_id, "operation_id": operation_id, "outcome": outcome.model_dump() if outcome is not None else None}):
+        reject(422, "credential_detected", CREDENTIAL_SAFE_MESSAGE)
+    payload = {
+        "operation_id": operation_id,
+        "session_id": session_id,
+        "accepted": outcome is not None,
+        "kind": outcome.operation.kind if outcome is not None else None,
+        "run": run_object(outcome.run) if outcome is not None else None,
+        "steering": steering_object(outcome.steering) if outcome is not None and outcome.steering is not None else None,
     }
+    if guard.contains(payload):
+        reject(422, "credential_detected", CREDENTIAL_SAFE_MESSAGE)
+    return JSONResponse(payload, headers=NO_STORE)
 
 
 @app.get(
     "/api/sessions/{session_id}/runs/{run_id}",
     dependencies=[Depends(check_boundary)],
 )
-async def get_run(session_id: UUID, run_id: UUID):
+async def get_run(session_id: PathUUID, run_id: PathUUID, request: Request):
+    check_workout_query(request, set())
     service: SessionService = app.state.session_service
     try:
         await service.get_session(str(session_id))
@@ -1434,14 +1627,18 @@ async def get_run(session_id: UUID, run_id: UUID):
         run = await service.get_run(str(session_id), str(run_id))
     except SessionNotFound:
         reject(404, "run_not_found", "运行不存在。")
-    return run_object(run)
+    payload = run_object(run)
+    if CredentialFilter((load_model_config().OPENAI_API_KEY,)).contains(payload):
+        reject(422, "credential_detected", CREDENTIAL_SAFE_MESSAGE)
+    return JSONResponse(payload, headers=NO_STORE)
 
 
 @app.get(
     "/api/sessions/{session_id}/runs",
     dependencies=[Depends(check_boundary)],
 )
-async def list_session_runs(session_id: PathUUID):
+async def list_session_runs(session_id: PathUUID, request: Request):
+    check_workout_query(request, set())
     service: SessionService = app.state.session_service
     guard = CredentialFilter((load_model_config().OPENAI_API_KEY,))
     try:
@@ -1461,7 +1658,8 @@ async def list_session_runs(session_id: PathUUID):
     "/api/sessions/{session_id}/runs/{run_id}/steering",
     dependencies=[Depends(check_boundary)],
 )
-async def list_run_steering(session_id: PathUUID, run_id: PathUUID):
+async def list_run_steering(session_id: PathUUID, run_id: PathUUID, request: Request):
+    check_workout_query(request, set())
     service: SessionService = app.state.session_service
     guard = CredentialFilter((load_model_config().OPENAI_API_KEY,))
     try:

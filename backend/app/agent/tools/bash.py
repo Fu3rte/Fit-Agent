@@ -11,8 +11,9 @@ from typing import BinaryIO
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.agent.tool import AgentTool, AgentToolResult
-from app.agent.tools.files import WORKSPACE
+from app.agent.tools.files import Workspace
 from app.ai.messages import TextContent
+from app.domain.session.attachments import TMP_ROOT
 
 MAX_LINES = 2000
 MAX_BYTES = 50 * 1024
@@ -37,7 +38,7 @@ def resolve_bash() -> str:
     return shell
 
 
-def format_output(stream: BinaryIO, root: Path) -> str:
+def format_output(stream: BinaryIO, output_dir: Path, reference_dir: str) -> str:
     size = stream.seek(0, os.SEEK_END)
     stream.seek(max(0, size - MAX_BYTES - 2))
     data = stream.read(MAX_BYTES + 2)
@@ -65,13 +66,14 @@ def format_output(stream: BinaryIO, root: Path) -> str:
             break
     output = b"\n".join(reversed(tail)).decode("utf-8", errors="replace")
     with NamedTemporaryFile(
-        prefix="bash-", suffix=".log", dir=root, delete=False
+        prefix="bash-", suffix=".log", dir=output_dir, delete=False
     ) as full_output:
         stream.seek(0)
         shutil.copyfileobj(stream, full_output)
         name = Path(full_output.name).name
     return (
-        f"{output}\n\n[输出截断：保留末尾最多 {MAX_LINES} 行或 50KB。完整输出：{name}]"
+        f"{output}\n\n[输出截断：保留末尾最多 {MAX_LINES} 行或 50KB。"
+        f"完整输出：{reference_dir}/{name}]"
     )
 
 
@@ -98,11 +100,13 @@ def run_command(
     shell: str,
     legacy_wsl: bool,
     root: Path,
+    output_dir: Path,
+    reference_dir: str,
     command: str,
     timeout: float | None,
     cancel: Event | None,
 ) -> AgentToolResult:
-    with TemporaryFile(dir=root) as output:
+    with TemporaryFile(dir=output_dir) as output:
         with subprocess.Popen(
             [shell, "-s"] if legacy_wsl else [shell, "-c", command],
             cwd=root,
@@ -135,7 +139,7 @@ def run_command(
             finally:
                 if process.poll() is None:
                     kill_tree(process)
-        text = format_output(output, root)
+        text = format_output(output, output_dir, reference_dir)
     if aborted:
         text += "\n\nCommand aborted"
     elif timed_out:
@@ -151,11 +155,11 @@ def run_command(
     )
 
 
-def create_bash_tool() -> AgentTool:
-    if WORKSPACE.is_symlink() or WORKSPACE.is_junction():
-        raise PermissionError("backend/temp 不能是链接")
-    WORKSPACE.mkdir(exist_ok=True)
-    root = WORKSPACE.resolve(strict=True)
+def create_bash_tool(session_id: str, *, tmp_root: Path = TMP_ROOT) -> AgentTool:
+    workspace = Workspace(session_id, tmp_root)
+    root = workspace.root
+    output_dir = workspace.ensure_workspace()
+    reference_dir = workspace.relative_to_root(output_dir)
     shell = resolve_bash()
     legacy_wsl = os.name == "nt" and Path(shell).parent.name.lower() in {
         "system32",
@@ -166,14 +170,15 @@ def create_bash_tool() -> AgentTool:
         tool_call_id, params: BashArguments, signal, on_update
     ) -> AgentToolResult:
         return run_command(
-            shell, legacy_wsl, root, params.command, params.timeout, signal
+            shell, legacy_wsl, root, output_dir, reference_dir,
+            params.command, params.timeout, signal,
         )
 
     return AgentTool(
         "bash",
-        "在 backend/temp 中执行 Bash 命令，按写入顺序合并 stdout 和 stderr。"
-        "保留末尾最多 2000 行或 50KB，截断时完整输出保存到 workspace 文件。"
-        "timeout 为可选的秒数，默认无超时；Bash 命令以宿主进程权限运行。",
+        "在项目根目录 tmp 中执行 Bash 命令，按写入顺序合并 stdout 和 stderr。"
+        "保留末尾最多 2000 行或 50KB，截断时完整输出保存到当前会话 workspace 文件。"
+        "timeout 为可选的秒数，默认无超时；Bash 以宿主进程权限运行，cwd 不构成文件系统隔离。",
         BashArguments,
         execute,
         execution_mode="sequential",

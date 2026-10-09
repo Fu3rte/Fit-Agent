@@ -37,6 +37,10 @@ class OperationExpired(OperationConflict):
     pass
 
 
+class RunBusy(SessionConflict):
+    pass
+
+
 class RunClosed(SessionConflict):
     pass
 

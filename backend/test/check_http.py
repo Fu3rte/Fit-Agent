@@ -3,7 +3,6 @@ import json
 import socket
 import time
 from pathlib import Path
-from tempfile import TemporaryDirectory
 from threading import Thread
 from uuid import UUID, uuid4
 
@@ -13,7 +12,6 @@ from openai._streaming import SSEDecoder
 from pydantic import TypeAdapter
 
 from app.agent.prompts import SYSTEM_PROMPT
-from app.agent.tools.files import WORKSPACE
 from app.agent.usage import summarize_usage
 from app.ai.messages import (
     AssistantMessage,
@@ -22,6 +20,7 @@ from app.ai.messages import (
     UserMessage,
     serialize_message,
 )
+from app.domain.session.attachments import TMP_ROOT
 from app.domain.session.errors import SessionNotFound
 from app.interfaces.http import ALLOWED_HOSTS, RunRequest, active, app, runs
 from app.model_config import load_model_config
@@ -209,20 +208,18 @@ def check() -> None:
         while not server.started and thread.is_alive() and time.monotonic() < deadline:
             time.sleep(0.01)
         assert server.started
-        with (
-            httpx.Client(
-                base_url=f"http://127.0.0.1:{listener.getsockname()[1]}",
-                headers={"Host": "127.0.0.1:8000", "Origin": "http://localhost:5173"},
-                timeout=180,
-                trust_env=False,
-            ) as client,
-            TemporaryDirectory(dir=WORKSPACE) as directory,
-        ):
-            root = Path(directory)
+        with httpx.Client(
+            base_url=f"http://127.0.0.1:{listener.getsockname()[1]}",
+            headers={"Host": "127.0.0.1:8000", "Origin": "http://localhost:5173"},
+            timeout=180,
+            trust_env=False,
+        ) as client:
             session = str(uuid4())
             create_session(client, session, "请回答完成")
+            prefix = f"sessions/{session}/workspace"
+            workspace = TMP_ROOT / "sessions" / session / "workspace"
             token = uuid4().hex
-            path = f"{root.name}/note.txt"
+            path = f"{prefix}/note.txt"
             payload = {
                 "session_id": session,
                 "operation_id": str(uuid4()),
@@ -339,12 +336,12 @@ def check() -> None:
 
             received_after = time.time_ns() // 1_000_000
             first_prompt = (
-                f"只操作 {root.name}/ 下文件。使用 write 在 {path} 写入精确文本 {token}，"
+                f"文件操作限定于当前会话 workspace。使用 write 在 {path} 写入精确文本 {token}，"
                 "然后使用 read 读取同一文件，最后说明内容。禁止添加空白或换行。"
             )
             first, starts, results, first_op, first_run = turn(first_prompt)
             assert {data["name"] for data in starts.values()} >= {"write", "read"}
-            assert (root / "note.txt").read_text(encoding="utf-8") == token
+            assert (workspace / "note.txt").read_text(encoding="utf-8") == token
             history = stored_messages(session)
             assert history[0].role == "system" and history[1].role == "user"
             assert isinstance(history[0], SystemMessage) and isinstance(
@@ -364,6 +361,20 @@ def check() -> None:
                 "prepare_profile_update",
                 "save_profile_update",
                 "get_profile_update_status",
+                "get_workout",
+                "get_workout_save_status",
+                "list_workouts",
+                "prepare_workout",
+                "save_workout",
+                "update_workout",
+                "get_current_plan",
+                "get_plan",
+                "get_plan_save_status",
+                "list_plans",
+                "prepare_plan",
+                "prepare_plan_import",
+                "prepare_plan_adjustment",
+                "save_plan",
             }
             assert received_after <= history[1].timestamp <= time.time_ns() // 1_000_000
             assert history[0].timestamp == history[1].timestamp
@@ -451,7 +462,7 @@ def check() -> None:
                 json={
                     "session_id": session,
                     "operation_id": str(uuid4()),
-                    "request": f"必须直接使用 read 读取 {root.name}/missing.txt，无需其他工具。",
+                    "request": f"必须直接使用 read 读取 {prefix}/missing.txt，无需其他工具。",
                 },
             ) as response:
                 failure = list(events(response))
@@ -476,14 +487,16 @@ def check() -> None:
 
             cancelled = str(uuid4())
             create_session(client, cancelled)
-            cancelled_path = f"{root.name}/disconnect.txt"
+            cancelled_prefix = f"sessions/{cancelled}/workspace"
+            cancelled_workspace = TMP_ROOT / "sessions" / cancelled / "workspace"
+            cancelled_path = f"{cancelled_prefix}/disconnect.txt"
             with client.stream(
                 "POST",
                 "/api/agent/run",
                 json={
                     "session_id": cancelled,
                     "operation_id": str(uuid4()),
-                    "request": f"全部文件操作仅允许在 {root.name}/ 内；如需 ls 仅可列出该目录。使用 write 在 {cancelled_path} 写入精确文本 {token}，然后使用 read 读取该文件，最后说明内容。",
+                    "request": f"文件操作限定于当前会话 workspace；如需 ls 仅可列出该目录。使用 write 在 {cancelled_path} 写入精确文本 {token}，然后使用 read 读取该文件，最后说明内容。",
                 },
             ) as response:
                 assert response.status_code == 200
@@ -517,11 +530,11 @@ def check() -> None:
                         {
                             "events": disconnected,
                             "active": active.locked(),
-                            "file_exists": (root / "disconnect.txt").exists(),
-                            "file_content": (root / "disconnect.txt").read_text(
+                            "file_exists": (cancelled_workspace / "disconnect.txt").exists(),
+                            "file_content": (cancelled_workspace / "disconnect.txt").read_text(
                                 encoding="utf-8"
                             )
-                            if (root / "disconnect.txt").exists()
+                            if (cancelled_workspace / "disconnect.txt").exists()
                             else None,
                             "context_committed": bool(stored_messages(cancelled)),
                         },
@@ -537,24 +550,26 @@ def check() -> None:
             assert client.post("/api/agent/run", json=payload).status_code == 409
             wait_idle()
             assert stored_messages(session) == session_after_failure
-            assert (root / "disconnect.txt").read_text(encoding="utf-8") == token
+            assert (cancelled_workspace / "disconnect.txt").read_text(encoding="utf-8") == token
             recovered, _, _, _, _ = turn("只回答完成，无需使用工具。", cancelled)
             assert len(stored_messages(cancelled)) >= 4
             early = str(uuid4())
             create_session(client, early)
+            early_prefix = f"sessions/{early}/workspace"
+            early_workspace = TMP_ROOT / "sessions" / early / "workspace"
             with client.stream(
                 "POST",
                 "/api/agent/run",
                 json={
                     "session_id": early,
                     "operation_id": str(uuid4()),
-                    "request": f"全部文件操作仅允许在 {root.name}/ 内。使用 write 在 {root.name}/early.txt 写入 completed。",
+                    "request": f"文件操作限定于当前会话 workspace。使用 write 在 {early_prefix}/early.txt 写入 completed。",
                 },
             ) as response:
                 assert response.status_code == 200
             wait_idle()
             assert last_run(early).status in {"cancelled", "failed"}
-            assert not (root / "early.txt").exists()
+            assert not (early_workspace / "early.txt").exists()
             EVIDENCE.mkdir(parents=True, exist_ok=True)
             (EVIDENCE / "real-http-events.json").write_text(
                 json.dumps(

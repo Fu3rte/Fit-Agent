@@ -10,7 +10,7 @@ from uuid import uuid4
 
 from app.agent.agent_loop import run_agent_loop
 from app.agent.config import AgentLoopConfig
-from app.agent.tools.files import WORKSPACE, create_file_tools
+from app.agent.tools.files import create_file_tools
 from app.ai.messages import (
     AssistantMessage,
     SystemMessage,
@@ -24,7 +24,7 @@ from app.domain.session.models import SendCommand, SendRequest, SessionMessageEn
 from app.infrastructure.persistence.sqlite.database import open_database
 from app.infrastructure.persistence.sqlite.repository import SqliteSessionRepository
 from test.check_tool_scheduling import single, usage
-from test.regression_support import temporary_root
+from test.regression_support import TEST_SESSION, session_workspace, temporary_root
 
 FILES = 64
 LINES = 800
@@ -44,17 +44,18 @@ def summarize(values: list[float]) -> dict:
     return {"n": len(values), "p50": cuts[49], "p95": cuts[94]}
 
 
-def build_files() -> tuple[TemporaryDirectory, list[Path]]:
-    # 文件工具按 WORKSPACE 解析相对路径，测量文件必须直接位于 WORKSPACE 之下。
-    directory = TemporaryDirectory(dir=WORKSPACE)
-    base = Path(directory.name)
+def build_files() -> tuple[TemporaryDirectory, Path, str, list[Path]]:
+    # 文件工具按统一 tmp 根解析相对路径，测量文件位于当前会话 workspace 之下。
+    directory = TemporaryDirectory()
+    root = Path(directory.name).resolve()
+    workspace, prefix = session_workspace(root)
     payload = "".join(f"line-{index:05d} " + "x" * 69 + "\n" for index in range(LINES))
     paths = []
     for index in range(FILES):
-        path = base / f"f{index:02d}.txt"
+        path = workspace / f"f{index:02d}.txt"
         path.write_text(payload, encoding="utf-8")
         paths.append(path)
-    return directory, paths
+    return directory, root, prefix, paths
 
 
 async def noop(_context, _signal):
@@ -101,16 +102,15 @@ async def run_once(mode, system, tools, tool_use, stop):
 
 
 def check_parallel() -> dict:
-    directory, paths = build_files()
-    base = paths[0].parent
+    directory, root, prefix, paths = build_files()
     try:
-        read = create_file_tools()["read"]
+        read = create_file_tools(TEST_SESSION, tmp_root=root)["read"]
         calls = [
             ToolCall(
                 type="toolCall",
                 id=f"c{index:02d}",
                 name="read",
-                arguments={"path": f"{base.name}/{path.name}"},
+                arguments={"path": f"{prefix}/{path.name}"},
             )
             for index, path in enumerate(paths)
         ]
@@ -251,7 +251,6 @@ async def persist(
 
 
 def check() -> None:
-    WORKSPACE.mkdir(exist_ok=True)
     evidence = check_parallel()
     environment = evidence["environment"]
     serial = evidence["serial"]

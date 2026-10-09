@@ -15,7 +15,7 @@ T = TypeVar("T")
 # 提交否决判据：由连接线程在 COMMIT 执行期间同步调用，返回真值表示本次提交让位。
 CommitVeto = Callable[[], bool]
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 9
 
 _MIGRATIONS_DIR = Path(__file__).resolve().parent / "migrations"
 _INITIAL_SCHEMA = _MIGRATIONS_DIR / "001_initial.sql"
@@ -32,10 +32,17 @@ _MIGRATIONS: dict[int, Path] = {
     5: _MIGRATIONS_DIR / "005_remove_confirmation_cards.sql",
     6: _MIGRATIONS_DIR / "006_workouts.sql",
     7: _MIGRATIONS_DIR / "007_plans.sql",
+    8: _MIGRATIONS_DIR / "008_plan_preparation_kinds.sql",
+    9: _MIGRATIONS_DIR / "009_session_attachments.sql",
 }
 
 # 当前版本的结构基线：表 -> 列集合。
 _TABLE_COLUMNS: dict[str, frozenset[str]] = {
+    "session_attachments": frozenset({
+        "attachment_id", "session_id", "file_name", "size_bytes", "storage_ref", "created_at",
+    }),
+    "session_entry_attachments": frozenset({"session_id", "entry_id", "attachment_id", "position"}),
+    "steering_input_attachments": frozenset({"session_id", "steering_id", "attachment_id", "position"}),
     "sessions": frozenset(
         {"id", "title", "active_leaf_id", "created_at", "updated_at"}
     ),
@@ -124,6 +131,7 @@ _TABLE_COLUMNS: dict[str, frozenset[str]] = {
     "plan_snapshots": frozenset({
         "proposal_id", "session_id", "request_entry_id", "source_entry_id", "base_profile_version",
         "base_plan_id", "payload", "display_entry_id", "confirmation_entry_id", "status", "created_at",
+        "preparation_kind",
     }),
     "plan_save_records": frozenset({
         "proposal_id", "session_id", "display_entry_id", "confirmation_entry_id", "result", "saved_at",
@@ -156,6 +164,7 @@ _NULLABLE_COLUMNS = frozenset({
     ("profile_snapshots", "display_entry_id"),
     ("profile_snapshots", "confirmation_entry_id"),
     ("plan_snapshots", "base_plan_id"),
+    ("plan_snapshots", "base_profile_version"),
     ("plan_snapshots", "display_entry_id"),
     ("plan_snapshots", "confirmation_entry_id"),
     ("workout_snapshots", "base_workout_id"),
@@ -166,6 +175,15 @@ _NULLABLE_COLUMNS = frozenset({
 
 # 版本 1 的外键基线：表 -> {(被引用表, {(子列, 父列), ...})}。
 _FOREIGN_KEYS: dict[str, set[tuple[str, frozenset[tuple[str, str]]]]] = {
+    "session_attachments": {("sessions", frozenset({("session_id", "id")}))},
+    "session_entry_attachments": {
+        ("session_entries", frozenset({("session_id", "session_id"), ("entry_id", "id")})),
+        ("session_attachments", frozenset({("session_id", "session_id"), ("attachment_id", "attachment_id")})),
+    },
+    "steering_input_attachments": {
+        ("steering_inputs", frozenset({("session_id", "session_id"), ("steering_id", "id")})),
+        ("session_attachments", frozenset({("session_id", "session_id"), ("attachment_id", "attachment_id")})),
+    },
     "sessions": {
         (
             "session_entries",
@@ -264,6 +282,7 @@ _FOREIGN_KEYS: dict[str, set[tuple[str, frozenset[tuple[str, str]]]]] = {
 }
 
 _INDEXES = frozenset({
+    "idx_session_attachments_session",
     "idx_session_entries_parent",
     "idx_session_entries_run",
     "idx_steering_inputs_run",
@@ -284,6 +303,9 @@ _INDEXES = frozenset({
 })
 
 _TRIGGERS = frozenset({
+    "session_attachments_immutable_update",
+    "session_entry_attachments_user_insert",
+    "session_entry_attachments_user_update",
     "session_entries_parent_exists_insert",
     "session_runs_request_entry_user_insert",
     "session_runs_request_entry_user_update",
@@ -442,6 +464,8 @@ async def open_database(path: Path | None = None) -> Database:
             await _migrate(connection, version + 1, SCHEMA_VERSION)
         else:
             raise RuntimeError(f"不支持的数据库 schema 版本：{version}")
+        if version != SCHEMA_VERSION:
+            await _verify_schema(connection)
     except BaseException:
         await connection.close()
         raise
@@ -513,6 +537,31 @@ async def _verify_schema(connection: aiosqlite.Connection) -> None:
     triggers = await _object_names(connection, "trigger")
     if not _TRIGGERS <= triggers:
         raise RuntimeError(f"触发器缺失：{sorted(_TRIGGERS - triggers)}")
+    await _verify_attachment_schema(connection)
+
+
+async def _verify_attachment_schema(connection: aiosqlite.Connection) -> None:
+    # SQLite 自身生成结构基线，完整核对列类型、主键、唯一性、CHECK、FK 级联与触发器正文。
+    reference = sqlite3.connect(":memory:")
+    try:
+        reference.executescript(_MIGRATIONS[9].read_text(encoding="utf-8"))
+        expected = reference.execute(
+            "SELECT type, name, tbl_name, sql FROM sqlite_master ORDER BY type, name"
+        ).fetchall()
+    finally:
+        reference.close()
+    tables = ("session_attachments", "session_entry_attachments", "steering_input_attachments")
+    actual = await _fetch_all(
+        connection,
+        "SELECT type, name, tbl_name, sql FROM sqlite_master "
+        "WHERE tbl_name IN (?, ?, ?) ORDER BY type, name",
+        tables,
+    )
+    def normalized(rows: list) -> list[tuple]:
+        return [(row[0], row[1], row[2], None if row[3] is None else " ".join(row[3].split()))
+                for row in rows]
+    if normalized(actual) != normalized(expected):
+        raise RuntimeError("附件 schema 的完整约束不兼容")
 
 
 async def _table_is_strict(connection: aiosqlite.Connection, table: str) -> bool:

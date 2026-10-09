@@ -23,6 +23,7 @@ const TIMESTAMP_FORMAT = new Intl.DateTimeFormat("sv-SE", {
   hour12: false,
 });
 
-export function formatTimestamp(iso: string): string {
-  return TIMESTAMP_FORMAT.format(new Date(iso));
+/** UTC 毫秒时间戳 → 本地可读时间（协议 §1：时间戳一律为 UTC 毫秒整数） */
+export function formatTimestamp(millis: number): string {
+  return TIMESTAMP_FORMAT.format(new Date(millis));
 }

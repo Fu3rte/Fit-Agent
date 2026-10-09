@@ -7,7 +7,7 @@ import {
   useNavigate,
 } from "react-router-dom";
 import { Toaster, useSonner } from "sonner";
-import { Dumbbell, Moon, Plus, Sun, UserRound } from "lucide-react";
+import { Dumbbell, ListChecks, Moon, Plus, Sun, UserRound } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { getTheme, setTheme, type Theme } from "@/lib/theme";
 import { TooltipProvider } from "@/components/ui/tooltip";
@@ -30,6 +30,7 @@ import SessionList, {
   navLinkClass,
 } from "@/features/chat/components/SessionList";
 import ProfilePage from "@/features/profile/ProfilePage";
+import PlansPage from "@/features/plans/PlansPage";
 import WorkoutRecordsPage from "@/features/workout/WorkoutRecordsPage";
 import {
   ensureDraft,
@@ -114,11 +115,12 @@ function ChatHost() {
   );
 }
 
-/** 页面路由（PRODUCT.md §3.5）：``/profile`` 打开个人画像页，``/plans`` 打开训练计划页的训练记录区，其余路径由会话宿主处理 */
+/** 页面路由（PRODUCT.md §3.5）：``/profile`` 打开个人画像页，``/plans`` 打开训练计划页，``/workouts`` 打开训练记录页，其余路径由会话宿主处理 */
 function PageHost() {
   const location = useLocation();
   if (location.pathname === "/profile") return <ProfilePage />;
-  if (location.pathname === "/plans") return <WorkoutRecordsPage />;
+  if (location.pathname === "/plans") return <PlansPage />;
+  if (location.pathname === "/workouts") return <WorkoutRecordsPage />;
   return <ChatHost />;
 }
 
@@ -158,8 +160,14 @@ export default function App() {
                   </SidebarMenuItem>
                   <SidebarMenuItem>
                     <NavLink to="/plans" className={navLinkClass}>
-                      <Dumbbell aria-hidden />
+                      <ListChecks aria-hidden />
                       <span>训练计划</span>
+                    </NavLink>
+                  </SidebarMenuItem>
+                  <SidebarMenuItem>
+                    <NavLink to="/workouts" className={navLinkClass}>
+                      <Dumbbell aria-hidden />
+                      <span>训练记录</span>
                     </NavLink>
                   </SidebarMenuItem>
                 </SidebarMenu>

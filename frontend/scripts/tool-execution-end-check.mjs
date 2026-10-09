@@ -124,7 +124,7 @@ assert.throws(() => parser({ run_id: u(99), tool_call_id: "tc-1", tool_name: "re
 const history = {
   session: { session_id: u(50), title: "会话", active_leaf_id: nodeSlow, created_at: 1, updated_at: 2 },
   entries: [
-    { entry_id: userEntry, parent_id: null, run_id: null, created_at: 1, message: { role: "user", text: "读取文件。", timestamp: 1 } },
+    { entry_id: userEntry, parent_id: null, run_id: null, created_at: 1, message: { role: "user", text: "读取文件。", timestamp: 1, attachments: [] } },
     {
       entry_id: assistantId,
       parent_id: userEntry,

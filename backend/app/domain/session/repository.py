@@ -1,6 +1,7 @@
 from contextlib import AbstractAsyncContextManager
 from typing import Protocol
 
+from app.domain.session.attachments import AttachmentMetadata
 from app.domain.session.models import (
     Session,
     SessionMessageEntry,
@@ -14,6 +15,26 @@ class SessionRepository(Protocol):
     def transaction(self) -> AbstractAsyncContextManager[None]: ...
 
     async def defer_foreign_keys(self) -> None: ...
+
+    async def get_attachments(self, attachment_ids: list[str]) -> dict[str, AttachmentMetadata]: ...
+
+    async def insert_attachment(self, metadata: AttachmentMetadata) -> None: ...
+
+    async def bind_entry_attachments(
+        self, session_id: str, entry_id: str, attachment_ids: list[str]
+    ) -> None: ...
+
+    async def bind_steering_attachments(
+        self, session_id: str, steering_id: str, attachment_ids: list[str]
+    ) -> None: ...
+
+    async def list_entry_attachments(
+        self, session_id: str, entry_id: str
+    ) -> list[AttachmentMetadata]: ...
+
+    async def list_steering_attachments(
+        self, session_id: str, steering_id: str
+    ) -> list[AttachmentMetadata]: ...
 
     async def insert_session(self, session: Session) -> None: ...
 

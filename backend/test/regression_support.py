@@ -32,6 +32,20 @@ BACKEND = Path(__file__).resolve().parents[1]
 TEMP_ROOT = BACKEND / "temp"
 HOST_HEADER = "127.0.0.1:8000"
 ORIGIN_HEADER = "http://localhost:5173"
+# 文件工具按可信会话绑定；测试使用固定会话，路径以注入的 tmp 根为基准。
+TEST_SESSION = "00000000-0000-4000-8000-000000000001"
+
+
+def session_workspace(
+    tmp_root: Path, session_id: str = TEST_SESSION
+) -> tuple[Path, str]:
+    directory = Path(tmp_root) / "sessions" / session_id / "workspace"
+    directory.mkdir(parents=True, exist_ok=True)
+    return directory, f"sessions/{session_id}/workspace"
+
+
+def session_directory(tmp_root: Path, session_id: str = TEST_SESSION) -> Path:
+    return Path(tmp_root) / "sessions" / session_id
 
 
 def temporary_root(name: str) -> Path:

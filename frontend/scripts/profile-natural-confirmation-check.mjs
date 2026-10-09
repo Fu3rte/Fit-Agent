@@ -121,7 +121,7 @@ assert.equal(round.entries.length, 2, "实时展示不新增条目，无重复�
 const historyRounds = historyToRounds({
   session: { session_id: sessionId, title: "会话", active_leaf_id: prepareNode, created_at: 1, updated_at: 2 },
   entries: [
-    { entry_id: userEntry, parent_id: null, run_id: null, created_at: 1, message: { role: "user", text: "整理画像。", timestamp: 1 } },
+    { entry_id: userEntry, parent_id: null, run_id: null, created_at: 1, message: { role: "user", text: "整理画像。", timestamp: 1, attachments: [] } },
     { entry_id: assistantId, parent_id: userEntry, run_id: runId, created_at: 2, message: { role: "assistant", content: [callBlock(prepareCall, "prepare_profile_update", prepareArguments)], stop_reason: "toolUse", timestamp: 2 } },
     { entry_id: prepareNode, parent_id: assistantId, run_id: runId, created_at: 3, message: { role: "toolResult", tool_call_id: prepareCall, tool_name: "prepare_profile_update", content: prepared, is_error: false, timestamp: 3 } },
   ],

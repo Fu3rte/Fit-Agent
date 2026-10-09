@@ -4,6 +4,7 @@ from contextlib import AbstractAsyncContextManager
 
 import aiosqlite
 
+from app.domain.session.attachments import AttachmentMetadata, attachment_storage_ref
 from app.domain.session.models import (
     Session,
     SessionMessageEntry,
@@ -13,6 +14,7 @@ from app.domain.session.models import (
 )
 from app.infrastructure.persistence.sqlite.database import Database
 
+_ATTACHMENT_COLUMNS = "attachment_id, session_id, file_name, size_bytes, storage_ref, created_at"
 _ENTRY_COLUMNS = "session_id, id, parent_id, run_id, type, messages, created_at"
 _RUN_COLUMNS = (
     "session_id, id, request_entry_id, last_entry_id, status, started_at, "
@@ -33,6 +35,7 @@ _SESSION_CHILD_TABLES = (
     "session_operation_invalidations",
     "session_runs",
     "session_entries",
+    "session_attachments",
 )
 
 
@@ -46,6 +49,15 @@ def _dump_messages(entry: SessionMessageEntry) -> str:
         ensure_ascii=False,
         allow_nan=False,
     )
+
+
+def _row_to_attachment(row: sqlite3.Row) -> AttachmentMetadata:
+    metadata = AttachmentMetadata.model_validate(dict(row), strict=True)
+    if metadata.storage_ref != attachment_storage_ref(
+        metadata.session_id, metadata.attachment_id, metadata.file_name
+    ):
+        raise ValueError("附件存储引用不兼容")
+    return metadata
 
 
 def _row_to_session(row: sqlite3.Row) -> Session:
@@ -109,6 +121,75 @@ class SqliteSessionRepository:
             return rows
 
         return await self._database.read(run)
+
+    async def get_attachments(self, attachment_ids: list[str]) -> dict[str, AttachmentMetadata]:
+        if not attachment_ids:
+            return {}
+        rows = await self._fetch_all(
+            f"SELECT {_ATTACHMENT_COLUMNS} FROM session_attachments "
+            f"WHERE attachment_id IN ({_placeholders(len(attachment_ids))})",
+            tuple(attachment_ids),
+        )
+        metadata = [_row_to_attachment(row) for row in rows]
+        return {item.attachment_id: item for item in metadata}
+
+    async def insert_attachment(self, metadata: AttachmentMetadata) -> None:
+        metadata = AttachmentMetadata.model_validate(metadata.model_dump(), strict=True)
+        if metadata.storage_ref != attachment_storage_ref(
+            metadata.session_id, metadata.attachment_id, metadata.file_name
+        ):
+            raise ValueError("附件存储引用不兼容")
+        await self._write(
+            f"INSERT INTO session_attachments ({_ATTACHMENT_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?)",
+            (metadata.attachment_id, metadata.session_id, metadata.file_name,
+             metadata.size_bytes, metadata.storage_ref, metadata.created_at),
+        )
+
+    async def bind_entry_attachments(
+        self, session_id: str, entry_id: str, attachment_ids: list[str]
+    ) -> None:
+        async with self.transaction():
+            for position, attachment_id in enumerate(attachment_ids):
+                await self._write(
+                    "INSERT INTO session_entry_attachments "
+                    "(session_id, entry_id, attachment_id, position) VALUES (?, ?, ?, ?)",
+                    (session_id, entry_id, attachment_id, position),
+                )
+
+    async def bind_steering_attachments(
+        self, session_id: str, steering_id: str, attachment_ids: list[str]
+    ) -> None:
+        async with self.transaction():
+            for position, attachment_id in enumerate(attachment_ids):
+                await self._write(
+                    "INSERT INTO steering_input_attachments "
+                    "(session_id, steering_id, attachment_id, position) VALUES (?, ?, ?, ?)",
+                    (session_id, steering_id, attachment_id, position),
+                )
+
+    async def list_entry_attachments(
+        self, session_id: str, entry_id: str
+    ) -> list[AttachmentMetadata]:
+        rows = await self._fetch_all(
+            "SELECT a.* FROM session_entry_attachments AS r "
+            "LEFT JOIN session_attachments AS a ON a.session_id = r.session_id "
+            "AND a.attachment_id = r.attachment_id WHERE r.session_id = ? "
+            "AND r.entry_id = ? ORDER BY r.position",
+            (session_id, entry_id),
+        )
+        return [_row_to_attachment(row) for row in rows]
+
+    async def list_steering_attachments(
+        self, session_id: str, steering_id: str
+    ) -> list[AttachmentMetadata]:
+        rows = await self._fetch_all(
+            "SELECT a.* FROM steering_input_attachments AS r "
+            "LEFT JOIN session_attachments AS a ON a.session_id = r.session_id "
+            "AND a.attachment_id = r.attachment_id WHERE r.session_id = ? "
+            "AND r.steering_id = ? ORDER BY r.position",
+            (session_id, steering_id),
+        )
+        return [_row_to_attachment(row) for row in rows]
 
     async def insert_session(self, session: Session) -> None:
         await self._write(

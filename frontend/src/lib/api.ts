@@ -1,29 +1,15 @@
 import type {
-  AgentPlanBody,
-  AgentPlanResponseWire,
   AgentStreamHeaders,
   ApiError,
-  ConversationCreateBody,
-  ConversationDetailWire,
-  ConversationListWire,
-  ConversationWire,
-  BodyMetricItemWire,
-  ConversationRunTraceWire,
-  BodyMetricListWire,
-  BodyMetricWriteBody,
-  CalendarResponseWire,
-  ConfirmWorkoutBody,
-  ConfirmWorkoutResponseWire,
+  AttachmentContentWire,
+  CurrentPlanWire,
   EditRunBody,
-  ExerciseListWire,
   HistoryEntryWire,
   HistoryRunWire,
   HistorySteeringWire,
   OperationQueryWire,
-  PersonalBestListWire,
-  PlanItemWire,
   PlanListWire,
-  PlanSessionCandidatesWire,
+  PlanRecordWire,
   ProfileResponseWire,
   ProviderStatusWire,
   ProviderTestWire,
@@ -33,9 +19,7 @@ import type {
   ReActEvent,
   ReActRunBody,
   RegenerateRunBody,
-  RecordItemWire,
-  RecordListWire,
-  RecordWriteBody,
+  RunSteeringItemWire,
   RunSteeringListWire,
   SendRunRepeatWire,
   SessionCreateBody,
@@ -52,7 +36,6 @@ import type {
   SteeringStatusWire,
   SteeringWithdrawBody,
   SteeringWithdrawWire,
-  TrendsResponseWire,
   WorkoutListWire,
   WorkoutRecordWire,
 } from "@/lib/contract";
@@ -61,6 +44,11 @@ import {
   nullableMillis,
   nullableString,
   nullableUuid,
+  parseAttachmentContent,
+  parseAttachmentWireList,
+  parseCurrentPlan,
+  parsePlanList,
+  parsePlanRecord,
   parseProfileResponse,
   parseWorkoutList,
   parseWorkoutRecord,
@@ -69,12 +57,13 @@ import {
   requireEnum,
   requireMillis,
   requireString,
+  requireText,
   requireUuid,
 } from "@/lib/business";
 import {
   ReActHttpError,
   createReActParser,
-  validChatInput,
+  validMessageInput,
 } from "@/features/chat/utils/reactAgent";
 
 export type { ApiError };
@@ -122,72 +111,6 @@ export const deleteProvider = () =>
 /** 连通性测试：用请求体里的表单值发一次最小调用，不落库、不消耗 Run 预算 */
 export const testProvider = (body: ProviderWriteBody) =>
   post<ProviderTestWire>("/api/provider/test", body);
-
-/** 动作目录全量：表单的动作选择与负重口径来源 */
-export const listExercises = () => request<ExerciseListWire>("/api/exercises");
-
-/** 训练记录列表（稳定身份 + 发生日期 + 关联日程 + 全部组） */
-export const listRecords = () => request<RecordListWire>("/api/records");
-
-export const createRecord = (body: RecordWriteBody) =>
-  post<RecordItemWire>("/api/records", body);
-
-export const updateRecord = (recordId: number, body: RecordWriteBody) =>
-  request<RecordItemWire>(`/api/records/${recordId}`, {
-    method: "PUT",
-    body: JSON.stringify(body),
-  });
-
-export const deleteRecord = (recordId: number) =>
-  request<void>(`/api/records/${recordId}`, { method: "DELETE" });
-
-/**
- * 当天可关联的计划日程候选；省略 date 用服务端业务自然日。
- * 零个或多个候选时必须由用户显式选择或标记额外训练（不猜）。
- */
-export const listPlanSessionCandidates = (date?: string) =>
-  request<PlanSessionCandidatesWire>(
-    date
-      ? `/api/records/plan-session-candidates?date=${encodeURIComponent(date)}`
-      : "/api/records/plan-session-candidates",
-  );
-
-/** 身体指标列表；体脂未记录为 null，不补 0 */
-export const listBodyMetrics = () =>
-  request<BodyMetricListWire>("/api/body-metrics");
-
-export const createBodyMetric = (body: BodyMetricWriteBody) =>
-  post<BodyMetricItemWire>("/api/body-metrics", body);
-
-export const updateBodyMetric = (metricId: number, body: BodyMetricWriteBody) =>
-  request<BodyMetricItemWire>(`/api/body-metrics/${metricId}`, {
-    method: "PUT",
-    body: JSON.stringify(body),
-  });
-
-export const deleteBodyMetric = (metricId: number) =>
-  request<void>(`/api/body-metrics/${metricId}`, { method: "DELETE" });
-
-/** 计划只读：全部版本（升序）、当前 active 与单版本身份 */
-export const listPlans = () => request<PlanListWire>("/api/plans");
-
-export const getActivePlan = () => request<PlanItemWire>("/api/plans/active");
-
-export const getPlan = (planId: number) =>
-  request<PlanItemWire>(`/api/plans/${planId}`);
-
-/** 三类 PB（最大重量、最大次数、最长时长）及来源训练、组序号与日期 */
-export const listPersonalBests = () =>
-  request<PersonalBestListWire>("/api/stats/personal-bests");
-
-/** 最近 30 天体重／体脂原始点与趋势摘要；力量系列由后端计算，看板不渲染 */
-export const getTrends = () => request<TrendsResponseWire>("/api/stats/trends");
-
-/** 一个自然月的计划日程状态与实际训练事实；month 为严格的 ``YYYY-MM`` */
-export const getCalendarMonth = (month: string) =>
-  request<CalendarResponseWire>(
-    `/api/stats/calendar?month=${encodeURIComponent(month)}`,
-  );
 
 /* ===== 会话持久化请求层（backend-http-sse-contract §11）===== */
 
@@ -283,7 +206,10 @@ function requireSteeringShape(
     throw new Error("Steering 状态无效。");
 }
 
-function parseSteeringInput(body: unknown): SteeringInputWire {
+/** 输入状态对象的共有身份字段（§11.2）：consumed 必须有 entry_id，discarded 必须有丢弃原因，其余两者为 null */
+function parseSteeringIdentity(
+  body: unknown,
+): Omit<SteeringInputWire, "attachments"> {
   if (!isObject(body)) throw new Error("输入响应无效。");
   const status = requireEnum(body.status, STEERING_STATUSES, "status");
   const entry_id = nullableUuid(body.entry_id, "entry_id");
@@ -301,6 +227,16 @@ function parseSteeringInput(body: unknown): SteeringInputWire {
     reason,
     created_at: requireMillis(body.created_at, "created_at"),
     updated_at: requireMillis(body.updated_at, "updated_at"),
+  };
+}
+
+/** 操作查询的输入对象（§11.2、附件契约 §4）：身份字段加按受理顺序返回的附件集合 */
+function parseSteeringInput(body: unknown): SteeringInputWire {
+  const identity = parseSteeringIdentity(body);
+  if (!isObject(body)) throw new Error("输入响应无效。");
+  return {
+    ...identity,
+    attachments: parseAttachmentWireList(body.attachments, "attachments"),
   };
 }
 
@@ -467,8 +403,11 @@ export async function runReActStream(
   onOpen: (headers: AgentStreamHeaders) => void,
   endpoint = "/api/agent/run",
 ): Promise<SendRunRepeatWire | null> {
-  if ("request" in body && !validChatInput(body.request))
-    throw new Error("消息必须包含 1 至 32000 个字符。");
+  if ("request" in body && !validMessageInput(body.request,
+    body.attachments === undefined ? [] : body.attachments))
+    throw new Error(
+      "消息必须包含非空白文本或至少一个附件，文本最多 32000 个字符。",
+    );
   const response = await fetch(endpoint, {
     method: "POST",
     headers: {
@@ -516,7 +455,10 @@ export async function submitSteering(
   body: SteeringBody,
   signal: AbortSignal,
 ): Promise<SteeringReceiveWire> {
-  if (!validChatInput(body.message)) throw new Error("Steering 文本无效。");
+  if (!validMessageInput(body.message, body.attachments))
+    throw new Error(
+      "Steering 必须包含非空白文本或至少一个附件，文本最多 32000 个字符。",
+    );
   const response = await fetch(
     `/api/agent/runs/${encodeURIComponent(runId)}/steering`,
     {
@@ -642,11 +584,11 @@ function parsePublicMessage(value: unknown): PublicMessageWire {
   if (!isObject(value)) throw new Error("历史消息无效。");
   if (value.role === "system") return { role: "system" };
   if (value.role === "user") {
-    if (typeof value.text !== "string") throw new Error("历史用户消息无效。");
     return {
       role: "user",
-      text: value.text,
+      text: requireText(value.text, "text"),
       timestamp: requireTimestamp(value.timestamp),
+      attachments: parseAttachmentWireList(value.attachments, "attachments"),
     };
   }
   if (value.role === "assistant") {
@@ -683,26 +625,24 @@ function parseHistoryEntry(value: unknown): HistoryEntryWire {
   };
 }
 
-function parseHistorySteering(value: unknown): HistorySteeringWire {
-  if (!isObject(value)) throw new Error("历史输入无效。");
-  const status = requireEnum(value.status, STEERING_STATUSES, "status");
-  const entry_id = nullableUuid(value.entry_id, "entry_id");
-  const reason =
-    value.reason === null
-      ? null
-      : requireEnum(value.reason, DISCARD_REASONS, "reason");
-  requireSteeringShape(status, entry_id, reason);
+/** 输入项的文本投影（session-history-contract §3.4、session-list-contract §3）：文本与时间戳保持接收时原值 */
+function parseSteeringText(value: unknown): RunSteeringItemWire {
+  const identity = parseSteeringIdentity(value);
+  if (!isObject(value)) throw new Error("输入响应无效。");
   return {
-    session_id: requireUuid(value.session_id, "session_id"),
-    run_id: requireUuid(value.run_id, "run_id"),
-    steering_id: requireUuid(value.steering_id, "steering_id"),
-    text: requireString(value.text, "text"),
+    ...identity,
+    text: requireText(value.text, "text"),
     timestamp: requireTimestamp(value.timestamp),
-    status,
-    entry_id,
-    reason,
-    created_at: requireMillis(value.created_at, "created_at"),
-    updated_at: requireMillis(value.updated_at, "updated_at"),
+  };
+}
+
+/** 历史输入项（§3.4、附件契约 §4）：文本投影加受理时的有序附件集合 */
+function parseHistorySteering(value: unknown): HistorySteeringWire {
+  const text = parseSteeringText(value);
+  if (!isObject(value)) throw new Error("输入响应无效。");
+  return {
+    ...text,
+    attachments: parseAttachmentWireList(value.attachments, "attachments"),
   };
 }
 
@@ -869,6 +809,24 @@ export const getWorkout = (workoutId: string, signal?: AbortSignal) =>
     parseWorkoutRecord,
   );
 
+/* ===== 附件原文读取（plan-import-adjustment-contract §4）===== */
+
+/** GET /api/sessions/{session_id}/attachments/{attachment_id}：元数据加严格 UTF-8 解码正文，无副作用 */
+export const getAttachmentContent = (
+  sessionId: string,
+  attachmentId: string,
+  signal?: AbortSignal,
+) =>
+  sessionRequest<AttachmentContentWire>(
+    `/api/sessions/${encodeURIComponent(sessionId)}/attachments/${encodeURIComponent(attachmentId)}`,
+    { method: "GET", signal },
+    parseAttachmentContent,
+  ).then((result) => {
+    if (result.attachment_id !== attachmentId)
+      throw new Error("附件内容身份不匹配。");
+    return result;
+  });
+
 /* ===== 会话运行及 Steering 独立列表（session-list-contract §2、§3）===== */
 
 /**
@@ -900,7 +858,7 @@ export function parseRunSteeringList(
   if (session_id !== sessionId || run_id !== runId)
     throw new Error("输入列表运行身份不匹配。");
   const steering = requireArray(body.steering, "steering").map(
-    parseHistorySteering,
+    parseSteeringText,
   );
   if (
     steering.some(
@@ -933,46 +891,28 @@ export const listRunSteering = (
     (body) => parseRunSteeringList(sessionId, runId, body),
   );
 
-/** 用户确认：激活 draft（幂等已 active 时返回既有行），返回落库后的计划行 */
-export const confirmPlan = (body: AgentPlanBody) =>
-  post<AgentPlanResponseWire>("/api/agent/confirm", body);
+/* ===== 训练计划查询（plan-generation-contract §5）===== */
 
-/** 用户拒绝：把 draft 归档（原 active 不变，永不写 rejected），返回落库后的计划行 */
-export const rejectPlan = (body: AgentPlanBody) =>
-  post<AgentPlanResponseWire>("/api/agent/reject", body);
-
-/**
- * 自然语言打卡确认写入：提交 `waiting` 载荷（含用户修改后的完整值），返回落库训练事实与重新现算的 PB。
- *
- * 服务端重新执行 DTO／领域／目录／日程关联校验，并复用表单的同一写入服务；错误仍是既有 JSON
- * 错误形状（400／409／422）。
- */
-export const confirmWorkout = (body: ConfirmWorkoutBody) =>
-  post<ConfirmWorkoutResponseWire>("/api/agent/confirm-workout", body);
-
-/** 会话列表：服务端按 ``updated_at`` 降序返回全部会话头 */
-export const listConversations = () =>
-  request<ConversationListWire>("/api/conversations");
-
-/** 新建空会话：标题非空由后端把关，返回落库后的会话头 */
-export const createConversation = (body: ConversationCreateBody) =>
-  post<ConversationWire>("/api/conversations", body);
-
-/** 会话详情：会话全部 Entry 重建的轮次与压缩分隔，刷新与切换路由后的唯一恢复来源 */
-export const readConversation = (conversationId: string) =>
-  request<ConversationDetailWire>(
-    `/api/conversations/${encodeURIComponent(conversationId)}`,
+/** GET /api/plans/current（§5）：没有当前计划时 ``id`` 与 ``content`` 同时为 null，不接受查询参数 */
+export const getCurrentPlan = (signal?: AbortSignal) =>
+  sessionRequest<CurrentPlanWire>(
+    "/api/plans/current",
+    { method: "GET", signal },
+    parseCurrentPlan,
   );
 
-/** 失败轮次的受限运行轨迹：仅返回阶段、工具名、状态与错误类型 */
-export const readConversationRunTrace = (chatId: string, threadId: string) =>
-  request<ConversationRunTraceWire>(
-    `/api/conversations/${encodeURIComponent(chatId)}/runs/${encodeURIComponent(threadId)}/trace`,
+/** GET /api/plans（§5）：直接数组，按 created_at 降序、同时间按 id 降序，无版本时为空数组 */
+export const listPlans = (signal?: AbortSignal) =>
+  sessionRequest<PlanListWire>(
+    "/api/plans",
+    { method: "GET", signal },
+    parsePlanList,
   );
 
-/** 删除会话：Entry／Run／Event 由后端级联清理；不存在与非法身份返回同一错误 */
-export const deleteConversation = (conversationId: string) =>
-  request<{ deleted: boolean }>(
-    `/api/conversations/${encodeURIComponent(conversationId)}`,
-    { method: "DELETE" },
+/** GET /api/plans/{plan_id}（§5）：完整版本；不存在时 404 plan_not_found */
+export const getPlan = (planId: string, signal?: AbortSignal) =>
+  sessionRequest<PlanRecordWire>(
+    `/api/plans/${encodeURIComponent(planId)}`,
+    { method: "GET", signal },
+    parsePlanRecord,
   );

@@ -1,6 +1,7 @@
 import asyncio
 import inspect
 import json
+import traceback
 from collections.abc import Awaitable, Callable, Mapping
 from copy import deepcopy
 from dataclasses import dataclass
@@ -47,6 +48,19 @@ class CredentialDetectedError(Exception):
     """工具结果命中已知模型凭据：禁止公开与保存，运行以 credential_detected 终止。"""
 
 
+class _ResultProtocolError(TypeError):
+    pass
+
+
+class _UpdatePublicationError(RuntimeError):
+    pass
+
+
+class _CancelledExecution(asyncio.CancelledError):
+    def __init__(self, result):
+        self.result = result
+
+
 @dataclass(frozen=True)
 class AgentToolResult:
     content: list[TextContent]
@@ -67,6 +81,7 @@ OnToolUpdate = Callable[[str, str, AgentToolResult], None]
 class BeforeToolCallContext:
     tool_call: ToolCall
     arguments: BaseModel
+    trusted_context: BaseModel | None = None
 
 
 @dataclass(frozen=True)
@@ -107,6 +122,7 @@ class AgentTool:
     execution_mode: ExecutionMode = "parallel"
     prepare_arguments: PrepareArguments | None = None
     max_output_chars: int | None = 50_000
+    trusted_context: BaseModel | None = None
 
     def definition(self) -> ToolDeclaration:
         return ToolDeclaration(
@@ -146,6 +162,15 @@ OnToolStart = Callable[[ToolCall], Awaitable[None]]
 OnToolFinalized = Callable[[FinalizedToolCall], Awaitable[None]]
 
 
+def prepare_arguments(tool: AgentTool, tool_call: ToolCall) -> JsonObject:
+    arguments = deepcopy(tool_call.arguments)
+    return tool.prepare_arguments(arguments) if tool.prepare_arguments else arguments
+
+
+def validate_arguments(tool: AgentTool, arguments: JsonObject) -> BaseModel:
+    return tool.arguments.model_validate(arguments)
+
+
 async def prepare_tool_call(
     index: int,
     tool_call: ToolCall,
@@ -172,15 +197,13 @@ async def prepare_tool_call(
     ):
         raise ValueError(f"工具声明与执行注册表不一致: {call_name}")
     try:
-        prepared = (
-            tool.prepare_arguments(deepcopy(tool_call.arguments))
-            if tool.prepare_arguments is not None
-            else tool_call.arguments
-        )
+        prepared = prepare_arguments(tool, tool_call)
+    except CredentialDetectedError:
+        raise
     except Exception as error:
         return _finalized(index, tool_call, f"参数预处理失败：{error}", timestamp)
     try:
-        arguments = tool.arguments.model_validate(prepared)
+        arguments = validate_arguments(tool, prepared)
     except ValidationError as error:
         return _finalized(
             index,
@@ -192,10 +215,14 @@ async def prepare_tool_call(
         try:
             decision = await before_tool_call(
                 BeforeToolCallContext(
-                    tool_call.model_copy(deep=True), arguments.model_copy(deep=True)
+                    tool_call.model_copy(deep=True),
+                    arguments.model_copy(deep=True),
+                    deepcopy(tool.trusted_context),
                 ),
                 signal,
             )
+        except CredentialDetectedError:
+            raise
         except Exception as error:
             return _finalized(index, tool_call, f"权限检查失败：{error}", timestamp)
         if _cancelled(signal):
@@ -221,16 +248,46 @@ async def execute_prepared_tool_call(
     tool = prepared.tool
     arguments = prepared.arguments
     started_at = perf_counter()
+    cancellation = None
+    accepting_updates = True
+
+    def update(partial: AgentToolResult) -> None:
+        if accepting_updates and on_update is not None:
+            try:
+                on_update(partial)
+            except (CredentialDetectedError, _ResultProtocolError):
+                raise
+            except Exception as error:
+                if contains_credentials is not None and contains_credentials(
+                    "".join(traceback.format_exception(error))
+                ):
+                    raise CredentialDetectedError() from None
+                raise _UpdatePublicationError("工具进度发布失败") from error
+
     try:
         result = await _execute_with_cancel(
-            tool_call.id, tool, arguments, signal, on_update
+            tool_call.id, tool, arguments, signal,
+            update if on_update is not None else None,
         )
-    except CredentialDetectedError:
+    except (CredentialDetectedError, _ResultProtocolError, _UpdatePublicationError):
         raise
+    except _CancelledExecution as error:
+        cancellation = error
+        result = error.result
+        if result is None:
+            result = AgentToolResult([], is_error=True)
+        _validate_result(result)
+        result = AgentToolResult(
+            [*result.content, TextContent(type="text", text="Operation aborted；工具执行已收尾，副作用可能已发生，请核对原操作。")],
+            is_error=True,
+        )
     except Exception as error:
         result = AgentToolResult(
             [TextContent(type="text", text=f"工具执行失败：{error}")], is_error=True
         )
+    finally:
+        accepting_updates = False
+    _validate_result(result)
     executed_at = perf_counter()
     # 完整结果（截断前）先过凭据检查，避免截断区内的凭据逃过公开与保存检查。
     _reject_credentials(contains_credentials, result)
@@ -242,7 +299,7 @@ async def execute_prepared_tool_call(
                 AfterToolCallContext(
                     tool_call.model_copy(deep=True),
                     arguments.model_copy(deep=True),
-                    result,
+                    deepcopy(result),
                     result.is_error,
                     duration_ms,
                 ),
@@ -267,12 +324,15 @@ async def execute_prepared_tool_call(
         else:
             if override is not None:
                 result = AgentToolResult(
-                    override.content
+                    deepcopy(override.content)
                     if override.content is not None
                     else result.content,
                     result.is_error if override.is_error is None else override.is_error,
                 )
+        _validate_result(result)
         _reject_credentials(contains_credentials, result)
+    if cancellation is not None:
+        raise cancellation
     finalized_at = perf_counter()
     message = ToolResultMessage(
         role="toolResult",
@@ -301,6 +361,7 @@ async def run_tool_call(
     after_tool_call: AfterToolCall | None = None,
     signal: Event | None = None,
     on_update: UpdateCallback | None = None,
+    contains_credentials: CredentialCheck | None = None,
 ) -> ToolResultMessage:
     outcome = await prepare_tool_call(
         0,
@@ -311,12 +372,21 @@ async def run_tool_call(
         signal=signal,
     )
     if isinstance(outcome, FinalizedToolCall):
+        _reject_credentials(contains_credentials, AgentToolResult(outcome.message.content, True))
         return outcome.message
+
+    def update(result: AgentToolResult) -> None:
+        _validate_result(result)
+        _reject_credentials(contains_credentials, result)
+        if on_update is not None:
+            on_update(result)
+
     finalized = await execute_prepared_tool_call(
         outcome,
         after_tool_call=after_tool_call,
         signal=signal,
-        on_update=on_update,
+        on_update=update if on_update is not None or contains_credentials is not None else None,
+        contains_credentials=contains_credentials,
     )
     return finalized.message
 
@@ -335,6 +405,8 @@ async def run_tool_batch(
     on_tool_update: OnToolUpdate | None = None,
     contains_credentials: CredentialCheck | None = None,
 ) -> ToolBatchResult:
+    if len({call.id for call in tool_calls}) != len(tool_calls):
+        raise ValueError("工具调用ID重复")
     messages: list[ToolResultMessage | None] = [None] * len(tool_calls)
     first_result_at: float | None = None
     prepare_started_at = perf_counter()
@@ -345,20 +417,26 @@ async def run_tool_batch(
     def update_for(tool_call_id: str, tool_name: str):
         # 进度回调绑定真实调用身份；执行结束后的迟到更新忽略；公开前先过凭据检查。
         active = [True]
-        if on_tool_update is None:
+        if on_tool_update is None and contains_credentials is None:
             return None, active
 
         def update(result: AgentToolResult) -> None:
             if not active[0]:
                 return
+            _validate_result(result)
             _reject_credentials(contains_credentials, result)
-            on_tool_update(tool_call_id, tool_name, result)
+            if on_tool_update is not None:
+                on_tool_update(tool_call_id, tool_name, result)
 
         return update, active
 
     async def finalize(finalized: FinalizedToolCall) -> None:
         nonlocal first_result_at
         # 定稿前先经过完成通知（含凭据检查）；命中时该结果不入结果集，随后停止调度。
+        _reject_credentials(
+            contains_credentials,
+            AgentToolResult(finalized.message.content, finalized.message.is_error),
+        )
         await notify_finalized(finalized)
         messages[finalized.index] = finalized.message
         if first_result_at is None:
@@ -518,11 +596,32 @@ async def _execute_with_cancel(
         # 任务取消桥接到工具信号，等待在途工作完成收尾并接收结果后再向外传播。
         if signal is not None:
             signal.set()
+        while not pending.done():
+            try:
+                await asyncio.wait((pending,))
+            except asyncio.CancelledError:
+                continue
         try:
-            await asyncio.shield(pending)
-        except BaseException:
-            pass
-        raise
+            result = pending.result()
+        except (CredentialDetectedError, _ResultProtocolError, _UpdatePublicationError):
+            raise
+        except asyncio.CancelledError:
+            result = None
+        except Exception as error:
+            result = AgentToolResult(
+                [TextContent(type="text", text=f"工具执行失败：{error}")], is_error=True
+            )
+        raise _CancelledExecution(result)
+
+
+def _validate_result(result: AgentToolResult) -> None:
+    if (
+        not isinstance(result, AgentToolResult)
+        or type(result.is_error) is not bool
+        or not isinstance(result.content, list)
+        or any(not isinstance(block, TextContent) for block in result.content)
+    ):
+        raise _ResultProtocolError("工具返回值违反AgentToolResult协议")
 
 
 def _reject_credentials(

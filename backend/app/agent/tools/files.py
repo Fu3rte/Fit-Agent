@@ -1,14 +1,18 @@
 import os
 import re
-from itertools import islice
+import stat
 from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.agent.tool import AgentTool, AgentToolResult
 from app.ai.messages import TextContent
+from app.domain.session.attachments import TMP_ROOT, validate_uuid
 
-WORKSPACE = Path(__file__).resolve().parents[3] / "temp"
+SESSION_DIRECTORY = "sessions"
+WORKSPACE_DIRECTORY = "workspace"
+EXCLUDED = {".git", ".venv", "node_modules", "__pycache__"}
+_REPARSE_POINT = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
 
 
 class PathArguments(BaseModel):
@@ -43,72 +47,155 @@ class LsArguments(PathArguments):
     limit: int = Field(default=100, ge=1, le=1000)
 
 
-def create_file_tools() -> dict[str, AgentTool]:
-    if WORKSPACE.is_symlink() or WORKSPACE.is_junction():
-        raise PermissionError("backend/temp 不能是链接")
-    WORKSPACE.mkdir(exist_ok=True)
-    root = WORKSPACE.resolve(strict=True)
+def is_linked(path: Path) -> bool:
+    # 符号链接、Windows junction 及 reparse point 都不能作为路径组件。
+    if path.is_symlink():
+        return True
+    try:
+        attributes = path.lstat()
+    except FileNotFoundError:
+        return False
+    return bool(getattr(attributes, "st_file_attributes", 0) & _REPARSE_POINT)
 
-    def resolve(path: str) -> Path:
+
+def reject_links(root: Path, relative: Path) -> None:
+    current = root
+    if is_linked(current):
+        raise PermissionError("路径不得包含链接或 reparse point")
+    for part in relative.parts:
+        current = current / part
+        if is_linked(current):
+            raise PermissionError("路径不得包含链接或 reparse point")
+
+
+class Workspace:
+    """当前会话在统一 tmp 根下的读写边界。
+
+    相对路径以 tmp 根为基准；读取限于当前会话附件与工作文件，写入限于当前会话 workspace。
+    会话身份来自后端可信上下文，不通过工具参数传入。
+    """
+
+    def __init__(self, session_id: str, tmp_root: Path = TMP_ROOT) -> None:
+        self._session_id = validate_uuid(session_id)
+        root = Path(tmp_root)
+        if root.is_symlink() or root.is_junction():
+            raise PermissionError("tmp 根目录不得为链接")
+        root.mkdir(parents=True, exist_ok=True)
+        self._root = root.resolve(strict=True)
+        reject_links(self._root, Path())
+        self.session_root = self._root / SESSION_DIRECTORY / self._session_id
+        self.workspace_root = self.session_root / WORKSPACE_DIRECTORY
+
+    @property
+    def root(self) -> Path:
+        return self._root
+
+    def ensure_workspace(self) -> Path:
+        relative = Path(SESSION_DIRECTORY) / self._session_id / WORKSPACE_DIRECTORY
+        reject_links(self._root, relative)
+        (self._root / relative).mkdir(parents=True, exist_ok=True)
+        return self._within(
+            relative, self.workspace_root, "write 和 edit 只允许操作当前会话 workspace"
+        )
+
+    def relative(self, path: str) -> Path:
         relative = Path(path)
         if relative.anchor or ".." in relative.parts:
-            raise PermissionError("只允许 backend/temp 内的相对路径")
-        target = (root / relative).resolve()
-        if not target.is_relative_to(root):
-            raise PermissionError("路径超出 backend/temp")
-        return target
+            raise PermissionError("只允许 tmp 根目录内的相对路径")
+        return relative
 
-    def files(path: str):
-        target = resolve(path)
-        if target.is_file():
-            yield target
-            return
-        if not target.is_dir():
-            raise NotADirectoryError(target)
-        for directory, dirs, names in os.walk(target, onerror=raise_walk_error):
-            dirs[:] = sorted(
-                name
-                for name in dirs
-                if name not in {".git", ".venv", "node_modules", "__pycache__"}
-                and not (Path(directory) / name).is_symlink()
-            )
-            for name in sorted(names):
-                candidate = Path(directory) / name
-                if not candidate.is_symlink():
-                    yield resolve(str(candidate.relative_to(root)))
+    def read_path(self, path: str) -> Path:
+        return self._within(self.relative(path), self.session_root, "只允许访问当前会话的附件与工作文件")
+
+    def write_path(self, path: str) -> Path:
+        return self._within(self.relative(path), self.workspace_root, "write 和 edit 只允许操作当前会话 workspace")
+
+    def _within(self, relative: Path, allowed: Path, message: str) -> Path:
+        reject_links(self._root, relative)
+        resolved = (self._root / relative).resolve()
+        if not resolved.is_relative_to(allowed):
+            raise PermissionError(message)
+        return resolved
+
+    def relative_to_root(self, target: Path) -> str:
+        return target.relative_to(self._root).as_posix()
+
+
+def iter_files(workspace: Workspace, path: str):
+    target = workspace.read_path(path)
+    if target.is_file():
+        yield target
+        return
+    if not target.is_dir():
+        raise NotADirectoryError(target)
+    for directory, dirs, names in os.walk(target, onerror=raise_walk_error):
+        dirs[:] = sorted(
+            name
+            for name in dirs
+            if name not in EXCLUDED and not is_linked(Path(directory) / name)
+        )
+        for name in sorted(names):
+            candidate = Path(directory) / name
+            if is_linked(candidate):
+                continue
+            resolved = candidate.resolve()
+            if not resolved.is_relative_to(workspace.session_root):
+                raise PermissionError("搜索结果超出当前会话")
+            yield resolved
+
+
+def create_file_tools(
+    session_id: str, *, tmp_root: Path = TMP_ROOT
+) -> dict[str, AgentTool]:
+    workspace = Workspace(session_id, tmp_root)
 
     def read(tool_call_id, params: ReadArguments, signal, on_update) -> AgentToolResult:
-        with resolve(params.path).open(encoding="utf-8") as stream:
-            lines = islice(
-                enumerate(stream, 1),
-                params.offset - 1,
-                params.offset + params.limit - 1,
-            )
-            text = "".join(f"{number}: {line.rstrip()}\n" for number, line in lines)
+        target = workspace.read_path(params.path)
+        collected: list[tuple[int, str]] = []
+        following = False
+        with target.open(encoding="utf-8") as stream:
+            for number, line in enumerate(stream, 1):
+                if number < params.offset:
+                    continue
+                if len(collected) == params.limit:
+                    following = True
+                    break
+                collected.append((number, line))
+        if not collected:
+            text = f"[无内容：offset {params.offset} 位于文件末尾之后]"
+        else:
+            text = "".join(f"{number}: {line.rstrip()}\n" for number, line in collected)
+            if following:
+                text += (
+                    f"\n[仅显示到第 {collected[-1][0]} 行，文件仍有后续内容；"
+                    f"继续读取请使用 offset={collected[-1][0] + 1}]"
+                )
         return AgentToolResult([TextContent(type="text", text=text)])
 
     def write(tool_call_id, params: WriteArguments, signal, on_update) -> AgentToolResult:
-        target = resolve(params.path)
+        target = workspace.write_path(params.path)
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(params.content, encoding="utf-8")
-        text = f"已写入 {target.relative_to(root).as_posix()}"
+        target = workspace.write_path(params.path)
+        with target.open("w", encoding="utf-8") as stream:
+            stream.write(params.content)
+        text = f"已写入 {workspace.relative_to_root(target)}"
         return AgentToolResult([TextContent(type="text", text=text)])
 
     def edit(tool_call_id, params: EditArguments, signal, on_update) -> AgentToolResult:
-        target = resolve(params.path)
+        target = workspace.write_path(params.path)
         content = target.read_text(encoding="utf-8")
         if content.count(params.old_text) != 1:
             raise ValueError("old_text 必须在文件中精确匹配一次")
         target.write_text(
             content.replace(params.old_text, params.new_text, 1), encoding="utf-8"
         )
-        text = f"已编辑 {target.relative_to(root).as_posix()}"
+        text = f"已编辑 {workspace.relative_to_root(target)}"
         return AgentToolResult([TextContent(type="text", text=text)])
 
     def find(tool_call_id, params: FindArguments, signal, on_update) -> AgentToolResult:
         matches = []
-        for candidate in files(params.path):
-            relative = candidate.relative_to(root)
+        for candidate in iter_files(workspace, params.path):
+            relative = candidate.relative_to(workspace.root)
             if relative.full_match(params.pattern):
                 matches.append(relative.as_posix())
                 if len(matches) == params.limit:
@@ -120,8 +207,8 @@ def create_file_tools() -> dict[str, AgentTool]:
     def grep(tool_call_id, params: GrepArguments, signal, on_update) -> AgentToolResult:
         expression = re.compile(params.pattern)
         matches = []
-        for candidate in files(params.path):
-            relative = candidate.relative_to(root)
+        for candidate in iter_files(workspace, params.path):
+            relative = candidate.relative_to(workspace.root)
             if not relative.full_match(params.glob):
                 continue
             with candidate.open(encoding="utf-8") as stream:
@@ -137,7 +224,7 @@ def create_file_tools() -> dict[str, AgentTool]:
         return AgentToolResult([TextContent(type="text", text=text)])
 
     def ls(tool_call_id, params: LsArguments, signal, on_update) -> AgentToolResult:
-        target = resolve(params.path)
+        target = workspace.read_path(params.path)
         entries = sorted(target.iterdir(), key=lambda item: item.name)
         text = "\n".join(
             item.name + ("/" if item.is_dir() else "") for item in entries[: params.limit]
@@ -149,42 +236,45 @@ def create_file_tools() -> dict[str, AgentTool]:
     tools = [
         AgentTool(
             "read",
-            "读取 UTF-8 文本；offset 从 1 开始，输出带行号。",
+            "读取 UTF-8 文本；offset 从 1 开始，输出带行号并提示是否仍有后续内容。"
+            "相对路径以项目根目录 tmp 为根，只允许读取当前会话的附件与工作文件。",
             ReadArguments,
             read,
             execution_mode="parallel",
         ),
         AgentTool(
             "edit",
-            "精确替换唯一一处 old_text；直接写入文件。",
+            "精确替换唯一一处 old_text；直接写入文件。"
+            "相对路径以项目根目录 tmp 为根，只允许编辑当前会话 workspace 内的文件。",
             EditArguments,
             edit,
             execution_mode="sequential",
         ),
         AgentTool(
             "write",
-            "写入 UTF-8 文本，创建父目录，覆盖已有文件。",
+            "写入 UTF-8 文本，创建父目录，覆盖已有文件。"
+            "相对路径以项目根目录 tmp 为根，只允许写入当前会话 workspace。",
             WriteArguments,
             write,
             execution_mode="sequential",
         ),
         AgentTool(
             "grep",
-            "用 regex 搜索 UTF-8 文件；glob 用于筛选文件。",
+            "用 regex 搜索 UTF-8 文件；glob 用于筛选文件；只允许访问当前会话的附件与工作文件。",
             GrepArguments,
             grep,
             execution_mode="parallel",
         ),
         AgentTool(
             "find",
-            "按 workspace 相对路径的 glob 查找文件，如 **/*.py。",
+            "按相对项目根目录 tmp 的 glob 查找文件；只允许访问当前会话的附件与工作文件。",
             FindArguments,
             find,
             execution_mode="parallel",
         ),
         AgentTool(
             "ls",
-            "列出目录的直接子项。",
+            "列出目录的直接子项；只允许访问当前会话的附件与工作文件。",
             LsArguments,
             ls,
             execution_mode="parallel",

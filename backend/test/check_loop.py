@@ -11,7 +11,7 @@ from app.agent.agent_loop import run_agent_loop
 from app.agent.config import AgentLoopConfig
 from app.agent.message_context import convert_to_llm
 from app.agent.prompts import SYSTEM_PROMPT
-from app.agent.tools.files import WORKSPACE, create_file_tools
+from app.agent.tools.files import create_file_tools
 from app.agent.usage import summarize_usage
 from app.ai.context import validate_tool_pairs
 from app.ai.messages import (
@@ -23,15 +23,17 @@ from app.ai.messages import (
     serialize_message,
 )
 from app.model_config import load_model_config
+from test.regression_support import TEST_SESSION, session_workspace
 
 
 def check() -> None:
-    tools = create_file_tools()
     config = load_model_config()
     base_config = AgentLoopConfig(model=config, max_turns=64)
-    with TemporaryDirectory(dir=WORKSPACE) as directory:
+    with TemporaryDirectory() as directory:
         root = Path(directory)
-        path = f"{root.name}/note.txt"
+        tools = create_file_tools(TEST_SESSION, tmp_root=root)
+        workspace, prefix = session_workspace(root)
+        path = f"{prefix}/note.txt"
         token = uuid4().hex
         session: list = [
             SystemMessage(
@@ -124,11 +126,11 @@ def check() -> None:
             return events, starts, results
 
         _, starts, _ = turn(
-            f"只操作 {root.name}/ 内的文件。使用 write 在 {path} 写入精确文本 "
+            f"只使用文件工具操作工作文件。使用 write 在 {path} 写入精确文本 "
             f"{token}，然后使用 read 读取该文件。完成后说明结果。"
         )
         assert {item["name"] for item in starts.values()} >= {"write", "read"}
-        assert (root / "note.txt").read_text(encoding="utf-8") == token
+        assert (workspace / "note.txt").read_text(encoding="utf-8") == token
         count = len(session)
         events, starts, results = turn(
             "沿用上一轮上下文中的文件路径和原文本：使用 edit 将原文本加上 -updated；"
@@ -145,7 +147,7 @@ def check() -> None:
             "find",
             "grep",
         }
-        assert (root / "note.txt").read_text(encoding="utf-8") == token + "-updated"
+        assert (workspace / "note.txt").read_text(encoding="utf-8") == token + "-updated"
         final_text = "".join(
             block.text
             for block in session[-1].content
@@ -173,7 +175,7 @@ def check() -> None:
                 run_agent_loop([user], context, base_config, cancel_on_tool, cancel),
             ).exception()
         assert isinstance(failure, CancelledError)
-        assert (root / "note.txt").read_text(encoding="utf-8") == token + "-updated"
+        assert (workspace / "note.txt").read_text(encoding="utf-8") == token + "-updated"
         assert isinstance(session[-1], AssistantMessage)
 
         async def noop(event):

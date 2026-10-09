@@ -13,7 +13,7 @@ from pydantic import ValidationError
 
 from app.agent.agent_loop import run_agent_loop
 from app.agent.config import AgentLoopConfig
-from app.agent.tools.files import WORKSPACE, create_file_tools
+from app.agent.tools.files import create_file_tools
 from app.agent.usage import summarize_usage
 from app.ai.api.openai_completions import STOP_REASONS
 from app.ai.context import normalize_context
@@ -28,6 +28,7 @@ from app.ai.messages import (
 from app.ai.stream import complete, stream
 from app.ai.types import DoneReason, ModelSpec
 from app.model_config import load_model_config
+from test.regression_support import TEST_SESSION, session_workspace
 
 
 def checked_run(coro):
@@ -115,8 +116,9 @@ async def check_steering(config, directory):
 
     polls = 0
     events.clear()
-    tools = {"write": create_file_tools()["write"]}
-    path = f"{directory.name}/truncated.txt"
+    workspace, prefix = session_workspace(directory)
+    tools = {"write": create_file_tools(TEST_SESSION, tmp_root=directory)["write"]}
+    path = f"{prefix}/truncated.txt"
     system = SystemMessage(role="system", content="必须调用 write 写入用户提供的完整文本。", tools_added=[tools["write"].definition()], timestamp=0)
     def limited_first_stream(model, context, options):
         assert options["max_tokens"] == 16384
@@ -162,18 +164,18 @@ async def check_steering(config, directory):
         json.loads(raw_arguments)
     assert not any(event["type"] == "toolcall_end" for event in first_updates)
     assert not any(event["type"] in {"tool_start", "tool_result"} for event in events)
-    assert not (directory / "truncated.txt").exists()
+    assert not (workspace / "truncated.txt").exists()
     normalize_context([system, *messages])
 
     polls = 0
     events.clear()
-    path = f"{directory.name}/real.txt"
+    path = f"{prefix}/real.txt"
     loop_config.get_steering_messages = steer
     messages = await run_agent_loop(
         [user(f"调用 write，在 {path} 写入精确文本 real，然后报告结果。")],
         {"messages": [system], "tools": tools}, loop_config, emit,
     )
-    assert (directory / "real.txt").read_text(encoding="utf-8") == "real"
+    assert (workspace / "real.txt").read_text(encoding="utf-8") == "real"
     assert polls == 3
     assert any(event["type"] == "tool_result" for event in events)
     normalize_context([system, *messages])
@@ -185,13 +187,14 @@ async def check_cancel(config, model, options):
         events = []
         trace = []
         polls = 0
-        tools = (
-            {"write": create_file_tools()["write"]}
-            if boundary in {"tool_start", "tool_result"}
-            else {}
-        )
-        with TemporaryDirectory(dir=WORKSPACE) as directory:
-            path = Path(directory) / "cancelled.txt"
+        with TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            workspace, prefix = session_workspace(root)
+            tools = (
+                {"write": create_file_tools(TEST_SESSION, tmp_root=root)["write"]}
+                if boundary in {"tool_start", "tool_result"}
+                else {}
+            )
             system = SystemMessage(role="system", content="按用户要求执行。", tools_added=[tool.definition() for tool in tools.values()], timestamp=0)
 
             async def steer():
@@ -213,7 +216,7 @@ async def check_cancel(config, model, options):
 
             config_loop = AgentLoopConfig(model=config, max_turns=3, get_steering_messages=steer, save_message=save_message)
             prompt = (
-                f"调用 write 在 {path.parent.name}/cancelled.txt 写入 cancelled。" if tools
+                f"调用 write 在 {prefix}/cancelled.txt 写入 cancelled。" if tools
                 else "只回复 OK。" if boundary == "message_end"
                 else "逐行输出从 1 到 10000 的整数。"
             )
@@ -233,9 +236,9 @@ async def check_cancel(config, model, options):
                     assert entry[2] in saved_at and saved_at[entry[2]] < index, (boundary, entry)
             results = [event for event in events if event["type"] == "tool_result"]
             if boundary == "tool_result":
-                assert results and path.read_text(encoding="utf-8") == "cancelled"
+                assert results and (workspace / "cancelled.txt").read_text(encoding="utf-8") == "cancelled"
             else:
-                assert not results and not path.exists()
+                assert not results and not (workspace / "cancelled.txt").exists()
             if boundary == "generation":
                 assert not any(isinstance(block, ToolCall) for block in ends[0].content)
                 if ends[0].usage is None:
@@ -261,7 +264,7 @@ def check():
     model = ModelSpec(api=config.MODEL_API, provider=config.OPENAI_PROVIDER, id=config.OPENAI_MODEL, base_url=config.OPENAI_BASE_URL)
     options = {"api_key": config.OPENAI_API_KEY, "max_tokens": 16384}
     checked_run(check_stream(model, options))
-    with TemporaryDirectory(dir=WORKSPACE) as directory:
+    with TemporaryDirectory() as directory:
         checked_run(check_steering(config, Path(directory)))
     checked_run(check_cancel(config, model, options))
     print("真实 OpenAI stop、toolUse、length、aborted、steering、取消和资源收尾检查通过")

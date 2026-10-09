@@ -17,7 +17,7 @@ from app.agent.tool import (
     BeforeToolCallResult,
     run_tool_batch,
 )
-from app.agent.tools.files import WORKSPACE, create_file_tools
+from app.agent.tools.files import create_file_tools
 from app.ai.messages import (
     AssistantMessage,
     SystemMessage,
@@ -33,7 +33,12 @@ from app.domain.session.models import SendCommand, SendRequest, SessionMessageEn
 from app.infrastructure.persistence.sqlite.database import open_database
 from app.infrastructure.persistence.sqlite.repository import SqliteSessionRepository
 from app.interfaces.http import CredentialDetectedError, CredentialFilter
-from test.regression_support import temporary_root, text
+from test.regression_support import (
+    TEST_SESSION,
+    session_workspace,
+    temporary_root,
+    text,
+)
 
 EVIDENCE = temporary_root("tool-scheduling")
 
@@ -526,11 +531,11 @@ def check_task_cancel_cleanup() -> None:
 
 
 def check_real_file_tools() -> None:
-    with TemporaryDirectory(dir=WORKSPACE) as directory:
-        root = Path(directory)
-        tools = create_file_tools()
-        (root / "note.txt").write_text("hello\nworld\n", encoding="utf-8")
-        prefix = root.name
+    with TemporaryDirectory() as directory:
+        root = Path(directory).resolve()
+        tools = create_file_tools(TEST_SESSION, tmp_root=root)
+        workspace, prefix = session_workspace(root)
+        (workspace / "note.txt").write_text("hello\nworld\n", encoding="utf-8")
         calls = [
             make_call("read", {"path": f"{prefix}/note.txt"}, "c-read"),
             make_call("grep", {"path": f"{prefix}", "pattern": "world", "glob": "**/*.txt"}, "c-grep"),
@@ -570,7 +575,7 @@ def check_credential_stops_scheduling() -> None:
             service = SessionService(SqliteSessionRepository(database))
             session_id = str(uuid4())
             await service.create_session(session_id, "凭据停止调度")
-            with TemporaryDirectory(dir=WORKSPACE) as directory:
+            with TemporaryDirectory() as directory:
                 root = Path(directory)
                 executed: list[str] = []
 
@@ -686,7 +691,7 @@ def check_database_ordering() -> None:
             service = SessionService(SqliteSessionRepository(database))
             session_id = str(uuid4())
             await service.create_session(session_id, "调度排序")
-            with TemporaryDirectory(dir=WORKSPACE) as directory:
+            with TemporaryDirectory() as directory:
                 root = Path(directory)
                 fast_finalized = Event()
 
@@ -699,7 +704,7 @@ def check_database_ordering() -> None:
                 probe = AgentTool(
                     "probe", "probe", ProbeArguments, probe_execute, execution_mode="parallel"
                 )
-                tools = {**create_file_tools(), "probe": probe}
+                tools = {**create_file_tools(TEST_SESSION, tmp_root=root), "probe": probe}
                 system = SystemMessage(
                     role="system",
                     content="",

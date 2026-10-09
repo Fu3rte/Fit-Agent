@@ -64,7 +64,7 @@ assert.deepEqual(regenRound.entries, [], "重新生成占位不伪造用户消�
 const history = {
   session: { session_id: sessionId, title: "会话", active_leaf_id: C, created_at: 1, updated_at: 2 },
   entries: [
-    { entry_id: A, parent_id: null, run_id: null, created_at: 1, message: { role: "user", text: "第一条。", timestamp: 1 } },
+    { entry_id: A, parent_id: null, run_id: null, created_at: 1, message: { role: "user", text: "第一条。", timestamp: 1, attachments: [] } },
     { entry_id: ASSIST, parent_id: A, run_id: RUN, created_at: 2, message: { role: "assistant", content: [], stop_reason: "stop", timestamp: 2 } },
   ],
   runs: [{ session_id: sessionId, run_id: RUN, request_entry_id: A, last_entry_id: ASSIST, status: "completed", started_at: 1, finished_at: 2, error_code: null, error_message: null }],
@@ -99,16 +99,16 @@ const steerId = u(46);
 const historyRound = historyToRounds({
   session: { session_id: sessionId, title: "会话", active_leaf_id: A2, created_at: 1, updated_at: 2 },
   entries: [
-    { entry_id: U0, parent_id: null, run_id: null, created_at: 1, message: { role: "user", text: "原始请求。", timestamp: 1 } },
+    { entry_id: U0, parent_id: null, run_id: null, created_at: 1, message: { role: "user", text: "原始请求。", timestamp: 1, attachments: [] } },
     { entry_id: A0, parent_id: U0, run_id: RUN0, created_at: 2, message: { role: "assistant", content: [], stop_reason: "stop", timestamp: 2 } },
-    { entry_id: S, parent_id: A0, run_id: RUN0, created_at: 3, message: { role: "user", text: "追加。", timestamp: 3 } },
+    { entry_id: S, parent_id: A0, run_id: RUN0, created_at: 3, message: { role: "user", text: "追加。", timestamp: 3, attachments: [] } },
     { entry_id: A2, parent_id: S, run_id: RUN2, created_at: 4, message: { role: "assistant", content: [], stop_reason: "stop", timestamp: 4 } },
   ],
   runs: [
     { session_id: sessionId, run_id: RUN0, request_entry_id: U0, last_entry_id: A0, status: "completed", started_at: 1, finished_at: 2, error_code: null, error_message: null },
     { session_id: sessionId, run_id: RUN2, request_entry_id: S, last_entry_id: A2, status: "completed", started_at: 3, finished_at: 4, error_code: null, error_message: null },
   ],
-  steering: [{ session_id: sessionId, run_id: RUN0, steering_id: steerId, text: "追加。", timestamp: 3, status: "consumed", entry_id: S, reason: null, created_at: 3, updated_at: 3 }],
+  steering: [{ session_id: sessionId, run_id: RUN0, steering_id: steerId, text: "追加。", attachments: [], timestamp: 3, status: "consumed", entry_id: S, reason: null, created_at: 3, updated_at: 3 }],
 });
 const byRun = new Map(historyRound.map((item) => [item.run_id, item]));
 assert.deepEqual(byRun.get(RUN0).entries.map((entry) => entry.id), [U0, A0], "目标节点不再留在旧运行轮次");

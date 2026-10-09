@@ -162,7 +162,7 @@ async def check():
 def main():
     evidence = asyncio.run(check())
     dates = []
-    bash = create_bash_tool()
+    bash = create_bash_tool(str(uuid4()))
     for day, offset, expected in [("2026-01-01", 1, "2025-12-31"),
                                   ("2024-03-01", 1, "2024-02-29"),
                                   ("2026-03-01", 3, "2026-02-26")]:

@@ -13,6 +13,7 @@ from pydantic import ValidationError
 from app.agent.tool import CredentialDetectedError, run_tool_batch
 from app.agent.tools.business import bind_business_tools, business_tool_declarations
 from app.agent.tools.exercises import exercise_tool_declarations
+from app.agent.tools.plan_import import plan_import_tool_declarations
 from app.agent.tools.plans import plan_tool_declarations
 from app.agent.tools.profile import profile_tool_declarations
 from app.agent.tools.workouts import workout_tool_declarations
@@ -63,7 +64,9 @@ EXERCISE_FIELDS = {
 }
 WORKOUT_TOOLS = [item.name for item in workout_tool_declarations()]
 PLAN_TOOLS = [item.name for item in plan_tool_declarations()]
-BUSINESS_TOOLS = {GET_PROFILE, SEARCH_EXERCISES, PREPARE, SAVE, STATUS, *WORKOUT_TOOLS, *PLAN_TOOLS}
+PLAN_IMPORT_TOOLS = [item.name for item in plan_import_tool_declarations()]
+BUSINESS_TOOLS = {GET_PROFILE, SEARCH_EXERCISES, PREPARE, SAVE, STATUS, *WORKOUT_TOOLS, *PLAN_TOOLS,
+                  *PLAN_IMPORT_TOOLS}
 
 
 async def check_catalog(directory: Path) -> dict:
@@ -104,12 +107,14 @@ async def check_declarations() -> dict:
         STATUS,
         *WORKOUT_TOOLS,
         *PLAN_TOOLS,
+        *PLAN_IMPORT_TOOLS,
     ]
     profile = profile_tool_declarations()
     exercises = exercise_tool_declarations()
     assert {item.name for item in profile} == {GET_PROFILE, PREPARE, SAVE, STATUS}
     assert [item.name for item in exercises] == [SEARCH_EXERCISES]
-    assert {item.name: item for item in profile + exercises + workout_tool_declarations() + plan_tool_declarations()} == DECLARED
+    assert {item.name: item for item in profile + exercises + workout_tool_declarations()
+            + plan_tool_declarations() + plan_import_tool_declarations()} == DECLARED
     serialized = json.dumps(
         [item.model_dump() for item in profile + exercises + workout_tool_declarations()], ensure_ascii=False
     )
@@ -217,12 +222,15 @@ async def check_argument_preparation(root: Path) -> dict:
         tools = bind_business_tools(fixture.business, context, fixture.call, {}, {})
         assert tools[PREPARE].prepare_arguments is not None
         assert tools[PREPARE].prepare_arguments.__module__ == "app.agent.tools.profile"
+        plan_preparation = {"prepare_plan_import", "prepare_plan_adjustment"}
+        for name in plan_preparation:
+            assert tools[name].prepare_arguments.__module__ == "app.agent.tools.plan_import"
         assert tools[SEARCH_EXERCISES].execute.__module__ == "app.agent.tools.exercises"
         assert list(tools) == list(DECLARED)
         assert all(
             tool.prepare_arguments is None
             for name, tool in tools.items()
-            if name not in {PREPARE, "prepare_workout"}
+            if name not in {PREPARE, "prepare_workout", *plan_preparation}
         )
         for version in (None, 1, 2):
             valid = prepare_arguments(version, payload())
@@ -584,7 +592,7 @@ async def check_migration(root: Path) -> dict:
     await database.close()
     reopened = await open_database(path)
     await reopened.close()
-    assert SCHEMA_VERSION == 7
+    assert SCHEMA_VERSION == max(_MIGRATIONS)
     return {"from": 3, "to": SCHEMA_VERSION}
 
 

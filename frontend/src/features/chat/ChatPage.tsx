@@ -4,7 +4,7 @@ import ChatComposer from "./components/ChatComposer";
 import ChatTranscript from "./components/ChatTranscript";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
-import { unknownSteeringRequests } from "./utils/reactAgent";
+import { unknownSteeringKeys } from "./utils/reactAgent";
 import { sessionRuns } from "./utils/sessionRunManager";
 
 /**
@@ -38,8 +38,8 @@ export default function ChatPage({
       navigate(`/sessions/${sessionId}`);
   }, [isDraft, view.persistent, location.pathname, navigate, sessionId]);
 
-  const unknownRequests = useMemo(
-    () => unknownSteeringRequests(view.operations),
+  const unknownKeys = useMemo(
+    () => unknownSteeringKeys(view.operations),
     [view.operations],
   );
 
@@ -58,6 +58,7 @@ export default function ChatPage({
         </h2>
       ) : (
         <ChatTranscript
+          sessionId={sessionId}
           rounds={view.rounds}
           onRetry={run.retry}
           onWithdraw={run.withdraw}
@@ -84,7 +85,7 @@ export default function ChatPage({
         busy={view.busy}
         ready={view.ready}
         error={view.error}
-        unknownRequests={unknownRequests}
+        unknownKeys={unknownKeys}
         onSend={run.send}
         onStop={run.stop}
       />

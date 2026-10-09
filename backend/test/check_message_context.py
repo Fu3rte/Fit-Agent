@@ -8,7 +8,7 @@ from threading import Event
 from pydantic import TypeAdapter, ValidationError
 
 from app.agent.message_context import convert_to_llm, prepare_message_context
-from app.agent.tools.files import WORKSPACE, create_file_tools
+from app.agent.tools.files import create_file_tools
 from app.ai.context import (
     get_current_system_message,
     get_current_system_prompt,
@@ -17,7 +17,11 @@ from app.ai.context import (
     validate_tool_pairs,
 )
 from app.ai.messages import Message, serialize_message
-from test.regression_support import run_tool
+from test.regression_support import (
+    TEST_SESSION,
+    run_tool,
+    session_workspace,
+)
 
 _adapter = TypeAdapter(Message)
 
@@ -217,11 +221,6 @@ def check_failures(messages: list[Message]) -> None:
 
 
 def check() -> None:
-    registry = create_file_tools()
-    declarations = {
-        name: tool.definition().model_dump(exclude_unset=True)
-        for name, tool in registry.items()
-    }
     usage = {
         "input": 2,
         "output": 3,
@@ -238,10 +237,17 @@ def check() -> None:
             "total": 1,
         },
     }
-    with TemporaryDirectory(dir=WORKSPACE) as directory:
-        path = Path(directory) / "context.txt"
+    with TemporaryDirectory() as directory:
+        tmp_root = Path(directory).resolve()
+        registry = create_file_tools(TEST_SESSION, tmp_root=tmp_root)
+        declarations = {
+            name: tool.definition().model_dump(exclude_unset=True)
+            for name, tool in registry.items()
+        }
+        workspace, prefix = session_workspace(tmp_root)
+        path = workspace / "context.txt"
         path.write_text("context-check", encoding="utf-8")
-        arguments = {"path": path.relative_to(WORKSPACE).as_posix()}
+        arguments = {"path": f"{prefix}/context.txt"}
         result = run_tool(registry["read"], arguments)
         assert result.is_error is False
         sources = [

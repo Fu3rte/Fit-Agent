@@ -856,6 +856,7 @@ def http_checks(evidence: dict) -> None:
             "role": "user",
             "text": "问题一",
             "timestamp": 100,
+            "attachments": [],
         }
         tool_message = body["entries"][2]["message"]
         assert tool_message["role"] == "assistant"
