@@ -5,7 +5,12 @@ from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from app.agent.tool import AgentTool, AgentToolResult
+from app.agent.tool import (
+    AgentTool,
+    AgentToolResult,
+    BeforeToolCallContext,
+    BeforeToolCallResult,
+)
 from app.ai.messages import TextContent
 from app.domain.session.attachments import TMP_ROOT, validate_uuid
 
@@ -47,6 +52,10 @@ class LsArguments(PathArguments):
     limit: int = Field(default=100, ge=1, le=1000)
 
 
+class WorkspaceAccessDenied(PermissionError):
+    pass
+
+
 def is_linked(path: Path) -> bool:
     # 符号链接、Windows junction 及 reparse point 都不能作为路径组件。
     if path.is_symlink():
@@ -61,11 +70,11 @@ def is_linked(path: Path) -> bool:
 def reject_links(root: Path, relative: Path) -> None:
     current = root
     if is_linked(current):
-        raise PermissionError("路径不得包含链接或 reparse point")
+        raise WorkspaceAccessDenied("路径不得包含链接或 reparse point")
     for part in relative.parts:
         current = current / part
         if is_linked(current):
-            raise PermissionError("路径不得包含链接或 reparse point")
+            raise WorkspaceAccessDenied("路径不得包含链接或 reparse point")
 
 
 class Workspace:
@@ -90,18 +99,10 @@ class Workspace:
     def root(self) -> Path:
         return self._root
 
-    def ensure_workspace(self) -> Path:
-        relative = Path(SESSION_DIRECTORY) / self._session_id / WORKSPACE_DIRECTORY
-        reject_links(self._root, relative)
-        (self._root / relative).mkdir(parents=True, exist_ok=True)
-        return self._within(
-            relative, self.workspace_root, "write 和 edit 只允许操作当前会话 workspace"
-        )
-
     def relative(self, path: str) -> Path:
         relative = Path(path)
         if relative.anchor or ".." in relative.parts:
-            raise PermissionError("只允许 tmp 根目录内的相对路径")
+            raise WorkspaceAccessDenied("只允许 tmp 根目录内的相对路径")
         return relative
 
     def read_path(self, path: str) -> Path:
@@ -114,11 +115,28 @@ class Workspace:
         reject_links(self._root, relative)
         resolved = (self._root / relative).resolve()
         if not resolved.is_relative_to(allowed):
-            raise PermissionError(message)
+            raise WorkspaceAccessDenied(message)
         return resolved
 
     def relative_to_root(self, target: Path) -> str:
         return target.relative_to(self._root).as_posix()
+
+
+class FilePermissionContext(BaseModel):
+    model_config = ConfigDict(frozen=True, arbitrary_types_allowed=True)
+    workspace: Workspace
+
+
+def check_file_permission(context: BeforeToolCallContext) -> BeforeToolCallResult | None:
+    if not isinstance(context.trusted_context, FilePermissionContext):
+        raise TypeError("文件工具缺少可信 Workspace 绑定")
+    if not isinstance(context.arguments, (WriteArguments, EditArguments)):
+        raise TypeError("文件写入参数类型不一致")
+    try:
+        context.trusted_context.workspace.write_path(context.arguments.path)
+    except WorkspaceAccessDenied as error:
+        return BeforeToolCallResult(block=True, reason=str(error))
+    return None
 
 
 def iter_files(workspace: Workspace, path: str):
@@ -249,6 +267,7 @@ def create_file_tools(
             EditArguments,
             edit,
             execution_mode="sequential",
+            trusted_context=FilePermissionContext(workspace=workspace),
         ),
         AgentTool(
             "write",
@@ -257,6 +276,7 @@ def create_file_tools(
             WriteArguments,
             write,
             execution_mode="sequential",
+            trusted_context=FilePermissionContext(workspace=workspace),
         ),
         AgentTool(
             "grep",

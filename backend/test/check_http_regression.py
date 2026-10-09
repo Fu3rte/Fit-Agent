@@ -27,6 +27,7 @@ from test.regression_support import (
     Server,
     client,
     patch_default_database,
+    seed_note,
     temporary_root,
 )
 
@@ -34,6 +35,8 @@ EVIDENCE = temporary_root("http-regression")
 SYSTEM_MESSAGE = SystemMessage(
     role="system", content="按用户要求执行。", tools_added=[], timestamp=0
 )
+# 真实模型长输出流提供可观测的运行中窗口，用于断连、关闭与取消收尾场景。
+BUSY_REQUEST = "逐行输出从 1 到 100000 的整数，不要省略。无需使用工具。"
 
 
 def service_call(coro):
@@ -150,7 +153,7 @@ def check_unknown_result_query_during_run(server, http, evidence):
         json={
             "session_id": session_id,
             "operation_id": operation_id,
-            "request": "必须调用 bash，command 精确为 sleep 2，timeout 为 10；完成后报告。",
+            "request": f"必须调用 read 读取 {seed_note(session_id)} 一次，然后报告读取结果。",
         },
     ) as response:
         run_id = response.headers["X-Run-ID"]
@@ -235,7 +238,7 @@ def check_steering_races(server, http, evidence):
         json={
             "session_id": session_id,
             "operation_id": str(uuid4()),
-            "request": "必须调用 bash，command 精确为 sleep 3，timeout 为 10；完成后报告。",
+            "request": f"必须调用 read 读取 {seed_note(session_id)} 一次，然后报告读取结果。",
         },
     ) as response:
         run_id = response.headers["X-Run-ID"]
@@ -300,12 +303,12 @@ def check_steering_discard_on_cancel(server, http, evidence):
         json={
             "session_id": session_id,
             "operation_id": str(uuid4()),
-            "request": "必须调用 bash，command 精确为 sleep 3，timeout 为 10；完成后报告。",
+            "request": BUSY_REQUEST,
         },
     ) as response:
         run_id = response.headers["X-Run-ID"]
         for event in events(response):
-            if event["event"] == "tool_start":
+            if event["event"] == "message_update":
                 accepted = http.post(
                     f"/api/agent/runs/{run_id}/steering",
                     json={
@@ -344,7 +347,7 @@ def check_commit_before_notify(server, http, evidence):
         json={
             "session_id": session_id,
             "operation_id": str(uuid4()),
-            "request": "必须调用 bash，command 精确为 sleep 1，timeout 为 10；完成后报告。",
+            "request": f"必须调用 read 读取 {seed_note(session_id)} 一次，然后报告读取结果。",
         },
     ) as response:
         run_id = response.headers["X-Run-ID"]
@@ -440,14 +443,14 @@ def check_shutdown_finalization(path, evidence):
                 json={
                     "session_id": session_id,
                     "operation_id": operation_id,
-                    "request": "必须调用 bash，command 精确为 sleep 3，timeout 为 10；完成后报告。",
+                    "request": BUSY_REQUEST,
                 },
             ) as response:
                 run_id = response.headers["X-Run-ID"]
                 for event in events(response):
-                    if event["event"] == "tool_start":
+                    if event["event"] == "message_update":
+                        assert active.locked()
                         break
-                assert active.locked()
                 shutdown = {"run_id": run_id, "session_id": session_id}
 
     async def inspect():
@@ -483,7 +486,7 @@ def check_immediate_disconnect(http, evidence):
         json={
             "session_id": session_id,
             "operation_id": str(uuid4()),
-            "request": "必须调用 bash，command 精确为 sleep 3，timeout 为 10；完成后报告。",
+            "request": BUSY_REQUEST,
         },
     ) as response:
         assert response.status_code == 200

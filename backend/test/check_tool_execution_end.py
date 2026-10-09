@@ -98,13 +98,13 @@ def check_projection() -> None:
         failure = ToolResultMessage(
             role="toolResult",
             tool_call_id="tc-fail",
-            tool_name="bash",
-            content=[TextContent(type="text", text="命令失败")],
+            tool_name="read",
+            content=[TextContent(type="text", text="工具执行失败：没有此类文件")],
             is_error=True,
             timestamp=0,
         )
         failed = public_tool_execution_end(internal_event(FinalizedToolCall(0, failure)))
-        assert failed["is_error"] is True and failed["content"] == "命令失败"
+        assert failed["is_error"] is True and failed["content"] == "工具执行失败：没有此类文件"
 
 
 def check_publish_and_encode() -> None:

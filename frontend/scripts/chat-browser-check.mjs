@@ -34,6 +34,11 @@ async function until(expression) {
 const message = "textarea[aria-label='消息']";
 const transcriptText = "document.querySelector('[data-slot=message-scroller-content]').innerText";
 const stop = "button[aria-label='停止']";
+// 真实工具卡片提供可见调用详情，后续长输出保持运行中窗口用于 steering、停止与冲突断言。
+const toolCard = "button[aria-label='calculate_date 工具调用详情']";
+const toolCount = `document.querySelectorAll("${toolCard}").length`;
+const toolRequest = (reply) =>
+  `必须调用 calculate_date 传 days_offset=-1，然后逐行输出从 1 到 100000 的整数，不要省略，最后一行只写 ${reply}。`;
 function send(text) { browser("fill", message, text); browser("press", "Enter"); }
 
 try {
@@ -47,8 +52,8 @@ try {
   browser("press", "Shift+Enter");
   assert.match(evaluate("document.querySelector('textarea').value"), /\n/);
 
-  send("必须调用 bash，command 精确为 sleep 5，timeout 为 10；完成后只回复 FIRST_BROWSER。");
-  await until("!!document.querySelector(\"button[aria-label='bash 工具调用详情']\")");
+  send(toolRequest("FIRST_BROWSER"));
+  await until(`!!document.querySelector("${toolCard}")`);
   assert.equal(evaluate("document.querySelector('textarea').disabled"), false);
   assert.equal(evaluate(`!!document.querySelector(${JSON.stringify(stop)})`), true);
   send("只回复 STEER_BROWSER。");
@@ -57,11 +62,11 @@ try {
   assert.equal(evaluate(`${transcriptText}.includes('STEER_BROWSER')`), true);
   assert.equal(evaluate("document.querySelectorAll('[role=alert]').length"), 0);
   assert.equal(evaluate("[...document.querySelectorAll('[data-slot=message-scroller-item]')].filter(el=>el.innerText==='只回复 STEER_BROWSER。').length"), 1);
-  browser("click", "button[aria-label='bash 工具调用详情']");
-  assert.equal(evaluate(`${transcriptText}.includes('sleep 5')`), true);
+  browser("click", toolCard);
+  assert.equal(evaluate(`${transcriptText}.includes('days_offset')`), true);
 
-  send("必须调用 bash，command 精确为 sleep 20，timeout 为 30；结束后只回复 STOP_BROWSER。");
-  await until("document.querySelectorAll(\"button[aria-label='bash 工具调用详情']\").length === 2");
+  send(toolRequest("STOP_BROWSER"));
+  await until(`${toolCount} === 2`);
   browser("fill", message, "保留的后续输入");
   browser("click", stop);
   assert.equal(evaluate("document.querySelector('textarea').value"), "保留的后续输入");
@@ -80,9 +85,9 @@ try {
   send("只回复 NEW_BROWSER。");
   await until(`!document.querySelector(${JSON.stringify(stop)}) && ${transcriptText}.includes('NEW_BROWSER')`);
   assert.equal(evaluate("document.querySelectorAll('[role=alert]').length"), 0, evaluate(transcriptText));
-  const previousTools = evaluate("document.querySelectorAll(\"button[aria-label='bash 工具调用详情']\").length");
-  send("必须调用 bash，command 精确为 sleep 10，timeout 为 20；完成后只回复 UNKNOWN_BROWSER。");
-  await until(`document.querySelectorAll("button[aria-label='bash 工具调用详情']").length > ${previousTools}`);
+  const previousTools = evaluate(toolCount);
+  send(toolRequest("UNKNOWN_BROWSER"));
+  await until(`${toolCount} > ${previousTools}`);
   browser("set", "offline", "on");
   send("未知的 steering 内容");
   await until(`${transcriptText}.includes('Steering 提交结果未知。')`);

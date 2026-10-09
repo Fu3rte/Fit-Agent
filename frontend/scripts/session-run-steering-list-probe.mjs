@@ -113,7 +113,7 @@ try {
   note("AbortSignal 中止在请求层原样抛出");
 
   // 4. 执行期间查询：running 快照与空输入列表
-  const longRequest = "必须调用 bash，command 精确为 sleep 30，timeout 为 45；结束后只回复 LIST_PROBE_LONG。";
+  const longRequest = "逐行输出从 1 到 100000 的整数，不要省略，最后一行只写 LIST_PROBE_LONG。无需使用工具。";
   let cancelRunId = null;
   const cancelStream = new AbortController();
   api
@@ -199,7 +199,7 @@ try {
   note(`取消收尾：运行 cancelled，第三条输入 ${left.status}${left.reason === null ? "" : `/${left.reason}`}`);
 
   // 7. 运行中断：写入 pending 输入后硬杀进程，重启后按中断恢复投影
-  const interruptRequest = "必须调用 bash，command 精确为 sleep 35，timeout 为 60；结束后只回复 LIST_PROBE_INTERRUPT。";
+  const interruptRequest = "逐行输出从 1 到 100000 的整数，不要省略，最后一行只写 LIST_PROBE_INTERRUPT。无需使用工具。";
   let interruptRunId = null;
   const interruptStream = new AbortController();
   api

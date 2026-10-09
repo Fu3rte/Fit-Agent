@@ -25,7 +25,7 @@ from test.check_http import (
     validate_events,
     wait_idle,
 )
-from test.regression_support import patch_default_database
+from test.regression_support import patch_default_database, seed_note
 
 EVIDENCE = Path(__file__).resolve().parents[1] / "temp" / "http-contract"
 
@@ -138,7 +138,7 @@ def check() -> None:
             with client.stream("POST", "/api/agent/run", json={
                 "session_id": tool_session,
                 "operation_id": str(uuid4()),
-                "request": "必须调用 bash，command 精确为 sleep 0.3，timeout 为 10；完成后报告。",
+                "request": f"必须调用 read 读取 {seed_note(tool_session)}，然后说明读取结果。",
             }) as response:
                 tool_run = response.headers["X-Run-ID"]
                 tool_received = []
@@ -159,10 +159,12 @@ def check() -> None:
 
             failure_session = str(uuid4())
             create_session(client, failure_session)
+            seed_note(failure_session)
+            absent = f"sessions/{failure_session}/workspace/absent-{uuid4().hex}.txt"
             with client.stream("POST", "/api/agent/run", json={
                 "session_id": failure_session,
                 "operation_id": str(uuid4()),
-                "request": "必须直接调用 bash，command 精确为 sleep 2，timeout 为 0.2；不得提前回答，不得使用其他工具。",
+                "request": f"必须直接调用 read 读取 {absent}；不得提前回答，不得使用其他工具。",
             }) as response:
                 failed_run = response.headers["X-Run-ID"]
                 failure = []
@@ -179,7 +181,7 @@ def check() -> None:
             assert any(
                 item["event"] == "tool_result"
                 and item["data"]["is_error"] is True
-                and "Command timed out after 0.2 seconds" in item["data"]["content"]
+                and "工具执行失败" in item["data"]["content"]
                 for item in failure
             )
             assert any(
@@ -189,42 +191,28 @@ def check() -> None:
                 for item in failure
             )
             assert last_run(failure_session).status == "completed" and UUID(failed_run) not in runs
-            evidence["tool_timeout"] = failure
-
-            business_session = str(uuid4())
-            create_session(client, business_session)
-            with client.stream("POST", "/api/agent/run", json={
-                "session_id": business_session,
-                "operation_id": str(uuid4()),
-                "request": "必须调用 bash，command 精确为 exit 7，然后说明真实结果。",
-            }) as response:
-                business = list(events(response))
-            wait_idle()
-            validate_events(business)
-            assert business[-1]["event"] == "done"
-            assert any(item["event"] == "tool_result" and item["data"]["is_error"] is True and "7" in item["data"]["content"] for item in business)
-            evidence["tool_error"] = business
+            evidence["tool_error"] = failure
 
             cancelled_session = str(uuid4())
             create_session(client, cancelled_session)
             with client.stream("POST", "/api/agent/run", json={
                 "session_id": cancelled_session,
                 "operation_id": str(uuid4()),
-                "request": "必须调用 bash，command 精确为 sleep 2，timeout 为 10；完成后报告。",
+                "request": "逐行输出从 1 到 100000 的整数，不要省略。无需使用工具。",
             }) as response:
                 cancelled_run = response.headers["X-Run-ID"]
                 disconnected = []
                 for item in events(response):
                     disconnected.append(item)
-                    if item["event"] == "tool_start":
+                    if item["event"] == "message_update":
                         reply = client.post(f"/api/agent/runs/{cancelled_run}/steering", json={"session_id": cancelled_session, "operation_id": str(uuid4()), "message": "只回复 LATE"})
                         assert reply.status_code == 200
                         assert active.locked()
+                        assert client.post("/api/agent/run", json={"session_id": str(uuid4()), "operation_id": str(uuid4()), "request": "OK"}).status_code == 409
                         break
-            time.sleep(0.1)
-            assert active.locked()
-            assert client.post("/api/agent/run", json={"session_id": str(uuid4()), "operation_id": str(uuid4()), "request": "OK"}).status_code == 409
+            # 断连只设置取消信号，收尾任务把运行推进到 cancelled 后才释放全局占用。
             wait_idle()
+            assert not active.locked()
             assert last_run(cancelled_session).status == "cancelled" and UUID(cancelled_run) not in runs
             assert client.post(f"/api/agent/runs/{cancelled_run}/steering", json={"session_id": cancelled_session, "operation_id": str(uuid4()), "message": "late"}).status_code == 409
             evidence["disconnect"] = disconnected
@@ -289,7 +277,7 @@ def check() -> None:
             assert key not in encoded
             assert all(term not in encoded for term in ("thinking_signature", "thought_signature", "text_signature", "Traceback", "Authorization"))
             (EVIDENCE / "real-events.json").write_text(encoded, encoding="utf-8")
-            print("PASS: real HTTP identity, FIFO steering, single consumption, rejection, tool timeout is_error, true is_error, stop/length/aborted, disconnect, resource cleanup; 100 atomic end races")
+            print("PASS: real HTTP identity, FIFO steering, single consumption, rejection, real tool error is_error, stop/length/aborted, disconnect, resource cleanup; 100 atomic end races")
     finally:
         server.should_exit = True
         thread.join(75)

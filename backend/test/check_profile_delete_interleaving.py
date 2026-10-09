@@ -3,6 +3,7 @@ import json
 import sqlite3
 import time
 from concurrent.futures import ThreadPoolExecutor
+from threading import Event
 from uuid import uuid4
 
 from app.agent.tools.business import bind_business_tools
@@ -118,20 +119,27 @@ def check() -> None:
 
         session = str(uuid4())
         assert http.post('/api/sessions', json={'session_id': session, 'title': 'TASK5_RUNNING_DELETE'}).status_code == 201
+        streamed = Event()
+
         async def running():
             with client(server.base_url) as streaming:
-                with streaming.stream('POST', '/api/agent/run', json={'session_id': session, 'operation_id': str(uuid4()), 'request': '必须调用 bash，command 精确为 sleep 3，timeout 为 10。完成后报告。'}) as stream:
+                with streaming.stream('POST', '/api/agent/run', json={'session_id': session, 'operation_id': str(uuid4()), 'request': '逐行输出从 1 到 100000 的整数，不要省略。无需使用工具。'}) as stream:
                     assert stream.status_code == 200
-                    return list(events(stream))
+                    collected = []
+                    for event in events(stream):
+                        collected.append(event)
+                        if event['event'] == 'message_update':
+                            streamed.set()
+                    return collected
         with ThreadPoolExecutor(max_workers=3) as pool:
             executing = pool.submit(lambda: asyncio.run(running()))
-            deadline = time.monotonic() + 30
-            while True:
-                body = http.get(f'/api/sessions/{session}/history').json()
-                if any(e['message']['role'] == 'assistant' and any(b.get('type') == 'tool_call' for b in e['message']['content']) for e in body['entries']):
-                    break
+            deadline = time.monotonic() + 60
+            # 真实模型流已开始增量输出，运行记录仍在 running，此时并发删除会话。
+            while not streamed.is_set():
                 assert time.monotonic() < deadline
                 time.sleep(0.05)
+            body = http.get(f'/api/sessions/{session}/history').json()
+            assert any(run['status'] == 'running' for run in body['runs']), body['runs']
             deletes = [pool.submit(http.delete, f'/api/sessions/{session}') for _ in range(2)]
             responses = [future.result(timeout=60) for future in deletes]
             terminal = executing.result(timeout=60)

@@ -19,7 +19,8 @@ from test.regression_support import (
 
 EVIDENCE = temporary_root("edit-regenerate")
 PLAIN_PROMPT = "只回答 OK，无需使用工具。"
-SLEEP_PROMPT = "必须调用 bash，command 精确为 sleep 3，timeout 为 10；完成后报告。"
+# 真实模型长输出流保持运行中窗口，用于忙碌冲突与取消收尾断言。
+BUSY_PROMPT = "逐行输出从 1 到 100000 的整数，不要省略。无需使用工具。"
 EXPIRED_DETAIL = {
     "code": "operation_conflict",
     "reason": "operation_expired",
@@ -281,13 +282,13 @@ def check_busy_and_cancel(http, evidence: dict) -> None:
             "session_id": session_id,
             "operation_id": str(uuid4()),
             "target_entry_id": user1,
-            "request": SLEEP_PROMPT,
+            "request": BUSY_PROMPT,
         },
     ) as response:
         edit_run = response.headers["X-Run-ID"]
         new_user = response.headers["X-Request-Entry-ID"]
         for event in events(response):
-            if event["event"] == "tool_start":
+            if event["event"] == "message_update":
                 assert active.locked()
                 busy = http.post(
                     "/api/agent/edit",

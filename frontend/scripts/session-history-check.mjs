@@ -100,10 +100,10 @@ try {
   note("快速切换展示与 URL 一致");
 
   // 6. 运行中刷新恢复：保持占用，终态后经历史刷新释放
-  send("必须调用 bash，command 精确为 sleep 12，timeout 为 20；结束后只回复 HISTORY_REFRESH。");
+  send("必须调用 calculate_date 传 days_offset=-1，然后逐行输出从 1 到 100000 的整数，不要省略，最后一行只写 HISTORY_REFRESH。");
   await until(`!!document.querySelector(${JSON.stringify(stop)})`, 60000, "运行开始");
   await until(`(${LEDGER}).some((item) => item.kind === 'send' && item.run_id)`, 60000, "运行受理并持久化");
-  await until("!!document.querySelector(\"button[aria-label='bash 工具调用详情']\")", 60000, "工具执行中");
+  await until(`!!document.querySelector("button[aria-label='calculate_date 工具调用详情']")`, 60000, "工具执行中");
   browser("reload");
   await until("!!document.querySelector('textarea')", 30000, "运行中刷新加载");
   browser("fill", message, "占用探测");

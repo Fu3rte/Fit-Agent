@@ -9,7 +9,6 @@ from app.agent.agent_loop import run_agent_loop
 from app.agent.config import AgentLoopConfig
 from app.agent.prompts import SYSTEM_PROMPT
 from app.agent.tool import AgentTool
-from app.agent.tools.bash import create_bash_tool
 from app.agent.tools.business import (
     bind_business_tools,
     business_tool_declarations,
@@ -54,10 +53,7 @@ async def run_scenario(
 ) -> tuple[list, str]:
     session_id = str(uuid4())
     await service.create_session(session_id, f"prompt-{session_id[:8]}")
-    static_tools = {
-        **create_file_tools(session_id),
-        "bash": create_bash_tool(session_id),
-    }
+    static_tools = create_file_tools(session_id)
     system_message = SystemMessage(
         role="system",
         content=SYSTEM_PROMPT,
@@ -218,9 +214,9 @@ async def _scenarios(root: Path) -> list[str]:
             names = {
                 event["name"] for event in events if event["type"] == "tool_start"
             }
-            # 允许当前生产注册表内的工具与文件/日期工具；任何保存类调用都构成越权确认。
+            # 允许当前生产注册表内的工具与文件工具；任何保存类调用都构成越权确认。
             assert names <= {item.name for item in business_tool_declarations()} | {
-                "bash", "read", "write", "edit"
+                "read", "write", "edit", "grep", "find", "ls"
             }, names
             writes = names & {"save_profile_update", "save_plan", "save_workout", "update_workout"}
             assert not writes, writes

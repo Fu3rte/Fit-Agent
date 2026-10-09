@@ -56,7 +56,7 @@ try {
   // Steering：接受/重复/同键冲突/撤回/消费冲突
   const steerSession = crypto.randomUUID();
   const sendOperation = crypto.randomUUID();
-  const steerRequest = "必须调用 bash，command 精确为 sleep 10，timeout 为 25；结束后只回复 STEER_PROBE。";
+  const steerRequest = "逐行输出从 1 到 100000 的整数，不要省略，最后一行只写 STEER_PROBE。无需使用工具。";
   await call("POST /api/sessions (steering)", "/api/sessions", { method: "POST", headers: json, body: JSON.stringify({ session_id: steerSession, title: steerRequest }) });
   const steerRun = await call("POST /api/agent/run (steering)", "/api/agent/run", { method: "POST", headers: stream, body: JSON.stringify({ session_id: steerSession, operation_id: sendOperation, request: steerRequest }), signal: controller.signal });
   const steerRunId = steerRun.headers.get("x-run-id");

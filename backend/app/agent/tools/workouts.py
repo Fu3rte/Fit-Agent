@@ -1,5 +1,14 @@
+from dataclasses import replace
+from functools import partial
+
 from app.agent.tool import AgentTool, ExecuteFunction, ToolDeclaration
-from app.agent.tools.common import MainLoopCall, business_result, unbound
+from app.agent.tools.common import (
+    FrozenBusinessContext,
+    MainLoopCall,
+    business_result,
+    check_business_permission,
+    unbound,
+)
 from app.ai.messages import JsonObject
 from app.application.business.service import BusinessService
 from app.domain.business.models import (
@@ -89,6 +98,8 @@ def bind_workout_tools(
     call: MainLoopCall,
     prepared: dict[str, str],
 ) -> dict[str, AgentTool]:
+    context = FrozenBusinessContext.model_validate(context.model_dump())
+
     def get_workout(tool_call_id, params: WorkoutGetArguments, signal, on_update):
         return business_result(service.get_workout(params.workout_id), call)
 
@@ -112,5 +123,17 @@ def bind_workout_tools(
             service.get_workout_save_status(context, params.proposal_id, signal), call
         )
 
-    return _tools(get_workout, list_workouts, prepare_workout, save_workout,
-                  update_workout, get_workout_save_status)
+    tools = _tools(get_workout, list_workouts, prepare_workout, save_workout,
+                   update_workout, get_workout_save_status)
+    for name in ("save_workout", "update_workout"):
+        tools[name] = replace(tools[name], trusted_context=context)
+    return tools
+
+
+async def check_workout_permission(context, service: BusinessService, call: MainLoopCall):
+    return await check_business_permission(
+        context,
+        partial(service.check_workout_save_authorization,
+                updating=context.tool_call.name == "update_workout"),
+        call,
+    )

@@ -1,7 +1,6 @@
 import asyncio
 import json
 import sqlite3
-import time
 from concurrent.futures import CancelledError
 from threading import Event, Thread
 from time import time_ns
@@ -12,7 +11,7 @@ import pytest
 
 from app.agent.agent_loop import run_agent_loop
 from app.agent.config import AgentLoopConfig
-from app.agent.tools.bash import create_bash_tool
+from app.agent.tools.files import create_file_tools
 from app.ai.messages import (
     AssistantMessage,
     SystemMessage,
@@ -25,6 +24,7 @@ from app.application.session.service import (
     CREDENTIAL_SAFE_MESSAGE,
     SessionService,
 )
+from app.domain.session.attachments import TMP_ROOT
 from app.domain.session.models import (
     SendCommand,
     SendRequest,
@@ -42,7 +42,7 @@ from app.interfaces.http import (
     terminal_decision,
 )
 from app.model_config import load_model_config
-from test.regression_support import temporary_root
+from test.regression_support import session_workspace, temporary_root
 
 EVIDENCE = temporary_root("agent-regression")
 ABORT_TRIGGER = "regress_abort_tool_result"
@@ -84,8 +84,12 @@ def check_tool_cancel(config, database_path):
             service = SessionService(SqliteSessionRepository(database))
             session_id = str(uuid4())
             await service.create_session(session_id, "取消注入")
-            tools = {"bash": create_bash_tool(session_id)}
-            prompt = "必须调用 bash，command 精确为 sleep 3，timeout 为 10；完成后报告。"
+            tools = create_file_tools(session_id)
+            workspace, prefix = session_workspace(TMP_ROOT, session_id)
+            (workspace / "note.txt").write_text("取消注入真实文件", encoding="utf-8")
+            prompt = (
+                f"必须调用 read 读取 {prefix}/note.txt 一次，然后完整说明该文件的真实内容。"
+            )
             send = await service.accept_send(
                 SendCommand(
                     operation_id=str(uuid4()),
@@ -96,6 +100,7 @@ def check_tool_cancel(config, database_path):
             )
             cancel = Event()
             started = Event()
+            messages = {"count": 0}
             trace = []
             position = {"id": send.run.request_entry_id}
 
@@ -114,8 +119,11 @@ def check_tool_cancel(config, database_path):
             async def emit(event):
                 key = event.get("message_id") or event.get("tool_call_id")
                 trace.append(("emit", event["type"], key))
-                if event["type"] == "tool_start":
-                    started.set()
+                # 工具结果已提交并定稿后的下一次模型流即取消注入点。
+                if event["type"] == "message_start":
+                    messages["count"] += 1
+                    if messages["count"] == 2:
+                        started.set()
 
             async def steer():
                 return []
@@ -129,7 +137,6 @@ def check_tool_cancel(config, database_path):
 
             def watcher():
                 started.wait(60)
-                time.sleep(0.5)
                 for _ in range(3):
                     cancel.set()
 
@@ -190,8 +197,10 @@ def check_commit_failure(config, database_path):
             service = SessionService(SqliteSessionRepository(database))
             session_id = str(uuid4())
             await service.create_session(session_id, "提交异常")
-            tools = {"bash": create_bash_tool(session_id)}
-            prompt = "必须调用 bash，command 精确为 echo ok，timeout 为 5；完成后报告。"
+            tools = create_file_tools(session_id)
+            workspace, prefix = session_workspace(TMP_ROOT, session_id)
+            (workspace / "commit.txt").write_text("提交异常真实文件", encoding="utf-8")
+            prompt = f"必须调用 read 读取 {prefix}/commit.txt 一次，然后报告读取结果。"
             send = await service.accept_send(
                 SendCommand(
                     operation_id=str(uuid4()),
@@ -274,8 +283,8 @@ def check_commit_failure(config, database_path):
                 ToolResultMessage(
                     role="toolResult",
                     tool_call_id="regress",
-                    tool_name="bash",
-                    content=[TextContent(type="text", text="ok")],
+                    tool_name="read",
+                    content=[TextContent(type="text", text="提交异常真实文件")],
                     is_error=False,
                     timestamp=0,
                 ),

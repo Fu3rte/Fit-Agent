@@ -8,6 +8,8 @@ from uuid import uuid4
 import httpx
 import uvicorn
 
+from app.domain.session.attachments import TMP_ROOT
+
 
 def run_tool(tool, arguments, *, declared=None, signal=None, tool_call_id="call"):
     from app.agent.tool import run_tool_call
@@ -46,6 +48,13 @@ def session_workspace(
 
 def session_directory(tmp_root: Path, session_id: str = TEST_SESSION) -> Path:
     return Path(tmp_root) / "sessions" / session_id
+
+
+def seed_note(session_id: str = TEST_SESSION) -> str:
+    # 文件工具按可信会话绑定；预置真实工作文件后返回 read 可用的相对路径。
+    directory, prefix = session_workspace(TMP_ROOT, session_id)
+    (directory / "note.txt").write_text("工具期间输入", encoding="utf-8")
+    return f"{prefix}/note.txt"
 
 
 def temporary_root(name: str) -> Path:

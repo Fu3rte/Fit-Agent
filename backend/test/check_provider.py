@@ -15,7 +15,6 @@ from pydantic import ValidationError
 
 from app.agent.agent_loop import run_agent_loop
 from app.agent.config import AgentLoopConfig
-from app.agent.tools.bash import create_bash_tool
 from app.agent.tools.files import create_file_tools
 from app.agent.usage import summarize_usage
 from app.ai.api.openai_completions import (
@@ -57,10 +56,7 @@ def check() -> None:
         config.create_client() as client,
     ):
         root = Path(directory)
-        registry = {
-            **create_file_tools(TEST_SESSION, tmp_root=root),
-            "bash": create_bash_tool(TEST_SESSION, tmp_root=root),
-        }
+        registry = create_file_tools(TEST_SESSION, tmp_root=root)
         workspace, prefix = session_workspace(root)
         system = SystemMessage(
             role="system",
@@ -333,14 +329,14 @@ def check() -> None:
         errors = [
             SystemMessage(
                 role="system",
-                content="仅执行用户指定的 Bash 命令，保留实际退出结果。",
-                tools_added=[registry["bash"].definition()],
+                content="仅按用户指定路径读取文件，保留真实读取结果。",
+                tools_added=[registry["read"].definition()],
                 timestamp=timestamp,
             ),
             UserMessage(
                 role="user",
-                content="必须用 bash 执行精确命令 printf failure; exit 7，"
-                "执行一次后说明实际结果，不重试。",
+                content=f"必须用 read 读取 {prefix}/absent.txt，"
+                "执行一次后说明实际结果，不重试也不改用其他工具。",
                 timestamp=timestamp,
             ),
         ]
@@ -364,8 +360,7 @@ def check() -> None:
             message.is_error is True for message in failed_results
         )
         assert all(
-            "Command exited with code 7" in message.content[0].text
-            for message in failed_results
+            "工具执行失败" in message.content[0].text for message in failed_results
         )
         validate_tool_pairs([*errors, *committed])
         totals = summarize_usage([*history, answer])
@@ -374,7 +369,7 @@ def check() -> None:
         )
         assert "cost" not in totals.model_dump(exclude_unset=True)
     print(
-        "真实文本、图片、工具图片回放、ID 映射、用量、声明校验、length 与 Bash 错误结果检查通过"
+        "真实文本、图片、工具图片回放、ID 映射、用量、声明校验、length 与真实文件读取失败结果检查通过"
     )
     print(
         f"真实思考回放字段：{replay_fields}；text_signature/thought_signature 为字段往返验证"

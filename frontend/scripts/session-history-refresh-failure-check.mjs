@@ -57,7 +57,7 @@ try {
   browser("reload");
   await until("!!document.querySelector('textarea')", 30000, "清空后加载");
 
-  send("必须调用 bash，command 精确为 sleep 10，timeout 为 20；结束后只回复 REFRESH_FAILURE。");
+  send("必须调用 calculate_date 传 days_offset=-1，然后逐行输出从 1 到 100000 的整数，不要省略，最后一行只写 REFRESH_FAILURE。");
   await until(`!!document.querySelector(${JSON.stringify(stop)})`, 90000, "运行开始");
   await until(`(${ledger}).some((item) => item.kind === 'send' && item.run_id)`, 30000, "运行受理并持久化操作");
   const operationId = evaluate(`(${ledger}).find((item) => item.kind === 'send').operation_id`);
@@ -68,7 +68,7 @@ try {
 
   browser("click", stop);
   await until(RELOAD, 60000, "历史刷新失败出现重载入口");
-  assert.equal(evaluate(`${transcriptText}.includes('必须调用 bash')`), true, "保留已展示内容");
+  assert.equal(evaluate(`${transcriptText}.includes('必须调用 calculate_date')`), true, "保留已展示内容");
   assert.ok((evaluate(ledger)).some((item) => item.kind === "send" && item.operation_id === operationId), "保留未确认账本");
   assert.equal(evaluate(`!!document.querySelector(${JSON.stringify(stop)})`), false, "失败不自动重发原操作");
   browser("fill", message, "占用探测");

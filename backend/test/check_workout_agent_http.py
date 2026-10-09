@@ -30,7 +30,7 @@ def turn(http, session, request=None, *, path="/api/agent/run", target=None):
     wait_idle()
     validate_events(result)
     assert result[-1]["event"] == "done", result[-1]
-    names = {e["data"]["tool_call_id"]: e["data"]["name"] for e in result if e["event"] == "tool_start"}
+    names = {e["data"]["tool_call_id"]: e["data"] for e in result if e["event"] == "tool_start"}
     endings = {e["data"]["tool_call_id"]: e["data"] for e in result if e["event"] == "tool_execution_end"}
     outputs = []
     for event in result:
@@ -41,7 +41,8 @@ def turn(http, session, request=None, *, path="/api/agent/run", target=None):
             assert data["entry_id"] and data["parent_id"]
             ending = endings[data["tool_call_id"]]
             assert ending["content"] == data["content"] and ending["is_error"] == data["is_error"]
-            outputs.append({**data, "name": names[data["tool_call_id"]]})
+            outputs.append({**data, "name": names[data["tool_call_id"]]["name"],
+                            "arguments": names[data["tool_call_id"]]["arguments"]})
     WIRE.append({"session": session, "request_entry_id": request_id, "path": path, "events": result})
     (ROOT / "wire.json").write_text(json.dumps(WIRE, ensure_ascii=False, indent=2), encoding="utf-8")
     print("PASS turn:", path, [o["name"] for o in outputs], flush=True)
@@ -80,10 +81,17 @@ def main():
     database = patch_default_database("workout-agent-http")
     with Server(app) as server, client(server.base_url) as http:
         first = session(http)
-        _, outputs = turn(http, first, "昨天实际完成俯卧撑两组，每组10次，重量和时长未知，无感受备注。目录身份未核实用null。请用代码换算具体日期，查询当天记录，整理完整训练快照给我核对，等待后续确认。")
+        _, outputs = turn(http, first, "昨天实际完成俯卧撑两组，每组10次，重量和时长未知，无感受备注。目录身份未核实用null。请用 calculate_date 换算具体日期，查询当天记录，整理完整训练快照给我核对，等待后续确认。")
         assert successful(outputs, "prepare_workout") and successful(outputs, "list_workouts")
-        assert any(o["name"] == "bash" and not o["is_error"] for o in outputs)
+        computed = [item for item in outputs if item["name"] == "calculate_date"]
+        assert computed and not computed[0]["is_error"], outputs
+        assert computed[0]["arguments"] == {"days_offset": -1}, computed[0]
+        relative = json.loads(computed[0]["content"])["date"]
+        assert all(item["arguments"].get("date_from") == relative
+                   and item["arguments"].get("date_to") == relative
+                   for item in outputs if item["name"] == "list_workouts"), outputs
         a = proposal(http, first)
+        assert a["performed_on"] == relative
         assert a["base_workout_id"] is None and a["base_workout_version"] is None
         assert len(a["payload"]["exercises"][0]["sets"]) == 2
         assert listing(http)["total"] == 0
@@ -184,7 +192,7 @@ def main():
                 return [row[0] for row in await (await db.connection.execute("PRAGMA integrity_check")).fetchall()]
         assert asyncio.run_coroutine_threadsafe(audit(), app.state.loop).result() == ["ok"]
     (ROOT / "evidence.json").write_text(json.dumps(record, ensure_ascii=False, indent=2), encoding="utf-8")
-    print("PASS: real model Agent/HTTP/SSE; relative-date bash; snapshot display; natural confirmation; cross-session update/conflict; original result regenerate; profile binding; edit/delete/restart:", ROOT)
+    print("PASS: real model Agent/HTTP/SSE; relative-date calculate_date; snapshot display; natural confirmation; cross-session update/conflict; original result regenerate; profile binding; edit/delete/restart:", ROOT)
 
 
 if __name__ == "__main__":

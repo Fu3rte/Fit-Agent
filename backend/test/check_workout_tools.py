@@ -1,16 +1,13 @@
 import asyncio
 import json
-import shlex
-import sys
 from datetime import date, timedelta
-from pathlib import Path
 from uuid import uuid4
 
 from app.agent.tool import run_tool_batch
-from app.agent.tools.bash import create_bash_tool
 from app.agent.tools.business import bind_business_tools, business_tool_declarations
+from app.agent.tools.dates import bind_date_tools
 from app.ai.messages import ToolCall
-from app.domain.business.models import WorkoutListArguments
+from app.domain.business.models import BusinessContext, WorkoutListArguments
 from app.domain.session.models import SendCommand, SendRequest
 from test.check_profile_confirmation import SYSTEM, Fixture, new_id, payload
 from test.check_workout_service_http import CONTENT, assistant
@@ -162,18 +159,19 @@ async def check():
 def main():
     evidence = asyncio.run(check())
     dates = []
-    bash = create_bash_tool(str(uuid4()))
     for day, offset, expected in [("2026-01-01", 1, "2025-12-31"),
                                   ("2024-03-01", 1, "2024-02-29"),
                                   ("2026-03-01", 3, "2026-02-26")]:
-        command = (shlex.quote(Path(sys.executable).as_posix()) + " -c 'from datetime import date,timedelta; "
-                   f'print((date.fromisoformat("{day}")-timedelta(days={offset})).isoformat())' + "'")
-        result = run_tool(bash, {"command": command})
-        assert not result.is_error and result.content[0].text.strip() == expected
-        dates.append({"base": day, "offset": offset, "result": expected})
-    evidence["actual_bash_dates"] = dates
+        message = run_tool(bind_date_tools(BusinessContext(
+            timezone="Asia/Shanghai", business_date=day, session_id=new_id(), run_id=new_id(),
+            request_entry_id=new_id(), source_entry_id=new_id()))["calculate_date"],
+            {"days_offset": -offset})
+        assert not message.is_error and json.loads(message.content[0].text) == {"date": expected}
+        dates.append({"base": day, "days_offset": -offset, "result": expected})
+    evidence["actual_date_tool"] = dates
     (ROOT / "evidence.json").write_text(json.dumps(evidence, ensure_ascii=False, indent=2), encoding="utf-8")
-    print("PASS: six actual tools/Harness; mixed snapshot bindings; insert/update/conflict; original status; strict identity; restart/delete; actual bash dates:", ROOT)
+    print("PASS: six actual tools/Harness; mixed snapshot bindings; insert/update/conflict; original status; "
+          "strict identity; restart/delete; actual calculate_date results:", ROOT)
 
 
 if __name__ == "__main__":

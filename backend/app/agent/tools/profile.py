@@ -1,9 +1,17 @@
+from dataclasses import replace
+
 from app.agent.tool import (
     AgentTool,
     ExecuteFunction,
     ToolDeclaration,
 )
-from app.agent.tools.common import MainLoopCall, business_result, unbound
+from app.agent.tools.common import (
+    FrozenBusinessContext,
+    MainLoopCall,
+    business_result,
+    check_business_permission,
+    unbound,
+)
 from app.ai.messages import JsonObject
 from app.application.business.service import BusinessService
 from app.domain.business.models import (
@@ -105,6 +113,8 @@ def bind_profile_tools(
     prepared: dict[str, str],
 ) -> dict[str, AgentTool]:
     # call 将业务协程投递到数据库所在主循环；prepared 记录本批快照展示绑定。
+    context = FrozenBusinessContext.model_validate(context.model_dump())
+
     def get_profile(tool_call_id, params: GetProfileArguments, signal, on_update):
         return business_result(service.get_profile(), call)
 
@@ -130,9 +140,19 @@ def bind_profile_tools(
             service.get_profile_update_status(context, params.proposal_id, signal), call
         )
 
-    return _tools(
+    tools = _tools(
         get_profile,
         prepare_profile_update,
         save_profile_update,
         get_profile_update_status,
+    )
+    tools["save_profile_update"] = replace(
+        tools["save_profile_update"], trusted_context=context
+    )
+    return tools
+
+
+async def check_profile_permission(context, service: BusinessService, call: MainLoopCall):
+    return await check_business_permission(
+        context, service.check_profile_save_authorization, call
     )

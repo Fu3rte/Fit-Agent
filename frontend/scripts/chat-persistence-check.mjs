@@ -35,6 +35,11 @@ const message = "textarea[aria-label='消息']";
 const transcriptText = "document.querySelector('[data-slot=message-scroller-content]').innerText";
 const stop = "button[aria-label='停止']";
 const sendButton = "button[aria-label='发送']";
+// 真实工具卡片提供可见调用详情，后续长输出保持运行中窗口用于刷新、steering 与竞争断言。
+const toolCard = "button[aria-label='calculate_date 工具调用详情']";
+const toolCount = `document.querySelectorAll("${toolCard}").length`;
+const toolRequest = (reply) =>
+  `必须调用 calculate_date 传 days_offset=-1，然后逐行输出从 1 到 100000 的整数，不要省略，最后一行只写 ${reply}。`;
 const send = (text) => { browser("fill", message, text); browser("press", "Enter"); };
 async function until(expression, timeout = 90000, label = expression) {
   const deadline = Date.now() + timeout;
@@ -74,7 +79,7 @@ try {
   note("新建会话身份变化并保持稳定");
 
   // 2. 运行中刷新：保持占用，终态后释放
-  send("必须调用 bash，command 精确为 sleep 12，timeout 为 20；结束后只回复 REFRESH_DONE。");
+  send(toolRequest("REFRESH_DONE"));
   await until(`!!document.querySelector(${JSON.stringify(stop)})`, 60000, "运行开始");
   await (async () => {
     for (let index = 0; index < 120; index += 1) {
@@ -88,10 +93,10 @@ try {
   const persistedRun = (await store()).operations.find((item) => item.kind === "send");
   assert.ok(persistedRun.run_id, "运行身份已持久化");
   report.refreshRunId = persistedRun.run_id;
-  await until("!!document.querySelector(\"button[aria-label='bash 工具调用详情']\")", 60000, "工具执行中");
+  await until(`!!document.querySelector("${toolCard}")`, 60000, "工具执行中");
   browser("reload");
   await until("!!document.querySelector('textarea')", 30000, "刷新后加载");
-  assert.equal((await evaluate(transcriptText)).includes("必须调用 bash"), true, "恢复原用户请求");
+  assert.equal((await evaluate(transcriptText)).includes("必须调用 calculate_date"), true, "恢复原用户请求");
   browser("fill", message, "占用探测");
   assert.equal(await evaluate(`document.querySelector(${JSON.stringify(sendButton)}).disabled`), true, "恢复运行期间保持占用");
   browser("fill", message, "");
@@ -101,11 +106,11 @@ try {
   note("运行中刷新恢复并保持占用");
 
   // 3. Steering 撤回（pending 转 withdrawn 并清理操作）
-  const bashBeforeSteer = evaluate("document.querySelectorAll(\"button[aria-label='bash 工具调用详情']\").length");
-  send("必须调用 bash，command 精确为 sleep 12，timeout 为 20；结束后只回复 STEER_RUN。");
+  const toolBeforeSteer = evaluate(toolCount);
+  send(toolRequest("STEER_RUN"));
   await until(`!!document.querySelector(${JSON.stringify(stop)})`, 60000, "Steering 运行开始");
   await until(`(${LEDGER}).some((item) => item.kind === 'send' && item.run_id)`, 60000, "Steering 运行受理");
-  await until(`document.querySelectorAll("button[aria-label='bash 工具调用详情']").length > ${bashBeforeSteer}`, 60000, "工具执行中");
+  await until(`${toolCount} > ${toolBeforeSteer}`, 60000, "工具执行中");
   send("STEER_WITHDRAW_ONLY。");
   await until(`!!document.querySelector("button[aria-label='撤回']")`, 30000, "出现撤回按钮");
   const steerStore = await store();
@@ -139,10 +144,10 @@ try {
   note("原键重试（查询优先）");
 
   // 5. SSE consumed 先到、Steering JSON 响应后到：只推迟真实响应的到达顺序
-  const bashBefore = evaluate("document.querySelectorAll(\"button[aria-label='bash 工具调用详情']\").length");
-  send("必须调用 bash，command 精确为 sleep 12，timeout 为 20；结束后只回复 RACE_RUN。");
+  const toolBefore = evaluate(toolCount);
+  send(toolRequest("RACE_RUN"));
   await until(`(${LEDGER}).some((item) => item.kind === 'send' && item.run_id)`, 60000, "竞争运行已受理");
-  await until(`document.querySelectorAll("button[aria-label='bash 工具调用详情']").length > ${bashBefore}`, 90000, "竞争工具执行中");
+  await until(`${toolCount} > ${toolBefore}`, 90000, "竞争工具执行中");
   evaluate(`(() => {
     const original = window.fetch;
     window.__steerGate = { held: false, release: null };

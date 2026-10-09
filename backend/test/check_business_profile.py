@@ -12,6 +12,7 @@ from pydantic import ValidationError
 
 from app.agent.tool import CredentialDetectedError, run_tool_batch
 from app.agent.tools.business import bind_business_tools, business_tool_declarations
+from app.agent.tools.dates import date_tool_declarations
 from app.agent.tools.exercises import exercise_tool_declarations
 from app.agent.tools.plan_import import plan_import_tool_declarations
 from app.agent.tools.plans import plan_tool_declarations
@@ -33,6 +34,7 @@ from app.infrastructure.persistence.sqlite.database import (
     open_database,
 )
 from test.check_profile_confirmation import (
+    CALCULATE_DATE,
     DECLARED,
     GET_PROFILE,
     PREPARE,
@@ -65,8 +67,8 @@ EXERCISE_FIELDS = {
 WORKOUT_TOOLS = [item.name for item in workout_tool_declarations()]
 PLAN_TOOLS = [item.name for item in plan_tool_declarations()]
 PLAN_IMPORT_TOOLS = [item.name for item in plan_import_tool_declarations()]
-BUSINESS_TOOLS = {GET_PROFILE, SEARCH_EXERCISES, PREPARE, SAVE, STATUS, *WORKOUT_TOOLS, *PLAN_TOOLS,
-                  *PLAN_IMPORT_TOOLS}
+BUSINESS_TOOLS = {GET_PROFILE, SEARCH_EXERCISES, CALCULATE_DATE, PREPARE, SAVE, STATUS,
+                  *WORKOUT_TOOLS, *PLAN_TOOLS, *PLAN_IMPORT_TOOLS}
 
 
 async def check_catalog(directory: Path) -> dict:
@@ -102,6 +104,7 @@ async def check_declarations() -> dict:
     assert [item.name for item in declarations] == [
         GET_PROFILE,
         SEARCH_EXERCISES,
+        CALCULATE_DATE,
         PREPARE,
         SAVE,
         STATUS,
@@ -113,7 +116,8 @@ async def check_declarations() -> dict:
     exercises = exercise_tool_declarations()
     assert {item.name for item in profile} == {GET_PROFILE, PREPARE, SAVE, STATUS}
     assert [item.name for item in exercises] == [SEARCH_EXERCISES]
-    assert {item.name: item for item in profile + exercises + workout_tool_declarations()
+    assert {item.name: item for item in profile + exercises + date_tool_declarations()
+            + workout_tool_declarations()
             + plan_tool_declarations() + plan_import_tool_declarations()} == DECLARED
     serialized = json.dumps(
         [item.model_dump() for item in profile + exercises + workout_tool_declarations()], ensure_ascii=False
@@ -226,6 +230,7 @@ async def check_argument_preparation(root: Path) -> dict:
         for name in plan_preparation:
             assert tools[name].prepare_arguments.__module__ == "app.agent.tools.plan_import"
         assert tools[SEARCH_EXERCISES].execute.__module__ == "app.agent.tools.exercises"
+        assert tools[CALCULATE_DATE].execute.__module__ == "app.agent.tools.dates"
         assert list(tools) == list(DECLARED)
         assert all(
             tool.prepare_arguments is None

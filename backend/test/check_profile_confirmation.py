@@ -57,6 +57,7 @@ SYSTEM = SystemMessage(role="system", content="系统提示词", tools_added=[],
 
 GET_PROFILE = "get_profile"
 SEARCH_EXERCISES = "search_exercises"
+CALCULATE_DATE = "calculate_date"
 PREPARE = "prepare_profile_update"
 SAVE = "save_profile_update"
 STATUS = "get_profile_update_status"
@@ -418,6 +419,7 @@ async def check_first_build(root: Path) -> dict:
         assert set(tools) == {
             GET_PROFILE,
             SEARCH_EXERCISES,
+            CALCULATE_DATE,
             PREPARE,
             SAVE,
             STATUS,
@@ -1240,6 +1242,7 @@ def check() -> None:
     assert set(DECLARED) == {
         GET_PROFILE,
         SEARCH_EXERCISES,
+        CALCULATE_DATE,
         PREPARE,
         SAVE,
         STATUS,

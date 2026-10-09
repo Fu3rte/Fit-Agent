@@ -31,9 +31,9 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 from app.agent.agent_loop import run_agent_loop
 from app.agent.config import AgentLoopConfig
 from app.agent.events import AgentEvent
+from app.agent.permissions import create_before_tool_call
 from app.agent.prompts import SYSTEM_PROMPT
 from app.agent.tool import CredentialDetectedError
-from app.agent.tools.bash import create_bash_tool
 from app.agent.tools.business import (
     bind_business_tools,
     business_tool_declarations,
@@ -945,6 +945,7 @@ def execute(
         on_steering_consumed=on_steering_consumed,
         save_message=save_message,
         bind_tools=execution_registry,
+        before_tool_call=create_before_tool_call(business, call),
         on_tool_update=on_tool_update,
         contains_credentials=guard.contains,
     )
@@ -1335,7 +1336,7 @@ async def launch_run(
         await service.get_session(session_id)
         model = load_model_config()
         secrets = (model.OPENAI_API_KEY,)
-        tools = {**create_file_tools(session_id), "bash": create_bash_tool(session_id)}
+        tools = create_file_tools(session_id)
         outcome = await accept(service, tools, secrets)
         if not outcome.created:
             active.release()

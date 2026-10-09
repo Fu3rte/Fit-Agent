@@ -7,7 +7,6 @@ from pathlib import Path
 from uuid import uuid4
 
 from app.agent.tool import run_tool_call
-from app.agent.tools.bash import create_bash_tool
 from app.agent.tools.files import create_file_tools
 from app.ai.messages import SystemMessage, ToolCall
 from app.application.session.service import SessionService
@@ -181,11 +180,6 @@ async def attachments_and_tools(root: Path) -> dict:
             assert "链接" in text(await tool_result(reader, {"path": f"{workspace}/link/leak.txt"}))
             link.unlink()
 
-        # Bash 的真实工作目录是统一 tmp 根。
-        bash = create_bash_tool(session, tmp_root=tmp_root)
-        pwd = await tool_result(bash, {"command": "pwd"})
-        assert not pwd.is_error and Path(text(pwd).strip()).name == tmp_root.name
-
         # 编辑保留原附件、替换为新集合；重新生成沿用目标版本附件。
         edit = EditCommand(
             operation_id=uid(), session_id=session,
@@ -268,7 +262,6 @@ async def attachments_and_tools(root: Path) -> dict:
             "tmp_root": str(tmp_root),
             "plan_path": plan_path,
             "pure_path": projected[1][0]["path"],
-            "bash_pwd": text(pwd).strip(),
             "steering_path": consumed_projection[0]["path"],
         }
     finally:
@@ -283,7 +276,7 @@ def check() -> None:
     assert evidence["tmp_root"] == str(root / "tmp")
     print(
         "PASS: 项目 tmp 根与启动 cwd 无关；真实附件可定位读取且字节完整；长附件续读；"
-        "workspace 可写可编辑；原附件只读；跨会话/穿越/链接拒绝；Bash pwd 为 tmp 根；"
+        "workspace 可写可编辑；原附件只读；跨会话/穿越/链接拒绝；"
         "编辑/重新生成/已消费 Steering 按真实节点投影；pending 与 withdrawn 不进入上下文"
     )
     print(f"evidence: {evidence} ; source TMP_ROOT={source_root}")

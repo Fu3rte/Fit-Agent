@@ -1,7 +1,10 @@
-from pydantic import ConfigDict
-
 from app.agent.tool import AgentTool, ExecuteFunction, ToolDeclaration
-from app.agent.tools.common import MainLoopCall, business_result, unbound
+from app.agent.tools.common import (
+    FrozenBusinessContext,
+    MainLoopCall,
+    business_result,
+    unbound,
+)
 from app.ai.messages import JsonObject
 from app.application.business.service import BusinessService
 from app.domain.business.models import (
@@ -9,10 +12,6 @@ from app.domain.business.models import (
     PlanAdjustmentArguments,
     PlanImportArguments,
 )
-
-
-class _FrozenBusinessContext(BusinessContext):
-    model_config = ConfigDict(frozen=True)
 
 
 def _prepare_plan_import_arguments(args: JsonObject) -> JsonObject:
@@ -73,7 +72,7 @@ def bind_plan_import_tools(
     call: MainLoopCall,
     prepared: dict[str, str],
 ) -> dict[str, AgentTool]:
-    frozen_context = _FrozenBusinessContext.model_validate(context.model_dump())
+    frozen_context = FrozenBusinessContext.model_validate(context.model_dump())
 
     def prepare_import(tool_call_id, params: PlanImportArguments, signal, on_update):
         def register(proposal):

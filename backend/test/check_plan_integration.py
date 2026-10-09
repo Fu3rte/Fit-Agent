@@ -212,7 +212,7 @@ def check(resume=None, database_path=None):
                 day = max(record["performed_on"] for record in workouts)
             assert http.get("/api/profile").json()["version"] == 1
             before = http.get("/api/workouts?page_size=100").json()
-            request_id, outputs, _ = turn(http, session, "请生成一个简洁的全身力量训练日加一个休息日的循环建议，训练日只安排两个具体目录动作，每个动作2组8次，重量未知，休息时间未知。请先读取已保存画像、当前计划，以后端business_date计算前六天，查询最近7自然日实际记录；list_workouts每页2条并读取所有分页，可将多页查询合并为一批并行调用，结合真实表现与器械限制核实动作完整目录信息，prepare_plan完整展示并等待我后续确认，先不要保存。")
+            request_id, outputs, _ = turn(http, session, "请生成一个简洁的全身力量训练日加一个休息日的循环建议，训练日只安排两个具体目录动作，每个动作2组8次，重量未知，休息时间未知。请先读取已保存画像、当前计划，用calculate_date传days_offset=-6以后端business_date为截止日算出起始日期，查询最近7自然日实际记录；list_workouts每页2条并读取所有分页，可将多页查询合并为一批并行调用，结合真实表现与器械限制核实动作完整目录信息，prepare_plan完整展示并等待我后续确认，先不要保存。")
             first, first_display = prepared(outputs)
             assert current(http) == {"id": None, "content": None}
             assert first.base_profile_version == 1 and first.base_plan_id is None
@@ -225,7 +225,7 @@ def check(resume=None, database_path=None):
                        for item in starts if item["name"] == "list_workouts")
             assert len({record["id"] for page in queries for record in page["items"]}) == 7
             assert success(outputs, "get_profile") and success(outputs, "get_current_plan") and success(outputs, "search_exercises")
-            assert any(item["name"] == "bash" for item in starts)
+            assert any(item["name"] == "calculate_date" for item in starts)
             _, outputs, _ = turn(http, session, "确认，但将两个动作的组数都改为3组，保留其他安排。请重新完整展示，等待我再次确认。")
             second, second_display = prepared(outputs)
             assert second.proposal_id != first.proposal_id
@@ -372,7 +372,7 @@ def continue_stage(resume, database_path, stage):
                 assert [(exercise.exercise_id, exercise.sets, exercise.reps) for exercise in proposal.payload.days[0].exercises] == [("1436", 2, 8), ("0025", 2, 8)]
                 assert status(session, proposal).status == "pending" and current(http)["id"] is None
                 assert not success(outputs, "save_plan")
-                assert not any(item["name"] in {"get_profile", "get_current_plan", "list_workouts", "search_exercises", "bash"} for item in outputs)
+                assert not any(item["name"] in {"get_profile", "get_current_plan", "list_workouts", "search_exercises", "calculate_date"} for item in outputs)
                 updated_branch = call(interface.app.state.session_service.get_current_branch(session))
                 assert display in {entry.id for entry in updated_branch}
                 displayed = next(entry for entry in updated_branch if entry.id == display).messages[0]

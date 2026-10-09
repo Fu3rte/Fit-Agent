@@ -80,7 +80,7 @@ try {
   await until(owner, "!!document.querySelector('textarea')", 30000, "owner 清空后加载");
 
   // 1. 撤回：observer 无原账本，用历史的 session_id/run_id/steering_id 成功撤回
-  send(owner, "必须调用 bash，command 精确为 sleep 20，timeout 为 30；结束后只回复 STEER_RUN_ONE。");
+  send(owner, "逐行输出从 1 到 100000 的整数，不要省略，最后一行只写 STEER_RUN_ONE。无需使用工具。");
   await until(owner, `!!document.querySelector(${JSON.stringify(stop)})`, 90000, "运行一开始");
   await until(owner, "location.pathname.startsWith('/sessions/')", 20000, "运行一会话 URL");
   const sessionId = evaluate(owner, "location.pathname.split('/').pop()");
@@ -105,7 +105,7 @@ try {
   await until(owner, `(() => { const s = localStorage.getItem('fit-agent:chat-client'); const id = ${activeId}; const l = s && id ? (JSON.parse(s).ledgers[id] || []) : []; return l.length === 0; })()`, 90000, "运行一收尾");
 
   // 2. 消费冲突：observer 点击撤回时后端已消费，改查真实状态并展示 consumed
-  send(owner, "必须调用 bash，command 精确为 sleep 12，timeout 为 60；bash 完成后用不少于 500 字逐段描述刚才执行的每一步，最后一行只写 STEER_RUN_TWO。");
+  send(owner, "先输出不少于 500 字的逐段说明，再逐行输出从 1 到 100000 的整数，不要省略，最后一行只写 STEER_RUN_TWO。无需使用工具。");
   await until(owner, `!!document.querySelector(${JSON.stringify(stop)})`, 90000, "运行二开始");
   await until(owner, `(() => { const s = localStorage.getItem('fit-agent:chat-client'); const id = ${activeId}; const l = s && id ? (JSON.parse(s).ledgers[id] || []) : []; return l.some((item) => item.kind === 'send' && item.run_id); })()`, 30000, "运行二受理");
   send(owner, "STEER_CONFLICT_ONLY。");
@@ -129,7 +129,7 @@ try {
   await until(owner, `(() => { const s = localStorage.getItem('fit-agent:chat-client'); const id = ${activeId}; const l = s && id ? (JSON.parse(s).ledgers[id] || []) : []; return l.length === 0; })()`, 90000, "运行二收尾");
 
   // 3. 结果未知：真实网络故障下保留未确认状态，恢复后再次撤回完成
-  send(owner, "必须调用 bash，command 精确为 sleep 25，timeout 为 35；结束后只回复 STEER_RUN_THREE。");
+  send(owner, "逐行输出从 1 到 100000 的整数，不要省略，最后一行只写 STEER_RUN_THREE。无需使用工具。");
   await until(owner, `!!document.querySelector(${JSON.stringify(stop)})`, 90000, "运行三开始");
   await until(owner, `(() => { const s = localStorage.getItem('fit-agent:chat-client'); const id = ${activeId}; const l = s && id ? (JSON.parse(s).ledgers[id] || []) : []; return l.some((item) => item.kind === 'send' && item.run_id); })()`, 30000, "运行三受理");
   send(owner, "STEER_UNKNOWN_ONLY。");

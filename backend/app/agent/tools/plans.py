@@ -1,5 +1,14 @@
+from dataclasses import replace
+
 from app.agent.tool import AgentTool, ExecuteFunction, ToolDeclaration
-from app.agent.tools.common import MainLoopCall, business_result, envelope, unbound
+from app.agent.tools.common import (
+    FrozenBusinessContext,
+    MainLoopCall,
+    business_result,
+    check_business_permission,
+    envelope,
+    unbound,
+)
 from app.application.business.service import BusinessService
 from app.domain.business.models import (
     BusinessContext,
@@ -72,6 +81,8 @@ def bind_plan_tools(
     call: MainLoopCall,
     prepared: dict[str, str],
 ) -> dict[str, AgentTool]:
+    context = FrozenBusinessContext.model_validate(context.model_dump())
+
     def get_current_plan(tool_call_id, params: EmptyPlanArguments, signal, on_update):
         return business_result(service.get_current_plan(), call)
 
@@ -93,4 +104,10 @@ def bind_plan_tools(
     def get_plan_save_status(tool_call_id, params: PlanStatusArguments, signal, on_update):
         return business_result(service.get_plan_save_status(context, params.proposal_id, signal), call)
 
-    return _tools(get_current_plan, get_plan, list_plans, prepare_plan, save_plan, get_plan_save_status)
+    tools = _tools(get_current_plan, get_plan, list_plans, prepare_plan, save_plan, get_plan_save_status)
+    tools["save_plan"] = replace(tools["save_plan"], trusted_context=context)
+    return tools
+
+
+async def check_plan_permission(context, service: BusinessService, call: MainLoopCall):
+    return await check_business_permission(context, service.check_plan_save_authorization, call)

@@ -296,9 +296,12 @@ def check(source: str) -> dict:
             current_calls = [call for call in read_only if call["name"] == "get_current_plan"]
             assert json.loads(by_call[current_calls[0]["call_id"]]["content"]) == {"id": None, "content": None}
             assert by_call[current_calls[0]["call_id"]]["content"] == chain["results"][current_calls[0]["call_id"]]
-            bash_calls = [call for call in read_only if call["name"] == "bash"]
-            assert bash_calls and by_call[bash_calls[0]["call_id"]]["content"] == chain["results"][bash_calls[0]["call_id"]]
-            assert by_call[bash_calls[0]["call_id"]]["content"].strip() == f"{chain['date_from']} {chain['date_to']}"
+            date_calls = [call for call in read_only if call["name"] == "calculate_date"]
+            assert date_calls, [call["name"] for call in read_only]
+            start_call = date_calls[0]
+            assert start_call["arguments"] == {"days_offset": -6}
+            assert by_call[start_call["call_id"]]["content"] == chain["results"][start_call["call_id"]]
+            assert json.loads(by_call[start_call["call_id"]]["content"]) == {"date": chain["date_from"]}
             catalog_calls = [call for call in read_only if call["name"] == "search_exercises"]
             assert catalog_calls and all(by_call[call["call_id"]]["content"] == chain["results"][call["call_id"]]
                                          for call in catalog_calls)

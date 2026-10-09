@@ -302,6 +302,19 @@ class BusinessService:
 
     # 内部协作。
 
+    async def check_profile_save_authorization(
+        self, context: BusinessContext, arguments: ProfileSaveArguments,
+    ) -> None:
+        async with self._repository.transaction():
+            branch = await self._require_branch(context.session_id)
+            snapshot = await self._repository.get_snapshot(arguments.proposal_id)
+            record = await self._repository.get_save_record(arguments.proposal_id)
+            if self._saved_result(context, snapshot, record) is not None:
+                return
+            if snapshot is None:
+                raise ProfileProposalNotFound()
+            await self._check_binding(context, branch, snapshot, arguments)
+
     async def _begin_save(
         self, context: BusinessContext, arguments: ProfileSaveArguments
     ) -> ProfileSaveResult | tuple[ProfileSnapshot, ProfileSnapshot]:
@@ -702,6 +715,19 @@ class BusinessService:
             self._repository.set_plan_snapshot_status, PlanVersionConflict,
         )
 
+    async def check_plan_save_authorization(
+        self, context: BusinessContext, arguments: PlanSaveArguments,
+    ) -> None:
+        async with self._repository.transaction():
+            branch = await self._require_branch(context.session_id)
+            snapshot = await self._repository.get_plan_snapshot(arguments.proposal_id)
+            record = await self._repository.get_plan_save_record(arguments.proposal_id)
+            if self._plan_saved_result(context, snapshot, record) is not None:
+                return
+            if snapshot is None:
+                raise PlanProposalNotFound()
+            await self._check_plan_binding(context, branch, snapshot, arguments)
+
     async def _begin_plan_save(
         self, context: BusinessContext, arguments: PlanSaveArguments,
     ) -> PlanSaveResult | tuple[PlanSnapshot, PlanSnapshot]:
@@ -969,6 +995,21 @@ class BusinessService:
         if snapshot.status == "saved":
             raise WorkoutProposalNotFound("已保存快照缺少幂等记录。")
         return None
+
+    async def check_workout_save_authorization(
+        self, context: BusinessContext, arguments: WorkoutSaveArguments, *, updating: bool,
+    ) -> None:
+        async with self._repository.transaction():
+            branch = await self._require_branch(context.session_id)
+            snapshot = await self._repository.get_workout_snapshot(arguments.proposal_id)
+            record = await self._repository.get_workout_save_record(arguments.proposal_id)
+            if self._workout_saved_result(context, snapshot, record) is not None:
+                return
+            if snapshot is None:
+                raise WorkoutProposalNotFound()
+            if updating != (snapshot.base_workout_id is not None):
+                raise WorkoutConfirmationInvalid("保存工具与快照的新增或更新类型不一致。")
+            await self._check_workout_binding(context, branch, snapshot, arguments)
 
     async def _begin_workout_save(
         self, context: BusinessContext, arguments: WorkoutSaveArguments, *, updating: bool,

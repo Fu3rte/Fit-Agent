@@ -1,8 +1,12 @@
+import json
 from datetime import date, timedelta
+from uuid import uuid4
 
-from app.agent.prompts import PYTHON_BASH_COMMAND, SYSTEM_PROMPT
-from app.agent.tools.bash import create_bash_tool
-from test.regression_support import TEST_SESSION, run_tool, text
+from app.agent.prompts import SYSTEM_PROMPT
+from app.agent.tools.business import business_tool_declarations
+from app.agent.tools.dates import bind_date_tools, date_tool_declarations
+from app.domain.business.models import BusinessContext
+from test.regression_support import run_tool, text
 
 # 计划提示口径必须与实际契约、真实工具参数校验一致；这里逐条核对可行动约束，不做语义判定。
 PLAN_REQUIRED = [
@@ -16,6 +20,7 @@ PLAN_REQUIRED = [
     "rest_seconds允许null",
     "目录外动作exercise_id=null",
     "以可信business_context.business_date为截止日",
+    "用calculate_date传days_offset=-6得到起始日期",
     "逐页读取所需记录直至覆盖total",
     "同会话新快照成功使旧pending失效",
     "禁止自动保存、将修改式确认授权旧内容",
@@ -40,24 +45,61 @@ PLAN_REQUIRED = [
     "按修改处理，重新准备并完整展示新快照，等待再次确认",
 ]
 
+DATE_PROMPT = [
+    "明确相对时间使用已注册 calculate_date 计算，days_offset 为严格整数：今天0、昨天-1、N天前-N",
+    "基准由后端绑定为可信 business_context.business_date",
+    "用calculate_date传days_offset=-6得到起始日期",
+]
+
+# 工具声明即契约：模型可见的日期口径必须与注册声明逐条一致。
+DATE_DECLARATION = [
+    "days_offset 为必填严格整数",
+    "0 今天、-1 昨天、-N 为 N 天前",
+    "近七个自然日的起始偏移为 -6",
+    '结果为一个 JSON 文本：{"date":"YYYY-MM-DD"}',
+    "禁止传入基准日期、时区或身份字段",
+]
+
+
+def context_for(business_date: str) -> BusinessContext:
+    return BusinessContext(
+        timezone="Asia/Shanghai",
+        business_date=business_date,
+        session_id=str(uuid4()),
+        run_id=str(uuid4()),
+        request_entry_id=str(uuid4()),
+        source_entry_id=str(uuid4()),
+    )
+
 
 def check():
-    assert PYTHON_BASH_COMMAND in SYSTEM_PROMPT
     assert "__PYTHON_BASH_COMMAND__" not in SYSTEM_PROMPT
+    assert "bash" not in SYSTEM_PROMPT and "解释器" not in SYSTEM_PROMPT
     assert '{"base_profile_version":1,"base_plan_id":null}' in SYSTEM_PROMPT
     assert '["/repeat","/days/0/exercises/0/sets","/days/0/notes","/notes"]' in SYSTEM_PROMPT
     assert "business_kind=plan" in SYSTEM_PROMPT
-    assert "禁止探测解释器" in SYSTEM_PROMPT
-    missing = [item for item in PLAN_REQUIRED if item not in SYSTEM_PROMPT]
+    missing = [item for item in PLAN_REQUIRED + DATE_PROMPT if item not in SYSTEM_PROMPT]
     assert not missing, missing
+
+    # 日期口径与生产注册表内的真实声明同源，声明变化即测试失败。
+    description = {item.name: item for item in business_tool_declarations()}[
+        "calculate_date"
+    ].description
+    assert description == date_tool_declarations()[0].description
+    absent = [item for item in DATE_DECLARATION if item not in description]
+    assert not absent, absent
+
+    # 提示口径的七个自然日范围由真实工具的严格契约产生，基准只来自绑定的可信上下文。
     day = "2026-01-01"
-    command = (f"{PYTHON_BASH_COMMAND} -c 'from datetime import date,timedelta; "
-               f'print((date.fromisoformat("{day}")-timedelta(days=6)).isoformat())' + "'")
-    message = run_tool(create_bash_tool(TEST_SESSION), {"command": command})
+    message = run_tool(bind_date_tools(context_for(day))["calculate_date"], {"days_offset": -6})
     assert not message.is_error
-    assert text(message).strip() == (date.fromisoformat(day) - timedelta(days=6)).isoformat()
-    print("PASS: actual system prompt trusted Python command, JSON null literal, JSON Pointer, plan tool constraints "
-          f"({len(PLAN_REQUIRED)} clauses), real Bash 7-day date calculation")
+    assert json.loads(text(message)) == {
+        "date": (date.fromisoformat(day) - timedelta(days=6)).isoformat()
+    }
+    print("PASS: actual system prompt JSON null literal, JSON Pointer, plan tool constraints "
+          f"({len(PLAN_REQUIRED)} clauses), calculate_date prompt contract "
+          f"({len(DATE_PROMPT)} clauses) and declaration contract ({len(DATE_DECLARATION)} clauses) "
+          "with real 7-day range")
 
 
 if __name__ == "__main__":

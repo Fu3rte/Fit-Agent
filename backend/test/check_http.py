@@ -355,7 +355,7 @@ def check() -> None:
                 "ls",
                 "find",
                 "grep",
-                "bash",
+                "calculate_date",
                 "get_profile",
                 "search_exercises",
                 "prepare_profile_update",
