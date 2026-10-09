@@ -98,6 +98,11 @@ function ExerciseFacts({
   path: string;
   suggested: (path: string) => boolean;
 }) {
+  /* 标题行承载动作名与目录身份，三者的指针路径都落在这里：`path`、`path/name`、`path/exercise_id` */
+  const headerSuggested =
+    suggested(path) ||
+    suggested(`${path}/name`) ||
+    suggested(`${path}/exercise_id`);
   return (
     <Field className="gap-2">
       <div className="flex flex-wrap items-center gap-2">
@@ -105,7 +110,7 @@ function ExerciseFacts({
         {exercise.exercise_id === null && (
           <Badge variant="outline">未在动作数据集内核实</Badge>
         )}
-        <Suggested shown={suggested(path)} />
+        <Suggested shown={headerSuggested} />
       </div>
       <FactRows rows={exerciseRows(exercise, path)} suggested={suggested} />
     </Field>

@@ -5,6 +5,7 @@ from uuid import uuid4
 from app.agent.prompts import SYSTEM_PROMPT
 from app.agent.tools.business import business_tool_declarations
 from app.agent.tools.dates import bind_date_tools, date_tool_declarations
+from app.agent.tools.plan_import import plan_import_tool_declarations
 from app.domain.business.models import BusinessContext
 from test.regression_support import run_tool, text
 
@@ -51,6 +52,47 @@ DATE_PROMPT = [
     "用calculate_date传days_offset=-6得到起始日期",
 ]
 
+# 调整专用提示段：逐字核对固定取数参数、可信日期、内容保留、来源路径同步、
+# notes 改动依据、训练事实时效及重新确认规则；均为提示词声明验证，不涉及模型行为判定。
+ADJUSTMENT_PROMPT = [
+    "调整前固定查询最近10条完整实际训练记录：list_workouts(date_from=null, date_to=business_context.business_date, page=1, page_size=10)",
+    "business_date使用后端可信运行上下文；读取返回的全部items，记录总数为x时使用min(x, 10)条，0条时为空数组[]",
+    "每条是一个训练日期的完整最新记录，按performed_on降序、id降序，含实际动作、逐组表现、重量口径和训练notes",
+    "prepare_plan_adjustment提交全部声明字段的完整最终payload，保留未涉及字段及原有suggested_fields建议来源",
+    "训练日或动作数组位置变化时同步来源路径",
+    "修改位置、原值、新值、理由、实际训练依据（含所用记录日期、相关逐组表现及必要重量口径）、依据不足或核实状态、必要注意事项写入计划或训练日notes，删除内容的说明同样写入notes",
+    "调整提案固定使用准备时查询到的训练事实。确认前新增训练或修正记录，原提案内容及状态保持原值",
+    "用户要求采用新增或修正事实时重新查询、整理完整最终payload、调用prepare_plan_adjustment重新准备，完整展示新提案及所用依据，等待后续用户再次明确确认",
+    "需要补充或更新画像时先走画像准备、完整展示、后续确认及保存流程，取得真实新版本后再准备计划",
+]
+
+# 调整工具声明与提示段同源：模型可见声明必须逐条承载相同的固定参数与规则。
+ADJUSTMENT_DECLARATION = [
+    "固定查询list_workouts(date_from=null, date_to=business_context.business_date, page=1, page_size=10)",
+    "business_date来自后端可信运行上下文，读取返回的全部items；总数为x时使用min(x, 10)条，",
+    "0条为空数组[]。每条为一个训练日期的完整最新记录，按performed_on降序、id降序，",
+    "包含实际动作、逐组表现、重量口径及训练notes，使用其中与本次任务相关的表现。",
+    "全部声明字段均须提交，保留未涉及字段、原有说明及suggested_fields建议来源；",
+    "suggested_fields按最终内容用JSON Pointer标记助手补充或修改的建议，数组位置变化时同步来源路径。",
+    "计划或训练日notes写明修改位置、原值、新值、理由、实际训练依据、记录日期、必要重量口径、",
+    "提案固定使用准备时查询到的训练事实，新增或修正训练记录保持原提案内容及状态；",
+    "用户要求采用新事实时重新查询、准备完整提案、展示全部业务字段、notes、建议来源及所用依据，",
+    "需要补充或更新画像时完成画像展示、后续确认及保存，取得真实新版本。",
+]
+
+# 提示段与声明共用的字面串：固定参数、min(x, 10)、倒序口径两处必须完全一致。
+ADJUSTMENT_SHARED = [
+    "list_workouts(date_from=null, date_to=business_context.business_date, page=1, page_size=10)",
+    "min(x, 10)",
+    "按performed_on降序、id降序",
+]
+
+# 生成流程的既有取数口径必须保持原值，与被调整段并列存在且互不替换。
+GENERATION_RECENT = [
+    "生成前读取近7自然日真实训练：以可信business_context.business_date为截止日",
+    "逐页读取所需记录直至覆盖total",
+]
+
 # 工具声明即契约：模型可见的日期口径必须与注册声明逐条一致。
 DATE_DECLARATION = [
     "days_offset 为必填严格整数",
@@ -81,10 +123,31 @@ def check():
     missing = [item for item in PLAN_REQUIRED + DATE_PROMPT if item not in SYSTEM_PROMPT]
     assert not missing, missing
 
-    # 日期口径与生产注册表内的真实声明同源，声明变化即测试失败。
-    description = {item.name: item for item in business_tool_declarations()}[
-        "calculate_date"
+    # 调整专用提示段逐条落地，缺失即声明与契约脱钩。
+    prompt_missing = [item for item in ADJUSTMENT_PROMPT if item not in SYSTEM_PROMPT]
+    assert not prompt_missing, prompt_missing
+    generation_missing = [item for item in GENERATION_RECENT if item not in SYSTEM_PROMPT]
+    assert not generation_missing, generation_missing
+
+    # 生产注册表与模型可见声明同源，二者 prepare_plan_adjustment 描述必须逐字一致。
+    production = {item.name: item for item in business_tool_declarations()}
+    declared = {item.name: item for item in plan_import_tool_declarations()}
+    assert production["prepare_plan_adjustment"].description == declared[
+        "prepare_plan_adjustment"
     ].description
+    adjustment_description = production["prepare_plan_adjustment"].description
+    declaration_missing = [item for item in ADJUSTMENT_DECLARATION if item not in adjustment_description]
+    assert not declaration_missing, declaration_missing
+
+    # 固定参数、min(x, 10) 与倒序口径在提示段和声明两处保持同一字面，声明即契约。
+    shared_missing = [
+        item for item in ADJUSTMENT_SHARED
+        if item not in adjustment_description or item not in SYSTEM_PROMPT
+    ]
+    assert not shared_missing, shared_missing
+
+    # 日期口径与生产注册表内的真实声明同源，声明变化即测试失败。
+    description = production["calculate_date"].description
     assert description == date_tool_declarations()[0].description
     absent = [item for item in DATE_DECLARATION if item not in description]
     assert not absent, absent
@@ -96,10 +159,12 @@ def check():
     assert json.loads(text(message)) == {
         "date": (date.fromisoformat(day) - timedelta(days=6)).isoformat()
     }
-    print("PASS: actual system prompt JSON null literal, JSON Pointer, plan tool constraints "
-          f"({len(PLAN_REQUIRED)} clauses), calculate_date prompt contract "
-          f"({len(DATE_PROMPT)} clauses) and declaration contract ({len(DATE_DECLARATION)} clauses) "
-          "with real 7-day range")
+    print("PASS: system prompt JSON null literal, JSON Pointer, plan tool constraints "
+          f"({len(PLAN_REQUIRED)} clauses), adjustment prompt ({len(ADJUSTMENT_PROMPT)} clauses) "
+          f"and declaration ({len(ADJUSTMENT_DECLARATION)} clauses) with shared literals "
+          f"({len(ADJUSTMENT_SHARED)}), generation caliber ({len(GENERATION_RECENT)}), "
+          f"calculate_date prompt contract ({len(DATE_PROMPT)} clauses) and declaration contract "
+          f"({len(DATE_DECLARATION)} clauses) with real 7-day range")
 
 
 if __name__ == "__main__":

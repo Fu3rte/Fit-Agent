@@ -12,6 +12,7 @@ import { retainedAttachmentDrafts } from "./attachments";
 import {
   PREPARE_PROFILE,
   PREPARE_WORKOUT,
+  assertPlanBusinessError,
   attachmentDisplay,
   preparedPlanDisplay,
   type PendingOperation,
@@ -83,6 +84,9 @@ function convertEntry(
       entry_id: entry.entry_id,
       parent_id: entry.parent_id,
     };
+  /* 错误结果沿用与实时一致的 schema：业务错误对象在解析位置失败，harness 说明文本保持原文。 */
+  if (message.is_error)
+    assertPlanBusinessError(message.tool_name, message.content);
   return {
     kind: "tool",
     id: message.tool_call_id,

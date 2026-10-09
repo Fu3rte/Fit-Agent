@@ -912,7 +912,7 @@ export function preparedPlanDisplay(
  * 计划工具的失败结果（契约 §8）：业务失败与内容校验错误以 JSON 对象返回，在解析位置严格校验；
  * 参数预处理、参数校验、权限拒绝、执行与后处理失败是 harness 的说明文本，原样进入通用工具展示。
  */
-function assertPlanBusinessError(name: string, content: string): void {
+export function assertPlanBusinessError(name: string, content: string): void {
   if (!PLAN_BUSINESS_TOOLS.includes(name)) return;
   let value: unknown;
   try {

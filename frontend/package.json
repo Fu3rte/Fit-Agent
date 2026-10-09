@@ -9,7 +9,7 @@
     "verify:bubble": "node scripts/bubble-tight-width-check.mjs",
     "verify:profile": "node scripts/profile-natural-confirmation-check.mjs",
     "verify:workout": "node scripts/workout-record-check.mjs",
-    "verify:plan": "node scripts/plan-contract-check.mjs && node scripts/plan-generation-check.mjs",
+    "verify:plan": "node scripts/plan-contract-check.mjs && node scripts/plan-generation-check.mjs && node scripts/plan-adjustment-check.mjs",
     "verify:runs": "node scripts/session-run-lifecycle-check.mjs",
     "verify:markdown": "node scripts/streaming-table-check.mjs",
     "preview": "vite preview"

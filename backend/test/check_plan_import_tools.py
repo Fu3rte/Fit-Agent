@@ -91,6 +91,10 @@ async def binding(f, session, calls):
             pass
         else:
             raise AssertionError("绑定上下文必须冻结")
+    # 绑定实例上模型可见的调整声明承载固定十条取数口径，可信业务日期来自绑定上下文。
+    adjust = tools["prepare_plan_adjustment"]
+    assert "list_workouts(date_from=null, date_to=business_context.business_date, page=1, page_size=10)" in adjust.definition().description
+    assert adjust.trusted_context.business_date == context.business_date
     return run, source, tools, registrations
 
 

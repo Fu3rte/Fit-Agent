@@ -2,6 +2,7 @@ import asyncio
 import copy
 import json
 import sqlite3
+from datetime import date, timedelta
 from pathlib import Path
 from uuid import uuid4
 
@@ -18,6 +19,9 @@ from app.domain.business.models import (
     PlanImportProposal,
     PlanSaveArguments,
     PlanSnapshot,
+    WorkoutContent,
+    WorkoutListArguments,
+    WorkoutRecord,
 )
 from app.domain.session.models import SendCommand, SendRequest
 from app.infrastructure.persistence.sqlite.business_repository import (
@@ -35,6 +39,7 @@ from test.check_profile_confirmation import (
     SYSTEM,
     Fixture,
     assert_rejected,
+    count_rows,
     new_id,
     now_ms,
 )
@@ -43,10 +48,33 @@ from test.check_workout_storage import make_record, raw, seed
 
 ROOT = Path(__file__).resolve().parents[2] / "tmp/backend-plan-import/checks" / uuid4().hex
 ROOT.mkdir(parents=True)
+# 调整计划后端专项独立证据目录，与已有录入专项证据分离。
+EVIDENCE_ROOT = Path(__file__).resolve().parents[2] / "tmp/backend-plan-adjustment-verification" / uuid4().hex
+EVIDENCE_ROOT.mkdir(parents=True)
 INCOMPLETE = {"repeat": None, "days": [
     {"kind": "training", "focus": "推", "exercises": [], "notes": None},
     {"kind": "rest", "focus": None, "exercises": [], "notes": None}],
     "notes": None, "suggested_fields": []}
+# 完整训练记录口径：多动作、逐组数据、非空重量口径、非空notes；用于最近十条完整性与最新版本核验。
+FULL_WORKOUT = {
+    "exercises": [
+        {"exercise_id": None, "name": "杠铃卧推", "load_convention": "barbell_total",
+         "sets": [{"reps": 8, "weight_kg": 40.0, "duration_seconds": None},
+                  {"reps": 8, "weight_kg": 42.5, "duration_seconds": None},
+                  {"reps": 6, "weight_kg": 45.0, "duration_seconds": None}]},
+        {"exercise_id": None, "name": "平板支撑", "load_convention": None,
+         "sets": [{"reps": None, "weight_kg": None, "duration_seconds": 60.0}]},
+    ],
+    "notes": "状态良好，最后一组接近力竭",
+}
+
+
+def full_record(performed_on, notes):
+    stamp = now_ms()
+    content = {**copy.deepcopy(FULL_WORKOUT), "notes": notes}
+    return WorkoutRecord(id=new_id(), performed_on=performed_on, version=1,
+                         content=WorkoutContent.model_validate(content),
+                         created_at=stamp, updated_at=stamp)
 
 
 def check_schema():
@@ -248,12 +276,301 @@ async def check_migration():
         await db.close()
 
 
+async def check_recent_workouts():
+    """真实 SQLite 与服务按固定十条参数取数：0/3/10/12 条返回 min(x, 10)，倒序且逐条完整；可信截止日排除未来。"""
+    primary = await Fixture(ROOT / "recent10.db").seeded()
+    try:
+        session = await primary.session("最近十条")
+        cutoff = primary.context(session, new_id(), new_id()).business_date
+        day = date.fromisoformat(cutoff)
+        arguments = WorkoutListArguments(date_from=None, date_to=cutoff, page=1, page_size=10)
+        for count in (0, 3, 10, 12):
+            f = await Fixture(ROOT / f"recent10-{count}.db").seeded()
+            try:
+                records = [make_record((day - timedelta(days=i)).isoformat()) for i in range(count)]
+                # 逆序插入，排序结果只可能来自服务的 performed_on/ID 倒序，与写入顺序无关。
+                for record in reversed(records):
+                    await f.repository.insert_workout(record)
+                result = await f.business.list_workouts(arguments)
+                expected = sorted(records, key=lambda item: (item.performed_on, item.id), reverse=True)[:10]
+                assert result.page == 1 and result.page_size == 10
+                assert result.total == count and len(result.items) == min(count, 10)
+                assert result.items == expected
+                # 每条读取返回的全部 items 均为一训练日期的完整最新记录，逐字段等于独立读取。
+                for item in result.items:
+                    assert await f.business.get_workout(item.id) == item
+            finally:
+                await f.close()
+        # 可信截止日过滤未来记录，绑定工具与服务返回完全一致。
+        records = [make_record((day - timedelta(days=i)).isoformat()) for i in range(12)]
+        future = make_record((day + timedelta(days=1)).isoformat())
+        for record in records + [future]:
+            await primary.repository.insert_workout(record)
+        service_result = await primary.business.list_workouts(arguments)
+        assert service_result.total == 12 and len(service_result.items) == 10
+        assert all(item.performed_on <= cutoff for item in service_result.items)
+        expected_ids = [item.id for item in sorted(records, key=lambda i: (i.performed_on, i.id), reverse=True)[:10]]
+        assert [item.id for item in service_result.items] == expected_ids
+        tool_message = await primary.invoke(
+            "list_workouts",
+            {"date_from": None, "date_to": cutoff, "page": 1, "page_size": 10},
+            primary.context(session, new_id(), new_id()),
+        )
+        assert not tool_message.is_error, tool_message
+        body = json.loads(tool_message.content[0].text)
+        assert body["total"] == 12 and body["page"] == 1 and body["page_size"] == 10
+        assert [item["id"] for item in body["items"]] == expected_ids
+    finally:
+        await primary.close()
+
+
+async def check_training_fact_lifecycle():
+    """待确认提案固定使用准备时的训练事实；采用新事实及修改式确认须重新准备并使旧 pending 失效、重新确认。"""
+    f = await Fixture(ROOT / "lifecycle.db").seeded()
+    try:
+        session = await f.session("调整事实时效")
+        await profile(f, session)
+        version = (await f.business.get_profile()).version
+        base_context, base_save = await prepare(f, session, "import", version=version, base=None)
+        first = await f.business.save_plan(base_context, base_save)
+        content_x = copy.deepcopy(INCOMPLETE)
+        content_x["notes"] = "依据2026年训练记录第3组8次调整重量"
+        prepare_context, prepare_save = await prepare(f, session, "adjustment", version=version,
+                                                       base=first.id, content=content_x)
+        snapshot = await f.repository.get_plan_snapshot(prepare_save.proposal_id)
+        assert snapshot.status == "pending" and snapshot.payload.model_dump() == content_x
+        assert snapshot.base_plan_id == first.id
+        # 确认前新增训练：原提案内容与状态保持原值。
+        workout = make_record(f.context(session, new_id(), new_id()).business_date)
+        await f.repository.insert_workout(workout)
+        after = await f.repository.get_plan_snapshot(prepare_save.proposal_id)
+        assert after.status == "pending" and after.payload.model_dump() == content_x
+        assert (await f.business.get_plan_save_status(prepare_context, prepare_save.proposal_id)).status == "pending"
+        # 沿用原提案确认保存使用准备时固化的内容，忽略确认后新增的训练。
+        saved_x = await f.business.save_plan(prepare_context, prepare_save)
+        assert saved_x.content.model_dump() == content_x
+        assert (await f.business.get_current_plan()).id == saved_x.id
+        assert await f.repository.get_workout(workout.id) == workout
+        # 采用新事实重新准备，旧 pending 快照失效，需对新提案再次确认。
+        content_y = copy.deepcopy(INCOMPLETE)
+        content_y["notes"] = "第一次整理的新提案"
+        context_y, save_y = await prepare(f, session, "adjustment", version=version, base=saved_x.id, content=content_y)
+        content_z = copy.deepcopy(INCOMPLETE)
+        content_z["notes"] = "采用新增训练事实后的重新准备"
+        context_z, save_z = await prepare(f, session, "adjustment", version=version, base=saved_x.id, content=content_z)
+        assert (await f.repository.get_plan_snapshot(save_y.proposal_id)).status == "invalidated"
+        assert (await f.repository.get_plan_snapshot(save_z.proposal_id)).status == "pending"
+        await assert_rejected("旧pending失效", f.business.save_plan(context_y, save_y), "plan_proposal_invalidated")
+        saved_z = await f.business.save_plan(context_z, save_z)
+        assert saved_z.content.model_dump() == content_z
+        assert (await f.business.get_current_plan()).id == saved_z.id
+        assert await f.repository.get_workout(workout.id) == workout
+        plans = await f.business.list_plans()
+        assert len(plans) == 3 and sum(item.is_current for item in plans) == 1
+    finally:
+        await f.close()
+
+
+async def check_recent_workouts_completeness():
+    """固定十条取数的完整性与最新版本：真实 SQLite/仓库/服务/生产绑定工具，完整逐字段对象一致。"""
+    f = await Fixture(EVIDENCE_ROOT / "recent-full.db").seeded()
+    try:
+        session = await f.session("最近十条完整性")
+        cutoff = f.context(session, new_id(), new_id()).business_date
+        day = date.fromisoformat(cutoff)
+        arguments = WorkoutListArguments(date_from=None, date_to=cutoff, page=1, page_size=10)
+        records = [full_record((day - timedelta(days=i)).isoformat(), notes=f"第{i}天完整记录")
+                   for i in range(12)]
+        # 逆序写入：返回排序只可能来自 performed_on、id 倒序，与写入顺序无关。
+        for record in reversed(records):
+            await f.repository.insert_workout(record)
+        # 同一天的最新版本：更新既有记录，记录表只保留最新完整内容且版本递增。
+        assert await f.repository.update_workout(records[0].id, 1,
+            WorkoutContent.model_validate({**copy.deepcopy(FULL_WORKOUT), "notes": "更新后的最新记录"}),
+            records[0].updated_at + 10)
+        latest = await f.repository.get_workout(records[0].id)
+        assert latest.version == 2 and latest.created_at == records[0].created_at
+        assert latest.updated_at == records[0].updated_at + 10
+        expected = sorted([latest, *records[1:]],
+                          key=lambda item: (item.performed_on, item.id), reverse=True)[:10]
+        result = await f.business.list_workouts(arguments)
+        assert result.page == 1 and result.page_size == 10 and result.total == 12
+        assert result.items == expected
+        # 每条为完整最新记录：与实际 get_workout 完整对象逐字段相等。
+        for item in result.items:
+            assert await f.business.get_workout(item.id) == item
+        top = result.items[0]
+        assert top.id == latest.id and top.version == 2 and top.updated_at == latest.updated_at
+        assert len(top.content.exercises) == 2
+        assert top.content.exercises[0].load_convention == "barbell_total"
+        assert [group.weight_kg for group in top.content.exercises[0].sets] == [40.0, 42.5, 45.0]
+        assert [group.reps for group in top.content.exercises[0].sets] == [8, 8, 6]
+        assert top.content.exercises[1].sets[0].duration_seconds == 60.0
+        assert top.content.notes == "更新后的最新记录"
+        # 截止日包含边界：未来记录被排除，total 保持截止日内实际总数。
+        future = full_record((day + timedelta(days=1)).isoformat(), notes="未来记录")
+        await f.repository.insert_workout(future)
+        after = await f.business.list_workouts(arguments)
+        assert after.total == 12 and len(after.items) == 10
+        assert all(item.performed_on <= cutoff for item in after.items)
+        assert future.id not in {item.id for item in after.items}
+        # 生产绑定工具与服务返回完全一致。
+        tool_message = await f.invoke("list_workouts",
+            {"date_from": None, "date_to": cutoff, "page": 1, "page_size": 10},
+            f.context(session, new_id(), new_id()))
+        assert not tool_message.is_error, tool_message
+        assert json.loads(tool_message.content[0].text) == after.model_dump()
+        return {"total": after.total, "items": len(after.items), "latest_version": top.version,
+                "boundary_inclusive": True}
+    finally:
+        await f.close()
+
+
+async def check_weight_convention():
+    """调整边界重量口径：重量有值（包括0）必须明确有效口径，无效口径在工具参数层被拒绝。"""
+    f = await Fixture(EVIDENCE_ROOT / "weight-convention.db").seeded()
+    try:
+        session = await f.session("调整重量口径")
+        await profile(f, session)
+        version = (await f.business.get_profile()).version
+        context = f.context(session, new_id(), new_id())
+
+        def arguments(weight, convention):
+            content = copy.deepcopy(CONTENT)
+            content["days"][0]["exercises"][0].update(weight_kg=weight, load_convention=convention)
+            return {"base_profile_version": version, "base_plan_id": None, "payload": content}
+
+        before = await count_rows(f.database, "plan_snapshots")
+        rejected = []
+        for weight, convention in ((0, None), (2.5, None), (None, "unknown"), (0, "unknown")):
+            message = await f.invoke("prepare_plan_adjustment", arguments(weight, convention), context)
+            assert message.is_error, (weight, convention)
+            assert "参数校验失败" in message.content[0].text
+            rejected.append([weight, convention])
+        assert await count_rows(f.database, "plan_snapshots") == before
+
+        accepted = []
+        for weight, convention in ((0, "added_weight"), (2.5, "barbell_total"), (None, "plates_total")):
+            _, save = await prepare(f, session, "adjustment", version, base=None,
+                                    content=arguments(weight, convention)["payload"])
+            snapshot = await f.repository.get_plan_snapshot(save.proposal_id)
+            exercise = snapshot.payload.days[0].exercises[0]
+            assert exercise.weight_kg == weight and exercise.load_convention == convention
+            accepted.append([exercise.weight_kg, exercise.load_convention])
+        return {"rejected": rejected, "accepted": accepted}
+    finally:
+        await f.close()
+
+
+async def prepare_adjustment_result(f, session, version, base):
+    """真实回合：用户请求节点 -> 助手工具调用来源节点 -> 真实调整准备工具，不绑定展示，用于绑定拒绝核验。"""
+    accepted = await f.service.accept_send(SendCommand(operation_id=new_id(), session_id=session,
+        request=SendRequest(text="整理计划")), system_message=SYSTEM)
+    run = accepted.run
+    args = PlanAdjustmentArguments(base_profile_version=version, base_plan_id=base, payload=INCOMPLETE)
+    call = new_id()
+    source = await f.append(session, run.id, run.request_entry_id,
+                            assistant("prepare_plan_adjustment", call, args.model_dump()))
+    proposal = await f.business.prepare_plan_adjustment(
+        f.context(session, run.request_entry_id, source), args)
+    return run, source, call, proposal
+
+
+async def check_display_binding_rejections():
+    """展示绑定：结果节点身份、内容、路径与准备快照不一致时按契约拒绝调整计划保存授权。"""
+    f = await Fixture(EVIDENCE_ROOT / "display-binding.db").seeded()
+    try:
+        base_session = await f.session("调整展示绑定基线")
+        await profile(f, base_session)
+        version = (await f.business.get_profile()).version
+        bootstrap, bootstrap_save = await prepare(f, base_session, "import", version=version, base=None)
+        base_plan = await f.business.save_plan(bootstrap, bootstrap_save)
+
+        rejected = []
+        for label, field, override in (
+            ("调用标识不匹配", "tool_call_id", new_id()),
+            ("工具名称不匹配", "tool_name", "prepare_plan"),
+            ("错误结果节点", "is_error", True),
+            ("展示内容不一致", "notes", "被篡改的展示内容"),
+        ):
+            session = await f.session(label)
+            run, source, call, proposal = await prepare_adjustment_result(f, session, version, base_plan.id)
+            body = proposal.model_dump()
+            message = ToolResultMessage(role="toolResult", tool_name="prepare_plan_adjustment", tool_call_id=call,
+                content=[TextContent(type="text", text=json.dumps(body))], is_error=False,
+                timestamp=now_ms())
+            if field == "notes":
+                body["payload"]["notes"] = override
+                message = message.model_copy(update={"content": [TextContent(type="text", text=json.dumps(body))]})
+            elif field == "is_error":
+                message = message.model_copy(update={"is_error": override})
+            else:
+                message = message.model_copy(update={field: override})
+            display = await f.append(session, run.id, source, message)
+            try:
+                await assert_rejected(label, f.business.bind_plan_display_entry(proposal.proposal_id, display),
+                                      "plan_confirmation_invalid")
+            finally:
+                await f.service.finish_run(session, run.id, "completed")
+            assert (await f.repository.get_plan_snapshot(proposal.proposal_id)).display_entry_id is None
+            rejected.append(label)
+        # 非法来源：展示节点不在当前消息路径，或使用用户请求节点。
+        for label, pick in (("节点不在路径", lambda run, source: new_id()),
+                            ("来源为用户节点", lambda run, source: run.request_entry_id)):
+            session = await f.session(label)
+            run, source, _, proposal = await prepare_adjustment_result(f, session, version, base_plan.id)
+            try:
+                await assert_rejected(label, f.business.bind_plan_display_entry(proposal.proposal_id, pick(run, source)),
+                                      "plan_confirmation_invalid")
+            finally:
+                await f.service.finish_run(session, run.id, "completed")
+            assert (await f.repository.get_plan_snapshot(proposal.proposal_id)).display_entry_id is None
+            rejected.append(label)
+        return {"rejected": rejected}
+    finally:
+        await f.close()
+
+
+async def check_payload_consistency():
+    """准备payload、持久化展示节点payload与最终保存content一致，且固定保存结果可复核。"""
+    f = await Fixture(EVIDENCE_ROOT / "payload-consistency.db").seeded()
+    try:
+        session = await f.session("调整payload一致性")
+        content = copy.deepcopy(CONTENT)
+        content["notes"] = "调整说明：第三组重量提升；依据2026-06-01训练记录第3组8次"
+        context, save = await prepare(f, session, "adjustment", base=None, content=content)
+        snapshot = await f.repository.get_plan_snapshot(save.proposal_id)
+        display = await f.service.get_entry(session, save.display_entry_id)
+        displayed = json.loads(display.messages[0].content[0].text)
+        assert displayed["proposal_id"] == save.proposal_id
+        saved = await f.business.save_plan(context, save)
+        assert saved.content.model_dump() == snapshot.payload.model_dump() == displayed["payload"]
+        assert saved.content.notes == content["notes"]
+        status = await f.business.get_plan_save_status(context, save.proposal_id)
+        assert status.status == "saved" and status.result == saved
+        assert (await f.business.get_current_plan()).id == saved.id
+        return {"proposal_id": save.proposal_id, "plan_id": saved.id}
+    finally:
+        await f.close()
+
+
 async def check():
     check_schema()
     await check_business()
     await check_migration()
-    print(f"PASS: strict import/adjustment schema; unknown values; real display/confirmation; nullable/version/plan conflicts; limits; immutable kinds; fixed saves; history; v7→{SCHEMA_VERSION} preservation")
+    await check_recent_workouts()
+    await check_training_fact_lifecycle()
+    evidence = {
+        "recent_completeness": await check_recent_workouts_completeness(),
+        "weight_convention": await check_weight_convention(),
+        "display_binding": await check_display_binding_rejections(),
+        "payload_consistency": await check_payload_consistency(),
+    }
+    (EVIDENCE_ROOT / "evidence.json").write_text(
+        json.dumps(evidence, ensure_ascii=False, indent=2), encoding="utf-8")
+    print(f"PASS: strict import/adjustment schema; unknown values; real display/confirmation; nullable/version/plan conflicts; limits; immutable kinds; fixed saves; history; recent-10 fixed query min(x,10) descending full records trusted cutoff; prep-time training facts immutable and re-prepare invalidates old pending; v7→{SCHEMA_VERSION} preservation; recent-10 full latest record and inclusive boundary; adjustment weight convention; display-binding identity/path/content rejection; prepare-display-save payload consistency")
     print("Evidence:", ROOT)
+    print("Adjustment evidence:", EVIDENCE_ROOT)
 
 
 if __name__ == "__main__":
