@@ -11,7 +11,6 @@ from starlette.requests import Request
 def probe():
     from app.interfaces.http import (
         ALLOWED_HOSTS,
-        ALLOWED_ORIGINS,
         FRONTEND_PORT,
         check_boundary,
     )
@@ -20,15 +19,24 @@ def probe():
     assert FRONTEND_PORT == port
     expected = {f"{host}:{value}" for host in ("localhost", "127.0.0.1") for value in (8000, port)}
     assert ALLOWED_HOSTS == expected
-    assert ALLOWED_ORIGINS == {f"http://{host}" for host in expected}
 
     def request(host, origin):
         return Request({"type": "http", "headers": [(b"host", host.encode()), (b"origin", origin.encode())]})
 
     for host in expected:
         asyncio.run(check_boundary(request(host, f"http://{host}")))
-    for origin in ("http://evil.example", f"http://localhost:{port}.evil.example",
-                   f"https://localhost:{port}", "http://localhost:5175"):
+    for host in ("localhost", "127.0.0.1"):
+        for value in (1, 80, 5173, 5175, 5176, 8000, 65535):
+            asyncio.run(check_boundary(request("localhost:8000", f"http://{host}:{value}")))
+    for origin in (
+        "http://evil.example", f"http://localhost:{port}.evil.example",
+        f"https://localhost:{port}", "http://localhost:0", "http://localhost:65536",
+        "http://localhost:abc", "http://localhost:-1", "http://localhost:999999",
+        "http://localhost", "null", "http://192.168.1.2:5175", "http://[::1]:5175",
+        "http://user@localhost:5175", "http://localhost:5175/", "http://localhost:5175/path",
+        "http://localhost:5175?query", "http://localhost:5175#fragment",
+        "http://localhost:5175?", "http://localhost:5175#", "http://localhost:5175\n",
+    ):
         with pytest.raises(HTTPException) as rejected:
             asyncio.run(check_boundary(request("localhost:8000", origin)))
         assert rejected.value.status_code == 403
@@ -36,6 +44,17 @@ def probe():
     with pytest.raises(HTTPException) as rejected:
         asyncio.run(check_boundary(request("evil.example:8000", f"http://localhost:{port}")))
     assert rejected.value.detail["code"] == "host_forbidden"
+    asyncio.run(check_boundary(Request({"type": "http", "headers": [(b"host", b"localhost:8000")]})))
+    for headers, code in (
+        ([(b"host", b"localhost:8000"), (b"origin", b"http://localhost:5175"),
+          (b"origin", b"http://localhost:5176")], "origin_forbidden"),
+        ([(b"host", b"localhost:8000"), (b"host", b"localhost:8000")], "host_forbidden"),
+        ([(b"origin", b"http://localhost:5175")], "host_forbidden"),
+    ):
+        with pytest.raises(HTTPException) as rejected:
+            asyncio.run(check_boundary(Request({"type": "http", "headers": headers})))
+        assert rejected.value.status_code == 403
+        assert rejected.value.detail["code"] == code
 
 
 def check():
@@ -51,7 +70,7 @@ def check():
         else:
             assert result.returncode != 0
             assert "FIT_AGENT_FRONTEND_PORT" in result.stderr
-    print("PASS: shared frontend port; default/custom/range; exact local Host/Origin allowlist; invalid configuration fails")
+    print("PASS: configured Host allowlist; local HTTP Origin ports 1–65535; malformed/foreign/duplicate headers rejected; invalid configuration fails")
 
 
 if __name__ == "__main__":

@@ -1,9 +1,16 @@
 import { useEffect, useMemo, useSyncExternalStore } from "react";
+import { useQuery } from "@tanstack/react-query";
 import { useLocation, useNavigate } from "react-router-dom";
 import ChatComposer from "./components/ChatComposer";
 import ChatTranscript from "./components/ChatTranscript";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
+import {
+  NO_VALID_MODEL_CONFIG,
+  hasValidProviderConfig,
+  providerAllowsInput,
+  providerQueryOptions,
+} from "@/features/provider/providerConfig";
 import { unknownSteeringKeys } from "./utils/reactAgent";
 import { sessionRuns } from "./utils/sessionRunManager";
 
@@ -23,6 +30,7 @@ export default function ChatPage({
   const location = useLocation();
   const run = sessionRuns.open(sessionId, isDraft);
   const view = useSyncExternalStore(run.subscribe, run.snapshot);
+  const provider = useQuery(providerQueryOptions());
 
   useEffect(() => {
     run.mount(isDraft);
@@ -42,6 +50,15 @@ export default function ChatPage({
     () => unknownSteeringKeys(view.operations),
     [view.operations],
   );
+
+  const canRun = hasValidProviderConfig(provider.data);
+  const inputAllowed = providerAllowsInput(provider.data, view.busy);
+  const blockedByProvider =
+    inputAllowed || provider.isPending
+      ? undefined
+      : provider.isError
+        ? provider.error.message
+        : NO_VALID_MODEL_CONFIG;
 
   const blank = isDraft && view.rounds.length === 0;
 
@@ -63,7 +80,7 @@ export default function ChatPage({
           onRetry={run.retry}
           onWithdraw={run.withdraw}
           retrying={view.retrying}
-          canEdit={view.ready && !view.busy}
+          canEdit={view.ready && !view.busy && canRun}
           onEdit={run.editMessage}
           onRegenerate={run.regenerateMessage}
         />
@@ -83,8 +100,8 @@ export default function ChatPage({
       <ChatComposer
         centered={blank}
         busy={view.busy}
-        ready={view.ready}
-        error={view.error}
+        ready={view.ready && inputAllowed}
+        error={view.error ?? blockedByProvider}
         unknownKeys={unknownKeys}
         onSend={run.send}
         onStop={run.stop}

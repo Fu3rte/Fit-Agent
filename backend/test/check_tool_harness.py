@@ -275,11 +275,11 @@ def check_loop_hooks() -> None:
         )
         declaration = tool.definition()
         model = SimpleNamespace(
-            MODEL_API="openai-completions",
-            OPENAI_PROVIDER="openai",
-            OPENAI_MODEL="test-model",
-            OPENAI_BASE_URL="http://unused",
-            OPENAI_API_KEY="unused",
+            api="openai-completions",
+            provider="openai",
+            model="test-model",
+            base_url="http://unused",
+            api_key="unused",
         )
         system = SystemMessage(
             role="system", content="", tools_added=[declaration], timestamp=0
@@ -297,9 +297,9 @@ def check_loop_hooks() -> None:
                     arguments={"name": "loop"},
                 )
             ],
-            api=model.MODEL_API,
-            provider=model.OPENAI_PROVIDER,
-            model=model.OPENAI_MODEL,
+            api=model.api,
+            provider=model.provider,
+            model=model.model,
             usage=Usage(
                 input=1, output=1, cache_read=0, cache_write=0, total_tokens=2
             ),
@@ -309,9 +309,9 @@ def check_loop_hooks() -> None:
         stop = AssistantMessage(
             role="assistant",
             content=[TextContent(type="text", text="完成")],
-            api=model.MODEL_API,
-            provider=model.OPENAI_PROVIDER,
-            model=model.OPENAI_MODEL,
+            api=model.api,
+            provider=model.provider,
+            model=model.model,
             usage=Usage(
                 input=1, output=1, cache_read=0, cache_write=0, total_tokens=2
             ),

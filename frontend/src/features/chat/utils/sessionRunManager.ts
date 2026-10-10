@@ -7,11 +7,16 @@ import {
   submitSteering,
   withdrawSteering,
 } from "@/lib/api";
-import { PLAN_QUERY_KEY, WORKOUT_QUERY_KEY, queryClient } from "@/lib/query";
+import { PLAN_QUERY_KEY, PROVIDER_QUERY_KEY, WORKOUT_QUERY_KEY, queryClient } from "@/lib/query";
+import {
+  NO_VALID_MODEL_CONFIG,
+  hasValidProviderConfig,
+} from "@/features/provider/providerConfig";
 import type {
   AttachmentWire,
   DiscardReasonWire,
   EditRunBody,
+  ProviderStatusWire,
   ReActRunBody,
   RegenerateRunBody,
   RunStatusWire,
@@ -841,6 +846,15 @@ class SessionRunRecord {
     this.patch({ ready: false, error: "该操作已受理，运行仍在执行。" });
   }
 
+  // 仅检查新运行，既有运行的 Steering 使用原配置快照。
+  private canStartRun(): boolean {
+    const configured = hasValidProviderConfig(
+      queryClient.getQueryData<ProviderStatusWire>(PROVIDER_QUERY_KEY),
+    );
+    if (!configured) this.patch({ error: NO_VALID_MODEL_CONFIG });
+    return configured;
+  }
+
   /** 编辑用户消息（附件契约 §3.2）：提交编辑后的完整附件集合，保留项为引用、新增或替换项为上传，全部移除为 `[]` */
   editMessage = (
     entryId: string,
@@ -850,7 +864,8 @@ class SessionRunRecord {
     if (
       !this.view.ready ||
       this.view.busy ||
-      !canSubmitChatInput(text, attachments, [])
+      !canSubmitChatInput(text, attachments, []) ||
+      !this.canStartRun()
     )
       return Promise.resolve(false);
     this.patch({ error: undefined });
@@ -871,7 +886,12 @@ class SessionRunRecord {
   };
 
   regenerateMessage = (entryId: string): void => {
-    if (!this.view.ready || this.view.busy) return;
+    if (
+      !this.view.ready ||
+      this.view.busy ||
+      !this.canStartRun()
+    )
+      return;
     this.patch({ error: undefined });
     const operation: PendingOperation = {
       operation_id: crypto.randomUUID(),
@@ -1041,7 +1061,8 @@ class SessionRunRecord {
     }
     if (
       !this.view.ready ||
-      pendingExecOperation(this.view.operations) !== undefined
+      pendingExecOperation(this.view.operations) !== undefined ||
+      !this.canStartRun()
     )
       return Promise.resolve(false);
     const operation: PendingOperation = {

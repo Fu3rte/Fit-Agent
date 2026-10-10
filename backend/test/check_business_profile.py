@@ -49,7 +49,7 @@ from test.check_profile_confirmation import (
     prepare_arguments,
     propose,
 )
-from test.regression_support import temporary_root
+from test.regression_support import install_test_model_config, temporary_root
 
 EVIDENCE = temporary_root("business-profile")
 
@@ -375,9 +375,9 @@ async def check_long_output_and_credentials(root: Path) -> dict:
         assert len(envelope(queried)["content"]["health_notes"]) == len(long_notes)
 
         # 截断区之后的模型凭据同样命中：结果不公开也不保存。
-        from app.model_config import load_model_config
+        from app.model_config import saved_api_key
 
-        secret = load_model_config().OPENAI_API_KEY
+        secret = saved_api_key()
         guarded = await run_tool_batch(
             [
                 ToolCall(
@@ -603,6 +603,7 @@ async def check_migration(root: Path) -> dict:
 
 def check() -> None:
     EVIDENCE.mkdir(parents=True, exist_ok=True)
+    install_test_model_config()
     evidence: dict = {}
     with TemporaryDirectory(dir=EVIDENCE, ignore_cleanup_errors=True) as directory:
         root = Path(directory)

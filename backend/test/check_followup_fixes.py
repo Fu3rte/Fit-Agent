@@ -20,6 +20,7 @@ from test.check_http import create_session, events, last_run, wait_idle
 from test.regression_support import (
     Server,
     client,
+    install_test_model_config,
     patch_default_database,
     temporary_root,
 )
@@ -342,6 +343,7 @@ def check_duplicate_while_closing(http, evidence):
 
 def check():
     EVIDENCE.mkdir(parents=True, exist_ok=True)
+    install_test_model_config()
     evidence = {}
     check_steering_restart(evidence)
 

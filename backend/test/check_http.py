@@ -24,7 +24,7 @@ from app.domain.session.attachments import TMP_ROOT
 from app.domain.session.errors import SessionNotFound
 from app.interfaces.http import ALLOWED_HOSTS, RunRequest, active, app, runs
 from app.model_config import load_model_config
-from test.regression_support import patch_default_database
+from test.regression_support import install_test_model_config, patch_default_database
 
 EVIDENCE = Path(__file__).resolve().parents[1] / "temp" / "http"
 
@@ -192,6 +192,7 @@ def check_credential_filter() -> None:
 
 
 def check() -> None:
+    install_test_model_config()
     EVIDENCE.mkdir(parents=True, exist_ok=True)
     patch_default_database("http")
     check_credential_filter()
@@ -278,7 +279,7 @@ def check() -> None:
                 {**payload, "extra": True},
             ):
                 assert client.post("/api/agent/run", json=invalid).status_code == 422
-            key = load_model_config().OPENAI_API_KEY
+            key = load_model_config().api_key
             blocked = client.post(
                 "/api/agent/run",
                 json={
@@ -483,7 +484,7 @@ def check() -> None:
                 for message in session_after_failure
             )
             error_text = json.dumps(failure, ensure_ascii=False)
-            assert load_model_config().OPENAI_API_KEY not in error_text
+            assert load_model_config().api_key not in error_text
 
             cancelled = str(uuid4())
             create_session(client, cancelled)

@@ -41,8 +41,11 @@ from app.interfaces.http import (
     publish_terminal,
     terminal_decision,
 )
-from app.model_config import load_model_config
-from test.regression_support import session_workspace, temporary_root
+from test.regression_support import (
+    install_test_model_config,
+    session_workspace,
+    temporary_root,
+)
 
 EVIDENCE = temporary_root("agent-regression")
 ABORT_TRIGGER = "regress_abort_tool_result"
@@ -332,7 +335,7 @@ def check_repeated_cancel(database_path):
 
 
 def check_credential_shards(config):
-    key = config.OPENAI_API_KEY
+    key = config.api_key
     guard = CredentialFilter((key,))
     assert guard.contains(key)
     assert guard.contains({"outer": [{"inner": key}], key: "value"})
@@ -363,9 +366,9 @@ def check_credential_shards(config):
     message = AssistantMessage(
         role="assistant",
         content=[TextContent(type="text", text=f"结尾{key}")],
-        api=config.MODEL_API,
-        provider=config.OPENAI_PROVIDER,
-        model=config.OPENAI_MODEL,
+        api=config.api,
+        provider=config.provider,
+        model=config.model,
         usage=Usage(input=1, output=1, cache_read=0, cache_write=0, total_tokens=2),
         stop_reason="stop",
         timestamp=0,
@@ -515,8 +518,8 @@ def check_steering_consume_failure(config):
 
 
 def check():
-    config = load_model_config()
-    assert config.MODEL_API == "openai-completions"
+    config = install_test_model_config()
+    assert config.api == "openai-completions"
     evidence = {}
     evidence["tool_cancel"] = check_tool_cancel(
         config, EVIDENCE / f"cancel-{uuid4().hex}.db"

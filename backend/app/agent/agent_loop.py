@@ -72,10 +72,10 @@ StreamFn = Callable[[ModelSpec, LlmContext, StreamOptions], AssistantResponse]
 
 def _model_spec(config: AgentLoopConfig) -> ModelSpec:
     return ModelSpec(
-        api=config.model.MODEL_API,
-        provider=config.model.OPENAI_PROVIDER,
-        id=config.model.OPENAI_MODEL,
-        base_url=config.model.OPENAI_BASE_URL,
+        api=config.model.api,
+        provider=config.model.provider,
+        id=config.model.model,
+        base_url=config.model.base_url,
     )
 
 
@@ -102,7 +102,7 @@ async def stream_assistant_response(
             raise ValueError(f"工具声明与执行注册表不一致: {declaration.name}")
     check_cancelled(signal)
     options: StreamOptions = {
-        "api_key": config.model.OPENAI_API_KEY,
+        "api_key": config.model.api_key,
         "signal": signal,
         "max_tokens": 16384,
     }

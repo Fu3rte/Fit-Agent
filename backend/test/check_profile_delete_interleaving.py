@@ -13,7 +13,13 @@ from app.interfaces.http import app
 from test.check_business_profile import _StatementSync
 from test.check_http import events, wait_idle
 from test.check_profile_confirmation import Fixture, payload, prepare_arguments, propose
-from test.regression_support import Server, client, run_tool, temporary_root
+from test.regression_support import (
+    Server,
+    client,
+    install_test_model_config,
+    run_tool,
+    temporary_root,
+)
 
 EVIDENCE = temporary_root('profile-delete-interleaving') / uuid4().hex
 EVIDENCE.mkdir()
@@ -51,6 +57,7 @@ def fingerprint(path):
 
 
 def check() -> None:
+    install_test_model_config()
     results = []
     for phase in ('before_commit', 'after_commit'):
         path = EVIDENCE / (phase + '.db')

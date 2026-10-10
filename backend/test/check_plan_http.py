@@ -1,16 +1,18 @@
 import asyncio
 import json
 from contextlib import contextmanager
-from pathlib import Path
 from uuid import uuid4
-
-from dotenv import set_key
 
 from app.infrastructure.persistence.sqlite import database as database_module
 from app.interfaces.http import app
 from test.check_plan_core import prepare, profile
 from test.check_profile_confirmation import Fixture
-from test.regression_support import Server, client, temporary_root
+from test.regression_support import (
+    Server,
+    client,
+    install_test_model_config,
+    temporary_root,
+)
 
 ROOT = temporary_root("plan-http") / uuid4().hex
 ROOT.mkdir()
@@ -47,23 +49,30 @@ def query(http, path, status=200):
 
 @contextmanager
 def credential_test_token():
+    from app import model_config
     from app.model_config import load_model_config
 
-    source = Path(__file__).resolve().parents[1] / ".env"
-    original = load_model_config().OPENAI_API_KEY
+    config = load_model_config()
     token = "plan-test-" + uuid4().hex
     try:
-        set_key(source, "OPENAI_API_KEY", token)
-        if load_model_config().OPENAI_API_KEY != token:
+        model_config.save_provider(
+            api=config.api, base_url=config.base_url, model=config.model,
+            provider=config.provider, api_key=token,
+        )
+        if load_model_config().api_key != token:
             raise RuntimeError("隔离凭据测试配置未生效")
         yield token
     finally:
-        set_key(source, "OPENAI_API_KEY", original)
-        if load_model_config().OPENAI_API_KEY != original:
+        model_config.save_provider(
+            api=config.api, base_url=config.base_url, model=config.model,
+            provider=config.provider, api_key=config.api_key,
+        )
+        if load_model_config().api_key != config.api_key:
             raise RuntimeError("隔离凭据测试配置恢复失败")
 
 
 def check():
+    install_test_model_config()
     empty = ROOT / "empty.db"
     database_module.default_database_path = lambda: empty
     with Server(app) as server, client(server.base_url) as http:

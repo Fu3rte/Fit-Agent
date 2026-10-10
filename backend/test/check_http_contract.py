@@ -25,7 +25,11 @@ from test.check_http import (
     validate_events,
     wait_idle,
 )
-from test.regression_support import patch_default_database, seed_note
+from test.regression_support import (
+    install_test_model_config,
+    patch_default_database,
+    seed_note,
+)
 
 EVIDENCE = Path(__file__).resolve().parents[1] / "temp" / "http-contract"
 
@@ -55,6 +59,7 @@ def check_turn_limit() -> None:
 
 
 def check() -> None:
+    install_test_model_config()
     check_turn_limit()
     EVIDENCE.mkdir(parents=True, exist_ok=True)
     patch_default_database("http-contract")
@@ -272,7 +277,7 @@ def check() -> None:
                 wait_idle()
                 assert last_run(session_id).status in {"cancelled", "failed"}
             assert not runs
-            key = load_model_config().OPENAI_API_KEY
+            key = load_model_config().api_key
             encoded = json.dumps(evidence, ensure_ascii=False)
             assert key not in encoded
             assert all(term not in encoded for term in ("thinking_signature", "thought_signature", "text_signature", "Traceback", "Authorization"))

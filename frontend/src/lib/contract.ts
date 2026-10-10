@@ -683,7 +683,8 @@ export type ReActEvent = { data: { run_id: string } } & (
 /** 已注册业务接口错误码（§11.5，编辑与重新生成新增 ``entry_not_found`` / ``invalid_target_entry``，
  *  画像自然语言确认新增 §11.9 的八项业务码，训练记录新增 workout-http-sse-contract §7 的 ``workout_not_found``，
  *  训练计划新增 plan-generation-contract §8 的十项业务码，
- *  附件新增 plan-import-adjustment-contract §9 的五项附件码） */
+ *  附件新增 plan-import-adjustment-contract §9 的五项附件码，
+ *  模型配置新增 PRODUCT.md §3.4 的 ``model_not_configured``） */
 export type ErrorCode =
   | "host_forbidden"
   | "origin_forbidden"
@@ -722,44 +723,34 @@ export type ErrorCode =
   | "invalid_request"
   | "invalid_business_payload"
   | "credential_detected"
+  | "model_not_configured"
   | "internal_error";
 
-export interface ApiError {
-  http_status: number;
-  error_code: ErrorCode;
-  message: string;
-}
+/* ===== 模型配置（PRODUCT.md §3.4）===== */
 
-/* 模型配置（PRODUCT.md §3.4） */
+export type ModelApi = "openai-completions" | "anthropic-messages";
 
-/** 客户端 transport：只决定后端用哪个 Chat 客户端（与后端 APIS 同集合） */
-export type ProviderApiWire = "openai_compatible" | "anthropic_messages";
-
-/** 结构化输出机制：只决定 with_structured_output 的原生 kwargs（与后端 STRUCTURED_OUTPUTS 同集合） */
-export type ProviderStructuredOutputWire =
-  "json_schema" | "function_calling_strict";
-
-/** GET /api/provider 响应：后端不回传 api_key 本体，只给是否已配置的布尔 */
-export type ProviderStatusWire = {
-  has_api_key: boolean;
+/** provider 留空时使用协议值；保存与诊断均要求显式提交 Key。 */
+export interface ProviderWriteBody {
+  api: ModelApi;
   base_url: string;
   model: string;
-  api: ProviderApiWire;
-  structured_output: ProviderStructuredOutputWire;
-};
+  api_key: string;
+  provider?: string;
+}
 
-/** PUT /api/provider 请求体：api_key 空串或省略时后端沿用已存值，api／structured_output 空串回落默认 */
-export type ProviderWriteBody = {
-  api_key?: string;
-  base_url?: string;
-  model?: string;
-  api?: ProviderApiWire;
-  structured_output?: ProviderStructuredOutputWire;
-};
+/** api_key 为明文凭据，仅保存在内存；provider 为生效值，清除后全部字段为 null。 */
+export interface ProviderStatusWire {
+  api: ModelApi | null;
+  base_url: string | null;
+  model: string | null;
+  api_key: string | null;
+  provider: string | null;
+}
 
-/** POST /api/provider/test 响应：ok 为 false 时 latency_ms 为 null，message 为固定文案 */
-export type ProviderTestWire = {
+/** 诊断通过和失败均返回非负整数毫秒耗时。 */
+export interface ProviderTestWire {
   ok: boolean;
-  latency_ms: number | null;
+  latency_ms: number;
   message: string;
-};
+}

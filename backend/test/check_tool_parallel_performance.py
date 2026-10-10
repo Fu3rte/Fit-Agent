@@ -31,11 +31,11 @@ LINES = 800
 REPS = 20
 WARMUP = 2
 MODEL = SimpleNamespace(
-    MODEL_API="openai-completions",
-    OPENAI_PROVIDER="openai",
-    OPENAI_MODEL="perf-model",
-    OPENAI_BASE_URL="http://unused",
-    OPENAI_API_KEY="unused",
+    api="openai-completions",
+    provider="openai",
+    model="perf-model",
+    base_url="http://unused",
+    api_key="unused",
 )
 
 
@@ -121,9 +121,9 @@ def check_parallel() -> dict:
         tool_use = AssistantMessage(
             role="assistant",
             content=[TextContent(type="text", text="读取全部文件"), *calls],
-            api=MODEL.MODEL_API,
-            provider=MODEL.OPENAI_PROVIDER,
-            model=MODEL.OPENAI_MODEL,
+            api=MODEL.api,
+            provider=MODEL.provider,
+            model=MODEL.model,
             usage=usage(),
             stop_reason="toolUse",
             timestamp=0,
@@ -131,9 +131,9 @@ def check_parallel() -> dict:
         stop = AssistantMessage(
             role="assistant",
             content=[TextContent(type="text", text="完成")],
-            api=MODEL.MODEL_API,
-            provider=MODEL.OPENAI_PROVIDER,
-            model=MODEL.OPENAI_MODEL,
+            api=MODEL.api,
+            provider=MODEL.provider,
+            model=MODEL.model,
             usage=usage(),
             stop_reason="stop",
             timestamp=0,
@@ -208,9 +208,9 @@ async def persist(
         assistant = AssistantMessage(
             role="assistant",
             content=[TextContent(type="text", text="读取"), *calls],
-            api=MODEL.MODEL_API,
-            provider=MODEL.OPENAI_PROVIDER,
-            model=MODEL.OPENAI_MODEL,
+            api=MODEL.api,
+            provider=MODEL.provider,
+            model=MODEL.model,
             usage=usage(),
             stop_reason="toolUse",
             timestamp=0,

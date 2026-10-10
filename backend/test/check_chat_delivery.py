@@ -18,20 +18,23 @@ from test.check_http import (
     validate_events,
     wait_idle,
 )
-from test.regression_support import patch_default_database
+from test.regression_support import install_test_model_config, patch_default_database
 
 EVIDENCE = Path(__file__).resolve().parents[1] / "temp" / "chat-delivery"
 ROOT = Path(__file__).resolve().parents[2]
 
 
 def check() -> None:
+    install_test_model_config()
     patch_default_database("chat-delivery")
     EVIDENCE.mkdir(parents=True, exist_ok=True)
     package = TypeAdapter(dict).validate_json((ROOT / "package.json").read_text(encoding="utf-8"))
     backend_command = "cd backend && uv run python -m uvicorn app.interfaces.http:app --reload --host 127.0.0.1 --port 8000"
     assert package["scripts"]["dev:backend"] == backend_command
-    assert '"npm run dev:backend"' in package["scripts"]["dev"]
-    assert '"npm run dev:frontend"' in package["scripts"]["dev"]
+    assert package["scripts"]["dev"] == "node scripts/dev.mjs"
+    launcher = (ROOT / "scripts" / "dev.mjs").read_text(encoding="utf-8")
+    assert '"npm run dev:backend"' in launcher
+    assert '"npm run dev:frontend"' in launcher
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
     for command in (backend_command.removeprefix("cd backend && "), "npm run dev"):
         assert command in readme

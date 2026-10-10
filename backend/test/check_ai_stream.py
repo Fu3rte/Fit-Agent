@@ -1,11 +1,9 @@
 import asyncio
 from concurrent.futures import CancelledError
 from copy import deepcopy
-from pathlib import Path
 from threading import Event
 
 import pytest
-from dotenv import dotenv_values
 from openai import APIConnectionError
 
 from app.ai.api import anthropic_messages, openai_completions
@@ -37,6 +35,7 @@ from app.ai.types import (
     ToolCallEndEvent,
     ToolCallStartEvent,
 )
+from test.regression_support import install_test_model_config
 
 
 def pending() -> AssistantMessage:
@@ -320,19 +319,15 @@ async def check_tool_contract() -> None:
 
 
 def load_openai_spec() -> tuple[ModelSpec, str]:
-    env = dotenv_values(Path(__file__).resolve().parents[1] / ".env")
-    provider = env["OPENAI_PROVIDER"]
-    identifier = env["OPENAI_MODEL"]
-    base_url = env["OPENAI_BASE_URL"]
-    api_key = env["OPENAI_API_KEY"]
-    assert provider and identifier and base_url and api_key
+    config = install_test_model_config()
+    assert config.api == "openai-completions"
     spec = ModelSpec(
-        api="openai-completions",
-        provider=provider,
-        id=identifier,
-        base_url=base_url,
+        api=config.api,
+        provider=config.provider,
+        id=config.model,
+        base_url=config.base_url,
     )
-    return spec, api_key
+    return spec, config.api_key
 
 
 def check_openai_request(spec: ModelSpec) -> None:

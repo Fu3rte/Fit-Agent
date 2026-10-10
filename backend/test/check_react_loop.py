@@ -15,13 +15,16 @@ from app.ai.messages import (
     UserMessage,
 )
 from app.ai.stream import stream
-from app.model_config import load_model_config
-from test.regression_support import TEST_SESSION, session_workspace
+from test.regression_support import (
+    TEST_SESSION,
+    install_test_model_config,
+    session_workspace,
+)
 
 
 def check():
-    config = load_model_config()
-    assert config.MODEL_API == "openai-completions"
+    config = install_test_model_config()
+    assert config.api == "openai-completions"
     loop_config = AgentLoopConfig(model=config, max_turns=8)
     limits = []
 

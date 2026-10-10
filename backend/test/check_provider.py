@@ -8,6 +8,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from time import time_ns
 
+from openai import OpenAI
 from openai.types.chat import ChatCompletion, ChatCompletionMessage
 from openai.types.chat.chat_completion import Choice
 from openai.types.completion_usage import CompletionUsage, PromptTokensDetails
@@ -37,23 +38,32 @@ from app.ai.messages import (
 )
 from app.ai.stream import complete, stream
 from app.ai.types import ModelSpec, StreamOptions
-from app.model_config import load_model_config
-from test.regression_support import TEST_SESSION, run_tool, session_workspace
+from test.regression_support import (
+    TEST_SESSION,
+    install_test_model_config,
+    run_tool,
+    session_workspace,
+)
 
 
 def check() -> None:
-    config = load_model_config()
+    config = install_test_model_config()
     spec = ModelSpec(
         api="openai-completions",
-        provider=config.OPENAI_PROVIDER,
-        id=config.OPENAI_MODEL,
-        base_url=config.OPENAI_BASE_URL,
+        provider=config.provider,
+        id=config.model,
+        base_url=config.base_url,
     )
-    options: StreamOptions = {"api_key": config.OPENAI_API_KEY}
+    options: StreamOptions = {"api_key": config.api_key}
     timestamp = time_ns() // 1_000_000
     with (
         TemporaryDirectory() as directory,
-        config.create_client() as client,
+        OpenAI(
+            api_key=config.api_key,
+            base_url=config.base_url,
+            max_retries=0,
+            timeout=60,
+        ) as client,
     ):
         root = Path(directory)
         registry = create_file_tools(TEST_SESSION, tmp_root=root)
@@ -97,10 +107,10 @@ def check() -> None:
             isinstance(block, TextContent) and block.text for block in text.content
         )
         assert (
-            text.provider == config.OPENAI_PROVIDER and text.api == "openai-completions"
+            text.provider == config.provider and text.api == "openai-completions"
         )
         assert (
-            text.model == config.OPENAI_MODEL and text.response_id and text.response_model
+            text.model == config.model and text.response_id and text.response_model
         )
         assert text.timestamp > 0 and text.usage.total_tokens > 0
         assert "cost" not in json.loads(serialize_message(text))["usage"]
@@ -181,7 +191,7 @@ def check() -> None:
             return ChatCompletion(
                 id="response-limit",
                 created=1,
-                model=config.OPENAI_MODEL,
+                model=config.model,
                 object="chat.completion",
                 choices=[
                     Choice(

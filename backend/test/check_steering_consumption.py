@@ -17,8 +17,8 @@ from app.ai.messages import (
 from app.ai.stream import AssistantResponse
 from app.application.session.service import SessionService
 from app.application.session.steering import SteeringCoordinator
-from app.model_config import load_model_config
 from test.check_steering import open_service, start_run, steering_command
+from test.regression_support import install_test_model_config
 
 BACKEND = Path(__file__).resolve().parents[1]
 TEMP_ROOT = BACKEND / "temp" / "steering-consumption"
@@ -216,7 +216,7 @@ async def scenario_no_model_after_failure(service: SessionService, path: Path) -
         await coordinator.consume(run_id, messages)
 
     config = AgentLoopConfig(
-        model=load_model_config(),
+        model=install_test_model_config(),
         max_turns=4,
         get_steering_messages=get_steering,
         on_steering_consumed=on_consumed,

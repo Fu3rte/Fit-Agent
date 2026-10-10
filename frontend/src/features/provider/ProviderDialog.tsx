@@ -1,7 +1,6 @@
 import { useEffect, useState } from "react";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQuery } from "@tanstack/react-query";
 import { toast } from "sonner";
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
@@ -12,133 +11,86 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import { testProvider } from "@/lib/api";
+import { parseProviderWriteBody } from "@/lib/business";
+import type { ModelApi, ProviderWriteBody } from "@/lib/contract";
 import {
-  deleteProvider,
-  getProvider,
-  putProvider,
-  testProvider,
-} from "@/lib/api";
-import type {
-  ProviderApiWire,
-  ProviderStructuredOutputWire,
-  ProviderWriteBody,
-} from "@/lib/contract";
+  clearProviderConfig,
+  providerFormState,
+  providerQueryOptions,
+  saveProviderConfig,
+} from "./providerConfig";
 
-/** 客户端 transport 的中文标签（value 与后端 APIS 同集合） */
-const API_LABELS: Record<ProviderApiWire, string> = {
-  openai_compatible: "OpenAI 兼容（ChatOpenAI）",
-  anthropic_messages: "Anthropic Messages（ChatAnthropic）",
+const API_LABELS: Record<ModelApi, string> = {
+  "openai-completions": "OpenAI Completions",
+  "anthropic-messages": "Anthropic Messages",
 };
 
-const API_VALUES = Object.keys(API_LABELS) as ProviderApiWire[];
+const API_VALUES = Object.keys(API_LABELS) as ModelApi[];
 
-/** 结构化输出机制的中文标签（value 与后端 STRUCTURED_OUTPUTS 同集合） */
-const STRUCTURED_OUTPUT_LABELS: Record<ProviderStructuredOutputWire, string> = {
-  json_schema: "JSON Schema",
-  function_calling_strict: "Function Calling（strict）",
-};
-
-/** 各 transport 允许的结构化输出机制：与后端 STRUCTURED_OUTPUTS_BY_API 同集合 */
-const STRUCTURED_OUTPUTS_BY_API: Record<
-  ProviderApiWire,
-  ProviderStructuredOutputWire[]
-> = {
-  openai_compatible: ["json_schema", "function_calling_strict"],
-  anthropic_messages: ["json_schema"],
-};
-
-const DEFAULT_API: ProviderApiWire = "openai_compatible";
-const DEFAULT_STRUCTURED_OUTPUT: ProviderStructuredOutputWire = "json_schema";
-
-const STRUCTURED_OUTPUT_VALUES = Object.keys(
-  STRUCTURED_OUTPUT_LABELS,
-) as ProviderStructuredOutputWire[];
-
-/** 线上两个协议字段可能缺字段或取未知值（旧后端响应）：只放行已知集合，其余回落服务端默认 */
-const asApi = (value: unknown): ProviderApiWire =>
-  API_VALUES.includes(value as ProviderApiWire)
-    ? (value as ProviderApiWire)
-    : DEFAULT_API;
-
-const asStructuredOutput = (value: unknown): ProviderStructuredOutputWire =>
-  STRUCTURED_OUTPUT_VALUES.includes(value as ProviderStructuredOutputWire)
-    ? (value as ProviderStructuredOutputWire)
-    : DEFAULT_STRUCTURED_OUTPUT;
-
-/** 模型配置弹层：入口在侧栏底部，承载 Base URL、模型名、transport、结构化输出与 API Key 的读写 */
 export function ProviderDialog({ onClose }: { onClose: () => void }) {
-  const queryClient = useQueryClient();
-  const provider = useQuery({ queryKey: ["provider"], queryFn: getProvider });
+  const provider = useQuery(providerQueryOptions());
 
-  const [baseUrl, setBaseUrl] = useState("");
-  const [model, setModel] = useState("");
-  const [apiKeyInput, setApiKeyInput] = useState("");
-  const [api, setApi] = useState<ProviderApiWire>(DEFAULT_API);
-  const [structuredOutput, setStructuredOutput] =
-    useState<ProviderStructuredOutputWire>(DEFAULT_STRUCTURED_OUTPUT);
+  const [form, setForm] = useState(() => providerFormState(provider.data));
+  const patch = (change: Partial<typeof form>) =>
+    setForm((current) => ({ ...current, ...change }));
 
-  // 只在服务端字段真的变化时回填：后台 refetch 与保存后的 setQueryData 不得清掉已输入的 Key
+  // 按字段值变化回填，避免相同数据的刷新重置表单。
   useEffect(() => {
-    if (!provider.data) return;
-    setBaseUrl(provider.data.base_url);
-    setModel(provider.data.model);
-    setApi(asApi(provider.data.api));
-    setStructuredOutput(asStructuredOutput(provider.data.structured_output));
+    if (provider.data === undefined) return;
+    setForm(providerFormState(provider.data));
   }, [
+    provider.data?.api,
     provider.data?.base_url,
     provider.data?.model,
-    provider.data?.api,
-    provider.data?.structured_output,
+    provider.data?.api_key,
+    provider.data?.provider,
   ]);
 
-  // 换 transport 时把超出该 transport 能力的机制收回默认，避免提交后端必然拒绝的组合
-  const allowedStructuredOutputs = STRUCTURED_OUTPUTS_BY_API[api];
-  const effectiveStructuredOutput = allowedStructuredOutputs.includes(
-    structuredOutput,
-  )
-    ? structuredOutput
-    : DEFAULT_STRUCTURED_OUTPUT;
-
   const save = useMutation({
-    mutationFn: (body: ProviderWriteBody) => putProvider(body),
-    onSuccess: (data) => {
-      queryClient.setQueryData(["provider"], data);
-      toast.success("模型配置已保存");
-    },
+    mutationFn: saveProviderConfig,
+    onSuccess: () => toast.success("模型配置已保存"),
     onError: (error) =>
       toast.error(error instanceof Error ? error.message : "模型配置保存失败"),
   });
 
   const clear = useMutation({
-    mutationFn: () => deleteProvider(),
-    onSuccess: (data) => {
-      queryClient.setQueryData(["provider"], data);
-      setApiKeyInput("");
-      toast.success("凭据已清除");
+    mutationFn: clearProviderConfig,
+    onSuccess: () => {
+      patch({ api: null, base_url: "", model: "", provider: "", api_key: "" });
+      toast.success("配置已清除");
     },
     onError: (error) =>
-      toast.error(error instanceof Error ? error.message : "凭据清除失败"),
+      toast.error(error instanceof Error ? error.message : "配置清除失败"),
   });
 
   const test = useMutation({
-    mutationFn: (body: ProviderWriteBody) => testProvider(body),
-    onSuccess: (data) => {
-      if (data.ok) toast.success(`${data.message}（${data.latency_ms} ms）`);
-      else toast.error(data.message);
+    mutationFn: testProvider,
+    onSuccess: (result) => {
+      const detail = `${result.message}（${result.latency_ms} ms）`;
+      if (result.ok) toast.success(detail);
+      else toast.error(detail);
     },
     onError: (error) =>
       toast.error(error instanceof Error ? error.message : "模型测试失败"),
   });
 
-  const hasApiKey = provider.data?.has_api_key ?? false;
+  const busy = save.isPending || clear.isPending || test.isPending;
 
-  const formBody = (): ProviderWriteBody => ({
-    api_key: apiKeyInput,
-    base_url: baseUrl.trim(),
-    model: model.trim(),
-    api,
-    structured_output: effectiveStructuredOutput,
-  });
+  const formBody = (): ProviderWriteBody | null => {
+    try {
+      return parseProviderWriteBody({
+        api: form.api,
+        base_url: form.base_url.trim(),
+        model: form.model.trim(),
+        api_key: form.api_key,
+        provider: form.provider,
+      });
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "模型配置校验失败");
+      return null;
+    }
+  };
 
   return (
     <Dialog open onOpenChange={(open) => !open && onClose()}>
@@ -161,34 +113,19 @@ export function ProviderDialog({ onClose }: { onClose: () => void }) {
         ) : (
           <>
             <div className="space-y-2">
-              <label
-                htmlFor="provider-base-url"
-                className="text-sm font-medium"
-              >
-                Base URL
-              </label>
-              <Input
-                id="provider-base-url"
-                value={baseUrl}
-                placeholder="例：https://api.example.com/v1"
-                onChange={(event) => setBaseUrl(event.target.value)}
-              />
-            </div>
-
-            <div className="space-y-2">
               <label htmlFor="provider-api" className="text-sm font-medium">
-                客户端 transport
+                协议
               </label>
               <Select
-                value={api}
-                onValueChange={(value) => setApi(value as ProviderApiWire)}
+                value={form.api ?? undefined}
+                onValueChange={(value) => patch({ api: value as ModelApi })}
               >
                 <SelectTrigger
                   id="provider-api"
                   className="w-full"
-                  aria-label="客户端 transport"
+                  aria-label="协议"
                 >
-                  <SelectValue />
+                  <SelectValue placeholder="选择协议" />
                 </SelectTrigger>
                 <SelectContent>
                   {API_VALUES.map((value) => (
@@ -202,85 +139,82 @@ export function ProviderDialog({ onClose }: { onClose: () => void }) {
 
             <div className="space-y-2">
               <label
-                htmlFor="provider-structured-output"
+                htmlFor="provider-base-url"
                 className="text-sm font-medium"
               >
-                结构化输出方式
-              </label>
-              <Select
-                value={effectiveStructuredOutput}
-                onValueChange={(value) =>
-                  setStructuredOutput(value as ProviderStructuredOutputWire)
-                }
-              >
-                <SelectTrigger
-                  id="provider-structured-output"
-                  className="w-full"
-                  aria-label="结构化输出方式"
-                >
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  {allowedStructuredOutputs.map((value) => (
-                    <SelectItem key={value} value={value}>
-                      {STRUCTURED_OUTPUT_LABELS[value]}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
-
-            <div className="space-y-2">
-              <label htmlFor="provider-model" className="text-sm font-medium">
-                模型名
+                Base URL
               </label>
               <Input
-                id="provider-model"
-                value={model}
-                placeholder="例：gpt-4o-mini"
-                onChange={(event) => setModel(event.target.value)}
+                id="provider-base-url"
+                value={form.base_url}
+                onChange={(event) => patch({ base_url: event.target.value })}
               />
             </div>
 
             <div className="space-y-2">
-              <div className="flex items-center gap-3">
-                <label
-                  htmlFor="provider-api-key"
-                  className="text-sm font-medium"
-                >
-                  API Key
-                </label>
-                <Badge variant={hasApiKey ? "default" : "secondary"}>
-                  {hasApiKey ? "已配置" : "未配置"}
-                </Badge>
-              </div>
+              <label htmlFor="provider-model" className="text-sm font-medium">
+                模型 ID
+              </label>
+              <Input
+                id="provider-model"
+                value={form.model}
+                onChange={(event) => patch({ model: event.target.value })}
+              />
+            </div>
+
+            <div className="space-y-2">
+              <label
+                htmlFor="provider-provider"
+                className="text-sm font-medium"
+              >
+                服务标识（provider）
+              </label>
+              <Input
+                id="provider-provider"
+                value={form.provider}
+                onChange={(event) => patch({ provider: event.target.value })}
+              />
+            </div>
+
+            <div className="space-y-2">
+              <label
+                htmlFor="provider-api-key"
+                className="text-sm font-medium"
+              >
+                API Key
+              </label>
               <Input
                 id="provider-api-key"
                 type="text"
-                value={apiKeyInput}
-                placeholder="留空沿用已存的 Key"
-                onChange={(event) => setApiKeyInput(event.target.value)}
+                value={form.api_key}
+                onChange={(event) => patch({ api_key: event.target.value })}
               />
             </div>
 
             <div className="flex flex-wrap items-center justify-end gap-3">
               <Button
                 variant="secondary"
-                onClick={() => test.mutate(formBody())}
-                disabled={test.isPending}
+                onClick={() => {
+                  const body = formBody();
+                  if (body !== null) test.mutate(body);
+                }}
+                disabled={busy}
               >
                 测试模型
               </Button>
               <Button
-                onClick={() => save.mutate(formBody())}
-                disabled={save.isPending}
+                onClick={() => {
+                  const body = formBody();
+                  if (body !== null) save.mutate(body);
+                }}
+                disabled={busy}
               >
                 保存配置
               </Button>
               <Button
                 variant="destructive"
                 onClick={() => clear.mutate()}
-                disabled={clear.isPending}
+                disabled={busy}
               >
                 清除凭据
               </Button>

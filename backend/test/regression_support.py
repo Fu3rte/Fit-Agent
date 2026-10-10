@@ -1,4 +1,5 @@
 import asyncio
+import os
 import socket
 import time
 from pathlib import Path
@@ -9,6 +10,40 @@ import httpx
 import uvicorn
 
 from app.domain.session.attachments import TMP_ROOT
+
+
+def install_test_model_config(root: Path | None = None):
+    # 使用隔离目录的真实 JSON 配置服务，凭据来自专用测试环境变量。
+    from app import model_config
+
+    api = os.environ.get("FIT_AGENT_TEST_MODEL_API", "openai-completions")
+    base_url = os.environ.get("FIT_AGENT_TEST_MODEL_BASE_URL")
+    identifier = os.environ.get("FIT_AGENT_TEST_MODEL_ID")
+    api_key = os.environ.get("FIT_AGENT_TEST_MODEL_API_KEY")
+    provider = os.environ.get("FIT_AGENT_TEST_MODEL_PROVIDER")
+    missing = [
+        name
+        for name, value in (
+            ("FIT_AGENT_TEST_MODEL_BASE_URL", base_url),
+            ("FIT_AGENT_TEST_MODEL_ID", identifier),
+            ("FIT_AGENT_TEST_MODEL_API_KEY", api_key),
+        )
+        if not value
+    ]
+    if missing:
+        raise RuntimeError("缺少测试模型环境变量: " + ", ".join(missing))
+    if root is None:
+        root = temporary_root("model-config") / uuid4().hex
+    root.mkdir(parents=True, exist_ok=True)
+    model_config.DATA_ROOT = root
+    model_config.save_provider(
+        api=api,
+        base_url=base_url,
+        model=identifier,
+        provider=provider,
+        api_key=api_key,
+    )
+    return model_config.load_model_config()
 
 
 def run_tool(tool, arguments, *, declared=None, signal=None, tool_call_id="call"):

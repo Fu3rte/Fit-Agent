@@ -13,6 +13,7 @@ from test.check_http import (
 from test.regression_support import (
     Server,
     client,
+    install_test_model_config,
     patch_default_database,
     temporary_root,
 )
@@ -411,6 +412,7 @@ def check_restart(flow: dict, evidence: dict) -> None:
 
 def check() -> None:
     EVIDENCE.mkdir(parents=True, exist_ok=True)
+    install_test_model_config()
     path = patch_default_database("edit-regenerate")
     evidence = {}
     server = Server(app)

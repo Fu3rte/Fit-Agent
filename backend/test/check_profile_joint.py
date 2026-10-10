@@ -11,6 +11,7 @@ from test.check_http import events, validate_events, wait_idle
 from test.regression_support import (
     Server,
     client,
+    install_test_model_config,
     patch_default_database,
     temporary_root,
 )
@@ -101,6 +102,7 @@ def successful(outputs, name):
 
 
 def check() -> None:
+    install_test_model_config()
     path = patch_default_database('profile-joint')
     (EVIDENCE / 'database-path.txt').write_text(str(path), encoding='utf-8')
     with Server(app) as server, client(server.base_url) as http:

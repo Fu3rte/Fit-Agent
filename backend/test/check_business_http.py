@@ -17,6 +17,7 @@ from test.check_profile_confirmation import assistant_prepare_call, payload
 from test.regression_support import (
     Server,
     client,
+    install_test_model_config,
     patch_default_database,
     temporary_root,
 )
@@ -134,6 +135,7 @@ async def save(business: BusinessService, ids: dict):
 
 def check() -> None:
     EVIDENCE.mkdir(parents=True, exist_ok=True)
+    install_test_model_config()
     patch_default_database("business-http")
     evidence: dict = {}
     with Server(app) as server:
@@ -189,7 +191,7 @@ def check() -> None:
             assert missing.json()["detail"]["code"] == "session_not_found"
 
             # 凭据保护：画像内容命中模型凭据时拒绝公开。
-            secret = load_model_config().OPENAI_API_KEY
+            secret = load_model_config().api_key
             leaky = run(
                 build_pending(
                     service, business, payload(environment=f"环境 {secret}"), "凭据会话"

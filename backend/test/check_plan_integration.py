@@ -19,6 +19,7 @@ from test.check_http import events, final_text, validate_events, wait_idle
 from test.regression_support import (
     Server,
     client,
+    install_test_model_config,
     patch_default_database,
     temporary_root,
 )
@@ -178,6 +179,7 @@ async def seed_workouts(day):
 
 
 def check(resume=None, database_path=None):
+    install_test_model_config()
     global MODEL_LIMIT, PREPARE_LIMIT, DATABASE
     if resume is not None:
         previous = json.loads(Path(resume).read_text(encoding="utf-8"))

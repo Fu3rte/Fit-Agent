@@ -32,11 +32,11 @@ from test.regression_support import TEST_SESSION, session_workspace
 
 MARKER = "REVIEW-CREDENTIAL-MARKER"
 MODEL = SimpleNamespace(
-    MODEL_API="openai-completions",
-    OPENAI_PROVIDER="openai",
-    OPENAI_MODEL="runtime-model",
-    OPENAI_BASE_URL="http://unused",
-    OPENAI_API_KEY="unused",
+    api="openai-completions",
+    provider="openai",
+    model="runtime-model",
+    base_url="http://unused",
+    api_key="unused",
 )
 
 
@@ -287,9 +287,9 @@ def check_progress_callback() -> None:
         content=[
             ToolCall(type="toolCall", id="c-loop", name="probe", arguments={"name": "a"})
         ],
-        api=MODEL.MODEL_API,
-        provider=MODEL.OPENAI_PROVIDER,
-        model=MODEL.OPENAI_MODEL,
+        api=MODEL.api,
+        provider=MODEL.provider,
+        model=MODEL.model,
         usage=usage(),
         stop_reason="toolUse",
         timestamp=0,
@@ -297,9 +297,9 @@ def check_progress_callback() -> None:
     stop = AssistantMessage(
         role="assistant",
         content=[TextContent(type="text", text="完成")],
-        api=MODEL.MODEL_API,
-        provider=MODEL.OPENAI_PROVIDER,
-        model=MODEL.OPENAI_MODEL,
+        api=MODEL.api,
+        provider=MODEL.provider,
+        model=MODEL.model,
         usage=usage(),
         stop_reason="stop",
         timestamp=0,

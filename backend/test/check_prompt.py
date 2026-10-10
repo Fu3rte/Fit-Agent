@@ -33,8 +33,7 @@ from app.infrastructure.persistence.sqlite.business_repository import (
 from app.infrastructure.persistence.sqlite.database import open_database
 from app.infrastructure.persistence.sqlite.repository import SqliteSessionRepository
 from app.interfaces import http as interface
-from app.model_config import load_model_config
-from test.regression_support import temporary_root
+from test.regression_support import install_test_model_config, temporary_root
 
 EVIDENCE = temporary_root("prompt")
 
@@ -207,7 +206,7 @@ async def _scenarios(root: Path) -> list[str]:
         service.attach_snapshots(business)
         async with repository.transaction():
             await repository.replace_exercises(catalog.all())
-        config = load_model_config()
+        config = install_test_model_config()
         evidence = []
         for index, prompt in enumerate(PROMPTS):
             events, text = await run_scenario(service, business, config, prompt)

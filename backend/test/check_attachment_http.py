@@ -24,7 +24,7 @@ from app.infrastructure.persistence.sqlite import database as database_module
 from app.interfaces import http
 from app.model_config import load_model_config
 from test.check_attachment_session import SYSTEM, reference, send_command, uid, upload
-from test.regression_support import Server, client
+from test.regression_support import Server, client, install_test_model_config
 
 ROOT = Path(__file__).resolve().parents[2] / "tmp/backend-plan-import/checks"
 PUBLIC_ATTACHMENT = {"attachment_id", "file_name", "size_bytes", "created_at"}
@@ -122,7 +122,7 @@ def listener_checks(root: Path, connection) -> None:
     withdrawable = connection.post(steering_path, json=withdraw_payload).json()
     assert connection.post(f"{steering_path}/{withdrawable['steering_id']}/withdraw", json={"session_id": session}).json()["status"] == "withdrawn"
     assert connection.get(f"/api/sessions/{session}/operations/{withdraw_payload['operation_id']}").json()["steering"]["attachments"][0]["attachment_id"] == file["attachment_id"]
-    key = load_model_config().OPENAI_API_KEY
+    key = load_model_config().api_key
     for item in (upload(key.encode("utf-8")), upload(name=key + ".md")):
         rejected = connection.post(steering_path, json={**steering_payload, "operation_id": uid(), "attachments": [item]})
         assert_error(rejected, 422, "credential_detected")
@@ -358,6 +358,7 @@ async def asgi_body_checks(root: Path) -> None:
 
 
 def main() -> None:
+    install_test_model_config()
     root = ROOT / "attachment-http" / uuid4().hex
     root.mkdir(parents=True)
     original_path = database_module.default_database_path

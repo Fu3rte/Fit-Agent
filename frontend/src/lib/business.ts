@@ -1,10 +1,11 @@
-/* ===== 共享 wire 校验原语与业务 schema（backend-http-sse-contract §11.8、§11.9，workout-http-sse-contract §2–§5，plan-generation-contract §2–§8）===== */
+/* ===== 共享 wire 校验原语与业务 schema（backend-http-sse-contract §11.8、§11.9，workout-http-sse-contract §2–§5，plan-generation-contract §2–§8，PRODUCT.md §3.4）===== */
 
 import type {
   AttachmentContentWire,
   AttachmentInputWire,
   AttachmentWire,
   CurrentPlanWire,
+  ModelApi,
   PlanBusinessErrorWire,
   PlanContentWire,
   PlanDayWire,
@@ -29,6 +30,9 @@ import type {
   ProfileSaveResultWire,
   ProfileStatusArgumentsWire,
   ProfileStatusResultWire,
+  ProviderStatusWire,
+  ProviderTestWire,
+  ProviderWriteBody,
   WorkoutContentWire,
   WorkoutExerciseWire,
   WorkoutListWire,
@@ -1048,4 +1052,78 @@ export function parseAttachmentInputList(
   if (new Set(list.map((item) => item.attachment_id)).size !== list.length)
     throw new Error(`${field} 含重复附件。`);
   return list;
+}
+
+/* ===== 模型配置（PRODUCT.md §3.4）===== */
+
+const MODEL_APIS = ["openai-completions", "anthropic-messages"] as const;
+const PROVIDER_FIELDS = ["api", "base_url", "model", "api_key", "provider"] as const;
+const PROVIDER_REQUIRED_FIELDS = ["api", "base_url", "model", "api_key"] as const;
+
+function requireModelApi(value: unknown, field: string): ModelApi {
+  return requireEnum(value, MODEL_APIS, field);
+}
+
+// 返回原始 URL，保留用户指定的端点路径。
+function requireHttpUrl(value: unknown, field: string): string {
+  const text = requireNonBlank(value, field);
+  let url: URL;
+  try {
+    url = new URL(text);
+  } catch {
+    throw new Error(`${field} 无效。`);
+  }
+  if (
+    (url.protocol !== "http:" && url.protocol !== "https:") ||
+    url.hostname === ""
+  )
+    throw new Error(`${field} 无效。`);
+  return text;
+}
+
+export function parseProviderStatus(body: unknown): ProviderStatusWire {
+  if (!isObject(body)) throw new Error("模型配置响应无效。");
+  exactKeys(body, PROVIDER_FIELDS, "模型配置响应");
+  return {
+    api: body.api === null ? null : requireModelApi(body.api, "api"),
+    base_url:
+      body.base_url === null ? null : requireHttpUrl(body.base_url, "base_url"),
+    model: nullableNonBlank(body.model, "model"),
+    api_key: nullableNonBlank(body.api_key, "api_key"),
+    provider: nullableNonBlank(body.provider, "provider"),
+  };
+}
+
+function optionalProvider(value: unknown): string | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "string") throw new Error("服务标识 无效。");
+  const text = value.trim();
+  return text === "" ? undefined : text;
+}
+
+export function parseProviderWriteBody(value: unknown): ProviderWriteBody {
+  if (!isObject(value)) throw new Error("模型配置请求无效。");
+  for (const key of Object.keys(value))
+    if (!(PROVIDER_FIELDS as readonly string[]).includes(key))
+      throw new Error("模型配置请求 含未定义字段。");
+  for (const key of PROVIDER_REQUIRED_FIELDS)
+    if (!(key in value)) throw new Error("模型配置请求 缺少必填字段。");
+  const provider = optionalProvider(value.provider);
+  return {
+    api: requireModelApi(value.api, "协议"),
+    base_url: requireHttpUrl(value.base_url, "Base URL"),
+    model: requireNonBlank(value.model, "模型 ID"),
+    api_key: requireNonBlank(value.api_key, "API Key"),
+    ...(provider === undefined ? {} : { provider }),
+  };
+}
+
+export function parseProviderTest(body: unknown): ProviderTestWire {
+  if (!isObject(body)) throw new Error("模型诊断响应无效。");
+  exactKeys(body, ["ok", "latency_ms", "message"], "模型诊断响应");
+  return {
+    ok: requireBoolean(body.ok, "ok"),
+    latency_ms: requireNonNegativeInt(body.latency_ms, "latency_ms"),
+    message: requireString(body.message, "message"),
+  };
 }

@@ -22,7 +22,12 @@ from test.check_plan_core import profile
 from test.check_plan_integration import STRICT_FAILURES, check_request_budget
 from test.check_profile_confirmation import Fixture
 from test.check_workout_service_http import prepare as prepare_workout
-from test.regression_support import Server, client, temporary_root
+from test.regression_support import (
+    Server,
+    client,
+    install_test_model_config,
+    temporary_root,
+)
 
 # 验证层级：装配层真实 HTTP/SSE/SQLite/工具与 Agent-loop 装配回归。助手消息逐字取自真实运行已持久化的
 # 原文，测试只注入模型响应入口，不合成、不修改任何助手消息字段，因此不构成真实模型 Agent 全流程验收。
@@ -258,6 +263,7 @@ async def seed_state(database: Path, chain: dict) -> dict:
 
 
 def check(source: str) -> dict:
+    install_test_model_config()
     chain = load_real_chain(source)
     database = temporary_root("plan-agent-errors") / f"{uuid4().hex}.db"
     seeded = asyncio.run(seed_state(database, chain))

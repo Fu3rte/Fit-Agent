@@ -626,11 +626,11 @@ def check_credential_stops_scheduling() -> None:
                         raise CredentialDetectedError()
 
                 model = SimpleNamespace(
-                    MODEL_API="openai-completions",
-                    OPENAI_PROVIDER="openai",
-                    OPENAI_MODEL="test-model",
-                    OPENAI_BASE_URL="http://unused",
-                    OPENAI_API_KEY="unused",
+                    api="openai-completions",
+                    provider="openai",
+                    model="test-model",
+                    base_url="http://unused",
+                    api_key="unused",
                 )
                 tool_use = AssistantMessage(
                     role="assistant",
@@ -638,9 +638,9 @@ def check_credential_stops_scheduling() -> None:
                         ToolCall(type="toolCall", id="leak", name="leak", arguments={"name": "leak"}),
                         ToolCall(type="toolCall", id="after", name="after", arguments={"name": "after"}),
                     ],
-                    api=model.MODEL_API,
-                    provider=model.OPENAI_PROVIDER,
-                    model=model.OPENAI_MODEL,
+                    api=model.api,
+                    provider=model.provider,
+                    model=model.model,
                     usage=usage(),
                     stop_reason="toolUse",
                     timestamp=0,
@@ -753,11 +753,11 @@ def check_database_ordering() -> None:
                         result_events.append(event["tool_call_id"])
 
                 model = SimpleNamespace(
-                    MODEL_API="openai-completions",
-                    OPENAI_PROVIDER="openai",
-                    OPENAI_MODEL="test-model",
-                    OPENAI_BASE_URL="http://unused",
-                    OPENAI_API_KEY="unused",
+                    api="openai-completions",
+                    provider="openai",
+                    model="test-model",
+                    base_url="http://unused",
+                    api_key="unused",
                 )
                 tool_use = AssistantMessage(
                     role="assistant",
@@ -765,9 +765,9 @@ def check_database_ordering() -> None:
                         ToolCall(type="toolCall", id="slow", name="probe", arguments={"name": "slow"}),
                         ToolCall(type="toolCall", id="fast", name="probe", arguments={"name": "fast"}),
                     ],
-                    api=model.MODEL_API,
-                    provider=model.OPENAI_PROVIDER,
-                    model=model.OPENAI_MODEL,
+                    api=model.api,
+                    provider=model.provider,
+                    model=model.model,
                     usage=usage(),
                     stop_reason="toolUse",
                     timestamp=0,
@@ -775,9 +775,9 @@ def check_database_ordering() -> None:
                 stop = AssistantMessage(
                     role="assistant",
                     content=[TextContent(type="text", text="完成")],
-                    api=model.MODEL_API,
-                    provider=model.OPENAI_PROVIDER,
-                    model=model.OPENAI_MODEL,
+                    api=model.api,
+                    provider=model.provider,
+                    model=model.model,
                     usage=usage(),
                     stop_reason="stop",
                     timestamp=0,

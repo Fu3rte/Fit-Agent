@@ -1,6 +1,5 @@
 import type {
   AgentStreamHeaders,
-  ApiError,
   AttachmentContentWire,
   CurrentPlanWire,
   EditRunBody,
@@ -50,6 +49,8 @@ import {
   parsePlanList,
   parsePlanRecord,
   parseProfileResponse,
+  parseProviderStatus,
+  parseProviderTest,
   parseWorkoutList,
   parseWorkoutRecord,
   requireArray,
@@ -65,52 +66,6 @@ import {
   createReActParser,
   validMessageInput,
 } from "@/features/chat/utils/reactAgent";
-
-export type { ApiError };
-
-/** 后端统一 JSON 错误形状 → Error（形状不变；SSE 与普通请求共用同一份错误处理） */
-function apiError(body: unknown, status: number): Error & Partial<ApiError> {
-  const err = body as Partial<ApiError> | null;
-  const error = new Error(err?.message ?? `请求失败（${status}）`) as Error &
-    Partial<ApiError>;
-  error.http_status = err?.http_status ?? status;
-  error.error_code = err?.error_code ?? "invalid_request";
-  return error;
-}
-
-async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(path, {
-    headers: { "Content-Type": "application/json" },
-    ...init,
-  });
-  const body = (await res.json().catch(() => null)) as unknown;
-  if (!res.ok) throw apiError(body, res.status);
-  return body as T;
-}
-
-const post = <T>(path: string, body?: unknown) =>
-  request<T>(path, {
-    method: "POST",
-    body: body === undefined ? "{}" : JSON.stringify(body),
-  });
-
-/** Provider 状态：has_api_key 表示是否已存 Key，响应不含 Key 本体 */
-export const getProvider = () => request<ProviderStatusWire>("/api/provider");
-
-/** 写入 Provider 配置：api_key 空串时后端沿用已存值 */
-export const putProvider = (body: ProviderWriteBody) =>
-  request<ProviderStatusWire>("/api/provider", {
-    method: "PUT",
-    body: JSON.stringify(body),
-  });
-
-/** 清除全部 Provider 配置，返回空状态 */
-export const deleteProvider = () =>
-  request<ProviderStatusWire>("/api/provider", { method: "DELETE" });
-
-/** 连通性测试：用请求体里的表单值发一次最小调用，不落库、不消耗 Run 预算 */
-export const testProvider = (body: ProviderWriteBody) =>
-  post<ProviderTestWire>("/api/provider/test", body);
 
 /* ===== 会话持久化请求层（backend-http-sse-contract §11）===== */
 
@@ -915,4 +870,34 @@ export const getPlan = (planId: string, signal?: AbortSignal) =>
     `/api/plans/${encodeURIComponent(planId)}`,
     { method: "GET", signal },
     parsePlanRecord,
+  );
+
+/* ===== 模型配置（PRODUCT.md §3.4）===== */
+
+export const getProvider = (signal?: AbortSignal) =>
+  sessionRequest<ProviderStatusWire>(
+    "/api/provider",
+    { method: "GET", cache: "no-store", signal },
+    parseProviderStatus,
+  );
+
+export const putProvider = (body: ProviderWriteBody) =>
+  sessionRequest<ProviderStatusWire>(
+    "/api/provider",
+    { method: "PUT", cache: "no-store", body: JSON.stringify(body) },
+    parseProviderStatus,
+  );
+
+export const deleteProvider = () =>
+  sessionRequest<ProviderStatusWire>(
+    "/api/provider",
+    { method: "DELETE", cache: "no-store" },
+    parseProviderStatus,
+  );
+
+export const testProvider = (body: ProviderWriteBody) =>
+  sessionRequest<ProviderTestWire>(
+    "/api/provider/test",
+    { method: "POST", cache: "no-store", body: JSON.stringify(body) },
+    parseProviderTest,
   );

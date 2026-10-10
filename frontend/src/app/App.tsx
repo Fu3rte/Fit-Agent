@@ -7,7 +7,7 @@ import {
   useNavigate,
 } from "react-router-dom";
 import { Toaster, useSonner } from "sonner";
-import { Dumbbell, ListChecks, Moon, Plus, Sun, UserRound } from "lucide-react";
+import { Dumbbell, ListChecks, Moon, Plus, Settings, Sun, UserRound } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { getTheme, setTheme, type Theme } from "@/lib/theme";
 import { TooltipProvider } from "@/components/ui/tooltip";
@@ -32,6 +32,7 @@ import SessionList, {
 import ProfilePage from "@/features/profile/ProfilePage";
 import PlansPage from "@/features/plans/PlansPage";
 import WorkoutRecordsPage from "@/features/workout/WorkoutRecordsPage";
+import { ProviderDialog } from "@/features/provider/ProviderDialog";
 import {
   ensureDraft,
   loadChatStore,
@@ -126,6 +127,7 @@ function PageHost() {
 
 export default function App() {
   const navigate = useNavigate();
+  const [providerOpen, setProviderOpen] = useState(false);
   return (
     <TooltipProvider>
       <GlobalToaster />
@@ -176,6 +178,13 @@ export default function App() {
             <SessionList />
           </SidebarContent>
           <SidebarFooter className="px-3 pb-4">
+            <SidebarMenuButton
+              onClick={() => setProviderOpen(true)}
+              className="cursor-pointer"
+            >
+              <Settings aria-hidden />
+              <span>模型配置</span>
+            </SidebarMenuButton>
             <ThemeToggle />
           </SidebarFooter>
         </Sidebar>
@@ -185,6 +194,9 @@ export default function App() {
           </div>
         </main>
         <SidebarToggle />
+        {providerOpen && (
+          <ProviderDialog onClose={() => setProviderOpen(false)} />
+        )}
       </SidebarProvider>
     </TooltipProvider>
   );

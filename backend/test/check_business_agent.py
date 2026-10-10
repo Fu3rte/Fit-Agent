@@ -6,6 +6,7 @@ from test.check_http import create_session, events, wait_idle
 from test.regression_support import (
     Server,
     client,
+    install_test_model_config,
     patch_default_database,
     temporary_root,
 )
@@ -42,6 +43,7 @@ def turn(http, session: str, prompt: str) -> list:
 
 
 def check() -> None:
+    install_test_model_config()
     patch_default_database("business-agent")
     EVIDENCE.mkdir(parents=True, exist_ok=True)
     with Server(app) as server, client(server.base_url) as http:

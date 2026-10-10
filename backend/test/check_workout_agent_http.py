@@ -5,7 +5,13 @@ from uuid import uuid4
 
 from app.interfaces.http import app
 from test.check_http import events, validate_events, wait_idle
-from test.regression_support import Server, client, patch_default_database, temporary_root
+from test.regression_support import (
+    Server,
+    client,
+    install_test_model_config,
+    patch_default_database,
+    temporary_root,
+)
 
 ROOT = temporary_root("workout-agent-http") / uuid4().hex
 ROOT.mkdir()
@@ -78,6 +84,7 @@ def proposal(http, identity):
 
 
 def main():
+    install_test_model_config()
     database = patch_default_database("workout-agent-http")
     with Server(app) as server, client(server.base_url) as http:
         first = session(http)

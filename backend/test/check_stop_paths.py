@@ -27,8 +27,11 @@ from app.ai.messages import (
 )
 from app.ai.stream import complete, stream
 from app.ai.types import DoneReason, ModelSpec
-from app.model_config import load_model_config
-from test.regression_support import TEST_SESSION, session_workspace
+from test.regression_support import (
+    TEST_SESSION,
+    install_test_model_config,
+    session_workspace,
+)
 
 
 def checked_run(coro):
@@ -259,10 +262,10 @@ async def check_cancel(config, model, options):
 
 
 def check():
-    config = load_model_config()
-    assert config.MODEL_API == "openai-completions"
-    model = ModelSpec(api=config.MODEL_API, provider=config.OPENAI_PROVIDER, id=config.OPENAI_MODEL, base_url=config.OPENAI_BASE_URL)
-    options = {"api_key": config.OPENAI_API_KEY, "max_tokens": 16384}
+    config = install_test_model_config()
+    assert config.api == "openai-completions"
+    model = ModelSpec(api=config.api, provider=config.provider, id=config.model, base_url=config.base_url)
+    options = {"api_key": config.api_key, "max_tokens": 16384}
     checked_run(check_stream(model, options))
     with TemporaryDirectory() as directory:
         checked_run(check_steering(config, Path(directory)))

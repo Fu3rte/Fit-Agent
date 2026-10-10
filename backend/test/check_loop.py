@@ -22,12 +22,15 @@ from app.ai.messages import (
     UserMessage,
     serialize_message,
 )
-from app.model_config import load_model_config
-from test.regression_support import TEST_SESSION, session_workspace
+from test.regression_support import (
+    TEST_SESSION,
+    install_test_model_config,
+    session_workspace,
+)
 
 
 def check() -> None:
-    config = load_model_config()
+    config = install_test_model_config()
     base_config = AgentLoopConfig(model=config, max_turns=64)
     with TemporaryDirectory() as directory:
         root = Path(directory)
@@ -107,8 +110,8 @@ def check() -> None:
                     assert message.tool_name == starts[message.tool_call_id]["name"]
                 if isinstance(message, AssistantMessage):
                     assert message.api == "openai-completions"
-                    assert message.provider == config.OPENAI_PROVIDER
-                    assert message.model == config.OPENAI_MODEL
+                    assert message.provider == config.provider
+                    assert message.model == config.model
                     assert (
                         message.response_id
                         and message.response_model

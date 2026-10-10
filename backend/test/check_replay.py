@@ -16,26 +16,26 @@ from app.ai.messages import (
     serialize_message,
 )
 from app.ai.types import ModelSpec, StreamOptions
-from app.model_config import load_model_config
+from test.regression_support import install_test_model_config
 
 _adapter = TypeAdapter(Message)
 
 
 def check() -> None:
-    config = load_model_config()
+    config = install_test_model_config()
     spec = ModelSpec(
         api="openai-completions",
-        provider=config.OPENAI_PROVIDER,
-        id=config.OPENAI_MODEL,
-        base_url=config.OPENAI_BASE_URL,
+        provider=config.provider,
+        id=config.model,
+        base_url=config.base_url,
     )
     options: StreamOptions = {"api_key": "k"}
     message = AssistantMessage(
         role="assistant",
         content=[TextContent(type="text", text="answer", text_signature="原始文本签名")],
         api="openai-completions",
-        provider=config.OPENAI_PROVIDER,
-        model=config.OPENAI_MODEL,
+        provider=config.provider,
+        model=config.model,
         usage=Usage(input=0, output=0, cache_read=0, cache_write=0, total_tokens=0),
         stop_reason="stop",
         timestamp=0,

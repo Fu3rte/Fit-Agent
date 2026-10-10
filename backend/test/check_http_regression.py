@@ -26,6 +26,7 @@ from test.check_http import (
 from test.regression_support import (
     Server,
     client,
+    install_test_model_config,
     patch_default_database,
     seed_note,
     temporary_root,
@@ -388,7 +389,7 @@ def service_entries(session_id):
 
 
 def check_credential_interception(server, http, evidence):
-    key = load_model_config().OPENAI_API_KEY
+    key = load_model_config().api_key
     session_id = str(uuid4())
     create_session(http, session_id, "凭据拦截")
     blocked = http.post(
@@ -551,6 +552,7 @@ def check_terminal_commit_failure(path, http, evidence):
 
 def check() -> None:
     EVIDENCE.mkdir(parents=True, exist_ok=True)
+    install_test_model_config()
     path = patch_default_database("http-regression")
     seed = seed_legacy(path)
     evidence = {}

@@ -25,11 +25,13 @@ from pydantic import (
     field_validator,
     model_validator,
 )
+from starlette.datastructures import URL
 from starlette.routing import compile_path
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from app.agent.agent_loop import run_agent_loop
 from app.agent.config import AgentLoopConfig
+from app.agent.diagnostic import run_diagnostic
 from app.agent.events import AgentEvent
 from app.agent.permissions import create_before_tool_call
 from app.agent.prompts import SYSTEM_PROMPT
@@ -103,14 +105,23 @@ from app.infrastructure.persistence.sqlite.business_repository import (
 )
 from app.infrastructure.persistence.sqlite.database import open_database
 from app.infrastructure.persistence.sqlite.repository import SqliteSessionRepository
-from app.model_config import load_model_config
+from app.model_config import (
+    API_VALUES,
+    ModelNotConfigured,
+    clear_provider,
+    effective_provider,
+    load_model_config,
+    load_provider_status,
+    save_provider,
+    saved_api_key,
+    validate_http_url,
+)
 
 frontend_port = os.environ.get("FIT_AGENT_FRONTEND_PORT", "5173")
 if re.fullmatch(r"[0-9]+", frontend_port) is None or not 1 <= int(frontend_port) <= 65535:
     raise ValueError("FIT_AGENT_FRONTEND_PORT 必须是 1–65535 的整数")
 FRONTEND_PORT = int(frontend_port)
 ALLOWED_HOSTS = {f"{host}:{port}" for host in ("127.0.0.1", "localhost") for port in (8000, FRONTEND_PORT)}
-ALLOWED_ORIGINS = {f"http://{host}" for host in ALLOWED_HOSTS}
 logger = logging.getLogger(__name__)
 active = Lock()
 runs_lock = Lock()
@@ -242,6 +253,34 @@ class WithdrawRequest(BaseModel):
     session_id: PathUUID
 
 
+class ProviderWriteBody(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    api: str
+    base_url: str
+    model: str
+    api_key: str
+    provider: str = ""
+
+    @field_validator("api")
+    @classmethod
+    def registered(cls, value: str) -> str:
+        if value not in API_VALUES:
+            raise ValueError("仅支持 openai-completions 与 anthropic-messages")
+        return value
+
+    @field_validator("base_url")
+    @classmethod
+    def http_url(cls, value: str) -> str:
+        return validate_http_url(value)
+
+    @field_validator("model", "api_key")
+    @classmethod
+    def nonblank(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("字段必须包含非空白内容")
+        return value
+
+
 class RunState:
     def __init__(self, session_id: UUID):
         self.run_id = uuid4()
@@ -253,6 +292,7 @@ class RunState:
         self.coordinator: SteeringCoordinator | None = None
         self.task: asyncio.Task | None = None
         self.closed_without_terminal = False
+        self.secrets: tuple[str, ...] = ()
 
     def publish(self, name: str, data: dict) -> None:
         self.events.put(AgentEvent(name, {"run_id": str(self.run_id), **data}))
@@ -264,6 +304,20 @@ class RunState:
 
 
 runs: dict[UUID, RunState] = {}
+
+
+def active_secrets(session_id: str | None = None) -> tuple[str, ...]:
+    # 合并当前保存的凭据与在途运行快照：清除或更换 Key 后，仍在使用的凭据继续参与检查。
+    current = saved_api_key()
+    with runs_lock:
+        states = list(runs.values())
+    held = [
+        secret
+        for state in states
+        if session_id is None or str(state.session_id) == str(session_id)
+        for secret in state.secrets
+    ]
+    return tuple(secret for secret in (current, *held) if secret)
 
 
 @asynccontextmanager
@@ -339,7 +393,7 @@ async def http_error(request: Request, error: HTTPException):
 @app.exception_handler(BusinessError)
 async def business_error(request: Request, error: BusinessError):
     detail = error.detail()
-    if CredentialFilter((load_model_config().OPENAI_API_KEY,)).contains(detail):
+    if CredentialFilter(active_secrets()).contains(detail):
         return JSONResponse({"detail": {
             "code": "credential_detected", "message": CREDENTIAL_SAFE_MESSAGE,
         }}, 422, headers=NO_STORE)
@@ -402,6 +456,16 @@ async def attachment_native_error(request: Request, error: OSError | UnicodeDeco
 async def internal_error(request: Request, error: Exception):
     return JSONResponse(status_code=500, content={
         "detail": {"code": "internal_error", "message": "服务内部错误。"},
+    }, headers=NO_STORE)
+
+
+@app.exception_handler(ModelNotConfigured)
+async def model_not_configured(request: Request, error: ModelNotConfigured):
+    return JSONResponse(status_code=409, content={
+        "detail": {
+            "code": "model_not_configured",
+            "message": "尚未配置可用的模型，无法发起新的运行。",
+        },
     }, headers=NO_STORE)
 
 
@@ -612,8 +676,14 @@ async def check_boundary(request: Request) -> None:
     origins = request.headers.getlist("origin")
     if len(hosts) != 1 or hosts[0] not in ALLOWED_HOSTS:
         reject(403, "host_forbidden", "Host 不允许")
-    if origins and (len(origins) != 1 or origins[0] not in ALLOWED_ORIGINS):
-        reject(403, "origin_forbidden", "Origin 不允许")
+    if origins:
+        if len(origins) != 1:
+            reject(403, "origin_forbidden", "Origin 不允许")
+        origin = URL(origins[0])
+        local = re.fullmatch(r"(?:localhost|127\.0\.0\.1):([0-9]{1,5})", origin.netloc)
+        if (local is None or not 1 <= int(local[1]) <= 65535
+                or origins[0] != f"http://{origin.netloc}"):
+            reject(403, "origin_forbidden", "Origin 不允许")
 
 
 class AttachmentBodyLimit:
@@ -656,6 +726,40 @@ class AttachmentBodyLimit:
 
 
 app.add_middleware(AttachmentBodyLimit)
+
+
+@app.get("/api/provider", dependencies=[Depends(check_boundary)])
+async def get_provider():
+    return JSONResponse(load_provider_status().model_dump(), headers=NO_STORE)
+
+
+@app.put("/api/provider", dependencies=[Depends(check_boundary)])
+async def put_provider(payload: ProviderWriteBody):
+    status = save_provider(
+        api=payload.api,
+        base_url=payload.base_url,
+        model=payload.model,
+        provider=payload.provider,
+        api_key=payload.api_key,
+    )
+    return JSONResponse(status.model_dump(), headers=NO_STORE)
+
+
+@app.delete("/api/provider", dependencies=[Depends(check_boundary)])
+async def delete_provider():
+    return JSONResponse(clear_provider().model_dump(), headers=NO_STORE)
+
+
+@app.post("/api/provider/test", dependencies=[Depends(check_boundary)])
+async def test_provider(payload: ProviderWriteBody):
+    result = await run_diagnostic(
+        api=payload.api,
+        base_url=payload.base_url,
+        model=payload.model,
+        provider=effective_provider(payload.api, payload.provider),
+        api_key=payload.api_key,
+    )
+    return JSONResponse(result, headers=NO_STORE)
 
 
 async def require_run(service: SessionService, run_id: str, session_id: str) -> None:
@@ -1115,7 +1219,7 @@ class RunStream(StreamingResponse):
 @app.post("/api/sessions", dependencies=[Depends(check_boundary)])
 async def create_session(payload: CreateSessionRequest):
     service: SessionService = app.state.session_service
-    credentials = (load_model_config().OPENAI_API_KEY,)
+    credentials = active_secrets()
     try:
         created, session = await service.create_session_result(
             str(payload.session_id), payload.title, credentials=credentials
@@ -1130,7 +1234,7 @@ async def create_session(payload: CreateSessionRequest):
 @app.get("/api/sessions", dependencies=[Depends(check_boundary)])
 async def list_sessions():
     service: SessionService = app.state.session_service
-    guard = CredentialFilter((load_model_config().OPENAI_API_KEY,))
+    guard = CredentialFilter(active_secrets())
     sessions = await service.list_sessions()
     ordered = sorted(
         sessions, key=lambda session: (session.updated_at, session.id), reverse=True
@@ -1156,7 +1260,7 @@ async def drain_session_runs(session_id: str) -> None:
 async def delete_session(session_id: PathUUID, request: Request):
     service: SessionService = request.app.state.session_service
     replacements: ReplacementCoordinator = request.app.state.replacements
-    if CredentialFilter((load_model_config().OPENAI_API_KEY,)).contains(session_id):
+    if CredentialFilter(active_secrets(session_id)).contains(session_id):
         reject(422, "credential_detected", CREDENTIAL_SAFE_MESSAGE)
 
     async def remove() -> None:
@@ -1175,7 +1279,7 @@ async def delete_session(session_id: PathUUID, request: Request):
 @app.get("/api/profile", dependencies=[Depends(check_boundary)])
 async def get_profile():
     business: BusinessService = app.state.business
-    guard = CredentialFilter((load_model_config().OPENAI_API_KEY,))
+    guard = CredentialFilter(active_secrets())
     response = await business.get_profile()
     payload = response.model_dump()
     if guard.contains(payload):
@@ -1195,7 +1299,7 @@ def check_workout_query(request: Request, allowed: set[str]) -> None:
 
 def workout_response(response) -> JSONResponse:
     payload = response.model_dump()
-    if CredentialFilter((load_model_config().OPENAI_API_KEY,)).contains(payload):
+    if CredentialFilter(active_secrets()).contains(payload):
         reject(422, "credential_detected", CREDENTIAL_SAFE_MESSAGE)
     return JSONResponse(payload, headers=NO_STORE)
 
@@ -1210,7 +1314,7 @@ async def get_current_plan(request: Request):
 async def list_plans(request: Request):
     check_workout_query(request, set())
     payload = [record.model_dump() for record in await request.app.state.business.list_plans()]
-    if CredentialFilter((load_model_config().OPENAI_API_KEY,)).contains(payload):
+    if CredentialFilter(active_secrets()).contains(payload):
         reject(422, "credential_detected", CREDENTIAL_SAFE_MESSAGE)
     return JSONResponse(payload, headers=NO_STORE)
 
@@ -1237,7 +1341,7 @@ async def get_workout(workout_id: PathUUID, request: Request):
 @app.get("/api/sessions/{session_id}/attachments/{attachment_id}", dependencies=[Depends(check_boundary)])
 async def get_attachment(session_id: PathUUID, attachment_id: PathUUID, request: Request):
     check_workout_query(request, set())
-    credentials = (load_model_config().OPENAI_API_KEY,)
+    credentials = active_secrets(session_id)
     if CredentialFilter(credentials).contains({"session_id": session_id, "attachment_id": attachment_id}):
         reject(422, "credential_detected", CREDENTIAL_SAFE_MESSAGE)
     try:
@@ -1261,7 +1365,7 @@ async def get_attachment(session_id: PathUUID, attachment_id: PathUUID, request:
 async def get_history(session_id: PathUUID, request: Request):
     check_workout_query(request, set())
     service: SessionService = app.state.session_service
-    guard = CredentialFilter((load_model_config().OPENAI_API_KEY,))
+    guard = CredentialFilter(active_secrets(session_id))
     try:
         history = await service.get_session_history(str(session_id))
     except SessionNotFound:
@@ -1298,9 +1402,9 @@ async def resolve_existing(
     try:
         outcome = await service.resolve_operation(
             operation_id, session_id, kind, request,
-            credentials=(load_model_config().OPENAI_API_KEY,),
+            credentials=active_secrets(session_id),
         )
-        if outcome is not None and CredentialFilter((load_model_config().OPENAI_API_KEY,)).contains(outcome.model_dump()):
+        if outcome is not None and CredentialFilter(active_secrets(session_id)).contains(outcome.model_dump()):
             reject(422, "credential_detected", CREDENTIAL_SAFE_MESSAGE)
         return outcome
     except CredentialDetected:
@@ -1335,7 +1439,7 @@ async def launch_run(
         disconnected = await request.is_disconnected()
         await service.get_session(session_id)
         model = load_model_config()
-        secrets = (model.OPENAI_API_KEY,)
+        secrets = (model.api_key,)
         tools = create_file_tools(session_id)
         outcome = await accept(service, tools, secrets)
         if not outcome.created:
@@ -1344,6 +1448,7 @@ async def launch_run(
         run = outcome.run
         state = RunState(UUID(session_id))
         state.run_id = UUID(run.id)
+        state.secrets = secrets
         state.operation_id = operation_id
         state.request_entry_id = run.request_entry_id
         state.coordinator = coordinator
@@ -1516,7 +1621,7 @@ async def steering(run_id: PathUUID, payload: SteeringRequest, request: Request)
     )
     if existing is None:
         await require_run(service, run_id, payload.session_id)
-    credentials = (load_model_config().OPENAI_API_KEY,)
+    credentials = active_secrets(str(payload.session_id))
     try:
         created, steering_input = await coordinator.accept(
             str(run_id),
@@ -1572,7 +1677,7 @@ async def withdraw(run_id: PathUUID, steering_id: PathUUID, payload: WithdrawReq
     except SessionNotFound:
         reject(404, "steering_not_found", "输入不存在。")
     steering_input = withdrawal.steering
-    if CredentialFilter((load_model_config().OPENAI_API_KEY,)).contains(steering_input.model_dump()):
+    if CredentialFilter(active_secrets(str(payload.session_id))).contains(steering_input.model_dump()):
         reject(422, "credential_detected", CREDENTIAL_SAFE_MESSAGE)
     return {
         "session_id": str(payload.session_id),
@@ -1597,7 +1702,7 @@ async def get_operation(session_id: PathUUID, operation_id: PathUUID, request: R
         reject_operation_expired()
     except SessionNotFound:
         reject(404, "session_not_found", "会话不存在。")
-    guard = CredentialFilter((load_model_config().OPENAI_API_KEY,))
+    guard = CredentialFilter(active_secrets(session_id))
     if guard.contains({"session_id": session_id, "operation_id": operation_id, "outcome": outcome.model_dump() if outcome is not None else None}):
         reject(422, "credential_detected", CREDENTIAL_SAFE_MESSAGE)
     payload = {
@@ -1629,7 +1734,7 @@ async def get_run(session_id: PathUUID, run_id: PathUUID, request: Request):
     except SessionNotFound:
         reject(404, "run_not_found", "运行不存在。")
     payload = run_object(run)
-    if CredentialFilter((load_model_config().OPENAI_API_KEY,)).contains(payload):
+    if CredentialFilter(active_secrets(session_id)).contains(payload):
         reject(422, "credential_detected", CREDENTIAL_SAFE_MESSAGE)
     return JSONResponse(payload, headers=NO_STORE)
 
@@ -1641,7 +1746,7 @@ async def get_run(session_id: PathUUID, run_id: PathUUID, request: Request):
 async def list_session_runs(session_id: PathUUID, request: Request):
     check_workout_query(request, set())
     service: SessionService = app.state.session_service
-    guard = CredentialFilter((load_model_config().OPENAI_API_KEY,))
+    guard = CredentialFilter(active_secrets(session_id))
     try:
         stored = await service.list_runs(session_id)
     except SessionNotFound:
@@ -1662,7 +1767,7 @@ async def list_session_runs(session_id: PathUUID, request: Request):
 async def list_run_steering(session_id: PathUUID, run_id: PathUUID, request: Request):
     check_workout_query(request, set())
     service: SessionService = app.state.session_service
-    guard = CredentialFilter((load_model_config().OPENAI_API_KEY,))
+    guard = CredentialFilter(active_secrets(session_id))
     try:
         stored = await service.list_steering(session_id, run_id)
     except RunNotFound:

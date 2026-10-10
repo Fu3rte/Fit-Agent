@@ -30,6 +30,7 @@ from app.model_config import load_model_config
 from test.regression_support import (
     Server,
     client,
+    install_test_model_config,
     patch_default_database,
     temporary_root,
 )
@@ -572,7 +573,7 @@ async def seed_http_history(path: Path) -> dict:
 
 
 def check_credential_read(path: Path, http, evidence: dict) -> None:
-    key = load_model_config().OPENAI_API_KEY
+    key = load_model_config().api_key
     before = sqlite3.connect(path, timeout=30)
     try:
         sessions_before = before.execute("SELECT count(*) FROM sessions").fetchone()[0]
@@ -746,6 +747,7 @@ def check_credential_read(path: Path, http, evidence: dict) -> None:
 
 
 def http_checks(evidence: dict) -> None:
+    install_test_model_config()
     path = patch_default_database("session-history-http")
     server = Server(app)
     with server, client(server.base_url) as http:

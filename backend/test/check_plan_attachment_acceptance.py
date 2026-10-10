@@ -15,6 +15,7 @@ from test.check_http import (
 from test.regression_support import (
     Server,
     client,
+    install_test_model_config,
     patch_default_database,
     temporary_root,
 )
@@ -50,6 +51,7 @@ def calls_named(starts: dict, names: set[str]) -> list[str]:
 
 
 def check() -> None:
+    install_test_model_config()
     patch_default_database("plan-attachment-acceptance")
     EVIDENCE.mkdir(parents=True, exist_ok=True)
     attachment_id = str(uuid4())

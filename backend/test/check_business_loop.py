@@ -36,8 +36,7 @@ from app.infrastructure.persistence.sqlite.business_repository import (
 )
 from app.infrastructure.persistence.sqlite.database import open_database
 from app.infrastructure.persistence.sqlite.repository import SqliteSessionRepository
-from app.model_config import load_model_config
-from test.regression_support import temporary_root
+from test.regression_support import install_test_model_config, temporary_root
 
 FULL_PROFILE: JsonObject = {
     "goal": "增肌",
@@ -230,7 +229,7 @@ async def check_loop(directory: Path) -> dict:
             assistant([TextContent(type="text", text="已整理完整画像，等待你的确认。")], "stop"),
         ]
         config = AgentLoopConfig(
-            model=load_model_config(),
+            model=install_test_model_config(),
             max_turns=8,
             transform_context=transform_context,
             save_message=save_message,

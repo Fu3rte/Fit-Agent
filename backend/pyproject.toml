@@ -10,7 +10,6 @@ requires-python = ">=3.13"
 dependencies = [
     "openai>=3,<4",
     "pydantic>=2,<3",
-    "python-dotenv>=1,<2",
     "fastapi>=0.115",
     "uvicorn>=0.30",
     "anyio>=4",

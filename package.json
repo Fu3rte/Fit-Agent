@@ -4,7 +4,7 @@
     "scripts": {
         "dev:frontend": "cd frontend && npm run dev",
         "dev:backend": "cd backend && uv run python -m uvicorn app.interfaces.http:app --reload --host 127.0.0.1 --port 8000",
-        "dev": "concurrently -n backend,frontend -c blue,green \"npm run dev:backend\" \"npm run dev:frontend\""
+        "dev": "node scripts/dev.mjs"
     },
     "devDependencies": {
         "concurrently": "^8.2.2"

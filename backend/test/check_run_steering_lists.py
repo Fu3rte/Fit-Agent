@@ -27,6 +27,7 @@ from app.model_config import load_model_config
 from test.regression_support import (
     Server,
     client,
+    install_test_model_config,
     patch_default_database,
     temporary_root,
 )
@@ -661,6 +662,7 @@ def live_read_checks(http, session_id: str) -> dict:
 
 
 def http_checks(evidence: dict) -> None:
+    install_test_model_config()
     path = patch_default_database("run-steering-lists-http")
     seed = asyncio.run(seed_http(path))
     runs_url = f"/api/sessions/{seed['session_id']}/runs"
@@ -832,7 +834,7 @@ def http_checks(evidence: dict) -> None:
 
         leaky = str(uuid4())
         leak_run = str(uuid4())
-        key = load_model_config().OPENAI_API_KEY
+        key = load_model_config().api_key
         insert_leaky_records(path, leaky, leak_run, key)
         blocked_runs = http.get(f"/api/sessions/{leaky}/runs")
         assert blocked_runs.status_code == 422, blocked_runs.text
