@@ -53,7 +53,7 @@ function convertEntry(
   consumedByEntry: Map<string, HistorySteeringWire>,
   toolArgs: Map<string, Record<string, unknown>>,
 ): ReActEntry | null {
-  // 仅 message 节点产生可见消息（compaction-contract-decisions §A）：压缩等隐藏结构节点只参与祖先链、运行归属与叶节点校验
+  // 仅 message 节点产生可见消息（compaction-contract-decisions §A）：压缩节点只参与祖先链、运行归属与叶节点校验
   if (entry.type !== "message") return null;
   const { message } = entry;
   if (message.role === "system") return null;

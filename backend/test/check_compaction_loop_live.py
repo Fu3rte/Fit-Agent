@@ -4,6 +4,7 @@ import time
 from pathlib import Path
 from uuid import uuid4
 
+from app.agent.budget import SAFETY_MARGIN_TOKENS, RequestBudget
 from app.agent.compaction import (
     DEFAULT_SETTINGS,
     ContextBudgetExceeded,
@@ -21,9 +22,9 @@ from app.model_config import load_model_config
 
 ROOT = Path(__file__).resolve().parents[2] / "tmp" / "agent-compaction-loop-part-2"
 
-# 英文填充：chars/4 估算与真实 token 接近，可在生产阈值下保持真实请求落在模型窗口内。
+# 英文 fixture 覆盖生产压缩阈值，完整摘要请求落在模型窗口内。
 FILLER = "the quick brown fox jumps over the lazy dog and keeps training hard. "
-SUMMARIZED_CHARS = 400_000
+SUMMARIZED_CHARS = 360_000
 RETAINED_CHARS = 95_000
 
 
@@ -67,7 +68,7 @@ async def measure() -> dict:
     )
     started = time.perf_counter()
     result = await generate_compaction_summary(
-        preparation, spec, api_key=config.api_key, settings=settings
+        preparation, spec, api_key=config.api_key, settings=settings, budget=RequestBudget()
     )
     latency_ms = int((time.perf_counter() - started) * 1000)
     assert result.summary.strip() and result.usage.total_tokens > 0
@@ -79,7 +80,7 @@ async def measure() -> dict:
         "production_settings": {
             "reserve_tokens": settings.reserve_tokens,
             "keep_recent_tokens": settings.keep_recent_tokens,
-            "threshold": spec.context_window - settings.reserve_tokens,
+            "threshold": spec.context_window - settings.reserve_tokens - SAFETY_MARGIN_TOKENS,
         },
         "before": {
             "estimated_context_tokens": projection.tokens,

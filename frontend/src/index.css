@@ -127,6 +127,36 @@
   --radius-md: calc(var(--radius) - 2px);
   --radius-lg: var(--radius);
   --radius-xl: calc(var(--radius) + 4px);
+
+  /* 抽屉进出动效（Radix 无样式，动效由本仓库声明） */
+  --animate-sheet-in-right: sheet-in-right 220ms ease-out;
+  --animate-sheet-out-right: sheet-out-right 180ms ease-in;
+  --animate-sheet-fade-in: sheet-fade-in 220ms ease-out;
+  --animate-sheet-fade-out: sheet-fade-out 180ms ease-in;
+}
+
+@keyframes sheet-in-right {
+  from {
+    transform: translateX(100%);
+  }
+}
+
+@keyframes sheet-out-right {
+  to {
+    transform: translateX(100%);
+  }
+}
+
+@keyframes sheet-fade-in {
+  from {
+    opacity: 0;
+  }
+}
+
+@keyframes sheet-fade-out {
+  to {
+    opacity: 0;
+  }
 }
 
 @layer components {

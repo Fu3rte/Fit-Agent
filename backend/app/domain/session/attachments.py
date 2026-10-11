@@ -1,5 +1,6 @@
 import base64
 import re
+from collections.abc import Sequence
 from pathlib import Path, PureWindowsPath
 from typing import Annotated, Literal, TypeAlias
 
@@ -101,3 +102,18 @@ def attachment_storage_ref(session_id: str, attachment_id: str, file_name: str) 
     validate_file_name(file_name)
     extension = attachment_extension(file_name)
     return f"tmp/sessions/{session_id}/attachments/{attachment_id}{extension}"
+
+
+def attachment_read_refs(
+    attachments: Sequence[AttachmentMetadata],
+) -> list[tuple[str, str]]:
+    # 附件读取引用的唯一生成入口：名称与相对 tmp 根的读取路径，供模型投影复用。
+    return [
+        (
+            metadata.file_name,
+            attachment_storage_ref(
+                metadata.session_id, metadata.attachment_id, metadata.file_name
+            ).removeprefix("tmp/"),
+        )
+        for metadata in attachments
+    ]

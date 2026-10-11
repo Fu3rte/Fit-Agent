@@ -218,7 +218,7 @@ export type PublicMessageWire =
     };
 
 /** 一个已提交节点（§3.1、compaction-contract-decisions §A）：entries 为 active_leaf_id 的祖先链，
- *  按根到叶排列；message 节点公开消息投影，compaction 为隐藏结构节点，摘要、usage、system_message
+ *  按根到叶排列；message 节点公开消息投影，compaction 节点只公开身份与父子关系，摘要、usage、system_message
  *  及内部附件路径保留在后端，两种节点都参与祖先链、运行归属与叶节点校验 */
 export type HistoryEntryWire =
   | {
@@ -690,7 +690,7 @@ export type ReActEvent = { data: { run_id: string } } & (
   | { event: "steering_status"; data: { steering_id: string } & SteeringStatus }
   | {
       event: "done";
-      data: { status: "completed"; stop_reason: "stop" | "length" };
+      data: { status: "completed"; stop_reason: "stop" };
     }
   | {
       event: "error";
@@ -702,7 +702,10 @@ export type ReActEvent = { data: { run_id: string } } & (
           | "credential_detected"
           | "compaction_failed"
           | "context_budget_exceeded"
-          | "context_overflow";
+          | "context_overflow"
+          | "model_request_limit_exceeded"
+          | "model_output_limit_exceeded"
+          | "provider_quota_exceeded";
         message: string;
         tool_call_id: string | null;
       };

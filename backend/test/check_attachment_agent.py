@@ -10,7 +10,7 @@ from app.agent.tool import run_tool_call
 from app.agent.tools.files import create_file_tools
 from app.ai.messages import SystemMessage, ToolCall
 from app.application.session.service import SessionService
-from app.domain.session.attachments import PROJECT_ROOT, TMP_ROOT
+from app.domain.session.attachments import PROJECT_ROOT, TMP_ROOT, attachment_read_refs
 from app.domain.session.models import (
     EditCommand,
     EditRequest,
@@ -23,7 +23,6 @@ from app.domain.session.models import (
 )
 from app.infrastructure.persistence.sqlite.database import open_database
 from app.infrastructure.persistence.sqlite.repository import SqliteSessionRepository
-from app.interfaces.http import entry_attachments
 from test.regression_support import temporary_root, text
 
 ROOT = temporary_root("attachment-agent")
@@ -56,7 +55,11 @@ def send(session: str, content: str = "", attachments: list | None = None) -> Se
 
 
 def project(entries):
-    return [entry_attachments(entry) for entry in entries if entry.messages[0].role == "user"]
+    return [
+        attachment_read_refs(entry.attachments)
+        for entry in entries
+        if entry.messages[0].role == "user"
+    ]
 
 
 async def tool_result(tool, arguments):
@@ -121,18 +124,18 @@ async def attachments_and_tools(root: Path) -> dict:
         users = [entry for entry in entries if entry.messages[0].role == "user"]
         projected = project(entries)
         assert len(projected) == 2, projected
-        assert [item["file_name"] for item in projected[0]] == ["plan.md", "notes.txt"]
+        assert [name for name, _ in projected[0]] == ["plan.md", "notes.txt"]
         plan_path = f"sessions/{session}/attachments/{plan['attachment_id']}.md"
         notes_path = f"sessions/{session}/attachments/{notes['attachment_id']}.txt"
-        assert [item["path"] for item in projected[0]] == [plan_path, notes_path]
+        assert [path for _, path in projected[0]] == [plan_path, notes_path]
         assert users[0].messages[0].content == "录入这个计划"
-        assert projected[1][0]["path"] == f"sessions/{session}/attachments/{pure['attachment_id']}.txt"
+        assert projected[1][0][1] == f"sessions/{session}/attachments/{pure['attachment_id']}.txt"
 
         # 原附件可定位、可读取，正文与原字节完整。
         read_plan = await tool_result(reader, {"path": plan_path})
         assert not read_plan.is_error and "周一 深蹲 3 组" in text(read_plan)
         assert (tmp_root / plan_path).read_bytes() == plan_body.encode("utf-8")
-        read_pure = await tool_result(reader, {"path": projected[1][0]["path"]})
+        read_pure = await tool_result(reader, {"path": projected[1][0][1]})
         assert "纯文件正文" in text(read_pure)
 
         # 长附件按 offset/limit 连续读取，给出续读信息，不静默截断。
@@ -238,7 +241,7 @@ async def attachments_and_tools(root: Path) -> dict:
         await service.finish_run(session, edited.run.id, "completed")
         edited_entry = await service.get_entry(session, edited.run.request_entry_id)
         assert [item.attachment_id for item in edited_entry.attachments] == [pure["attachment_id"]]
-        assert project(await service.get_branch(session, edited.run.request_entry_id))[-1][0]["path"] == projected[1][0]["path"]
+        assert project(await service.get_branch(session, edited.run.request_entry_id))[-1][0][1] == projected[1][0][1]
 
         replacement = upload("替换正文\n".encode("utf-8"), "new.txt")
         replace = EditCommand(
@@ -258,8 +261,9 @@ async def attachments_and_tools(root: Path) -> dict:
         regenerated_projection = project(
             await service.get_branch(session, regenerated.run.request_entry_id)
         )[-1]
-        assert [item["attachment_id"] for item in regenerated_projection] == [
-            pure["attachment_id"], replacement["attachment_id"]
+        assert [path for _, path in regenerated_projection] == [
+            f"sessions/{session}/attachments/{pure['attachment_id']}.txt",
+            f"sessions/{session}/attachments/{replacement['attachment_id']}.txt",
         ]
 
         # pending、withdrawn Steering 附件不进入模型上下文；consumed 后按真实节点投影。
@@ -279,14 +283,14 @@ async def attachments_and_tools(root: Path) -> dict:
         pending_branch = project(
             await service.get_branch(steer_session, (await service.get_session(steer_session)).active_leaf_id)
         )
-        pending_paths = [item["path"] for group in pending_branch for item in group]
+        pending_paths = [path for group in pending_branch for _, path in group]
         assert all(pending_upload["attachment_id"] not in path for path in pending_paths), pending_branch
         consumed = await service.consume_steering(steer_session, steer_run.run.id, steering.id)
         after_consumption = project(
             await service.get_branch(steer_session, consumed.entry.id)
         )
         consumed_projection = after_consumption[-1]
-        assert consumed_projection[0]["path"] == (
+        assert consumed_projection[0][1] == (
             f"sessions/{steer_session}/attachments/{pending_upload['attachment_id']}.txt"
         )
         withdrawn_upload = upload("撤回正文\n".encode("utf-8"), "withdrawn.txt")
@@ -307,8 +311,8 @@ async def attachments_and_tools(root: Path) -> dict:
         return {
             "tmp_root": str(tmp_root),
             "plan_path": plan_path,
-            "pure_path": projected[1][0]["path"],
-            "steering_path": consumed_projection[0]["path"],
+            "pure_path": projected[1][0][1],
+            "steering_path": consumed_projection[0][1],
         }
     finally:
         await database.close()

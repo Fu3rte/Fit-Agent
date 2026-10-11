@@ -580,7 +580,7 @@ const HISTORY_ENTRY_KEYS = [
 ] as const;
 
 /** 历史节点判别联合（§3.1、compaction-contract-decisions §A）：未知类型、字段缺失或多余字段均报错；
- *  compaction 为隐藏结构节点，只公开身份与父子关系，不携带 message */
+ *  compaction 节点只公开身份与父子关系，不携带 message */
 function parseHistoryEntry(value: unknown): HistoryEntryWire {
   if (!isObject(value)) throw new Error("历史节点无效。");
   const type = requireEnum(

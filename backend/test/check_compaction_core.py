@@ -1,5 +1,6 @@
 import asyncio
 import json
+from math import ceil
 from pathlib import Path
 from uuid import uuid4
 
@@ -195,13 +196,13 @@ def check_summary_validation() -> None:
 
 
 def check_estimate_tokens() -> None:
-    assert C.estimate_tokens(user("中文内容")) == 1
-    assert C.estimate_tokens(user("中" * 400)) == 100
+    assert C.estimate_tokens(user("中文内容")) == ceil(4 / C.CHARS_PER_TOKEN)
+    assert C.estimate_tokens(user("中" * 400)) == ceil(400 / C.CHARS_PER_TOKEN)
     plan = json.dumps(
         {"plan": [{"day": index, "exercises": ["深蹲", "卧推"] * 4} for index in range(300)]},
         ensure_ascii=False,
     )
-    assert C.estimate_tokens(tool_result("c1", plan)) == (len(plan) + 3) // 4
+    assert C.estimate_tokens(tool_result("c1", plan)) == ceil(len(plan) / C.CHARS_PER_TOKEN)
     assert C.estimate_tokens(tool_result("c1", plan)) >= 2000
     image = UserMessage(
         role="user",
@@ -232,7 +233,7 @@ def check_estimate_tokens() -> None:
         stop_reason="stop",
         timestamp=tick(),
     )
-    assert C.estimate_tokens(thinking) == (len("推理") * 50 + 3) // 4
+    assert C.estimate_tokens(thinking) == ceil(len("推理") * 50 / C.CHARS_PER_TOKEN)
     print("estimate_tokens：中文、长 JSON 计划、工具 schema、图片与思考计数通过")
 
 
@@ -254,7 +255,7 @@ def check_context_tokens() -> None:
     assert C.estimate_context_tokens(zero).last_usage_index is None
 
     window, reserve = 128000, 16384
-    threshold = window - reserve
+    threshold = window - reserve - C.SAFETY_MARGIN_TOKENS
     assert C.should_compact(threshold, window, reserve) is False
     assert C.should_compact(threshold + 1, window, reserve) is True
     with pytest.raises(ValueError):
@@ -635,13 +636,13 @@ def check_summary_limits() -> None:
         )
 
     C._check_summary_budget(
-        prompt, spec(input_tokens + output_tokens), output_tokens, "历史摘要"
+        prompt, spec(input_tokens + output_tokens + C.SAFETY_MARGIN_TOKENS), output_tokens, "历史摘要"
     )
     with pytest.raises(C.ContextBudgetExceeded):
         C._check_summary_budget(
-            prompt, spec(input_tokens + output_tokens - 1), output_tokens, "历史摘要"
+            prompt, spec(input_tokens + output_tokens + C.SAFETY_MARGIN_TOKENS - 1), output_tokens, "历史摘要"
         )
-    print("摘要预算：输出额度受模型能力限制、输入加输出窗口边界、用量合并通过")
+    print("摘要预算：输出额度受模型能力限制、完整请求预算边界、用量合并通过")
 
 
 async def scenario_real_path() -> None:

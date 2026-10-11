@@ -8,6 +8,7 @@ from uuid import uuid4
 from openai._streaming import SSEDecoder
 from pydantic import TypeAdapter
 
+from app.agent.budget import SAFETY_MARGIN_TOKENS
 from app.agent.compaction import (
     KEEP_RECENT_TOKENS,
     RESERVE_TOKENS,
@@ -136,10 +137,11 @@ def call(coro, loop):
 
 
 def pure_checks() -> dict:
-    # 生产预算与阈值：context_tokens > context_window - reserve 触发。
+    # 生产阈值包含回答预留与安全余量。
     assert RESERVE_TOKENS == 16384 and KEEP_RECENT_TOKENS == 20000
-    assert should_compact(CONTEXT_WINDOW - RESERVE_TOKENS + 1, CONTEXT_WINDOW, RESERVE_TOKENS) is True
-    assert should_compact(CONTEXT_WINDOW - RESERVE_TOKENS, CONTEXT_WINDOW, RESERVE_TOKENS) is False
+    threshold = CONTEXT_WINDOW - RESERVE_TOKENS - SAFETY_MARGIN_TOKENS
+    assert should_compact(threshold + 1, CONTEXT_WINDOW, RESERVE_TOKENS) is True
+    assert should_compact(threshold, CONTEXT_WINDOW, RESERVE_TOKENS) is False
     # 固定失败码与文案：SSE 与运行记录使用相同文本。
     assert terminal_decision(CompactionSummaryError("x"), False) == (
         "failed", "compaction_failed", COMPACTION_FAILED_MESSAGE,
@@ -160,7 +162,7 @@ def pure_checks() -> dict:
     summary_usage = Usage(input=0, output=0, cache_read=0, cache_write=0, total_tokens=7)
     totals = summarize_usage([assistant], compaction_usage=[summary_usage])
     assert totals.total_tokens == 9
-    return {"threshold": CONTEXT_WINDOW - RESERVE_TOKENS}
+    return {"threshold": threshold}
 
 
 def compaction_checks(http, ids: dict) -> dict:

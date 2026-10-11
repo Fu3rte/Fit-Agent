@@ -8,6 +8,7 @@ from uuid import uuid4
 import pytest
 
 from app.agent import compaction as C
+from app.agent.budget import RequestBudget
 from app.agent.compaction_summary import (
     COMPACTION_SUMMARY_PREFIX,
     COMPACTION_SUMMARY_SUFFIX,
@@ -701,7 +702,7 @@ async def scenario_live_summary_commit(root: Path) -> dict:
         preparation = C.prepare_compaction(entries, model.context_window, model.max_tokens, LIVE_SETTINGS)
         started = time.perf_counter()
         result = await C.generate_compaction_summary(
-            preparation, model, api_key=config.api_key
+            preparation, model, api_key=config.api_key, settings=LIVE_SETTINGS, budget=RequestBudget()
         )
         latency_ms = int((time.perf_counter() - started) * 1000)
         assert result.summary.strip()

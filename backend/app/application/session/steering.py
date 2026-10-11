@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 
 from app.ai.messages import UserMessage
 from app.application.session.service import SessionService
+from app.domain.session.attachments import AttachmentMetadata
 from app.domain.session.errors import RunClosed, SteeringConsumptionConflict
 from app.domain.session.models import (
     RunOutcome,
@@ -59,8 +60,9 @@ class _PriorityGate:
 class RunSteeringBoundary:
     session_id: str
     notify: Callable[[dict], None]
-    queue: deque[tuple[str, UserMessage]] = field(default_factory=deque)
+    queue: deque[SteeringInput] = field(default_factory=deque)
     occupied: dict[int, str] = field(default_factory=dict)
+    attachments: dict[int, list[AttachmentMetadata]] = field(default_factory=dict)
     accepting: bool = True
     gate: _PriorityGate = field(default_factory=_PriorityGate)
 
@@ -114,9 +116,7 @@ class SteeringCoordinator:
                 command, credentials=credentials
             )
             if outcome.created and boundary is not None:
-                boundary.queue.append(
-                    (outcome.steering.id, outcome.steering.message)
-                )
+                boundary.queue.append(outcome.steering)
             return outcome.created, outcome.steering
 
     async def withdraw(
@@ -138,9 +138,7 @@ class SteeringCoordinator:
             )
             if boundary is not None and withdrawal.changed:
                 boundary.queue = deque(
-                    (item_id, message)
-                    for item_id, message in boundary.queue
-                    if item_id != steering_id
+                    item for item in boundary.queue if item.id != steering_id
                 )
                 boundary.notify({
                     "steering_id": steering_id,
@@ -163,6 +161,13 @@ class SteeringCoordinator:
                 boundary.accepting = False
             return messages
 
+    async def attachments_for(
+        self, run_id: str, messages: Sequence[UserMessage]
+    ) -> list[list[AttachmentMetadata]]:
+        # 已取出输入对应的附件：模型请求投影据此表达读取引用。
+        boundary = self._boundary(run_id)
+        return [boundary.attachments.get(id(message), []) for message in messages]
+
     async def consume(self, run_id: str, messages: list[UserMessage]) -> str | None:
         boundary = self._boundary(run_id)
         async with boundary.gate.consume_priority():
@@ -176,6 +181,7 @@ class SteeringCoordinator:
                     boundary.session_id, run_id, steering_id
                 )
                 boundary.occupied.pop(id(message), None)
+                boundary.attachments.pop(id(message), None)
                 if not result.created:
                     continue
                 last_entry_id = result.steering.entry_id
@@ -236,7 +242,8 @@ class SteeringCoordinator:
     def _drain(self, boundary: RunSteeringBoundary) -> list[UserMessage]:
         messages: list[UserMessage] = []
         while boundary.queue:
-            steering_id, message = boundary.queue.popleft()
-            boundary.occupied[id(message)] = steering_id
-            messages.append(message)
+            steering = boundary.queue.popleft()
+            boundary.occupied[id(steering.message)] = steering.id
+            boundary.attachments[id(steering.message)] = steering.attachments
+            messages.append(steering.message)
         return messages

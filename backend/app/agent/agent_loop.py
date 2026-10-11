@@ -79,6 +79,11 @@ AgentEventSink = Callable[[LoopEvent], Awaitable[None]]
 StreamFn = Callable[[ModelSpec, LlmContext, StreamOptions], AssistantResponse]
 
 
+class ModelOutputLimitExceeded(Exception):
+    # 普通响应达到输出上限：已生成文本与持久化消息保留，运行进入截断终态。
+    pass
+
+
 DEFAULT_MAX_OUTPUT_TOKENS = 16384
 # 单次模型调用前的压缩次数上限：避免重复生成相同摘要导致无界循环。
 MAX_COMPACTIONS_PER_CALL = 4
@@ -118,6 +123,9 @@ async def stream_assistant_response(
         "max_tokens": min(DEFAULT_MAX_OUTPUT_TOKENS, spec.max_tokens),
     }
     llm_context: LlmContext = {"messages": messages}
+    if config.request_budget is None:
+        raise RuntimeError("正式运行必须装配共享模型请求预算")
+    config.request_budget.reserve()
     response = stream_fn(spec, llm_context, options)
     index: int | None = None
     async with aclosing(response):
@@ -170,13 +178,20 @@ async def compact_if_needed(
     signal: Event | None,
     emit: AgentEventSink,
 ) -> None:
-    # 每次模型调用前的阈值压缩：只总结新的合法范围，回到预算内或无法再释放空间时结束。
+    # 每次模型调用前的阈值压缩：最多 4 次，每次压缩后重估完整请求。
+    # 回到预算内即继续；仍超预算且估算输入没有减少时立即终止；第 4 次后同样复核。
+    tokens = await hooks.estimate_request()
     for _ in range(MAX_COMPACTIONS_PER_CALL):
         check_cancelled(signal)
+        if not should_compact(tokens, hooks.context_window, hooks.reserve_tokens):
+            return
+        before = tokens
+        await run_compaction(context, hooks, signal, emit, "threshold")
         tokens = await hooks.estimate_request()
         if not should_compact(tokens, hooks.context_window, hooks.reserve_tokens):
             return
-        await run_compaction(context, hooks, signal, emit, "threshold")
+        if tokens >= before:
+            raise ContextBudgetExceeded("压缩未减少估算输入，无法满足当前请求预算")
     raise ContextBudgetExceeded("压缩未释放足够的上下文空间，无法满足当前请求预算")
 
 
@@ -301,8 +316,13 @@ async def run_loop(
             turn_completed = False
             tool_timing: ToolBatchResult | None = None
             try:
-                context["messages"].extend(pending_messages)
-                messages.extend(pending_messages)
+                projected_pending = (
+                    config.project_steering(pending_messages)
+                    if pending_messages and config.project_steering is not None
+                    else pending_messages
+                )
+                context["messages"].extend(projected_pending)
+                messages.extend(projected_pending)
                 if pending_messages and config.on_steering_consumed is not None:
                     await config.on_steering_consumed(pending_messages)
                 pending_messages = []
@@ -331,6 +351,8 @@ async def run_loop(
                     await recover_context_overflow(
                         context, config.compaction, signal, emit
                     )
+                    # 恢复后必须重试一次：无论本回合由工具续接还是 Steering 触发，都要求循环再入。
+                    has_more_tool_calls = True
                     continue
                 messages.append(message)
                 if message.stop_reason == "aborted":
@@ -355,8 +377,8 @@ async def run_loop(
                     if not text:
                         raise RuntimeError("模型返回了空的最终回答")
                 elif message.stop_reason == "length":
-                    if tool_calls:
-                        raise ValueError("length 最终消息包含工具调用")
+                    # 输出截断：截断的工具参数禁止执行，运行进入输出上限终态。
+                    raise ModelOutputLimitExceeded()
                 elif not tool_calls:
                     raise ValueError("toolUse 响应缺少工具调用")
                 has_more_tool_calls = message.stop_reason == "toolUse"

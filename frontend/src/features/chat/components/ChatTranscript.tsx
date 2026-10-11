@@ -24,9 +24,9 @@ import {
 } from "@/components/ui/tooltip";
 import ToolCallCard from "./ToolCallCard";
 import MarkdownContent from "./MarkdownContent";
+import UserMessageBubble from "./UserMessageBubble";
 import {
   AttachmentChips,
-  AttachmentList,
   AttachmentPicker,
   useAttachmentDrafts,
 } from "./Attachments";
@@ -159,53 +159,47 @@ function Entry({
               </div>
             </div>
           ) : (
-            <Bubble variant="default" align="end">
-              {attachments.length > 0 && (
-                <AttachmentList
-                  sessionId={sessionId}
-                  attachments={attachments}
-                />
-              )}
-              {request !== "" && (
-                <BubbleContent className="whitespace-pre-wrap">
-                  {request}
-                </BubbleContent>
-              )}
-              {canEdit && nodeId !== undefined && (
-                <div className="absolute right-0 top-full z-10 hidden gap-1 pt-1 group-hover/bubble:flex group-focus-within/bubble:flex">
-                  <Tooltip>
-                    <TooltipTrigger asChild>
-                      <Button
-                        type="button"
-                        variant="ghost"
-                        size="icon"
-                        className="size-7 text-muted-foreground hover:text-foreground"
-                        aria-label="编辑消息"
-                        onClick={() => onStartEdit(entry)}
-                      >
-                        <Pencil />
-                      </Button>
-                    </TooltipTrigger>
-                    <TooltipContent>编辑</TooltipContent>
-                  </Tooltip>
-                  <Tooltip>
-                    <TooltipTrigger asChild>
-                      <Button
-                        type="button"
-                        variant="ghost"
-                        size="icon"
-                        className="size-7 text-muted-foreground hover:text-foreground"
-                        aria-label="重新生成"
-                        onClick={() => onRegenerate(nodeId)}
-                      >
-                        <RefreshCw />
-                      </Button>
-                    </TooltipTrigger>
-                    <TooltipContent>重新生成</TooltipContent>
-                  </Tooltip>
-                </div>
-              )}
-            </Bubble>
+            <UserMessageBubble
+              sessionId={sessionId}
+              request={request}
+              attachments={attachments}
+              actions={
+                canEdit && nodeId !== undefined ? (
+                  <div className="absolute right-0 top-full z-10 hidden gap-1 pt-1 group-hover/bubble:flex group-focus-within/bubble:flex">
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="icon"
+                          className="size-7 text-muted-foreground hover:text-foreground"
+                          aria-label="编辑消息"
+                          onClick={() => onStartEdit(entry)}
+                        >
+                          <Pencil />
+                        </Button>
+                      </TooltipTrigger>
+                      <TooltipContent>编辑</TooltipContent>
+                    </Tooltip>
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="icon"
+                          className="size-7 text-muted-foreground hover:text-foreground"
+                          aria-label="重新生成"
+                          onClick={() => onRegenerate(nodeId)}
+                        >
+                          <RefreshCw />
+                        </Button>
+                      </TooltipTrigger>
+                      <TooltipContent>重新生成</TooltipContent>
+                    </Tooltip>
+                  </div>
+                ) : undefined
+              }
+            />
           )}
           {entry.steering?.status === "pending" && (
             <Tooltip>
@@ -279,7 +273,9 @@ function Entry({
                 </CollapsibleContent>
               </Collapsible>
             ) : null;
-          return !entry.stop_reason ? (
+          const truncated = entry.stop_reason === "length";
+          const state = truncated ? "未执行" : "生成中";
+          return !entry.stop_reason || truncated ? (
             <Collapsible
               key={block.content_index}
               defaultOpen={false}
@@ -290,9 +286,9 @@ function Entry({
                   type="button"
                   variant="ghost"
                   size="sm"
-                  aria-label={`${block.name} 生成中的调用参数`}
+                  aria-label={`${block.name} ${state}的调用参数`}
                 >
-                  {block.name} · 生成中
+                  {`${block.name} · ${state}`}
                   <ChevronDown aria-hidden className="size-4" />
                 </Button>
               </CollapsibleTrigger>
@@ -306,7 +302,7 @@ function Entry({
         })}
         {entry.stop_reason === "length" && (
           <p role="status" className="text-sm text-muted-foreground">
-            输出已达到上限
+            回答达到输出上限，内容未完成
           </p>
         )}
         {entry.stop_reason === "aborted" && (
@@ -455,57 +451,64 @@ export default function ChatTranscript({
                     </div>
                   </MessageScrollerItem>
                 ))}
-                {(round.status !== "completed" || round.error) && (
-                  <MessageScrollerItem messageId={`${round.id}:status`}>
-                    {round.status === "running" && (
-                      <div className="flex items-center gap-2">
-                        <Loader2
-                          role="status"
-                          aria-label="执行中"
-                          className="size-4 animate-spin text-muted-foreground"
-                        />
-                        {/* 压缩阶段（compaction-contract-decisions §B）：仅由当前连接的 compaction_start 得知 */}
-                        {round.compaction_id !== undefined && (
-                          <p
+                {(round.status !== "completed" || round.error) &&
+                  !(round.status === "failed" &&
+                    round.error === "回答达到输出上限，内容未完成" &&
+                    round.entries.some(
+                      (entry) =>
+                        entry.kind === "assistant" &&
+                        entry.stop_reason === "length",
+                    )) && (
+                    <MessageScrollerItem messageId={`${round.id}:status`}>
+                      {round.status === "running" && (
+                        <div className="flex items-center gap-2">
+                          <Loader2
                             role="status"
-                            className="text-sm text-muted-foreground"
-                          >
-                            压缩上下文
-                          </p>
-                        )}
-                      </div>
-                    )}
-                    {round.status === "cancelled" && (
-                      <p
-                        role="status"
-                        className="text-sm text-muted-foreground"
-                      >
-                        已取消
-                      </p>
-                    )}
-                    {round.status === "interrupted" && (
-                      <p
-                        role="status"
-                        className="text-sm text-muted-foreground"
-                      >
-                        已中断
-                      </p>
-                    )}
-                    {round.status === "failed" && !round.error && (
-                      <p
-                        role="status"
-                        className="text-sm text-muted-foreground"
-                      >
-                        本次运行失败
-                      </p>
-                    )}
-                    {round.error && round.status !== "interrupted" && (
-                      <p role="alert" className="text-sm text-destructive">
-                        {round.error}
-                      </p>
-                    )}
-                  </MessageScrollerItem>
-                )}
+                            aria-label="执行中"
+                            className="size-4 animate-spin text-muted-foreground"
+                          />
+                          {/* 压缩阶段（compaction-contract-decisions §B）：仅由当前连接的 compaction_start 得知 */}
+                          {round.compaction_id !== undefined && (
+                            <p
+                              role="status"
+                              className="text-sm text-muted-foreground"
+                            >
+                              压缩上下文
+                            </p>
+                          )}
+                        </div>
+                      )}
+                      {round.status === "cancelled" && (
+                        <p
+                          role="status"
+                          className="text-sm text-muted-foreground"
+                        >
+                          已取消
+                        </p>
+                      )}
+                      {round.status === "interrupted" && (
+                        <p
+                          role="status"
+                          className="text-sm text-muted-foreground"
+                        >
+                          已中断
+                        </p>
+                      )}
+                      {round.status === "failed" && !round.error && (
+                        <p
+                          role="status"
+                          className="text-sm text-muted-foreground"
+                        >
+                          本次运行失败
+                        </p>
+                      )}
+                      {round.error && round.status !== "interrupted" && (
+                        <p role="alert" className="text-sm text-destructive">
+                          {round.error}
+                        </p>
+                      )}
+                    </MessageScrollerItem>
+                  )}
               </Fragment>
             ))}
           </MessageScrollerContent>

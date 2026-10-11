@@ -708,13 +708,11 @@ export function applyReActEvent(
           )
             throw new Error("内容块身份变化。");
         }
-      } else {
-        const reason = event.data.stop_reason;
-        if (
-          (reason === "length" || reason === "aborted") &&
-          event.data.content.some((block) => block.type === "tool_call")
-        )
-          throw new Error("截断或取消消息包含工具调用。");
+      } else if (
+        event.data.stop_reason === "aborted" &&
+        event.data.content.some((block) => block.type === "tool_call")
+      ) {
+        throw new Error("取消消息包含工具调用。");
       }
       entries[index] = {
         ...entry,
@@ -1193,10 +1191,7 @@ export function createReActParser(
           } else throw new Error("Steering 状态无效。");
           break;
         case "done":
-          if (
-            data.status !== "completed" ||
-            !["stop", "length"].includes(data.stop_reason as string)
-          )
+          if (data.status !== "completed" || data.stop_reason !== "stop")
             throw new Error("终止状态无效。");
           terminal = true;
           break;
@@ -1210,7 +1205,10 @@ export function createReActParser(
                   data.code === "credential_detected" ||
                   data.code === "compaction_failed" ||
                   data.code === "context_budget_exceeded" ||
-                  data.code === "context_overflow")) ||
+                  data.code === "context_overflow" ||
+                  data.code === "model_request_limit_exceeded" ||
+                  data.code === "model_output_limit_exceeded" ||
+                  data.code === "provider_quota_exceeded")) ||
               (data.status === "cancelled" && data.code === "cancelled")
             )
           )

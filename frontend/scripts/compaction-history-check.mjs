@@ -1,5 +1,5 @@
 // 运行：node scripts/compaction-history-check.mjs
-// 纯解析／状态检查：压缩隐藏结构节点参与祖先链、叶节点与运行归属，聊天仅从 message 节点提取消息。
+// 纯解析／状态检查：压缩节点参与祖先链、叶节点与运行归属，聊天仅从 message 节点提取消息。
 import assert from "node:assert/strict";
 import { createServer } from "vite";
 
@@ -186,7 +186,7 @@ reject((wire) => {
   wire.session.active_leaf_id = null;
 }, /空分支历史无效/);
 
-// 任务三：普通最终回答 stop_reason=length 保存已输出内容并以 completed 收尾（既有行为）
+// length 保留已输出内容，并以 model_output_limit_exceeded 收尾。
 const RUN = u(70);
 const MSG = u(71);
 const apply = (state, event, data) =>
@@ -196,17 +196,19 @@ let live = apply({ id: RUN, run_id: RUN, status: "running", entries: [] }, "mess
 live = apply(live, "message_update", { run_id: RUN, message_id: MSG, content: text, content_index: 0, update_type: "text_delta" });
 live = apply(live, "message_end", { run_id: RUN, message_id: MSG, content: text, stop_reason: "length", entry_id: MSG, parent_id: null });
 assert.equal(live.entries[0].stop_reason, "length", "length 终态保留在助手消息");
-live = apply(live, "done", { run_id: RUN, status: "completed", stop_reason: "length" });
-assert.equal(live.status, "completed", "length 以 completed 结束运行");
+const outputLimit = { run_id: RUN, status: "failed", code: "model_output_limit_exceeded", message: "回答达到输出上限，内容未完成", tool_call_id: null };
+live = apply(live, "error", outputLimit);
+assert.equal(live.status, "failed", "length 以 failed 结束运行");
+assert.equal(live.error, outputLimit.message);
 assert.equal(live.entries[0].content[0].text, "已输出的截断内容", "length 保留已输出内容");
 
-// 长度事件真实解析：message_end 的 stop_reason 接受 length，done 接受 length
+// 真实解析器保留 length 消息，并接收输出截断错误。
 const events = [];
 const parser = reactAgent.createReActParser((event) => events.push(event), RUN);
 parser.feed(`event: message_end\ndata: ${JSON.stringify({ run_id: RUN, message_id: MSG, content: text, stop_reason: "length", entry_id: MSG, parent_id: null })}\n\n`);
-parser.feed(`event: done\ndata: ${JSON.stringify({ run_id: RUN, status: "completed", stop_reason: "length" })}\n\n`);
+parser.feed(`event: error\ndata: ${JSON.stringify(outputLimit)}\n\n`);
 parser.finish();
-assert.deepEqual(events.map((event) => event.event), ["message_end", "done"], "解析器接受 length 的既有事件序列");
+assert.deepEqual(events.map((event) => event.event), ["message_end", "error"], "解析器接受截断失败事件序列");
 
 /* ===== 任务二：压缩阶段事件解析与运行 reducer ===== */
 const CRUN = u(80);
@@ -292,5 +294,5 @@ assert.deepEqual(flow.entries.map((entry) => entry.kind), ["assistant", "tool", 
 assert.equal(flow.entries[2].content[0].text, "最终回答。", "压缩后的真实助手内容完整");
 
 console.log(
-  "PASS: 压缩隐藏节点祖先链与叶节点、非法节点归属拒绝、length 原行为，以及压缩阶段事件解析、保持 running、严格拒绝与失败/取消收尾",
+  "PASS: 压缩隐藏节点祖先链与叶节点、非法节点归属拒绝、length 截断失败终态，以及压缩阶段事件解析、保持 running、严格拒绝与失败/取消收尾",
 );

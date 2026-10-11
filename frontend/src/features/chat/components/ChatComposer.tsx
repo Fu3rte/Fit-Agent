@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { Maximize2, Minimize2, SendHorizontal, Square } from "lucide-react";
+import { ArrowUp, Maximize2, Minimize2, Square } from "lucide-react";
 import { canSubmitChatInput } from "../utils/reactAgent";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
@@ -38,18 +38,12 @@ export default function ChatComposer({
   const requestRevision = useRef(0);
   const requestRef = useRef<HTMLTextAreaElement>(null);
   const [composerExpanded, setComposerExpanded] = useState(false);
-  const [singleLine, setSingleLine] = useState(true);
   const [atMaxHeight, setAtMaxHeight] = useState(false);
   useEffect(() => {
     const element = requestRef.current;
     if (element === null) return;
     const style = window.getComputedStyle(element);
-    const lineHeight = Number.parseFloat(style.lineHeight);
-    const padY =
-      Number.parseFloat(style.paddingTop) +
-      Number.parseFloat(style.paddingBottom);
     const maxHeight = Number.parseFloat(style.maxHeight);
-    setSingleLine(element.scrollHeight <= lineHeight * 1.5 + padY);
     setAtMaxHeight(
       request.trim() !== "" &&
         Number.isFinite(maxHeight) &&
@@ -57,14 +51,16 @@ export default function ChatComposer({
     );
   }, [request, composerExpanded]);
   const hasContent = request.trim() !== "" || files.drafts.length > 0;
-  const hasTray = files.drafts.length > 0 || files.error !== null;
   const showExpand = composerExpanded || (hasContent && atMaxHeight);
-  const inlineActions = !composerExpanded && singleLine && !hasTray;
 
-  const valid = canSubmitChatInput(request, files.drafts, unknownKeys);
+  const canSubmit =
+    ready &&
+    !submitting &&
+    !files.pending &&
+    canSubmitChatInput(request, files.drafts, unknownKeys);
   const send = () => {
     // 导入读取期间不提交：等待用户选中的附件处理完成后才提交准确集合
-    if (!ready || pending.current || !valid || files.pending) return;
+    if (!canSubmit || pending.current) return;
     const submittedRevision = requestRevision.current;
     const submitted = files.drafts;
     pending.current = true;
@@ -88,8 +84,11 @@ export default function ChatComposer({
           </p>
         )}
 
-        <div
-          className="relative flex flex-col rounded-3xl bg-card px-4 py-3 shadow-md"
+        <form
+          onSubmit={(event) => {
+            event.preventDefault();
+            send();
+          }}
           onDragOver={(event) => {
             if (event.dataTransfer.types.includes("Files"))
               event.preventDefault();
@@ -100,6 +99,7 @@ export default function ChatComposer({
             event.preventDefault();
             files.pick(dropped);
           }}
+          className="relative rounded-2xl border border-input bg-background p-2 shadow-sm"
         >
           {showExpand && (
             <button
@@ -115,6 +115,12 @@ export default function ChatComposer({
               )}
             </button>
           )}
+
+          <AttachmentChips
+            drafts={files.drafts}
+            error={files.error}
+            onRemove={files.remove}
+          />
 
           <Textarea
             ref={requestRef}
@@ -143,36 +149,16 @@ export default function ChatComposer({
             }
             rows={1}
             className={cn(
-              "w-full resize-none overflow-y-auto border-0 bg-transparent py-1 focus-visible:ring-0 field-sizing-content scrollbar-none [&::-webkit-scrollbar]:hidden",
+              "w-full resize-none overflow-y-auto border-0 bg-transparent px-2 text-sm shadow-none focus-visible:outline-none focus-visible:ring-0 field-sizing-content",
               composerExpanded
                 ? "min-h-32 max-h-[min(40vh,20rem)]"
-                : "min-h-0 max-h-17",
-              inlineActions
-                ? cn("pl-10", busy && hasContent ? "pr-24" : "pr-14")
-                : "pl-1 pr-10",
+                : "min-h-[44px] max-h-[200px]",
             )}
           />
 
-          <AttachmentChips
-            drafts={files.drafts}
-            error={files.error}
-            onRemove={files.remove}
-          />
-
-          {inlineActions && (
-            <div className="absolute top-1/2 left-2 flex -translate-y-1/2 items-center">
-              <AttachmentPicker onPick={files.pick} />
-            </div>
-          )}
-
-          {(busy || hasContent) && (
-            <div
-              className={
-                inlineActions
-                  ? "absolute top-1/2 right-4 flex -translate-y-1/2 items-center gap-1"
-                  : "mt-1 flex justify-end gap-1"
-              }
-            >
+          <div className="flex items-center justify-between px-1 pt-1">
+            <AttachmentPicker onPick={files.pick} />
+            <div className="flex items-center gap-1">
               {busy && (
                 <Button
                   type="button"
@@ -180,31 +166,23 @@ export default function ChatComposer({
                   variant="secondary"
                   aria-label="停止"
                   onClick={onStop}
-                  className="size-8"
+                  className="h-8 w-8 rounded-full"
                 >
-                  <Square aria-hidden className="size-4" />
+                  <Square aria-hidden className="h-4 w-4" />
                 </Button>
               )}
-              {hasContent && (
-                <Button
-                  size="icon"
-                  aria-label="发送"
-                  onClick={send}
-                  disabled={!ready || submitting || !valid || files.pending}
-                  className="size-8"
-                >
-                  <SendHorizontal />
-                </Button>
-              )}
+              <Button
+                type="submit"
+                size="icon"
+                aria-label="发送"
+                disabled={!canSubmit}
+                className="h-8 w-8 rounded-full"
+              >
+                <ArrowUp aria-hidden className="h-4 w-4" />
+              </Button>
             </div>
-          )}
-
-          {!inlineActions && (
-            <div className="mt-1 flex items-center">
-              <AttachmentPicker onPick={files.pick} />
-            </div>
-          )}
-        </div>
+          </div>
+        </form>
       </div>
     </div>
   );

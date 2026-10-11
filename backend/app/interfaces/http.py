@@ -29,7 +29,8 @@ from starlette.datastructures import URL
 from starlette.routing import compile_path
 from starlette.types import ASGIApp, Receive, Scope, Send
 
-from app.agent.agent_loop import run_agent_loop
+from app.agent.agent_loop import ModelOutputLimitExceeded, run_agent_loop
+from app.agent.budget import ModelRequestLimitExceeded, RequestBudget
 from app.agent.compaction import (
     KEEP_RECENT_TOKENS,
     RESERVE_TOKENS,
@@ -40,6 +41,7 @@ from app.agent.compaction import (
     estimate_context_tokens,
     generate_compaction_summary,
     prepare_compaction,
+    project_user_message,
 )
 from app.agent.config import AgentLoopConfig, CompactionHooks, LoopCompactionResult
 from app.agent.diagnostic import run_diagnostic
@@ -66,6 +68,7 @@ from app.ai.messages import (
 )
 from app.ai.model_capabilities import resolve_model_spec
 from app.ai.overflow import ContextOverflowError
+from app.ai.quota import ProviderQuotaExceeded
 from app.ai.types import check_cancelled
 from app.application.business.catalog import Catalog
 from app.application.business.coordination import ReplacementCoordinator
@@ -82,7 +85,6 @@ from app.domain.business.models import BusinessContext, WorkoutListArguments
 from app.domain.session.attachments import (
     AttachmentError,
     AttachmentInput,
-    attachment_storage_ref,
 )
 from app.domain.session.errors import (
     CredentialDetected,
@@ -166,6 +168,8 @@ TERMINAL_RUN_STATUSES = frozenset(
 COMPACTION_FAILED_MESSAGE = "上下文压缩失败，请重新发起请求。"
 CONTEXT_BUDGET_EXCEEDED_MESSAGE = "当前模型的上下文预算不足，无法继续执行。"
 CONTEXT_OVERFLOW_MESSAGE = "恢复后仍超出容量，无法继续执行。"
+MODEL_OUTPUT_LIMIT_MESSAGE = "回答达到输出上限，内容未完成"
+PROVIDER_QUOTA_EXCEEDED_MESSAGE = "模型服务账户额度不足，无法继续执行。"
 
 
 def compaction_settings() -> CompactionSettings:
@@ -612,20 +616,6 @@ def attachment_object(metadata) -> dict:
     }
 
 
-def entry_attachments(entry: SessionMessageEntry) -> list[dict]:
-    # 真实用户节点的有序附件投影：读取路径相对统一 tmp 根，来源为后端元数据。
-    return [
-        {
-            "attachment_id": item.attachment_id,
-            "file_name": item.file_name,
-            "path": attachment_storage_ref(
-                item.session_id, item.attachment_id, item.file_name
-            ).removeprefix("tmp/"),
-        }
-        for item in entry.attachments
-    ]
-
-
 def history_entry(entry: SessionEntry) -> dict:
     # 公开投影按节点类型白名单：压缩节点只公开身份与父子关系，摘要、用量、
     # 系统状态及内部附件路径保留在后端，不能直接 model_dump 作为公开响应。
@@ -851,9 +841,10 @@ def execute(
         return business_date(entry.created_at)
 
     business_day["value"] = read_business_date(request_entry["id"])
-    # 运行开始时固定一次模型能力快照与压缩预算，供当前运行与摘要调用共用。
+    # 运行开始时固定一次模型能力快照与压缩预算，供当前运行与摘要调用共用；请求预算每次运行独立创建。
     spec = resolve_model_spec(model)
     settings = compaction_settings()
+    budget = RequestBudget()
 
     def business_context(source_entry_id: str) -> BusinessContext:
         return BusinessContext(
@@ -896,10 +887,8 @@ def execute(
                 continue
             message = entry.messages[0]
             if isinstance(message, UserMessage):
+                # 附件读取引用已在模型投影中表达为用户内容，此处不再重复注入。
                 node = {"entry_id": entry.id, "role": "user"}
-                if entry.attachments:
-                    # 附件只在真实用户节点投影，读取仍由后端元数据决定。
-                    node["attachments"] = entry_attachments(entry)
                 proposal_id = bindings.get(entry.id)
                 if proposal_id is not None:
                     node["proposal_id"] = proposal_id
@@ -1035,6 +1024,14 @@ def execute(
     async def get_steering_messages_or_close() -> list[Message]:
         return call(coordinator.take_or_close(run.id))
 
+    def project_steering(messages: list[Message]) -> list[Message]:
+        # 统一附件投影：Steering 输入在进入模型请求前表达附件读取引用。
+        groups = call(coordinator.attachments_for(run.id, messages))
+        return [
+            project_user_message(message, group)
+            for message, group in zip(messages, groups)
+        ]
+
     async def on_steering_consumed(messages: list[Message]) -> None:
         last_id = call(coordinator.consume(run.id, messages))
         if last_id is not None:
@@ -1132,7 +1129,8 @@ def execute(
         )
         tokens_before = estimate_context_tokens(request_messages()).tokens
         result = await generate_compaction_summary(
-            preparation, spec, api_key=secrets[0], settings=settings, signal=signal
+            preparation, spec, api_key=secrets[0], settings=settings, signal=signal,
+            budget=budget,
         )
         check_cancelled(signal)
         system_state = get_current_system_message(projection.context.messages)
@@ -1174,6 +1172,7 @@ def execute(
         model=model,
         max_turns=64,
         model_spec=spec,
+        request_budget=budget,
         compaction=CompactionHooks(
             estimate_request=estimate_request,
             compact=compact,
@@ -1183,6 +1182,7 @@ def execute(
         transform_context=transform_context,
         get_steering_messages=get_steering_messages,
         get_steering_messages_or_close=get_steering_messages_or_close,
+        project_steering=project_steering,
         on_steering_consumed=on_steering_consumed,
         save_message=save_message,
         bind_tools=execution_registry,
@@ -1201,7 +1201,7 @@ def execute(
     check_cancelled(state.cancel)
     final_message = next(
         message for message in reversed(messages)
-        if isinstance(message, AssistantMessage) and message.stop_reason in {"stop", "length"}
+        if isinstance(message, AssistantMessage) and message.stop_reason == "stop"
     )
     return final_message.stop_reason
 
@@ -1230,6 +1230,12 @@ def terminal_decision(
         return "failed", "compaction_failed", COMPACTION_FAILED_MESSAGE
     if isinstance(failure, (ContextBudgetExceeded, NoSummarizableHistory)):
         return "failed", "context_budget_exceeded", CONTEXT_BUDGET_EXCEEDED_MESSAGE
+    if isinstance(failure, ModelRequestLimitExceeded):
+        return "failed", "model_request_limit_exceeded", str(failure)
+    if isinstance(failure, ProviderQuotaExceeded):
+        return "failed", "provider_quota_exceeded", PROVIDER_QUOTA_EXCEEDED_MESSAGE
+    if isinstance(failure, ModelOutputLimitExceeded):
+        return "failed", "model_output_limit_exceeded", MODEL_OUTPUT_LIMIT_MESSAGE
     if cancelled:
         return "cancelled", "cancelled", "执行已取消。"
     if isinstance(failure, ContextOverflowError):

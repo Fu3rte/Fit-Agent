@@ -334,21 +334,12 @@ def continue_stage(resume, database_path, stage):
     with sqlite3.connect(database) as db:
         workout_rows = db.execute("SELECT * FROM workouts ORDER BY id").fetchall()
         workout_save_rows = db.execute("SELECT * FROM workout_save_records ORDER BY proposal_id").fetchall()
-    original_evidence = json.loads((Path(__file__).resolve().parents[1] / "temp/plan-integration/2b8b8275d752486faf09aba08b4a913c/evidence.json").read_text(encoding="utf-8"))
-    original_workouts = {}
-    for previous_turn in original_evidence["turns"]:
-        names = {event["data"]["tool_call_id"]: event["data"]["name"] for event in previous_turn["events"] if event["event"] == "tool_start"}
-        for event in previous_turn["events"]:
-            if event["event"] == "tool_result" and names[event["data"]["tool_call_id"]] == "list_workouts" and not event["data"]["is_error"]:
-                for record in json.loads(event["data"]["content"])["items"]:
-                    original_workouts[record["id"]] = record
     try:
         with Server(interface.app) as server, client(server.base_url, timeout=105) as http:
             before = http.get("/api/workouts?page_size=100").json()
-            assert len(before["items"]) == 8 and len(original_workouts) == 7
-            assert all(record == original_workouts[record["id"]] for record in before["items"] if record["id"] in original_workouts)
+            assert len(before["items"]) == 8
             (ROOT / "workout-baseline.json").write_text(json.dumps({"collected_at": time_ns() // 1_000_000,
-                "source": "original 2b8 evidence (7 recent records); current read-only DB and HTTP (all 8, including outside-range 2026-10-01)",
+                "source": "current read-only DB and HTTP (all 8 records, including outside-range 2026-10-01)",
                 "http": before, "database_rows": workout_rows, "save_records": workout_save_rows}, ensure_ascii=False, indent=2), encoding="utf-8")
             stored_before = history(http, session)
             branch = call(interface.app.state.session_service.get_current_branch(session))

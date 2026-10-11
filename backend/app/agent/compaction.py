@@ -5,6 +5,7 @@ from math import ceil
 from threading import Event
 from time import time_ns
 
+from app.agent.budget import CHARS_PER_TOKEN, SAFETY_MARGIN_TOKENS, RequestBudget
 from app.agent.compaction_summary import CompactionSummaryMessage
 from app.agent.message_context import convert_to_llm
 from app.ai.messages import (
@@ -21,7 +22,11 @@ from app.ai.messages import (
 )
 from app.ai.stream import complete
 from app.ai.types import LlmContext, ModelSpec, StreamOptions, check_cancelled
-from app.domain.session.attachments import attachment_storage_ref
+from app.domain.session.attachments import (
+    AttachmentMetadata,
+    attachment_read_refs,
+    attachment_storage_ref,
+)
 from app.domain.session.models import (
     CompactionAttachmentReference,
     CompactionEntry,
@@ -37,8 +42,9 @@ KEEP_RECENT_TOKENS = 20000
 HISTORY_SUMMARY_RATIO = 0.8
 TURN_PREFIX_SUMMARY_RATIO = 0.5
 
-# 图片内容按固定字符数参与估算，与 Pi 保持一致。
+# 图片内容按固定字符数参与估算，与 Pi 保持一致；文本换算后图片仍按既有除数得到固定 token。
 ESTIMATED_IMAGE_CHARS = 4800
+ESTIMATED_IMAGE_TOKENS = ESTIMATED_IMAGE_CHARS // 4
 
 
 class CompactionError(Exception):
@@ -109,16 +115,23 @@ class CompactionSummaryResult:
     usage: Usage
 
 
-def _content_chars(content) -> int:
+def _text_tokens(chars: int) -> int:
+    # 文本统一按 CHARS_PER_TOKEN 换算并向上取整。
+    return ceil(chars / CHARS_PER_TOKEN)
+
+
+def _content_parts(content) -> tuple[int, int]:
+    # 返回（文本字符数, 图片固定 token 数）：图片保持既有固定估算方式。
     if isinstance(content, str):
-        return len(content)
-    chars = 0
+        return len(content), 0
+    text_chars = 0
+    image_tokens = 0
     for block in content:
         if isinstance(block, TextContent):
-            chars += len(block.text)
+            text_chars += len(block.text)
         elif isinstance(block, ImageContent):
-            chars += ESTIMATED_IMAGE_CHARS
-    return chars
+            image_tokens += ESTIMATED_IMAGE_TOKENS
+    return text_chars, image_tokens
 
 
 def _content_text(content) -> str:
@@ -128,9 +141,9 @@ def _content_text(content) -> str:
 
 
 def estimate_tokens(message: Message) -> int:
-    # Pi 的字符数除以 4 近似：偏保守，并对系统状态、工具声明与图片计入。
+    # 文本按 CHARS_PER_TOKEN 保守估算，并对系统状态、工具声明与图片单独计入。
     if isinstance(message, SystemMessage):
-        chars = _content_chars(message.content)
+        chars, image_tokens = _content_parts(message.content)
         if message.sections is not None:
             chars += sum(len(value) for value in message.sections.values() if value)
         if message.tools_added is not None:
@@ -141,9 +154,10 @@ def estimate_tokens(message: Message) -> int:
                     allow_nan=False,
                 )
             )
-        return ceil(chars / 4)
+        return image_tokens + _text_tokens(chars)
     if isinstance(message, UserMessage):
-        return ceil(_content_chars(message.content) / 4)
+        chars, image_tokens = _content_parts(message.content)
+        return image_tokens + _text_tokens(chars)
     if isinstance(message, AssistantMessage):
         chars = 0
         for block in message.content:
@@ -155,9 +169,10 @@ def estimate_tokens(message: Message) -> int:
                 chars += len(block.name) + len(
                     json.dumps(block.arguments, ensure_ascii=False, allow_nan=False)
                 )
-        return ceil(chars / 4)
+        return _text_tokens(chars)
     if isinstance(message, ToolResultMessage):
-        return ceil(_content_chars(message.content) / 4)
+        chars, image_tokens = _content_parts(message.content)
+        return image_tokens + _text_tokens(chars)
 
 
 def calculate_context_tokens(usage: Usage) -> int:
@@ -207,7 +222,7 @@ def should_compact(context_tokens: int, context_window: int, reserve_tokens: int
         raise ValueError("context_window 必须为正整数")
     if type(reserve_tokens) is not int or reserve_tokens <= 0:
         raise ValueError("reserve_tokens 必须为正整数")
-    return context_tokens > context_window - reserve_tokens
+    return context_tokens + reserve_tokens + SAFETY_MARGIN_TOKENS > context_window
 
 
 def check_budget(
@@ -222,11 +237,12 @@ def check_budget(
     ):
         if type(value) is not int or value <= 0:
             raise ValueError(f"{name} 必须为正整数")
-    if settings.reserve_tokens >= context_window:
+    if settings.reserve_tokens + SAFETY_MARGIN_TOKENS >= context_window:
         raise ContextBudgetExceeded(
-            f"模型上下文容量 {context_window} 无法容纳预留空间 {settings.reserve_tokens}"
+            f"模型上下文容量 {context_window} 无法容纳预留空间 {settings.reserve_tokens} "
+            f"与安全余量 {SAFETY_MARGIN_TOKENS}"
         )
-    available = context_window - settings.reserve_tokens
+    available = context_window - settings.reserve_tokens - SAFETY_MARGIN_TOKENS
     if settings.keep_recent_tokens > available:
         raise ContextBudgetExceeded(
             f"近期保留预算 {settings.keep_recent_tokens} 超过可用空间 {available}"
@@ -240,8 +256,33 @@ def _entry_messages(entry: SessionEntry) -> list[Message]:
     return []
 
 
+def attachment_lines(attachments: Sequence[AttachmentMetadata]) -> str:
+    return "\n".join(
+        f"[附件] {file_name}: {path}"
+        for file_name, path in attachment_read_refs(attachments)
+    )
+
+
+def project_user_message(
+    message: Message, attachments: Sequence[AttachmentMetadata]
+) -> Message:
+    # 附件以用户内容表达，纯附件回合因此非空；原始消息保持不变。
+    if not attachments or not isinstance(message, UserMessage):
+        return message
+    block = attachment_lines(attachments)
+    content = f"{message.content}\n\n{block}" if message.content.strip() else block
+    return message.model_copy(update={"content": content})
+
+
+def _project_entry_messages(entry: SessionEntry) -> list[Message]:
+    messages = _entry_messages(entry)
+    if not isinstance(entry, SessionMessageEntry) or not entry.attachments:
+        return messages
+    return [project_user_message(message, entry.attachments) for message in messages]
+
+
 def _summarizable_messages(entry: SessionEntry) -> list[Message]:
-    return [message for message in _entry_messages(entry) if message.role != "system"]
+    return [m for m in _project_entry_messages(entry) if m.role != "system"]
 
 
 def _is_cut_point(entry: SessionEntry) -> bool:
@@ -311,7 +352,7 @@ def build_effective_context(path: Sequence[SessionEntry]) -> EffectiveContext:
         source_entry_ids.append(head.id)
     for entry in entries[1:] if head is not None else entries:
         if isinstance(entry, SessionMessageEntry):
-            for message in _entry_messages(entry):
+            for message in _project_entry_messages(entry):
                 messages.append(message)
                 source_entry_ids.append(entry.id)
     return EffectiveContext(messages, source_entry_ids)
@@ -605,7 +646,7 @@ def _summary_prompt(
 
 def _summary_input_tokens(prompt: str) -> int:
     # 摘要输入与独立提示词单独计数，包含角色标记、JSON 与提示词自身开销。
-    return ceil(len(SUMMARIZATION_SYSTEM_PROMPT) / 4) + ceil(len(prompt) / 4)
+    return _text_tokens(len(SUMMARIZATION_SYSTEM_PROMPT)) + _text_tokens(len(prompt))
 
 
 def estimate_summary_input_tokens(
@@ -624,12 +665,12 @@ def estimate_summary_input_tokens(
 def _check_summary_budget(
     prompt: str, model: ModelSpec, output_tokens: int, label: str
 ) -> None:
-    # 完整摘要输入加本次输出额度必须落在模型窗口内；相等允许，超出在供应商请求前拒绝。
+    # 完整摘要输入、本次输出额度与安全余量之和必须落在模型窗口内；相等允许，超出在供应商请求前拒绝。
     input_tokens = _summary_input_tokens(prompt)
-    if input_tokens + output_tokens > model.context_window:
+    if input_tokens + output_tokens + SAFETY_MARGIN_TOKENS > model.context_window:
         raise ContextBudgetExceeded(
-            f"{label}输入 {input_tokens} 与输出额度 {output_tokens} "
-            f"超过模型上下文 {model.context_window}"
+            f"{label}输入 {input_tokens}、输出额度 {output_tokens} 与安全余量 "
+            f"{SAFETY_MARGIN_TOKENS} 超过模型上下文 {model.context_window}"
         )
 
 
@@ -681,6 +722,7 @@ async def _call_summary(
     previous_summary: str | None,
     ratio: float,
     label: str,
+    budget: RequestBudget | None,
     turn_prefix: bool = False,
 ) -> CompactionSummaryResult:
     check_cancelled(signal)
@@ -693,6 +735,9 @@ async def _call_summary(
         "max_tokens": _summary_max_tokens(settings.reserve_tokens, model.max_tokens, ratio),
     }
     _check_summary_budget(prompt, model, options["max_tokens"], label)
+    if budget is None:
+        raise ValueError(f"{label}缺少共享请求预算，无法计数")
+    budget.reserve()
     message = await complete(model, _build_summary_context(prompt), options)
     check_cancelled(signal)
     return _validated_summary(message, label)
@@ -726,6 +771,7 @@ async def generate_compaction_summary(
     api_key: str,
     settings: CompactionSettings = DEFAULT_SETTINGS,
     signal: Event | None = None,
+    budget: RequestBudget | None = None,
 ) -> CompactionSummaryResult:
     # 独立摘要请求：只有摘要系统提示词与序列化历史，不注册任何业务工具。
     if not api_key:
@@ -741,6 +787,7 @@ async def generate_compaction_summary(
                 previous_summary=preparation.previous_summary,
                 ratio=HISTORY_SUMMARY_RATIO,
                 label="历史摘要",
+                budget=budget,
             )
             if preparation.messages_to_summarize
             else None
@@ -754,6 +801,7 @@ async def generate_compaction_summary(
             previous_summary=None,
             ratio=TURN_PREFIX_SUMMARY_RATIO,
             label="任务前缀摘要",
+            budget=budget,
             turn_prefix=True,
         )
         history_text = (
@@ -777,4 +825,5 @@ async def generate_compaction_summary(
         previous_summary=preparation.previous_summary,
         ratio=HISTORY_SUMMARY_RATIO,
         label="历史摘要",
+        budget=budget,
     )

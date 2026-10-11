@@ -424,13 +424,14 @@ class SessionService:
             await self._require_session(session_id)
             entries = await self._repository.list_entries(session_id)
             path = build_session_path(session_id, entries, leaf_id)
-            context = build_effective_context(path)
             for entry in path:
-                # 附件按真实用户节点投影，累计历史附件仍由检查点 details 提供。
+                # 附件先按真实用户节点投影，供模型请求投影表达为用户内容；
+                # 累计历史附件仍由检查点 details 提供。
                 if _is_role(entry, "user"):
                     entry.attachments = await self._repository.list_entry_attachments(
                         session_id, entry.id
                     )
+            context = build_effective_context(path)
             return SessionProjection(path=path, context=context)
 
     async def get_run(self, session_id: str, run_id: str) -> SessionRun:

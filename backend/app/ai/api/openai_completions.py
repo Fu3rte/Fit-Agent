@@ -25,6 +25,7 @@ from app.ai.messages import (
     UserMessage,
 )
 from app.ai.overflow import build_overflow_message, is_context_overflow_error
+from app.ai.quota import raise_if_provider_quota_exceeded
 from app.ai.types import (
     AssistantStreamEvent,
     DoneEvent,
@@ -433,6 +434,8 @@ async def stream(
                     **request, stream=True, stream_options={"include_usage": True}
                 )
             except Exception as error:
+                # 明确账户额度耗尽：独立于限流与上下文溢出，立即向上传播共享异常。
+                raise_if_provider_quota_exceeded(error)
                 # 助手 start 前的明确容量拒绝：转换为 error 助手消息，交给上层做一次恢复。
                 if not is_context_overflow_error(error):
                     raise

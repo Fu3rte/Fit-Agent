@@ -1,18 +1,11 @@
 import { useRef, useState } from "react";
-import { useQuery } from "@tanstack/react-query";
-import { Paperclip, X } from "lucide-react";
+import { FileText, Paperclip, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { getAttachmentContent } from "@/lib/api";
 import {
   mergeAttachmentDrafts,
   readAttachmentFiles,
   type AttachmentDraft,
 } from "../utils/attachments";
-
-/** 附件原文查询（plan-import-adjustment-contract §4）：按会话与附件身份定位，读取无副作用 */
-function attachmentQueryKey(sessionId: string, attachmentId: string) {
-  return ["attachment", sessionId, attachmentId] as const;
-}
 
 /** 一次导入读取任务（附件契约 §1）：按发起顺序排队，完成或失败后就地合入或整批拒绝 */
 interface ImportTask {
@@ -132,6 +125,13 @@ export function useAttachmentDrafts() {
   };
 }
 
+/** 附件字节数的展示口径：按量级换算 B／KB／MB（Intl unit:byte 无二进制进位，实测不可用） */
+export function formatAttachmentBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+}
+
 /** 导入入口：与输入框同区的按钮，选择 UTF-8 的 `.md`／`.txt` 文件挂入附件草稿 */
 export function AttachmentPicker({
   onPick,
@@ -143,15 +143,17 @@ export function AttachmentPicker({
   const input = useRef<HTMLInputElement>(null);
   return (
     <>
-      <button
+      <Button
         type="button"
+        variant="ghost"
+        size="icon"
         aria-label="导入训练计划文件"
         disabled={disabled}
         onClick={() => input.current?.click()}
-        className="grid size-8 place-items-center rounded-full text-muted-foreground hover:bg-secondary hover:text-foreground disabled:pointer-events-none disabled:opacity-50"
+        className="h-8 w-8 rounded-lg text-muted-foreground hover:text-foreground"
       >
-        <Paperclip aria-hidden className="size-4" />
-      </button>
+        <Paperclip aria-hidden className="h-4 w-4" />
+      </Button>
       <input
         ref={input}
         type="file"
@@ -167,7 +169,7 @@ export function AttachmentPicker({
   );
 }
 
-/** 附件草稿条：文件名、移除入口与具体错误说明 */
+/** 附件草稿条：文件图标、文件名、字节数、移除入口与具体错误说明 */
 export function AttachmentChips({
   drafts,
   error,
@@ -182,89 +184,40 @@ export function AttachmentChips({
   if (drafts.length === 0 && error === null) return null;
   return (
     <div className="flex flex-col gap-1">
-      {drafts.map((item, at) => (
-        <div
-          key={item.attachment_id}
-          className="flex items-center gap-2 self-start rounded-full bg-secondary py-1 pr-2 pl-3 text-sm"
-        >
-          <span className="max-w-64 truncate">{item.file_name}</span>
-          <button
-            type="button"
-            aria-label={`移除 ${item.file_name}`}
-            disabled={disabled}
-            onClick={() => onRemove(at)}
-            className="grid size-5 shrink-0 place-items-center rounded-full text-muted-foreground hover:bg-muted hover:text-foreground disabled:pointer-events-none disabled:opacity-50"
-          >
-            <X aria-hidden className="size-3" />
-          </button>
+      {drafts.length > 0 && (
+        <div className="flex flex-wrap gap-2 px-2 pb-2">
+          {drafts.map((item, at) => (
+            <div
+              key={item.attachment_id}
+              className="flex items-center gap-2 rounded-lg border bg-muted/50 px-2.5 py-1.5 text-xs text-foreground"
+            >
+              <FileText
+                aria-hidden
+                className="h-3.5 w-3.5 shrink-0 text-muted-foreground"
+              />
+              <span className="max-w-[180px] truncate">{item.file_name}</span>
+              <span className="shrink-0 text-muted-foreground">
+                {formatAttachmentBytes(item.size_bytes)}
+              </span>
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon"
+                aria-label={`移除 ${item.file_name}`}
+                disabled={disabled}
+                onClick={() => onRemove(at)}
+                className="h-5 w-5 shrink-0 rounded-md text-muted-foreground hover:bg-muted hover:text-foreground"
+              >
+                <X aria-hidden className="h-3 w-3" />
+              </Button>
+            </div>
+          ))}
         </div>
-      ))}
+      )}
       {error !== null && (
-        <p role="alert" className="text-sm text-destructive">
+        <p role="alert" className="px-2 text-sm text-destructive">
           {error}
         </p>
-      )}
-    </div>
-  );
-}
-
-/** 已提交消息的有序附件：只展示文件名，正文按附件读取接口单独取得 */
-export function AttachmentList({
-  sessionId,
-  attachments,
-}: {
-  sessionId: string;
-  attachments: readonly AttachmentDraft[];
-}) {
-  return (
-    <div className="flex flex-col items-end gap-1">
-      {attachments.map((item) => (
-        <AttachmentReadout
-          key={item.attachment_id}
-          sessionId={sessionId}
-          draft={item}
-        />
-      ))}
-    </div>
-  );
-}
-
-function AttachmentReadout({
-  sessionId,
-  draft,
-}: {
-  sessionId: string;
-  draft: AttachmentDraft;
-}) {
-  const [open, setOpen] = useState(false);
-  const content = useQuery({
-    queryKey: attachmentQueryKey(sessionId, draft.attachment_id),
-    queryFn: ({ signal }) =>
-      getAttachmentContent(sessionId, draft.attachment_id, signal),
-    enabled: open,
-  });
-  return (
-    <div className="flex flex-col items-end gap-1">
-      <Button
-        type="button"
-        variant="ghost"
-        size="sm"
-        aria-expanded={open}
-        aria-label={`查看 ${draft.file_name} 原文`}
-        className="max-w-64 truncate text-muted-foreground hover:text-foreground"
-        onClick={() => setOpen((value) => !value)}
-      >
-        {draft.file_name}
-      </Button>
-      {open && content.isError && (
-        <p role="alert" className="text-sm text-destructive">
-          {content.error.message}
-        </p>
-      )}
-      {open && content.data !== undefined && (
-        <pre className="max-w-2xl overflow-x-auto rounded-lg bg-secondary p-3 text-sm whitespace-pre-wrap break-words">
-          {content.data.text}
-        </pre>
       )}
     </div>
   );

@@ -61,16 +61,16 @@ def test_history_boundary_equal_and_over_one_token() -> None:
         C.RESERVE_TOKENS, DEFAULT_MAX_TOKENS, C.HISTORY_SUMMARY_RATIO
     )
     C._check_summary_budget(
-        prompt, model(input_tokens + output_tokens), output_tokens, "历史摘要"
+        prompt, model(input_tokens + output_tokens + C.SAFETY_MARGIN_TOKENS), output_tokens, "历史摘要"
     )
     with pytest.raises(C.ContextBudgetExceeded):
         C._check_summary_budget(
-            prompt, model(input_tokens + output_tokens - 1), output_tokens, "历史摘要"
+            prompt, model(input_tokens + output_tokens + C.SAFETY_MARGIN_TOKENS - 1), output_tokens, "历史摘要"
         )
     RECORDS["history_boundary"] = {
         "input_tokens": input_tokens,
         "output_tokens": output_tokens,
-        "window_equal": input_tokens + output_tokens,
+        "window_equal": input_tokens + output_tokens + C.SAFETY_MARGIN_TOKENS,
     }
 
 
@@ -83,16 +83,16 @@ def test_turn_prefix_boundary_equal_and_over_one_token() -> None:
         C.RESERVE_TOKENS, DEFAULT_MAX_TOKENS, C.TURN_PREFIX_SUMMARY_RATIO
     )
     C._check_summary_budget(
-        prompt, model(input_tokens + output_tokens), output_tokens, "任务前缀摘要"
+        prompt, model(input_tokens + output_tokens + C.SAFETY_MARGIN_TOKENS), output_tokens, "任务前缀摘要"
     )
     with pytest.raises(C.ContextBudgetExceeded):
         C._check_summary_budget(
-            prompt, model(input_tokens + output_tokens - 1), output_tokens, "任务前缀摘要"
+            prompt, model(input_tokens + output_tokens + C.SAFETY_MARGIN_TOKENS - 1), output_tokens, "任务前缀摘要"
         )
     RECORDS["turn_prefix_boundary"] = {
         "input_tokens": input_tokens,
         "output_tokens": output_tokens,
-        "window_equal": input_tokens + output_tokens,
+        "window_equal": input_tokens + output_tokens + C.SAFETY_MARGIN_TOKENS,
     }
 
 

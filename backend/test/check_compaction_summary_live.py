@@ -6,6 +6,7 @@ from pathlib import Path
 from threading import Event
 
 from app.agent import compaction as C
+from app.agent.budget import RequestBudget
 from app.ai.messages import (
     AssistantMessage,
     SystemMessage,
@@ -276,11 +277,16 @@ def run_scenario(name: str, model) -> dict:
     turn_prefix_quota = C._summary_max_tokens(
         LIVE_SETTINGS.reserve_tokens, model.max_tokens, C.TURN_PREFIX_SUMMARY_RATIO
     )
+    budget = RequestBudget()
     started = time.perf_counter()
     result = asyncio.run(
-        C.generate_compaction_summary(preparation, model, api_key=model_key)
+        C.generate_compaction_summary(
+            preparation, model, api_key=model_key, settings=LIVE_SETTINGS, budget=budget
+        )
     )
     latency_ms = int((time.perf_counter() - started) * 1000)
+    expected_requests = 2 if preparation.is_split_turn and preparation.messages_to_summarize else 1
+    assert budget.used == expected_requests, (name, budget.used, expected_requests)
     lowered = result.summary.lower()
     missing = [heading for heading in SECTION_HEADINGS if heading not in lowered]
     assert not missing, (name, missing, result.summary[:600])
@@ -296,7 +302,7 @@ def run_scenario(name: str, model) -> dict:
         "previous_summary": preparation.previous_summary is not None,
         "attachments": [item.model_dump() for item in preparation.attachments],
         "first_kept_entry_id": preparation.first_kept_entry_id,
-        "effective_context_chars_over_4": sum(
+        "estimated_effective_context_tokens": sum(
             C.estimate_tokens(message) for message in context.messages
         ),
         "tokens_before_usage_basis": preparation.tokens_before,
@@ -307,12 +313,12 @@ def run_scenario(name: str, model) -> dict:
         "turn_prefix_input_tokens": turn_prefix_input,
         "turn_prefix_output_quota": turn_prefix_quota,
         "history_budget_headroom": (
-            model.context_window - history_quota - history_input
+            model.context_window - history_quota - history_input - C.SAFETY_MARGIN_TOKENS
             if preparation.messages_to_summarize
             else None
         ),
         "turn_prefix_budget_headroom": (
-            model.context_window - turn_prefix_quota - turn_prefix_input
+            model.context_window - turn_prefix_quota - turn_prefix_input - C.SAFETY_MARGIN_TOKENS
             if preparation.turn_prefix_messages
             else None
         ),
@@ -321,7 +327,7 @@ def run_scenario(name: str, model) -> dict:
             abs(estimated_input - actual_input) / actual_input if actual_input else None
         ),
         "usage": result.usage.model_dump(),
-        "request_count": 2 if preparation.turn_prefix_messages else 1,
+        "request_count": budget.used,
         "latency_ms": latency_ms,
         "summary_chars": len(result.summary),
         "summary": result.summary,
@@ -338,7 +344,7 @@ def run_cancellation(model) -> dict:
     try:
         asyncio.run(
             C.generate_compaction_summary(
-                preparation, model, api_key=model_key, signal=signal
+                preparation, model, api_key=model_key, signal=signal, budget=RequestBudget()
             )
         )
     except CancelledError:
@@ -385,9 +391,9 @@ def check() -> None:
         "cancellation": run_cancellation(model),
         "cost": "缺少供应商单价，仅记录 token",
         "notes": [
-            "历史为合成夹具，助手 usage 为固定占位值；tokens_before_usage_basis 反映该占位基准，上下文规模以 effective_context_chars_over_4 为准。",
-            "estimate_error 为 chars/4 估算相对真实输入 token 的偏差，中文对话偏低约 2 倍。",
-            "每次摘要调用前按 estimate_summary_input_tokens + 输出额度 <= context_window 校验；history/turn_prefix_budget_headroom 为对应调用的窗口余量。",
+            "历史为合成夹具，助手 usage 为固定占位值；tokens_before_usage_basis 反映该占位基准，上下文规模以 estimated_effective_context_tokens 为准。",
+            "estimate_error 为 chars/3.5 估算相对真实输入 token 的偏差。",
+            "每次摘要调用前按 estimate_summary_input_tokens + 输出额度 + 4096 <= context_window 校验；history/turn_prefix_budget_headroom 为对应调用的窗口余量。",
         ],
         "gaps": [
             "缺用量、工具调用、error、length 终态无法由真实服务稳定触发；由 check_compaction_core 的 _validated_summary 纯逻辑校验覆盖。",
