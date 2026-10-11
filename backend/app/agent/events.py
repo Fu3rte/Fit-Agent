@@ -7,6 +7,7 @@ class AgentEvent:
     event: Literal[
         "message_start", "message_update", "message_end", "tool_start",
         "tool_execution_update", "tool_execution_end", "tool_result",
-        "steering_status", "done", "error",
+        "steering_status", "compaction_start", "compaction_end",
+        "done", "error",
     ]
     data: dict

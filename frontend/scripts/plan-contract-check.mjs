@@ -304,6 +304,7 @@ for (const code of [
   "profile_version_conflict",
   "plan_confirmation_invalid",
   "plan_access_denied",
+  "proposal_already_saved",
   "session_not_found",
 ])
   assert.equal(business.parsePlanBusinessError({ code, message: "业务失败。" }).code, code, `${code} 未被接受`);

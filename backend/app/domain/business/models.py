@@ -563,3 +563,56 @@ class CatalogExercise(BusinessModel):
     secondary_muscles: list[str]
     load_convention: LoadConvention | None
     steps: CatalogSteps
+
+
+# 待确认提案受控读取：复用三类业务的快照内容与准备依据字段。
+
+class PendingProposalArguments(BusinessModel):
+    business_kind: Literal["profile", "plan", "workout"]
+    proposal_id: str = Field(pattern=STANDARD_UUID)
+
+
+class ProfilePendingProposal(BusinessModel):
+    business_kind: Literal["profile"]
+    proposal_id: str = Field(pattern=STANDARD_UUID)
+    status: ProfileProposalStatus
+    payload: ProfileContent
+    request_entry_id: str = Field(pattern=STANDARD_UUID)
+    source_entry_id: str = Field(pattern=STANDARD_UUID)
+    display_entry_id: str = Field(pattern=STANDARD_UUID)
+    confirmation_entry_id: str | None = Field(default=None, pattern=STANDARD_UUID)
+    profile_id: ProfileTargetId
+    base_profile_version: int | None = Field(gt=0)
+
+
+class PlanPendingProposal(BusinessModel):
+    business_kind: Literal["plan"]
+    proposal_id: str = Field(pattern=STANDARD_UUID)
+    status: PlanProposalStatus
+    payload: PlanContent
+    request_entry_id: str = Field(pattern=STANDARD_UUID)
+    source_entry_id: str = Field(pattern=STANDARD_UUID)
+    display_entry_id: str = Field(pattern=STANDARD_UUID)
+    confirmation_entry_id: str | None = Field(default=None, pattern=STANDARD_UUID)
+    preparation_kind: PlanPreparationKind
+    base_profile_version: int | None = Field(gt=0)
+    base_plan_id: str | None = Field(pattern=STANDARD_UUID)
+
+
+class WorkoutPendingProposal(WorkoutDateModel):
+    business_kind: Literal["workout"]
+    proposal_id: str = Field(pattern=STANDARD_UUID)
+    status: WorkoutProposalStatus
+    payload: WorkoutContent
+    request_entry_id: str = Field(pattern=STANDARD_UUID)
+    source_entry_id: str = Field(pattern=STANDARD_UUID)
+    display_entry_id: str = Field(pattern=STANDARD_UUID)
+    confirmation_entry_id: str | None = Field(default=None, pattern=STANDARD_UUID)
+    base_workout_id: str | None = Field(pattern=STANDARD_UUID)
+    base_workout_version: int | None = Field(gt=0)
+
+    @model_validator(mode="after")
+    def validate_base_pair(self) -> Self:
+        if (self.base_workout_id is None) != (self.base_workout_version is None):
+            raise ValueError("基础记录 ID 与版本必须同时为空或同时有值。")
+        return self

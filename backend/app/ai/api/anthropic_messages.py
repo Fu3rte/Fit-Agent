@@ -23,6 +23,7 @@ from app.ai.messages import (
     Usage,
     UserMessage,
 )
+from app.ai.overflow import build_overflow_message, is_context_overflow_error
 from app.ai.types import (
     AssistantStreamEvent,
     DoneEvent,
@@ -306,7 +307,19 @@ async def stream(
         default_headers=headers or None,
     ) as client:
         check_cancelled(signal)
-        raw = await client.messages.create(**request, stream=True)
+        try:
+            raw = await client.messages.create(**request, stream=True)
+        except Exception as error:
+            # 助手 start 前的明确容量拒绝：转换为 error 助手消息，交给上层做一次恢复。
+            if not is_context_overflow_error(error):
+                raise
+            yield StartEvent(type="start", partial=output)
+            yield DoneEvent(
+                type="done",
+                reason="error",
+                message=build_overflow_message(output, error),
+            )
+            return
         async with raw:
             yield StartEvent(type="start", partial=output)
             async for event in raw:

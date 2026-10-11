@@ -37,6 +37,13 @@ class InvalidBusinessPayload(BusinessError):
         super().__init__(errors=errors)
 
 
+# 待确认提案读取命中已保存快照：三类业务共用，提示查询原保存操作状态。
+class ProposalAlreadySaved(BusinessError):
+    code = "proposal_already_saved"
+    http_status = 409
+    message = "该提案已保存，无法作为待确认内容读取。请查询原保存操作状态。"
+
+
 # 画像自然语言确认与保存契约 §9 的七项业务错误码。
 
 class ProfileProposalNotFound(BusinessError):

@@ -1,9 +1,14 @@
+from collections.abc import Sequence
+
 from app.agent.message_context import convert_to_llm
 from app.ai.messages import AssistantMessage, Message, ToolResultMessage, Usage
 
 
-def summarize_usage(messages: list[Message]) -> Usage:
-    records: list[Usage] = []
+def summarize_usage(
+    messages: list[Message], *, compaction_usage: Sequence[Usage] = ()
+) -> Usage:
+    # 摘要请求用量保存在压缩检查点上，不通过消息正文，按调用方提供的真实用量计入一次。
+    records: list[Usage] = list(compaction_usage)
     tool_ids: set[str] = set()
     for message in convert_to_llm(messages):
         if isinstance(message, AssistantMessage):

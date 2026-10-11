@@ -426,7 +426,7 @@ async def check_first_build(root: Path) -> dict:
             "get_workout", "list_workouts", "prepare_workout", "save_workout",
             "update_workout", "get_workout_save_status",
             "get_current_plan", "get_plan", "list_plans", "prepare_plan", "save_plan", "get_plan_save_status",
-            "prepare_plan_import", "prepare_plan_adjustment",
+            "get_pending_proposal", "prepare_plan_import", "prepare_plan_adjustment",
         }
         assert {name: tool.definition() for name, tool in tools.items()} == DECLARED
         assert set(DECLARED[PREPARE].parameters["properties"]) == {
@@ -1249,7 +1249,7 @@ def check() -> None:
         "get_workout", "list_workouts", "prepare_workout", "save_workout",
         "update_workout", "get_workout_save_status",
         "get_current_plan", "get_plan", "list_plans", "prepare_plan", "save_plan", "get_plan_save_status",
-        "prepare_plan_import", "prepare_plan_adjustment",
+        "get_pending_proposal", "prepare_plan_import", "prepare_plan_adjustment",
     }
     evidence: dict = {}
     with TemporaryDirectory(dir=EVIDENCE, ignore_cleanup_errors=True) as directory:

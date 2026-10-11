@@ -53,6 +53,8 @@ function convertEntry(
   consumedByEntry: Map<string, HistorySteeringWire>,
   toolArgs: Map<string, Record<string, unknown>>,
 ): ReActEntry | null {
+  // 仅 message 节点产生可见消息（compaction-contract-decisions §A）：压缩等隐藏结构节点只参与祖先链、运行归属与叶节点校验
+  if (entry.type !== "message") return null;
   const { message } = entry;
   if (message.role === "system") return null;
   if (message.role === "user") {
@@ -123,7 +125,7 @@ export function historyToRounds(history: SessionHistoryWire): ReActRound[] {
 
   const toolArgs = new Map<string, Record<string, unknown>>();
   for (const entry of entries)
-    if (entry.message.role === "assistant")
+    if (entry.type === "message" && entry.message.role === "assistant")
       for (const block of entry.message.content)
         if (block.type === "tool_call")
           toolArgs.set(block.tool_call_id, block.arguments);
@@ -158,7 +160,7 @@ export function historyToRounds(history: SessionHistoryWire): ReActRound[] {
     /* 用户节点优先归属以它为 request_entry_id 的运行（§3.3）：重新生成复用已消费 Steering
      * 节点时，该节点创建自旧运行但仍应展示在新运行下；无运行声明时按其创建运行归属。 */
     let owner: HistoryRunWire | undefined;
-    if (entry.message.role === "user") {
+    if (entry.type === "message" && entry.message.role === "user") {
       const claimed = requestToRuns.get(entry.entry_id) ?? [];
       owner =
         claimed.length > 0

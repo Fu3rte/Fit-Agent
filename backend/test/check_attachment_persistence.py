@@ -272,7 +272,17 @@ async def check_migration_and_files():
                             session_id=ids["session"], display_entry_id=ids["display"],
                             confirmation_entry_id=snapshot.confirmation_entry_id, result=result, saved_at=1000))
         tables = [row[0] for row in await rows(db, "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")]
-        before = {table: await rows(db, f"SELECT * FROM {table} ORDER BY 1, 2") for table in tables}
+
+        # 压缩能力为 session_entries 增列；迁移保真只比对原有消息列。
+        def snapshot_sql(table: str) -> str:
+            columns = (
+                "session_id, id, parent_id, run_id, type, messages, created_at"
+                if table == "session_entries"
+                else "*"
+            )
+            return f"SELECT {columns} FROM {table} ORDER BY 1, 2"
+
+        before = {table: await rows(db, snapshot_sql(table)) for table in tables}
         assert await rows(db, "PRAGMA user_version") == [(8,)]
         data = "\ufeff# 原计划\r\n推拉腿\n".encode("utf-8")
         attachment = identifier()
@@ -288,7 +298,7 @@ async def check_migration_and_files():
         business = SqliteBusinessRepository(db)
         assert await rows(db, "PRAGMA user_version") == [(SCHEMA_VERSION,)]
         for table in tables:
-            assert await rows(db, f"SELECT * FROM {table} ORDER BY 1, 2") == before[table], table
+            assert await rows(db, snapshot_sql(table)) == before[table], table
         async with repo.transaction():
             await repo.insert_attachment(stored)
             await repo.bind_entry_attachments(ids["session"], ids["request"], [attachment])

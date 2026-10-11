@@ -39,6 +39,7 @@ import type {
   WorkoutRecordWire,
 } from "@/lib/contract";
 import {
+  exactKeys,
   isObject,
   nullableMillis,
   nullableString,
@@ -569,13 +570,39 @@ function parsePublicMessage(value: unknown): PublicMessageWire {
   throw new Error("历史消息角色无效。");
 }
 
+/** 历史节点的公共身份字段（§3.1）：message 与 compaction 两种节点共有 */
+const HISTORY_ENTRY_KEYS = [
+  "type",
+  "entry_id",
+  "parent_id",
+  "run_id",
+  "created_at",
+] as const;
+
+/** 历史节点判别联合（§3.1、compaction-contract-decisions §A）：未知类型、字段缺失或多余字段均报错；
+ *  compaction 为隐藏结构节点，只公开身份与父子关系，不携带 message */
 function parseHistoryEntry(value: unknown): HistoryEntryWire {
   if (!isObject(value)) throw new Error("历史节点无效。");
+  const type = requireEnum(
+    value.type,
+    ["message", "compaction"] as const,
+    "type",
+  );
+  const entry_id = requireUuid(value.entry_id, "entry_id");
+  const parent_id = nullableUuid(value.parent_id, "parent_id");
+  const run_id = nullableUuid(value.run_id, "run_id");
+  const created_at = requireMillis(value.created_at, "created_at");
+  if (type === "compaction") {
+    exactKeys(value, HISTORY_ENTRY_KEYS, "历史节点");
+    return { type, entry_id, parent_id, run_id, created_at };
+  }
+  exactKeys(value, [...HISTORY_ENTRY_KEYS, "message"], "历史节点");
   return {
-    entry_id: requireUuid(value.entry_id, "entry_id"),
-    parent_id: nullableUuid(value.parent_id, "parent_id"),
-    run_id: nullableUuid(value.run_id, "run_id"),
-    created_at: requireMillis(value.created_at, "created_at"),
+    type,
+    entry_id,
+    parent_id,
+    run_id,
+    created_at,
     message: parsePublicMessage(value.message),
   };
 }
@@ -649,8 +676,13 @@ export function parseSessionHistory(
     if (run.session_id !== sessionId || runsById.has(run.run_id))
       throw new Error("历史运行归属无效。");
     runsById.set(run.run_id, run);
+    // request_entry_id 继续指向真实用户消息节点：压缩节点不能作为运行依据（§3.1）
     const request = nodes.get(run.request_entry_id);
-    if (request === undefined || request.message.role !== "user")
+    if (
+      request === undefined ||
+      request.type !== "message" ||
+      request.message.role !== "user"
+    )
       throw new Error("历史运行请求节点无效。");
     if (run.last_entry_id !== null) {
       const last = nodes.get(run.last_entry_id);
@@ -669,10 +701,12 @@ export function parseSessionHistory(
       throw new Error("历史输入归属无效。");
     steeringIds.add(input.steering_id);
     if (!runsById.has(input.run_id)) throw new Error("历史输入目标运行无效。");
+    // consumed 输入继续关联真实用户消息节点：压缩节点不能作为消费节点（§3.4）
     if (input.status === "consumed") {
       const node = nodes.get(input.entry_id as string);
       if (
         node === undefined ||
+        node.type !== "message" ||
         node.message.role !== "user" ||
         node.run_id !== input.run_id
       )

@@ -1,0 +1,38 @@
+{
+  "openai-completions": {
+    "https://api.ant-ling.com/v1": "ant-ling",
+    "https://api.cerebras.ai/v1": "cerebras",
+    "https://api.deepseek.com": "deepseek",
+    "https://api.fireworks.ai/inference/v1": "fireworks",
+    "https://api.groq.com/openai/v1": "groq",
+    "https://api.individual.githubcopilot.com": "github-copilot",
+    "https://api.moonshot.ai/v1": "moonshotai",
+    "https://api.moonshot.cn/v1": "moonshotai-cn",
+    "https://api.together.ai/v1": "together",
+    "https://api.xiaomimimo.com/v1": "xiaomi",
+    "https://api.z.ai/api/coding/paas/v4": "zai",
+    "https://inference.baseten.co/v1": "baseten",
+    "https://integrate.api.nvidia.com/v1": "nvidia",
+    "https://open.bigmodel.cn/api/coding/paas/v4": "zai-coding-cn",
+    "https://opencode.ai/zen/go/v1": "opencode-go",
+    "https://opencode.ai/zen/v1": "opencode",
+    "https://openrouter.ai/api/v1": "openrouter",
+    "https://router.huggingface.co/v1": "huggingface",
+    "https://token-plan-ams.xiaomimimo.com/v1": "xiaomi-token-plan-ams",
+    "https://token-plan-cn.xiaomimimo.com/v1": "xiaomi-token-plan-cn",
+    "https://token-plan-sgp.xiaomimimo.com/v1": "xiaomi-token-plan-sgp",
+    "https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1": "qwen-token-plan-cn"
+  },
+  "anthropic-messages": {
+    "https://ai-gateway.vercel.sh": "vercel-ai-gateway",
+    "https://api.anthropic.com": "anthropic",
+    "https://api.fireworks.ai/inference": "fireworks",
+    "https://api.individual.githubcopilot.com": "github-copilot",
+    "https://api.kimi.com/coding": "kimi-coding",
+    "https://api.minimax.io/anthropic": "minimax",
+    "https://api.minimaxi.com/anthropic": "minimax-cn",
+    "https://opencode.ai/zen": "opencode",
+    "https://opencode.ai/zen/go": "opencode-go",
+    "https://openrouter.ai/api": "openrouter"
+  }
+}

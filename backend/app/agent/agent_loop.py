@@ -7,7 +7,8 @@ from threading import Event
 from typing import Literal, NotRequired, TypedDict
 from uuid import uuid4
 
-from app.agent.config import AgentLoopConfig
+from app.agent.compaction import ContextBudgetExceeded, should_compact
+from app.agent.config import AgentLoopConfig, CompactionHooks
 from app.agent.message_context import prepare_message_context
 from app.agent.tool import AgentTool, FinalizedToolCall, ToolBatchResult, run_tool_batch
 from app.ai.context import get_current_tools
@@ -19,6 +20,8 @@ from app.ai.messages import (
     ToolCall,
     text_projection,
 )
+from app.ai.model_capabilities import resolve_model_spec
+from app.ai.overflow import ContextOverflowError
 from app.ai.stream import AssistantResponse, stream
 from app.ai.types import (
     AssistantStreamEvent,
@@ -41,10 +44,16 @@ class LoopEvent(TypedDict):
         "tool_start",
         "tool_execution_end",
         "tool_result",
+        "compaction_start",
+        "compaction_end",
     ]
     trace_id: NotRequired[str]
     turn_id: NotRequired[str]
     status: NotRequired[Literal["completed", "failed", "cancelled"]]
+    compaction_id: NotRequired[str]
+    reason: NotRequired[Literal["threshold", "overflow"]]
+    entry_id: NotRequired[str]
+    parent_id: NotRequired[str]
     message_id: NotRequired[str]
     message: NotRequired[AssistantMessage]
     assistant_event: NotRequired[AssistantStreamEvent]
@@ -70,13 +79,14 @@ AgentEventSink = Callable[[LoopEvent], Awaitable[None]]
 StreamFn = Callable[[ModelSpec, LlmContext, StreamOptions], AssistantResponse]
 
 
+DEFAULT_MAX_OUTPUT_TOKENS = 16384
+# 单次模型调用前的压缩次数上限：避免重复生成相同摘要导致无界循环。
+MAX_COMPACTIONS_PER_CALL = 4
+
+
 def _model_spec(config: AgentLoopConfig) -> ModelSpec:
-    return ModelSpec(
-        api=config.model.api,
-        provider=config.model.provider,
-        id=config.model.model,
-        base_url=config.model.base_url,
-    )
+    # 运行开始时固定一份能力快照：模型请求与摘要调用共用同一份。
+    return config.model_spec or resolve_model_spec(config.model)
 
 
 async def stream_assistant_response(
@@ -101,13 +111,14 @@ async def stream_assistant_response(
         ):
             raise ValueError(f"工具声明与执行注册表不一致: {declaration.name}")
     check_cancelled(signal)
+    spec = _model_spec(config)
     options: StreamOptions = {
         "api_key": config.model.api_key,
         "signal": signal,
-        "max_tokens": 16384,
+        "max_tokens": min(DEFAULT_MAX_OUTPUT_TOKENS, spec.max_tokens),
     }
     llm_context: LlmContext = {"messages": messages}
-    response = stream_fn(_model_spec(config), llm_context, options)
+    response = stream_fn(spec, llm_context, options)
     index: int | None = None
     async with aclosing(response):
         async for event in response:
@@ -151,6 +162,64 @@ async def stream_assistant_response(
             "message": final_message.model_copy(deep=True),
         })
         return final_message
+
+
+async def compact_if_needed(
+    context: AgentContext,
+    hooks: CompactionHooks,
+    signal: Event | None,
+    emit: AgentEventSink,
+) -> None:
+    # 每次模型调用前的阈值压缩：只总结新的合法范围，回到预算内或无法再释放空间时结束。
+    for _ in range(MAX_COMPACTIONS_PER_CALL):
+        check_cancelled(signal)
+        tokens = await hooks.estimate_request()
+        if not should_compact(tokens, hooks.context_window, hooks.reserve_tokens):
+            return
+        await run_compaction(context, hooks, signal, emit, "threshold")
+    raise ContextBudgetExceeded("压缩未释放足够的上下文空间，无法满足当前请求预算")
+
+
+async def run_compaction(
+    context: AgentContext,
+    hooks: CompactionHooks,
+    signal: Event | None,
+    emit: AgentEventSink,
+    reason: str,
+) -> None:
+    # 阈值压缩与溢出恢复共用同一次提交与阶段事件，只压缩一次。
+    compaction_id = str(uuid4())
+    await emit({
+        "type": "compaction_start",
+        "compaction_id": compaction_id,
+        "reason": reason,
+    })
+    result = await hooks.compact(compaction_id, signal)
+    if result.entry_id != compaction_id or not result.parent_id:
+        raise ValueError("压缩提交节点身份与阶段事件不一致")
+    context["messages"] = result.messages
+    await emit({
+        "type": "compaction_end",
+        "compaction_id": compaction_id,
+        "entry_id": result.entry_id,
+        "parent_id": result.parent_id,
+    })
+
+
+async def recover_context_overflow(
+    context: AgentContext,
+    hooks: CompactionHooks | None,
+    signal: Event | None,
+    emit: AgentEventSink,
+) -> None:
+    # 明确上下文溢出的一次恢复：复用现有切点与摘要调用，只压缩一次并提交检查点。
+    if hooks is None:
+        raise ContextBudgetExceeded("未配置压缩，无法恢复上下文溢出")
+    await run_compaction(context, hooks, signal, emit, "overflow")
+    # 检查点提交后按完整请求复核预算：合法切点只保证保留消息完整，不保证仍满足容量。
+    tokens = await hooks.estimate_request()
+    if should_compact(tokens, hooks.context_window, hooks.reserve_tokens):
+        raise ContextBudgetExceeded("恢复压缩未释放足够的上下文空间，无法满足当前请求预算")
 
 
 async def run_agent_loop(
@@ -215,6 +284,9 @@ async def run_loop(
         )
         model_calls = 0
         has_more_tool_calls = True
+        # 同一连续失败过程最多压缩恢复一次；成功响应后重置，恢复后的续接轮跳过阈值压缩。
+        recovery_used = False
+        skip_threshold = False
         while has_more_tool_calls or pending_messages:
             check_cancelled(signal)
             if model_calls >= config.max_turns:
@@ -234,6 +306,9 @@ async def run_loop(
                 if pending_messages and config.on_steering_consumed is not None:
                     await config.on_steering_consumed(pending_messages)
                 pending_messages = []
+                if config.compaction is not None and not skip_threshold:
+                    await compact_if_needed(context, config.compaction, signal, emit)
+                skip_threshold = False
                 message = await stream_assistant_response(
                     context, config, signal, message_id, emit, stream_fn
                 )
@@ -245,6 +320,18 @@ async def run_loop(
                     for block in item.content
                     if isinstance(block, ToolCall)
                 }
+                if message.stop_reason == "error" and message.context_overflow:
+                    # 失败消息已由 stream_assistant_response 落库并公开；这里只做恢复调度。
+                    if recovery_used:
+                        raise ContextOverflowError(
+                            message.error_message or "上下文容量溢出"
+                        )
+                    recovery_used = True
+                    skip_threshold = True
+                    await recover_context_overflow(
+                        context, config.compaction, signal, emit
+                    )
+                    continue
                 messages.append(message)
                 if message.stop_reason == "aborted":
                     raise CancelledError("模型响应已取消")
@@ -252,6 +339,7 @@ async def run_loop(
                     raise RuntimeError(message.error_message)
                 if message.stop_reason not in {"stop", "length", "toolUse"}:
                     raise ValueError(f"未知模型终止状态: {message.stop_reason}")
+                recovery_used = False
                 check_cancelled(signal)
                 tool_calls = [
                     block for block in message.content if isinstance(block, ToolCall)

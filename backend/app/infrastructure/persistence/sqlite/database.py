@@ -15,7 +15,7 @@ T = TypeVar("T")
 # 提交否决判据：由连接线程在 COMMIT 执行期间同步调用，返回真值表示本次提交让位。
 CommitVeto = Callable[[], bool]
 
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 11
 
 _MIGRATIONS_DIR = Path(__file__).resolve().parent / "migrations"
 _INITIAL_SCHEMA = _MIGRATIONS_DIR / "001_initial.sql"
@@ -34,7 +34,12 @@ _MIGRATIONS: dict[int, Path] = {
     7: _MIGRATIONS_DIR / "007_plans.sql",
     8: _MIGRATIONS_DIR / "008_plan_preparation_kinds.sql",
     9: _MIGRATIONS_DIR / "009_session_attachments.sql",
+    10: _MIGRATIONS_DIR / "010_session_compaction.sql",
+    11: _MIGRATIONS_DIR / "011_session_model_omission.sql",
 }
+
+# 需要重建 session_entries 的迁移：重建期间临时关闭外键，避免级联删除关联附件。
+_FOREIGN_KEY_REBUILDS = frozenset({10, 11})
 
 # 当前版本的结构基线：表 -> 列集合。
 _TABLE_COLUMNS: dict[str, frozenset[str]] = {
@@ -47,7 +52,22 @@ _TABLE_COLUMNS: dict[str, frozenset[str]] = {
         {"id", "title", "active_leaf_id", "created_at", "updated_at"}
     ),
     "session_entries": frozenset(
-        {"session_id", "id", "parent_id", "run_id", "type", "messages", "created_at"}
+        {
+            "session_id",
+            "id",
+            "parent_id",
+            "run_id",
+            "type",
+            "messages",
+            "summary",
+            "first_kept_entry_id",
+            "tokens_before",
+            "usage",
+            "system_message",
+            "details",
+            "created_at",
+            "model_omitted",
+        }
     ),
     "session_runs": frozenset(
         {
@@ -152,6 +172,13 @@ _NULLABLE_COLUMNS = frozenset({
     ("sessions", "active_leaf_id"),
     ("session_entries", "parent_id"),
     ("session_entries", "run_id"),
+    ("session_entries", "messages"),
+    ("session_entries", "summary"),
+    ("session_entries", "first_kept_entry_id"),
+    ("session_entries", "tokens_before"),
+    ("session_entries", "usage"),
+    ("session_entries", "system_message"),
+    ("session_entries", "details"),
     ("session_runs", "last_entry_id"),
     ("session_runs", "finished_at"),
     ("session_runs", "error_code"),
@@ -195,6 +222,10 @@ _FOREIGN_KEYS: dict[str, set[tuple[str, frozenset[tuple[str, str]]]]] = {
         (
             "session_entries",
             frozenset({("session_id", "session_id"), ("parent_id", "id")}),
+        ),
+        (
+            "session_entries",
+            frozenset({("session_id", "session_id"), ("first_kept_entry_id", "id")}),
         ),
         (
             "session_runs",
@@ -477,7 +508,22 @@ async def _migrate(
 ) -> None:
     for target in range(from_version, to_version + 1):
         script = _MIGRATIONS[target].read_text(encoding="utf-8")
-        await apply_schema(connection, script, target)
+        rebuild = target in _FOREIGN_KEY_REBUILDS
+        if rebuild:
+            # 表重建必须在外键关闭时执行：外键开启时改名会连带改写其他表的引用，
+            # 并可能级联删除附件关联行。legacy_alter_table 让改名保持其他表引用不变。
+            await connection.execute("PRAGMA foreign_keys = OFF")
+            await connection.execute("PRAGMA legacy_alter_table = ON")
+        try:
+            await apply_schema(connection, script, target)
+        finally:
+            if rebuild:
+                await connection.execute("PRAGMA legacy_alter_table = OFF")
+                await _enable_foreign_keys(connection)
+        if rebuild:
+            violations = await _fetch_all(connection, "PRAGMA foreign_key_check")
+            if violations:
+                raise RuntimeError(f"迁移后外键校验失败：{violations}")
 
 
 async def apply_schema(

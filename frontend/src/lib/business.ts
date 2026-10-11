@@ -101,8 +101,8 @@ export function requireArray(value: unknown, field: string): unknown[] {
   return value;
 }
 
-/** 必填字段集合完全一致：缺字段与额外字段均按协议异常处理 */
-function exactKeys(
+/** 必填字段集合完全一致：缺字段与额外字段均按协议异常处理；历史节点等封闭对象复用同一规则 */
+export function exactKeys(
   value: Record<string, unknown>,
   keys: readonly string[],
   field: string,
@@ -571,6 +571,7 @@ const PLAN_ERROR_CODES = [
   "profile_version_conflict",
   "plan_confirmation_invalid",
   "plan_access_denied",
+  "proposal_already_saved",
   "session_not_found",
 ] as const;
 

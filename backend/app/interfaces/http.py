@@ -30,7 +30,18 @@ from starlette.routing import compile_path
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from app.agent.agent_loop import run_agent_loop
-from app.agent.config import AgentLoopConfig
+from app.agent.compaction import (
+    KEEP_RECENT_TOKENS,
+    RESERVE_TOKENS,
+    CompactionSettings,
+    CompactionSummaryError,
+    ContextBudgetExceeded,
+    NoSummarizableHistory,
+    estimate_context_tokens,
+    generate_compaction_summary,
+    prepare_compaction,
+)
+from app.agent.config import AgentLoopConfig, CompactionHooks, LoopCompactionResult
 from app.agent.diagnostic import run_diagnostic
 from app.agent.events import AgentEvent
 from app.agent.permissions import create_before_tool_call
@@ -41,6 +52,7 @@ from app.agent.tools.business import (
     business_tool_declarations,
 )
 from app.agent.tools.files import create_file_tools
+from app.ai.context import get_current_system_message
 from app.ai.messages import (
     AssistantMessage,
     Message,
@@ -52,6 +64,8 @@ from app.ai.messages import (
     UserMessage,
     text_projection,
 )
+from app.ai.model_capabilities import resolve_model_spec
+from app.ai.overflow import ContextOverflowError
 from app.ai.types import check_cancelled
 from app.application.business.catalog import Catalog
 from app.application.business.coordination import ReplacementCoordinator
@@ -86,6 +100,8 @@ from app.domain.session.errors import (
     SteeringConsumptionConflict,
 )
 from app.domain.session.models import (
+    CompactionDetails,
+    CompactionEntry,
     EditCommand,
     EditRequest,
     OperationOutcome,
@@ -93,6 +109,7 @@ from app.domain.session.models import (
     RegenerateRequest,
     SendCommand,
     SendRequest,
+    SessionEntry,
     SessionMessageEntry,
     SteeringCommand,
     SteeringInput,
@@ -144,6 +161,21 @@ def session_gate(session_id: str) -> asyncio.Lock:
 TERMINAL_RUN_STATUSES = frozenset(
     {"completed", "failed", "cancelled", "interrupted"}
 )
+
+# 固定公开文案：SSE error 与运行记录使用完全相同的文本。
+COMPACTION_FAILED_MESSAGE = "上下文压缩失败，请重新发起请求。"
+CONTEXT_BUDGET_EXCEEDED_MESSAGE = "当前模型的上下文预算不足，无法继续执行。"
+CONTEXT_OVERFLOW_MESSAGE = "恢复后仍超出容量，无法继续执行。"
+
+
+def compaction_settings() -> CompactionSettings:
+    # 生产预算固定为 reserve 16384、keep 20000；环境变量仅供测试注入缩小或调整触发条件的预算。
+    reserve = os.environ.get("FIT_AGENT_COMPACTION_RESERVE_TOKENS")
+    keep = os.environ.get("FIT_AGENT_COMPACTION_KEEP_RECENT_TOKENS")
+    return CompactionSettings(
+        reserve_tokens=int(reserve) if reserve is not None else RESERVE_TOKENS,
+        keep_recent_tokens=int(keep) if keep is not None else KEEP_RECENT_TOKENS,
+    )
 
 
 class CredentialFilter:
@@ -594,17 +626,22 @@ def entry_attachments(entry: SessionMessageEntry) -> list[dict]:
     ]
 
 
-def history_entry(entry: SessionMessageEntry) -> dict:
-    message = public_message(entry.messages[0])
-    if message["role"] == "user":
-        message["attachments"] = [attachment_object(item) for item in entry.attachments]
-    return {
+def history_entry(entry: SessionEntry) -> dict:
+    # 公开投影按节点类型白名单：压缩节点只公开身份与父子关系，摘要、用量、
+    # 系统状态及内部附件路径保留在后端，不能直接 model_dump 作为公开响应。
+    public = {
+        "type": entry.type,
         "entry_id": entry.id,
         "parent_id": entry.parent_id,
         "run_id": entry.run_id,
         "created_at": entry.created_at,
-        "message": message,
     }
+    if isinstance(entry, CompactionEntry):
+        return public
+    message = public_message(entry.messages[0])
+    if message["role"] == "user":
+        message["attachments"] = [attachment_object(item) for item in entry.attachments]
+    return {**public, "message": message}
 
 
 def history_steering(steering: SteeringInput) -> dict:
@@ -814,6 +851,9 @@ def execute(
         return business_date(entry.created_at)
 
     business_day["value"] = read_business_date(request_entry["id"])
+    # 运行开始时固定一次模型能力快照与压缩预算，供当前运行与摘要调用共用。
+    spec = resolve_model_spec(model)
+    settings = compaction_settings()
 
     def business_context(source_entry_id: str) -> BusinessContext:
         return BusinessContext(
@@ -835,8 +875,10 @@ def execute(
         }
 
     def message_nodes(leaf_id: str) -> list[dict]:
-        # 当前消息路径的节点引用：保存工具需要真实展示及确认节点 ID，后端按此校验。
-        nodes = []
+        # 本轮模型投影的真实来源节点 + 核验后的待确认提案引用；不再累积整条原始路径。
+        projection = call(service.get_projection(session_id, leaf_id))
+        visible = set(projection.context.source_entry_ids)
+        nodes: list[dict] = []
         bindings = call(business.list_confirmation_bindings(session_id))
         displays = call(business.list_display_bindings(session_id))
         workout_bindings = call(business.list_workout_confirmation_bindings(session_id))
@@ -849,7 +891,9 @@ def execute(
         if (displays.keys() & workout_displays.keys()
                 or (displays.keys() | workout_displays.keys()) & plan_displays.keys()):
             raise RuntimeError("展示节点具有多类业务绑定")
-        for entry in call(service.get_branch(session_id, leaf_id)):
+        for entry in projection.path:
+            if not isinstance(entry, SessionMessageEntry) or entry.id not in visible:
+                continue
             message = entry.messages[0]
             if isinstance(message, UserMessage):
                 node = {"entry_id": entry.id, "role": "user"}
@@ -904,30 +948,42 @@ def execute(
                     node["display_entry_id"] = entry.id
                     node["business_kind"] = "plan"
                 nodes.append(node)
+        # 待确认提案引用：只给身份与关联节点，完整内容仍按 proposal_id 受控读取。
+        for reference in call(business.list_pending_references(session_id)):
+            nodes.append({
+                "role": "pendingProposal",
+                "business_kind": reference.business_kind,
+                "proposal_id": reference.proposal_id,
+                "status": reference.status,
+                "request_entry_id": reference.request_entry_id,
+                "source_entry_id": reference.source_entry_id,
+                "display_entry_id": reference.display_entry_id,
+                "confirmation_entry_id": reference.confirmation_entry_id,
+            })
         return nodes
 
+    def dynamic_system_message() -> SystemMessage:
+        # 临时系统上下文：仅参与模型请求投影，不持久化，每次重建。
+        return SystemMessage(
+            role="system",
+            content="",
+            sections={
+                "business_context": json.dumps(
+                    {
+                        "timezone": BUSINESS_TIMEZONE,
+                        "business_date": business_day["value"],
+                        "request_entry_id": request_entry["id"],
+                        "message_nodes": message_nodes(position["id"]),
+                    },
+                    ensure_ascii=False,
+                    allow_nan=False,
+                )
+            },
+            timestamp=time_ns() // 1_000_000,
+        )
+
     async def transform_context(messages: list[Message], signal) -> list[Message]:
-        # 临时系统上下文：仅参与模型请求投影，不持久化，保持原提示词与工具声明完整。
-        return [
-            *messages,
-            SystemMessage(
-                role="system",
-                content="",
-                sections={
-                    "business_context": json.dumps(
-                        {
-                            "timezone": BUSINESS_TIMEZONE,
-                            "business_date": business_day["value"],
-                            "request_entry_id": request_entry["id"],
-                            "message_nodes": message_nodes(position["id"]),
-                        },
-                        ensure_ascii=False,
-                        allow_nan=False,
-                    )
-                },
-                timestamp=time_ns() // 1_000_000,
-            ),
-        ]
+        return [*messages, dynamic_system_message()]
 
     async def save_message(node_id: str, message: Message) -> None:
         parent_id = position["id"]
@@ -942,6 +998,11 @@ def execute(
                     type="message",
                     messages=[message],
                     created_at=time_ns() // 1_000_000,
+                    # 明确上下文溢出的失败尝试：持久化模型投影省略标记。
+                    model_omitted=(
+                        isinstance(message, AssistantMessage)
+                        and message.context_overflow
+                    ),
                 ),
                 credentials=secrets,
             )
@@ -1030,6 +1091,19 @@ def execute(
             if guard.contains(data):
                 raise CredentialDetectedError()
             state.publish(kind, data)
+        elif kind == "compaction_start":
+            # 阶段开始：只公开压缩身份与原因，不含摘要、系统状态与用量。
+            state.publish(kind, {
+                "compaction_id": event["compaction_id"],
+                "reason": event["reason"],
+            })
+        elif kind == "compaction_end":
+            # 检查点提交成功后公开真实节点身份，与开始事件的压缩身份一致。
+            state.publish(kind, {
+                "compaction_id": event["compaction_id"],
+                "entry_id": event["entry_id"],
+                "parent_id": event["parent_id"],
+            })
 
     def on_tool_update(tool_call_id: str, tool_name: str, result) -> None:
         # 单工具进度快照：中间态，可被完成事件与保存确认覆盖；凭据在 harness 通知前拦截。
@@ -1040,9 +1114,72 @@ def execute(
             ),
         )
 
+    def request_messages() -> list[Message]:
+        # 即将发送的完整请求：当前模型投影加每次重建的动态业务系统上下文。
+        projection = call(service.get_projection(session_id, position["id"]))
+        return [*projection.context.messages, dynamic_system_message()]
+
+    async def estimate_request() -> int:
+        # 完整计数入口：来源与投影一致性由投影读取保证，动态资料按实际请求计入。
+        return estimate_context_tokens(request_messages()).tokens
+
+    async def compact(compaction_id: str, signal) -> LoopCompactionResult:
+        # 事务外生成真实摘要与用量，再经第一部分事务入口提交；cancelled 在提交前生效。
+        check_cancelled(signal)
+        projection = call(service.get_projection(session_id, position["id"]))
+        preparation = prepare_compaction(
+            projection.path, spec.context_window, spec.max_tokens, settings
+        )
+        tokens_before = estimate_context_tokens(request_messages()).tokens
+        result = await generate_compaction_summary(
+            preparation, spec, api_key=secrets[0], settings=settings, signal=signal
+        )
+        check_cancelled(signal)
+        system_state = get_current_system_message(projection.context.messages)
+        if system_state is None:
+            raise RuntimeError("压缩检查点缺少稳定系统状态")
+        entry = CompactionEntry(
+            session_id=session_id,
+            id=compaction_id,
+            parent_id=position["id"],
+            run_id=run.id,
+            type="compaction",
+            summary=result.summary,
+            first_kept_entry_id=preparation.first_kept_entry_id,
+            tokens_before=tokens_before,
+            usage=result.usage,
+            system_message=system_state,
+            details=(
+                CompactionDetails(attachments=preparation.attachments)
+                if preparation.attachments
+                else None
+            ),
+            created_at=time_ns() // 1_000_000,
+        )
+        outcome = call(service.commit_compaction(
+            entry, prepared_position=entry.parent_id, credentials=secrets
+        ))
+        if outcome.credential_detected:
+            raise CredentialDetectedError()
+        parents[outcome.entry.id] = outcome.entry.parent_id
+        position["id"] = outcome.entry.id
+        refreshed = call(service.get_projection(session_id, outcome.entry.id))
+        return LoopCompactionResult(
+            entry_id=outcome.entry.id,
+            parent_id=outcome.entry.parent_id,
+            messages=refreshed.context.messages,
+        )
+
     loop_config = AgentLoopConfig(
         model=model,
         max_turns=64,
+        model_spec=spec,
+        compaction=CompactionHooks(
+            estimate_request=estimate_request,
+            compact=compact,
+            context_window=spec.context_window,
+            reserve_tokens=settings.reserve_tokens,
+        ),
         transform_context=transform_context,
         get_steering_messages=get_steering_messages,
         get_steering_messages_or_close=get_steering_messages_or_close,
@@ -1089,8 +1226,14 @@ def terminal_decision(
     # 凭据命中优先于取消；否则按取消、失败、完成的顺序裁决候选终态。
     if isinstance(failure, CredentialDetectedError):
         return "failed", "credential_detected", CREDENTIAL_SAFE_MESSAGE
+    if isinstance(failure, CompactionSummaryError):
+        return "failed", "compaction_failed", COMPACTION_FAILED_MESSAGE
+    if isinstance(failure, (ContextBudgetExceeded, NoSummarizableHistory)):
+        return "failed", "context_budget_exceeded", CONTEXT_BUDGET_EXCEEDED_MESSAGE
     if cancelled:
         return "cancelled", "cancelled", "执行已取消。"
+    if isinstance(failure, ContextOverflowError):
+        return "failed", "context_overflow", CONTEXT_OVERFLOW_MESSAGE
     if failure is not None:
         return "failed", "execution_failed", "执行失败，请重新发起请求。"
     return "completed", None, None
@@ -1113,7 +1256,9 @@ async def coordinate(
     failure: BaseException | None = None
     stop_reason: str | None = None
     try:
-        branch = await service.get_context(session_id, run.request_entry_id)
+        # 模型请求使用摘要感知投影；原始路径继续供业务校验与公开历史使用。
+        projection = await service.get_projection(session_id, run.request_entry_id)
+        branch = projection.context.messages
         future = executor.submit(
             execute, run, session_id, branch, tools, state, service, business,
             loop, model, secrets,

@@ -53,6 +53,8 @@ def check() -> None:
         provider=config.provider,
         id=config.model,
         base_url=config.base_url,
+        context_window=128000,
+        max_tokens=16384,
     )
     options: StreamOptions = {"api_key": config.api_key}
     timestamp = time_ns() // 1_000_000

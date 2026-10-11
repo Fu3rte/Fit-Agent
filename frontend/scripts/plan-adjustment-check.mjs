@@ -716,6 +716,7 @@ const historyWire = (toolName, content, isError) => ({
   },
   entries: [
     {
+      type: "message",
       entry_id: USER_ENTRY,
       parent_id: null,
       run_id: null,
@@ -723,6 +724,7 @@ const historyWire = (toolName, content, isError) => ({
       message: { role: "user", text: "把卧推重量提到 80 kg。", timestamp: 1, attachments: [] },
     },
     {
+      type: "message",
       entry_id: ASSISTANT_ENTRY,
       parent_id: USER_ENTRY,
       run_id: RUN_ID,
@@ -735,6 +737,7 @@ const historyWire = (toolName, content, isError) => ({
       },
     },
     {
+      type: "message",
       entry_id: RESULT_NODE,
       parent_id: ASSISTANT_ENTRY,
       run_id: RUN_ID,

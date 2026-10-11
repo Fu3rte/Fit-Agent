@@ -46,9 +46,10 @@ const run = (overrides) => ({
 const history = {
   session: { session_id: sessionId, title: "会话", active_leaf_id: runPendingRequest, created_at: 1, updated_at: 2 },
   entries: [
-    { entry_id: systemEntry, parent_id: null, run_id: null, created_at: 1, message: { role: "system" } },
-    { entry_id: requestEntry, parent_id: systemEntry, run_id: null, created_at: 2, message: { role: "user", text: "第一条请求。", timestamp: 2, attachments: [] } },
+    { type: "message", entry_id: systemEntry, parent_id: null, run_id: null, created_at: 1, message: { role: "system" } },
+    { type: "message", entry_id: requestEntry, parent_id: systemEntry, run_id: null, created_at: 2, message: { role: "user", text: "第一条请求。", timestamp: 2, attachments: [] } },
     {
+      type: "message",
       entry_id: assistantEntry,
       parent_id: requestEntry,
       run_id: runOkId,
@@ -60,11 +61,11 @@ const history = {
         timestamp: 3,
       },
     },
-    { entry_id: toolEntry, parent_id: assistantEntry, run_id: runOkId, created_at: 4, message: { role: "toolResult", tool_call_id: "tc1", tool_name: "bash", content: "ok", is_error: false, timestamp: 4 } },
-    { entry_id: steerConsumedEntry, parent_id: toolEntry, run_id: runOkId, created_at: 5, message: { role: "user", text: "追加A。", timestamp: 5, attachments: [] } },
-    { entry_id: failRequest, parent_id: steerConsumedEntry, run_id: null, created_at: 6, message: { role: "user", text: "失败请求。", timestamp: 6, attachments: [] } },
-    { entry_id: intrRequest, parent_id: failRequest, run_id: null, created_at: 7, message: { role: "user", text: "中断请求。", timestamp: 7, attachments: [] } },
-    { entry_id: runPendingRequest, parent_id: intrRequest, run_id: null, created_at: 8, message: { role: "user", text: "运行中请求。", timestamp: 8, attachments: [] } },
+    { type: "message", entry_id: toolEntry, parent_id: assistantEntry, run_id: runOkId, created_at: 4, message: { role: "toolResult", tool_call_id: "tc1", tool_name: "bash", content: "ok", is_error: false, timestamp: 4 } },
+    { type: "message", entry_id: steerConsumedEntry, parent_id: toolEntry, run_id: runOkId, created_at: 5, message: { role: "user", text: "追加A。", timestamp: 5, attachments: [] } },
+    { type: "message", entry_id: failRequest, parent_id: steerConsumedEntry, run_id: null, created_at: 6, message: { role: "user", text: "失败请求。", timestamp: 6, attachments: [] } },
+    { type: "message", entry_id: intrRequest, parent_id: failRequest, run_id: null, created_at: 7, message: { role: "user", text: "中断请求。", timestamp: 7, attachments: [] } },
+    { type: "message", entry_id: runPendingRequest, parent_id: intrRequest, run_id: null, created_at: 8, message: { role: "user", text: "运行中请求。", timestamp: 8, attachments: [] } },
   ],
   runs: [
     run({ run_id: runOkId, request_entry_id: requestEntry, last_entry_id: steerConsumedEntry, status: "completed" }),

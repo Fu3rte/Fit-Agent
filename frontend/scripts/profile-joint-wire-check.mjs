@@ -35,7 +35,7 @@ for (const turn of wire.turns) {
 }
 const historical = historyToRounds(wire.history);
 const restored = historical.flatMap(r=>r.entries).filter(e=>e.kind==='tool' && e.profile!==undefined);
-const proposals = wire.history.entries.filter(e=>e.message.role==='toolResult' && e.message.tool_name==='prepare_profile_update' && !e.message.is_error);
+const proposals = wire.history.entries.filter(e=>e.type==='message' && e.message.role==='toolResult' && e.message.tool_name==='prepare_profile_update' && !e.message.is_error);
 assert.equal(restored.length, proposals.length);
 for (const proposal of proposals) assert.deepEqual(restored.find(e=>e.entry_id===proposal.entry_id).profile, JSON.parse(proposal.message.content).payload);
 const merged = mergeHistoryRounds(live, historical);

@@ -339,7 +339,10 @@ async def check_migration_and_store():
         await repo.replace_exercises(Catalog.load().all())
     tables = ["profile", "workouts", "exercises", "sessions", "session_entries", "session_runs", "profile_snapshots", "profile_save_records", "workout_snapshots", "workout_save_records"]
     async def rows(database, table):
-        cursor = await database.connection.execute(f"SELECT * FROM {table} ORDER BY 1")
+        # 压缩能力为 session_entries 增列；迁移保真只比对原有消息列。
+        columns = ("session_id, id, parent_id, run_id, type, messages, created_at"
+                   if table == "session_entries" else "*")
+        cursor = await database.connection.execute(f"SELECT {columns} FROM {table} ORDER BY 1")
         values = [tuple(row) for row in await cursor.fetchall()]
         await cursor.close()
         return values

@@ -124,6 +124,9 @@ export interface ReActRound {
     | "cancelled"
     | "interrupted"
     | "unknown";
+  /** 进行中的压缩阶段身份（compaction-contract-decisions §B）：仅由当前连接的 compaction_start 得知，
+   *  compaction_end 或运行终态清除；刷新后不猜测此前阶段 */
+  compaction_id?: string;
   /** 结果未知、等待确认或显式重试的操作（§5.5） */
   pending?: PendingOperation[];
 }
@@ -139,6 +142,8 @@ export function finishReActRound(
     ...round,
     status,
     error,
+    // 终态收尾清除压缩阶段：失败或取消允许没有 compaction_end（compaction-contract-decisions §B）
+    compaction_id: undefined,
     entries: round.entries.map((entry) => {
       if (entry.kind !== "tool" || entry.status !== "running") return entry;
       const failed =
@@ -813,6 +818,18 @@ export function applyReActEvent(
       };
       break;
     }
+    /* 压缩阶段（compaction-contract-decisions §B）：开始事件登记阶段并保持 running，完成事件在检查点提交后清除；
+     * 重复开始、缺失开始的完成、compaction_id 与进行中阶段不一致均按协议异常处理。 */
+    case "compaction_start": {
+      if (round.compaction_id !== undefined)
+        throw new Error("重复的压缩开始事件。");
+      return { ...round, compaction_id: event.data.compaction_id };
+    }
+    case "compaction_end": {
+      if (round.compaction_id !== event.data.compaction_id)
+        throw new Error("压缩完成事件与进行中的阶段不匹配。");
+      return { ...round, compaction_id: undefined };
+    }
     case "steering_status": {
       const existing: ReActEntry | undefined = entries.find(
         (entry) => entry.id === event.data.steering_id,
@@ -822,6 +839,9 @@ export function applyReActEvent(
       return applySteeringStatus(round, event.data);
     }
     case "done": {
+      // 压缩进行中收到完成事件视为协议异常：关闭连接保留已有内容，由运行查询确认真实终态
+      if (round.compaction_id !== undefined)
+        throw new Error("压缩阶段未结束时收到完成事件。");
       const assistants = entries.filter((entry) => entry.kind === "assistant");
       if (
         !assistants.length ||
@@ -1138,6 +1158,24 @@ export function createReActParser(
           )
             throw new Error("工具结果无效。");
           break;
+        /* 压缩事件（§B）：compaction_id 为该次压缩提交节点的 UUID，reason 为触发原因；
+         * compaction_end 的 compaction_id 与 entry_id 一致，parent_id 为必填非 null UUID。 */
+        case "compaction_start":
+          if (
+            !uuid(data.compaction_id) ||
+            !(data.reason === "threshold" || data.reason === "overflow")
+          )
+            throw new Error("压缩开始事件无效。");
+          break;
+        case "compaction_end":
+          if (
+            !uuid(data.compaction_id) ||
+            !uuid(data.entry_id) ||
+            data.entry_id !== data.compaction_id ||
+            !uuid(data.parent_id)
+          )
+            throw new Error("压缩完成事件无效。");
+          break;
         case "steering_status":
           if (!uuid(data.steering_id)) throw new Error("Steering 状态无效。");
           else if (data.status === "consumed") {
@@ -1169,7 +1207,10 @@ export function createReActParser(
             !(
               (data.status === "failed" &&
                 (data.code === "execution_failed" ||
-                  data.code === "credential_detected")) ||
+                  data.code === "credential_detected" ||
+                  data.code === "compaction_failed" ||
+                  data.code === "context_budget_exceeded" ||
+                  data.code === "context_overflow")) ||
               (data.status === "cancelled" && data.code === "cancelled")
             )
           )

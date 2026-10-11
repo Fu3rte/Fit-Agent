@@ -3,7 +3,7 @@ from concurrent.futures import CancelledError
 from threading import Event
 from typing import Literal, NotRequired, TypeAlias, TypedDict
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from app.ai.messages import AssistantMessage, Message, ToolCall
 
@@ -15,6 +15,8 @@ class ModelSpec(BaseModel):
     provider: str
     id: str
     base_url: str
+    context_window: int = Field(gt=0)
+    max_tokens: int = Field(gt=0)
     headers: dict[str, str] | None = None
 
 

@@ -358,6 +358,7 @@ def check() -> None:
                 "grep",
                 "calculate_date",
                 "get_profile",
+                "get_pending_proposal",
                 "search_exercises",
                 "prepare_profile_update",
                 "save_profile_update",

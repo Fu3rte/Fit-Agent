@@ -6,7 +6,9 @@ import aiosqlite
 
 from app.domain.session.attachments import AttachmentMetadata, attachment_storage_ref
 from app.domain.session.models import (
+    CompactionEntry,
     Session,
+    SessionEntry,
     SessionMessageEntry,
     SessionOperation,
     SessionRun,
@@ -15,7 +17,8 @@ from app.domain.session.models import (
 from app.infrastructure.persistence.sqlite.database import Database
 
 _ATTACHMENT_COLUMNS = "attachment_id, session_id, file_name, size_bytes, storage_ref, created_at"
-_ENTRY_COLUMNS = "session_id, id, parent_id, run_id, type, messages, created_at"
+# 会话节点表随压缩能力扩展了列；消息行只使用原始列，压缩行列在类型分支中读取。
+_ENTRY_COLUMNS = "*"
 _RUN_COLUMNS = (
     "session_id, id, request_entry_id, last_entry_id, status, started_at, "
     "finished_at, error_code, error_message"
@@ -43,11 +46,13 @@ def _placeholders(count: int) -> str:
     return ", ".join("?" for _ in range(count))
 
 
+def _dump_json(value: object) -> str:
+    return json.dumps(value, ensure_ascii=False, allow_nan=False)
+
+
 def _dump_messages(entry: SessionMessageEntry) -> str:
-    return json.dumps(
-        [message.model_dump(exclude_unset=True) for message in entry.messages],
-        ensure_ascii=False,
-        allow_nan=False,
+    return _dump_json(
+        [message.model_dump(exclude_unset=True) for message in entry.messages]
     )
 
 
@@ -64,10 +69,39 @@ def _row_to_session(row: sqlite3.Row) -> Session:
     return Session.model_validate(dict(row))
 
 
-def _row_to_entry(row: sqlite3.Row) -> SessionMessageEntry:
+def _row_to_entry(row: sqlite3.Row) -> SessionEntry:
     data = dict(row)
-    data["messages"] = json.loads(data["messages"])
-    return SessionMessageEntry.model_validate(data)
+    if data["type"] == "compaction":
+        return CompactionEntry.model_validate(
+            {
+                "session_id": data["session_id"],
+                "id": data["id"],
+                "parent_id": data["parent_id"],
+                "run_id": data["run_id"],
+                "type": "compaction",
+                "summary": data["summary"],
+                "first_kept_entry_id": data["first_kept_entry_id"],
+                "tokens_before": data["tokens_before"],
+                "usage": json.loads(data["usage"]),
+                "system_message": json.loads(data["system_message"]),
+                "details": None
+                if data["details"] is None
+                else json.loads(data["details"]),
+                "created_at": data["created_at"],
+            }
+        )
+    return SessionMessageEntry.model_validate(
+        {
+            "session_id": data["session_id"],
+            "id": data["id"],
+            "parent_id": data["parent_id"],
+            "run_id": data["run_id"],
+            "type": "message",
+            "messages": json.loads(data["messages"]),
+            "created_at": data["created_at"],
+            "model_omitted": bool(data["model_omitted"]),
+        }
+    )
 
 
 def _row_to_run(row: sqlite3.Row) -> SessionRun:
@@ -235,11 +269,37 @@ class SqliteSessionRepository:
             )
         await self._write("DELETE FROM sessions WHERE id = ?", (session_id,))
 
-    async def insert_entry(self, entry: SessionMessageEntry) -> None:
+    async def insert_entry(self, entry: SessionEntry) -> None:
+        if isinstance(entry, CompactionEntry):
+            await self._write(
+                "INSERT INTO session_entries "
+                "(session_id, id, parent_id, run_id, type, messages, summary, "
+                "first_kept_entry_id, tokens_before, usage, system_message, details, "
+                "created_at) "
+                "VALUES (?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    entry.session_id,
+                    entry.id,
+                    entry.parent_id,
+                    entry.run_id,
+                    entry.type,
+                    entry.summary,
+                    entry.first_kept_entry_id,
+                    entry.tokens_before,
+                    _dump_json(entry.usage.model_dump(exclude_unset=True)),
+                    _dump_json(entry.system_message.model_dump(exclude_unset=True)),
+                    None
+                    if entry.details is None
+                    else _dump_json(entry.details.model_dump(exclude_unset=True)),
+                    entry.created_at,
+                ),
+            )
+            return
         await self._write(
             "INSERT INTO session_entries "
-            "(session_id, id, parent_id, run_id, type, messages, created_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            "(session_id, id, parent_id, run_id, type, messages, created_at, "
+            "model_omitted) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 entry.session_id,
                 entry.id,
@@ -248,6 +308,7 @@ class SqliteSessionRepository:
                 entry.type,
                 _dump_messages(entry),
                 entry.created_at,
+                int(entry.model_omitted),
             ),
         )
 
@@ -265,7 +326,7 @@ class SqliteSessionRepository:
 
     async def get_entry(
         self, session_id: str, entry_id: str
-    ) -> SessionMessageEntry | None:
+    ) -> SessionEntry | None:
         row = await self._fetch_one(
             f"SELECT {_ENTRY_COLUMNS} FROM session_entries "
             "WHERE session_id = ? AND id = ?",
@@ -273,7 +334,7 @@ class SqliteSessionRepository:
         )
         return None if row is None else _row_to_entry(row)
 
-    async def list_entries(self, session_id: str) -> list[SessionMessageEntry]:
+    async def list_entries(self, session_id: str) -> list[SessionEntry]:
         rows = await self._fetch_all(
             f"SELECT {_ENTRY_COLUMNS} FROM session_entries WHERE session_id = ? "
             "ORDER BY created_at, id",

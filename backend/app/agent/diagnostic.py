@@ -2,8 +2,10 @@ from contextlib import aclosing
 from time import monotonic
 
 from app.ai.messages import SystemMessage, Tool, ToolCall, UserMessage
+from app.ai.model_capabilities import resolve_model_spec
 from app.ai.stream import stream
-from app.ai.types import ModelSpec, StreamOptions
+from app.ai.types import StreamOptions
+from app.model_config import ModelConfig
 
 DIAGNOSTIC_TOOL_NAME = "diagnostic_echo"
 DIAGNOSTIC_TOKEN = "fit-agent-diagnostic"
@@ -56,7 +58,15 @@ async def run_diagnostic(
     api_key: str,
 ) -> dict:
     # 独立诊断：仅提供诊断工具声明，不进入业务工具执行链路，不读写业务数据。
-    spec = ModelSpec(api=api, provider=provider, id=model, base_url=base_url)
+    spec = resolve_model_spec(
+        ModelConfig(
+            api=api,
+            base_url=base_url,
+            model=model,
+            provider=provider,
+            api_key=api_key,
+        )
+    )
     options: StreamOptions = {"api_key": api_key, "max_tokens": 1024}
     context = {
         "messages": [

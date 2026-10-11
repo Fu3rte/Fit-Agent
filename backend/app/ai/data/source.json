@@ -1,0 +1,17 @@
+{
+  "pi_ai_package": "@earendil-works/pi-ai",
+  "pi_ai_version": "1.1.0",
+  "pi_data_schema_version": 6,
+  "pi_data_generated_at": "2026-10-07T22:01:28.515Z",
+  "copied_at": "2026-10-10",
+  "apis": [
+    "openai-completions",
+    "anthropic-messages"
+  ],
+  "provider_count": 32,
+  "model_count": 1074,
+  "endpoint_count": 32,
+  "conflicting_endpoints_excluded": [
+    "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1"
+  ]
+}

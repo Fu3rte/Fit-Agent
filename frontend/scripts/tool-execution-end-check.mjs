@@ -124,16 +124,17 @@ assert.throws(() => parser({ run_id: u(99), tool_call_id: "tc-1", tool_name: "re
 const history = {
   session: { session_id: u(50), title: "会话", active_leaf_id: nodeSlow, created_at: 1, updated_at: 2 },
   entries: [
-    { entry_id: userEntry, parent_id: null, run_id: null, created_at: 1, message: { role: "user", text: "读取文件。", timestamp: 1, attachments: [] } },
+    { type: "message", entry_id: userEntry, parent_id: null, run_id: null, created_at: 1, message: { role: "user", text: "读取文件。", timestamp: 1, attachments: [] } },
     {
+      type: "message",
       entry_id: assistantId,
       parent_id: userEntry,
       run_id: runId,
       created_at: 2,
       message: { role: "assistant", content, stop_reason: "toolUse", timestamp: 2 },
     },
-    { entry_id: nodeSlow, parent_id: assistantId, run_id: runId, created_at: 3, message: { role: "toolResult", tool_call_id: "tc-slow", tool_name: "read", content: "slow-result", is_error: false, timestamp: 3 } },
-    { entry_id: nodeFast, parent_id: nodeSlow, run_id: runId, created_at: 4, message: { role: "toolResult", tool_call_id: "tc-fast", tool_name: "ls", content: "fast-result", is_error: false, timestamp: 4 } },
+    { type: "message", entry_id: nodeSlow, parent_id: assistantId, run_id: runId, created_at: 3, message: { role: "toolResult", tool_call_id: "tc-slow", tool_name: "read", content: "slow-result", is_error: false, timestamp: 3 } },
+    { type: "message", entry_id: nodeFast, parent_id: nodeSlow, run_id: runId, created_at: 4, message: { role: "toolResult", tool_call_id: "tc-fast", tool_name: "ls", content: "fast-result", is_error: false, timestamp: 4 } },
   ],
   runs: [{ session_id: u(50), run_id: runId, request_entry_id: userEntry, last_entry_id: nodeFast, status: "completed", started_at: 1, finished_at: 5, error_code: null, error_message: null }],
   steering: [],

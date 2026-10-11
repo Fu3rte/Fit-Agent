@@ -4,10 +4,12 @@ import time
 import uuid
 from collections.abc import AsyncIterator, Sequence
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
 from typing import Protocol
 
+from app.agent.compaction import EffectiveContext, build_effective_context
 from app.ai.context import validate_tool_pairs
 from app.ai.messages import Message, SystemMessage, UserMessage, serialize_message
 from app.application.session.attachment_files import (
@@ -23,7 +25,11 @@ from app.domain.session.attachments import (
     AttachmentReference,
     AttachmentUpload,
 )
-from app.domain.session.branch import build_session_context, build_session_path
+from app.domain.session.branch import (
+    build_session_context,
+    build_session_path,
+    message_entries,
+)
 from app.domain.session.errors import (
     CredentialDetected,
     EntryNotFound,
@@ -41,6 +47,8 @@ from app.domain.session.errors import (
 )
 from app.domain.session.models import (
     AppendOutcome,
+    CompactionEntry,
+    CompactionOutcome,
     EditCommand,
     EditRequest,
     OperationOutcome,
@@ -50,6 +58,7 @@ from app.domain.session.models import (
     SendCommand,
     SendRequest,
     Session,
+    SessionEntry,
     SessionHistory,
     SessionMessageEntry,
     SessionOperation,
@@ -65,6 +74,14 @@ from app.domain.session.repository import SessionRepository
 
 CREDENTIAL_ERROR_CODE = "credential_detected"
 CREDENTIAL_SAFE_MESSAGE = "检测到受保护凭据，操作已拒绝"
+
+
+@dataclass(frozen=True)
+class SessionProjection:
+    # 模型投影读取结果：当前完整祖先链与摘要感知有效上下文。
+    # context.source_entry_ids 与 path 中的真实节点一一对应，供第二部分生成引用。
+    path: list[SessionEntry]
+    context: EffectiveContext
 
 
 class SnapshotStore(Protocol):
@@ -140,12 +157,13 @@ def _same_request(kind: str, stored_request: object, incoming: object) -> bool:
     return stored == incoming
 
 
-def _is_role(entry: SessionMessageEntry, role: str) -> bool:
-    return entry.messages[0].role == role
+def _is_role(entry: SessionEntry | None, role: str) -> bool:
+    # 真实消息节点才带 messages；压缩节点及缺失节点一律不匹配业务角色。
+    return isinstance(entry, SessionMessageEntry) and entry.messages[0].role == role
 
 
 def _subtree_ids(
-    entries: Sequence[SessionMessageEntry], root_id: str, *, include_root: bool
+    entries: Sequence[SessionEntry], root_id: str, *, include_root: bool
 ) -> set[str]:
     children: dict[str | None, list[str]] = {}
     for entry in entries:
@@ -320,11 +338,11 @@ class SessionService:
                 await self._snapshots.remove_for_session(session_id)
             await self._repository.delete_session(session_id)
 
-    async def get_entry(self, session_id: str, entry_id: str) -> SessionMessageEntry:
+    async def get_entry(self, session_id: str, entry_id: str) -> SessionEntry:
         async with self._repository.transaction():
             return await self._require_entry(session_id, entry_id)
 
-    async def list_entries(self, session_id: str) -> list[SessionMessageEntry]:
+    async def list_entries(self, session_id: str) -> list[SessionEntry]:
         await self._require_session(session_id)
         return await self._repository.list_entries(session_id)
 
@@ -336,23 +354,34 @@ class SessionService:
             return await self._branch(session_id, session.active_leaf_id)
 
     async def get_session_history(self, session_id: str) -> SessionHistory:
-        # 单次读取事务内取得会话、当前分支、关联运行及输入，保证同一快照。
+        # 单次读取事务内取得会话、完整祖先链、关联运行及输入，保证同一快照。
         async with self._repository.transaction():
             session = await self._require_session(session_id)
-            branch = await self._branch(session_id, session.active_leaf_id)
-            branch_ids = {entry.id for entry in branch}
+            entries = await self._repository.list_entries(session_id)
+            path = build_session_path(session_id, entries, session.active_leaf_id)
+            nodes = {entry.id: entry for entry in path}
+            for entry in path:
+                # 附件只在真实用户消息节点投影；压缩节点不携带附件集合。
+                if _is_role(entry, "user"):
+                    entry.attachments = await self._repository.list_entry_attachments(
+                        session_id, entry.id
+                    )
             referenced = {
-                entry.run_id for entry in branch if entry.run_id is not None
+                entry.run_id for entry in path if entry.run_id is not None
             }
             runs = [
                 run
                 for run in await self._repository.list_runs(session_id)
                 if run.id in referenced
                 or (
-                    run.request_entry_id in branch_ids
+                    run.request_entry_id in nodes
                     and (run.last_entry_id is None or run.status == "running")
                 )
             ]
+            for run in runs:
+                # 运行依据必须仍是真实用户消息节点，压缩节点不承担请求身份。
+                if not _is_role(nodes.get(run.request_entry_id), "user"):
+                    raise AttachmentError("internal_error", "运行请求节点不是用户消息")
             runs.sort(key=lambda run: (run.started_at, run.id))
             steering: list[SteeringInput] = []
             for run in runs:
@@ -363,12 +392,14 @@ class SessionService:
             for item in steering:
                 item.attachments = await self._repository.list_steering_attachments(session_id, item.id)
                 if item.status == "consumed":
-                    consumed = next(entry for entry in branch if entry.id == item.entry_id)
+                    consumed = nodes.get(item.entry_id)
+                    if not _is_role(consumed, "user"):
+                        raise AttachmentError("internal_error", "Steering 消费节点不是用户消息")
                     if consumed.attachments != item.attachments or serialize_message(consumed.messages[0]) != serialize_message(item.message):
                         raise AttachmentError("internal_error", "Steering 附件关联损坏")
             return SessionHistory(
                 session=session,
-                entries=branch,
+                entries=path,
                 runs=runs,
                 steering=steering,
             )
@@ -383,6 +414,24 @@ class SessionService:
     async def get_context(self, session_id: str, leaf_id: str | None) -> list[Message]:
         entries = await self.list_entries(session_id)
         return build_session_context(session_id, entries, leaf_id)
+
+    async def get_projection(
+        self, session_id: str, leaf_id: str | None
+    ) -> SessionProjection:
+        # 模型投影入口：最新检查点系统状态与摘要、first_kept_entry_id 起的保留原文及
+        # 检查点之后的新增消息。原始路径语义不变，继续由 get_branch/get_context 提供。
+        async with self._repository.transaction():
+            await self._require_session(session_id)
+            entries = await self._repository.list_entries(session_id)
+            path = build_session_path(session_id, entries, leaf_id)
+            context = build_effective_context(path)
+            for entry in path:
+                # 附件按真实用户节点投影，累计历史附件仍由检查点 details 提供。
+                if _is_role(entry, "user"):
+                    entry.attachments = await self._repository.list_entry_attachments(
+                        session_id, entry.id
+                    )
+            return SessionProjection(path=path, context=context)
 
     async def get_run(self, session_id: str, run_id: str) -> SessionRun:
         return await self._require_run(session_id, run_id)
@@ -532,10 +581,10 @@ class SessionService:
                 return resolved
             await self._ensure_idle()
             session = await self._require_session(command.session_id)
-            target = await self._require_entry(
+            target = await self._require_message_entry(
                 command.session_id, request.target_entry_id
             )
-            if not _is_role(target, "user"):
+            if target.messages[0].role != "user":
                 raise InvalidTargetEntry("编辑目标必须是同会话用户消息节点")
             entries = await self._repository.list_entries(command.session_id)
             await self._ensure_pairable(
@@ -597,10 +646,10 @@ class SessionService:
                 return resolved
             await self._ensure_idle()
             session = await self._require_session(command.session_id)
-            target = await self._require_entry(
+            target = await self._require_message_entry(
                 command.session_id, request.target_entry_id
             )
-            if not _is_role(target, "user"):
+            if target.messages[0].role != "user":
                 raise InvalidTargetEntry("重新生成目标必须是同会话用户消息节点")
             _reject_credentials(target.model_dump(), credentials)
             attachments = await self._accept_attachments(
@@ -752,6 +801,75 @@ class SessionService:
                 run=run,
             )
 
+    async def commit_compaction(
+        self,
+        entry: CompactionEntry,
+        *,
+        prepared_position: str,
+        credentials: Sequence[str] = (),
+    ) -> CompactionOutcome:
+        # 检查点提交：摘要、真实 usage、系统状态、tokens_before 与附件详情均由调用方在
+        # 事务外生成。事务内核对摘要准备位置未变化，原子写入检查点、运行末节点与分支指针。
+        if _contains_credential(entry.model_dump(), credentials):
+            async with self._repository.transaction():
+                run = await self._require_run(entry.session_id, entry.run_id)
+                if run.status == "running":
+                    now = _now_ms()
+                    run = run.model_copy(
+                        update={
+                            "status": "failed",
+                            "finished_at": now,
+                            "error_code": CREDENTIAL_ERROR_CODE,
+                            "error_message": CREDENTIAL_SAFE_MESSAGE,
+                        }
+                    )
+                    await self._repository.update_run(run)
+                    await self._discard_pending(entry.session_id, run.id, "failed", now)
+                return CompactionOutcome(
+                    created=False,
+                    credential_detected=True,
+                    entry=None,
+                    run=run,
+                )
+        async with self._repository.transaction():
+            existing = await self._repository.get_entry(entry.session_id, entry.id)
+            if existing is not None:
+                if not self._same_compaction(existing, entry):
+                    raise SessionConflict(f"节点 ID 冲突: {entry.id}")
+                run = await self._require_run(entry.session_id, entry.run_id)
+                return CompactionOutcome(
+                    created=False,
+                    credential_detected=False,
+                    entry=existing,
+                    run=run,
+                )
+            run = await self._require_run(entry.session_id, entry.run_id)
+            if run.status != "running":
+                raise SessionConflict("运行未在运行，拒绝提交压缩检查点")
+            session = await self._require_session(entry.session_id)
+            if entry.parent_id != prepared_position:
+                raise SessionConflict("压缩检查点父节点与摘要准备位置不一致")
+            position = self._run_position(run)
+            if position != prepared_position:
+                raise SessionConflict("摘要准备位置与运行当前进度不一致")
+            if session.active_leaf_id != position:
+                raise SessionConflict("当前分支指针与运行进度不一致")
+            entries = await self._repository.list_entries(entry.session_id)
+            path = build_session_path(entry.session_id, entries, position)
+            # 复用已批准的保留起点结构语义：非法起点在此抛出 ValueError，事务不写入。
+            build_effective_context([*path, entry])
+            now = _now_ms()
+            await self._repository.insert_entry(entry)
+            run = run.model_copy(update={"last_entry_id": entry.id})
+            await self._repository.update_run(run)
+            await self._set_leaf(session, entry.id, now)
+            return CompactionOutcome(
+                created=True,
+                credential_detected=False,
+                entry=entry,
+                run=run,
+            )
+
     async def consume_steering(
         self, session_id: str, run_id: str, steering_id: str
     ) -> SteeringConsumption:
@@ -760,7 +878,7 @@ class SessionService:
             if steering.run_id != run_id:
                 raise SessionConflict("Steering 输入不属于指定运行")
             if steering.status == "consumed":
-                entry = await self._require_entry(session_id, steering.entry_id)
+                entry = await self._require_message_entry(session_id, steering.entry_id)
                 entry.attachments = await self._repository.list_entry_attachments(session_id, entry.id)
                 if entry.attachments != steering.attachments:
                     raise AttachmentError("internal_error", "Steering 附件关系损坏")
@@ -930,9 +1048,9 @@ class SessionService:
         self, session_id: str, leaf_id: str | None
     ) -> list[SessionMessageEntry]:
         entries = await self._repository.list_entries(session_id)
-        branch = build_session_path(session_id, entries, leaf_id)
+        branch = message_entries(build_session_path(session_id, entries, leaf_id))
         for entry in branch:
-            if _is_role(entry, "user"):
+            if entry.messages[0].role == "user":
                 entry.attachments = await self._repository.list_entry_attachments(session_id, entry.id)
         return branch
 
@@ -944,7 +1062,7 @@ class SessionService:
     async def _ensure_pairable(
         self,
         session_id: str,
-        entries: list[SessionMessageEntry],
+        entries: list[SessionEntry],
         leaf_id: str | None,
     ) -> None:
         context = build_session_context(session_id, entries, leaf_id)
@@ -968,7 +1086,7 @@ class SessionService:
         self,
         session_id: str,
         target_id: str,
-        entries: list[SessionMessageEntry],
+        entries: list[SessionEntry],
         *,
         include_target: bool,
     ) -> None:
@@ -981,7 +1099,7 @@ class SessionService:
             # 随消息移除画像快照；已完成保存的幂等记录保留。
             await self._snapshots.remove_for_entries(session_id, deleted_ids)
         runs = await self._repository.list_runs(session_id)
-        entries_by_run: dict[str, list[SessionMessageEntry]] = {}
+        entries_by_run: dict[str, list[SessionEntry]] = {}
         for entry in entries:
             if entry.run_id is not None:
                 entries_by_run.setdefault(entry.run_id, []).append(entry)
@@ -1083,8 +1201,19 @@ class SessionService:
             and existing.parent_id == incoming.parent_id
             and existing.run_id == incoming.run_id
             and existing.type == incoming.type
+            and existing.model_omitted == incoming.model_omitted
             and serialize_message(existing.messages[0])
             == serialize_message(incoming.messages[0])
+        )
+
+    def _same_compaction(
+        self, existing: SessionEntry, incoming: CompactionEntry
+    ) -> bool:
+        # 重复提交同一检查点按既有节点身份规则处理：载荷一致视为已提交，created_at 不参与比较。
+        if not isinstance(existing, CompactionEntry):
+            return False
+        return existing.model_dump(exclude={"created_at"}) == incoming.model_dump(
+            exclude={"created_at"}
         )
 
     async def _require_session(self, session_id: str) -> Session:
@@ -1095,7 +1224,7 @@ class SessionService:
 
     async def _require_entry(
         self, session_id: str, entry_id: str | None
-    ) -> SessionMessageEntry:
+    ) -> SessionEntry:
         if entry_id is None:
             raise EntryNotFound("节点 ID 为空")
         entry = await self._repository.get_entry(session_id, entry_id)
@@ -1103,6 +1232,15 @@ class SessionService:
             raise EntryNotFound(f"节点不存在: {entry_id}")
         if _is_role(entry, "user"):
             entry.attachments = await self._repository.list_entry_attachments(session_id, entry_id)
+        return entry
+
+    async def _require_message_entry(
+        self, session_id: str, entry_id: str | None
+    ) -> SessionMessageEntry:
+        # 需要 messages[0] 的调用者先确认节点为真实消息节点，压缩节点不参与业务确认链。
+        entry = await self._require_entry(session_id, entry_id)
+        if not isinstance(entry, SessionMessageEntry):
+            raise InvalidTargetEntry("目标节点必须是消息节点")
         return entry
 
     async def _require_run(self, session_id: str, run_id: str) -> SessionRun:

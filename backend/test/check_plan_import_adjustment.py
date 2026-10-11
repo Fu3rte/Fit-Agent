@@ -237,7 +237,10 @@ async def check_migration():
                 await raw(db, "INSERT INTO plan_save_records VALUES (?, ?, ?, ?, ?, ?)",
                           (proposal, ids["session"], ids["display"], ids["confirmation"], json.dumps(result), stamp))
         async def rows(table):
-            cursor = await db.connection.execute(f"SELECT * FROM {table} ORDER BY 1")
+            # 压缩能力为 session_entries 增列；迁移保真只比对原有消息列。
+            columns = ("session_id, id, parent_id, run_id, type, messages, created_at"
+                       if table == "session_entries" else "*")
+            cursor = await db.connection.execute(f"SELECT {columns} FROM {table} ORDER BY 1")
             result = [dict(row) for row in await cursor.fetchall()]
             await cursor.close()
             return result

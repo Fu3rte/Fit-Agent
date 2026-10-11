@@ -1,5 +1,6 @@
 import json
 import time
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from functools import partial
 from threading import Event
@@ -31,6 +32,7 @@ from app.domain.business.errors import (
     ProfileSessionNotFound,
     ProfileUpdateProcessing,
     ProfileVersionConflict,
+    ProposalAlreadySaved,
     WorkoutAccessDenied,
     WorkoutConfirmationInvalid,
     WorkoutNotFound,
@@ -44,11 +46,13 @@ from app.domain.business.models import (
     BusinessFieldError,
     CatalogExercise,
     CurrentPlan,
+    PendingProposalArguments,
     PlanAdjustmentArguments,
     PlanAdjustmentProposal,
     PlanContent,
     PlanImportArguments,
     PlanImportProposal,
+    PlanPendingProposal,
     PlanPreparationKind,
     PlanProposal,
     PlanProposalArguments,
@@ -59,6 +63,7 @@ from app.domain.business.models import (
     PlanSnapshot,
     PlanStatusResult,
     ProfileContent,
+    ProfilePendingProposal,
     ProfileProposal,
     ProfileProposalArguments,
     ProfileRecord,
@@ -71,6 +76,7 @@ from app.domain.business.models import (
     WorkoutContent,
     WorkoutListArguments,
     WorkoutListResult,
+    WorkoutPendingProposal,
     WorkoutProposal,
     WorkoutProposalArguments,
     WorkoutRecord,
@@ -90,6 +96,18 @@ BUSINESS_TIMEZONE = "Asia/Shanghai"
 _BUSINESS_OFFSET = timezone(timedelta(hours=8))
 
 PREPARE_TOOL_NAME = "prepare_profile_update"
+
+
+@dataclass(frozen=True)
+class PendingProposalReference:
+    # 本轮待确认提案引用：只含身份与关联节点，完整内容仍按 proposal_id 受控读取。
+    business_kind: str
+    proposal_id: str
+    status: str
+    request_entry_id: str
+    source_entry_id: str
+    display_entry_id: str | None
+    confirmation_entry_id: str | None
 
 
 def business_date(created_at_ms: int) -> str:
@@ -1152,3 +1170,148 @@ class BusinessService:
                         raise WorkoutConfirmationInvalid()
                     bindings[entry_id] = item.proposal_id
             return bindings
+
+    # 本轮待确认提案引用：只读聚合三类仍待确认的提案身份与关联节点，供模型投影使用。
+
+    async def list_pending_references(self, session_id: str) -> list[PendingProposalReference]:
+        async with self._repository.transaction():
+            await self._require_session(session_id)
+            references: list[PendingProposalReference] = []
+            for business_kind, snapshots in (
+                ("profile", await self._repository.list_snapshots(session_id)),
+                ("plan", await self._repository.list_plan_snapshots(session_id)),
+                ("workout", await self._repository.list_workout_snapshots(session_id)),
+            ):
+                for snapshot in snapshots:
+                    if snapshot.status not in {"pending", "processing"}:
+                        continue
+                    references.append(PendingProposalReference(
+                        business_kind=business_kind,
+                        proposal_id=snapshot.proposal_id,
+                        status=snapshot.status,
+                        request_entry_id=snapshot.request_entry_id,
+                        source_entry_id=snapshot.source_entry_id,
+                        display_entry_id=snapshot.display_entry_id,
+                        confirmation_entry_id=snapshot.confirmation_entry_id,
+                    ))
+            return references
+
+    # 待确认提案受控只读读取：复用三类业务的快照、路径及展示校验，不写库。
+
+    def _pending_status(
+        self, status: str, processing: type[BusinessError],
+        invalidated: type[BusinessError], conflict: type[BusinessError],
+    ) -> None:
+        if status == "processing":
+            raise processing()
+        if status == "invalidated":
+            raise invalidated()
+        if status == "conflicted":
+            raise conflict()
+        if status == "saved":
+            raise ProposalAlreadySaved()
+
+    async def get_pending_proposal(
+        self, context: BusinessContext, arguments: PendingProposalArguments,
+        signal: Event | None = None,
+    ) -> ProfilePendingProposal | PlanPendingProposal | WorkoutPendingProposal:
+        check_cancelled(signal)
+        async with self._repository.transaction():
+            entries = self._entries(await self._require_branch(context.session_id))
+            if arguments.business_kind == "profile":
+                return await self._pending_profile(context, entries, arguments.proposal_id)
+            if arguments.business_kind == "plan":
+                return await self._pending_plan(context, entries, arguments.proposal_id)
+            return await self._pending_workout(context, entries, arguments.proposal_id)
+
+    async def _pending_profile(
+        self, context: BusinessContext, entries: dict[str, SessionMessageEntry], proposal_id: str,
+    ) -> ProfilePendingProposal:
+        snapshot = await self._repository.get_snapshot(proposal_id)
+        if snapshot is None:
+            raise ProfileProposalNotFound()
+        if snapshot.session_id != context.session_id:
+            raise ProfileAccessDenied()
+        self._require_role(entries, snapshot.request_entry_id, "user", "请求节点")
+        self._require_role(entries, snapshot.source_entry_id, "assistant", "来源节点")
+        if snapshot.display_entry_id is not None:
+            self._require_role(entries, snapshot.display_entry_id, "toolResult", "展示节点")
+        self._pending_status(
+            snapshot.status, ProfileUpdateProcessing,
+            ProfileProposalInvalidated, ProfileVersionConflict,
+        )
+        display_id = snapshot.display_entry_id
+        if display_id is None:
+            raise ProfileConfirmationInvalid("展示节点尚未绑定。")
+        self._require_prepare_result(
+            entries[display_id], entries[snapshot.source_entry_id], entries
+        )
+        return ProfilePendingProposal(
+            business_kind="profile", proposal_id=snapshot.proposal_id, status=snapshot.status,
+            payload=snapshot.payload, request_entry_id=snapshot.request_entry_id,
+            source_entry_id=snapshot.source_entry_id, display_entry_id=display_id,
+            confirmation_entry_id=snapshot.confirmation_entry_id,
+            profile_id=snapshot.profile_id, base_profile_version=snapshot.base_profile_version,
+        )
+
+    async def _pending_plan(
+        self, context: BusinessContext, entries: dict[str, SessionMessageEntry], proposal_id: str,
+    ) -> PlanPendingProposal:
+        snapshot = await self._repository.get_plan_snapshot(proposal_id)
+        if snapshot is None:
+            raise PlanProposalNotFound()
+        if snapshot.session_id != context.session_id:
+            raise PlanAccessDenied()
+        self._plan_role(entries, snapshot.request_entry_id, "user")
+        self._plan_role(entries, snapshot.source_entry_id, "assistant")
+        if snapshot.display_entry_id is not None:
+            self._plan_role(entries, snapshot.display_entry_id, "toolResult")
+        self._pending_status(
+            snapshot.status, PlanSaveProcessing,
+            PlanProposalInvalidated, PlanVersionConflict,
+        )
+        display_id = snapshot.display_entry_id
+        if display_id is None:
+            raise PlanConfirmationInvalid("展示节点尚未绑定。")
+        self._require_plan_result(
+            entries[display_id], snapshot, entries[snapshot.source_entry_id], entries
+        )
+        return PlanPendingProposal(
+            business_kind="plan", proposal_id=snapshot.proposal_id, status=snapshot.status,
+            payload=snapshot.payload, request_entry_id=snapshot.request_entry_id,
+            source_entry_id=snapshot.source_entry_id, display_entry_id=display_id,
+            confirmation_entry_id=snapshot.confirmation_entry_id,
+            preparation_kind=snapshot.preparation_kind,
+            base_profile_version=snapshot.base_profile_version, base_plan_id=snapshot.base_plan_id,
+        )
+
+    async def _pending_workout(
+        self, context: BusinessContext, entries: dict[str, SessionMessageEntry], proposal_id: str,
+    ) -> WorkoutPendingProposal:
+        snapshot = await self._repository.get_workout_snapshot(proposal_id)
+        if snapshot is None:
+            raise WorkoutProposalNotFound()
+        if snapshot.session_id != context.session_id:
+            raise WorkoutAccessDenied()
+        self._workout_role(entries, snapshot.request_entry_id, "user")
+        self._workout_role(entries, snapshot.source_entry_id, "assistant")
+        if snapshot.display_entry_id is not None:
+            self._workout_role(entries, snapshot.display_entry_id, "toolResult")
+        self._pending_status(
+            snapshot.status, WorkoutSaveProcessing,
+            WorkoutProposalInvalidated, WorkoutVersionConflict,
+        )
+        display_id = snapshot.display_entry_id
+        if display_id is None:
+            raise WorkoutConfirmationInvalid("展示节点尚未绑定。")
+        self._require_workout_result(
+            entries[display_id], snapshot, entries[snapshot.source_entry_id], entries
+        )
+        return WorkoutPendingProposal(
+            business_kind="workout", proposal_id=snapshot.proposal_id, status=snapshot.status,
+            payload=snapshot.payload, request_entry_id=snapshot.request_entry_id,
+            source_entry_id=snapshot.source_entry_id, display_entry_id=display_id,
+            confirmation_entry_id=snapshot.confirmation_entry_id,
+            performed_on=snapshot.performed_on, base_workout_id=snapshot.base_workout_id,
+            base_workout_version=snapshot.base_workout_version,
+        )

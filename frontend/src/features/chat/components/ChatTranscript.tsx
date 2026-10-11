@@ -436,11 +436,22 @@ export default function ChatTranscript({
                 {(round.status !== "completed" || round.error) && (
                   <MessageScrollerItem messageId={`${round.id}:status`}>
                     {round.status === "running" && (
-                      <Loader2
-                        role="status"
-                        aria-label="执行中"
-                        className="size-4 animate-spin text-muted-foreground"
-                      />
+                      <div className="flex items-center gap-2">
+                        <Loader2
+                          role="status"
+                          aria-label="执行中"
+                          className="size-4 animate-spin text-muted-foreground"
+                        />
+                        {/* 压缩阶段（compaction-contract-decisions §B）：仅由当前连接的 compaction_start 得知 */}
+                        {round.compaction_id !== undefined && (
+                          <p
+                            role="status"
+                            className="text-sm text-muted-foreground"
+                          >
+                            压缩上下文
+                          </p>
+                        )}
+                      </div>
                     )}
                     {round.status === "cancelled" && (
                       <p

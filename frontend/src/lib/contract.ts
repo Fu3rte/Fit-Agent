@@ -217,14 +217,25 @@ export type PublicMessageWire =
       timestamp: number;
     };
 
-/** 一个已提交节点（§3.1）：entries 为 active_leaf_id 的祖先链，按根到叶排列 */
-export interface HistoryEntryWire {
-  entry_id: string;
-  parent_id: string | null;
-  run_id: string | null;
-  created_at: number;
-  message: PublicMessageWire;
-}
+/** 一个已提交节点（§3.1、compaction-contract-decisions §A）：entries 为 active_leaf_id 的祖先链，
+ *  按根到叶排列；message 节点公开消息投影，compaction 为隐藏结构节点，摘要、usage、system_message
+ *  及内部附件路径保留在后端，两种节点都参与祖先链、运行归属与叶节点校验 */
+export type HistoryEntryWire =
+  | {
+      type: "message";
+      entry_id: string;
+      parent_id: string | null;
+      run_id: string | null;
+      created_at: number;
+      message: PublicMessageWire;
+    }
+  | {
+      type: "compaction";
+      entry_id: string;
+      parent_id: string | null;
+      run_id: string | null;
+      created_at: number;
+    };
 
 /** 历史运行对象（§3.3）：与运行接口契约的运行对象同形 */
 export type HistoryRunWire = SessionRunWire;
@@ -543,6 +554,7 @@ export type PlanBusinessErrorCode =
   | "profile_version_conflict"
   | "plan_confirmation_invalid"
   | "plan_access_denied"
+  | "proposal_already_saved"
   | "session_not_found";
 
 /** 工具失败结果内容：仅 invalid_business_payload 携带 ``errors`` */
@@ -664,6 +676,17 @@ export type ReActEvent = { data: { run_id: string } } & (
         is_error: boolean;
       } & ReActCommittedEntry;
     }
+  /** 压缩开始（compaction-contract-decisions §B）：``compaction_id`` 为该次压缩提交节点的身份，
+   *  ``reason`` 为触发原因；压缩期间运行保持 running，前端展示“压缩上下文”阶段 */
+  | {
+      event: "compaction_start";
+      data: { compaction_id: string; reason: "threshold" | "overflow" };
+    }
+  /** 压缩检查点提交成功后发送（§B）：``compaction_id`` 与提交节点 ``entry_id`` 一致，``parent_id`` 为其父节点 */
+  | {
+      event: "compaction_end";
+      data: ReActCommittedEntry & { compaction_id: string };
+    }
   | { event: "steering_status"; data: { steering_id: string } & SteeringStatus }
   | {
       event: "done";
@@ -673,7 +696,13 @@ export type ReActEvent = { data: { run_id: string } } & (
       event: "error";
       data: {
         status: "failed" | "cancelled";
-        code: "execution_failed" | "cancelled" | "credential_detected";
+        code:
+          | "execution_failed"
+          | "cancelled"
+          | "credential_detected"
+          | "compaction_failed"
+          | "context_budget_exceeded"
+          | "context_overflow";
         message: string;
         tool_call_id: string | null;
       };
@@ -715,6 +744,7 @@ export type ErrorCode =
   | "profile_required"
   | "plan_confirmation_invalid"
   | "plan_access_denied"
+  | "proposal_already_saved"
   | "attachment_format_invalid"
   | "attachment_size_exceeded"
   | "attachment_not_found"

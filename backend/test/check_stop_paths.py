@@ -92,7 +92,14 @@ async def check_stream(model, options):
         async with aclosing(response):
             async for _event in response:
                 pytest.fail("请求前取消产生了事件")
-    broken = ModelSpec(api=model.api, provider=model.provider, id=model.id, base_url="http://127.0.0.1:1/v1")
+    broken = ModelSpec(
+        api=model.api,
+        provider=model.provider,
+        id=model.id,
+        base_url="http://127.0.0.1:1/v1",
+        context_window=128000,
+        max_tokens=16384,
+    )
     with pytest.raises(APIConnectionError):
         await complete(broken, context, options)
 
@@ -264,7 +271,14 @@ async def check_cancel(config, model, options):
 def check():
     config = install_test_model_config()
     assert config.api == "openai-completions"
-    model = ModelSpec(api=config.api, provider=config.provider, id=config.model, base_url=config.base_url)
+    model = ModelSpec(
+        api=config.api,
+        provider=config.provider,
+        id=config.model,
+        base_url=config.base_url,
+        context_window=128000,
+        max_tokens=16384,
+    )
     options = {"api_key": config.api_key, "max_tokens": 16384}
     checked_run(check_stream(model, options))
     with TemporaryDirectory() as directory:

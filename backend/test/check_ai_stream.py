@@ -195,7 +195,14 @@ async def check_container() -> None:
             yield event
 
     ADAPTERS["test-api"] = synthetic
-    spec = ModelSpec(api="test-api", provider="test", id="test", base_url="http://test")
+    spec = ModelSpec(
+        api="test-api",
+        provider="test",
+        id="test",
+        base_url="http://test",
+        context_window=128000,
+        max_tokens=16384,
+    )
     context: LlmContext = {
         "messages": [
             SystemMessage(role="system", content="", timestamp=0),
@@ -212,7 +219,14 @@ async def check_container() -> None:
 
     with pytest.raises(ValueError, match="未注册的协议"):
         stream(
-            ModelSpec(api="missing", provider="t", id="t", base_url="http://t"),
+            ModelSpec(
+                api="missing",
+                provider="t",
+                id="t",
+                base_url="http://t",
+                context_window=128000,
+                max_tokens=16384,
+            ),
             context,
             options,
         )
@@ -326,6 +340,8 @@ def load_openai_spec() -> tuple[ModelSpec, str]:
         provider=config.provider,
         id=config.model,
         base_url=config.base_url,
+        context_window=128000,
+        max_tokens=16384,
     )
     return spec, config.api_key
 
@@ -415,6 +431,8 @@ def check_anthropic_request() -> None:
         provider="anthropic",
         id="claude-test",
         base_url="https://api.anthropic.com",
+        context_window=200000,
+        max_tokens=64000,
     )
     tool = Tool(
         name="echo",
@@ -615,6 +633,8 @@ async def check_openai_real(spec: ModelSpec, api_key: str) -> None:
         provider="local",
         id=spec.id,
         base_url="http://127.0.0.1:1/v1",
+        context_window=128000,
+        max_tokens=16384,
     )
     response = stream(broken, text_context, options)
     with pytest.raises(APIConnectionError):

@@ -198,6 +198,8 @@ class AssistantMessage(Model):
     error_message: str = None
     raw_stop_reason: str = None
     end_turn: bool = None
+    # 明确上下文溢出的失败尝试：仅供运行内恢复识别，不进入公开投影。
+    context_overflow: bool = False
     timestamp: int | float
 
     @model_validator(mode="after")

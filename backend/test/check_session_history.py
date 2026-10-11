@@ -847,12 +847,14 @@ def http_checks(evidence: dict) -> None:
         ]
         for item in body["entries"]:
             assert set(item) == {
+                "type",
                 "entry_id",
                 "parent_id",
                 "run_id",
                 "created_at",
                 "message",
             }
+            assert item["type"] == "message"
         assert body["entries"][0]["message"] == {"role": "system"}
         assert body["entries"][1]["message"] == {
             "role": "user",

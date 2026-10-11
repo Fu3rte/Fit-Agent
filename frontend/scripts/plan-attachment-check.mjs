@@ -266,6 +266,7 @@ const baseHistory = () => ({
   },
   entries: [
     {
+      type: "message",
       entry_id: userEntry,
       parent_id: null,
       run_id: null,
@@ -278,6 +279,7 @@ const baseHistory = () => ({
       },
     },
     {
+      type: "message",
       entry_id: assistantEntry,
       parent_id: userEntry,
       run_id: runId,
@@ -290,6 +292,7 @@ const baseHistory = () => ({
       },
     },
     {
+      type: "message",
       entry_id: steerEntry,
       parent_id: assistantEntry,
       run_id: runId,
