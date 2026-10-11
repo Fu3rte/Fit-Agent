@@ -109,6 +109,42 @@ assert.equal(
   LIMIT,
   "追加后合计按保留项与新增项共同计算",
 );
+// 超限批次在读取前拒绝：以真实 File 的 size 判定；计数仅在原生读取方法上包一层并原样委托，
+// 读取计数为 0 即证明未读取也未编码任何字节
+const nativeArrayBuffer = File.prototype.arrayBuffer;
+let arrayBufferReads = 0;
+File.prototype.arrayBuffer = function (...args) {
+  arrayBufferReads += 1;
+  return nativeArrayBuffer.apply(this, args);
+};
+try {
+  arrayBufferReads = 0;
+  await assert.rejects(
+    files.readAttachmentFiles([new File(["a".repeat(LIMIT + 1)], "big.md")]),
+    /超过 100000 字节/,
+    "单文件超限在读取前拒绝",
+  );
+  assert.equal(arrayBufferReads, 0, "超限批次未读取字节");
+  arrayBufferReads = 0;
+  await assert.rejects(
+    files.readAttachmentFiles([
+      new File(["a".repeat(60_000)], "a.md"),
+      new File(["b".repeat(40_001)], "b.md"),
+    ]),
+    /超过 100000 字节/,
+    "本批合计超限在读取前拒绝",
+  );
+  assert.equal(arrayBufferReads, 0, "超限批次未读取字节");
+  arrayBufferReads = 0;
+  const atLimit = await files.readAttachmentFiles([
+    new File(["a".repeat(60_000)], "a.md"),
+    new File(["b".repeat(40_000)], "b.md"),
+  ]);
+  assert.equal(arrayBufferReads, 2, "恰好达上限时逐文件真实读取");
+  assert.equal(files.attachmentBytes(atLimit), LIMIT);
+} finally {
+  File.prototype.arrayBuffer = nativeArrayBuffer;
+}
 
 /** 3. 纯文件输入与序列化：空文本要求附件非空，集合为空时拒绝 */
 assert.equal(reactAgent.validMessageInput("", accepted), true);

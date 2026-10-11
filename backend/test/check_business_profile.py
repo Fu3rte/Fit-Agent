@@ -233,13 +233,14 @@ async def check_argument_preparation(root: Path) -> dict:
         plan_preparation = {"prepare_plan_import", "prepare_plan_adjustment"}
         for name in plan_preparation:
             assert tools[name].prepare_arguments.__module__ == "app.agent.tools.plan_import"
+        assert tools["prepare_plan"].prepare_arguments.__module__ == "app.agent.tools.plans"
         assert tools[SEARCH_EXERCISES].execute.__module__ == "app.agent.tools.exercises"
         assert tools[CALCULATE_DATE].execute.__module__ == "app.agent.tools.dates"
         assert list(tools) == list(DECLARED)
         assert all(
             tool.prepare_arguments is None
             for name, tool in tools.items()
-            if name not in {PREPARE, "prepare_workout", *plan_preparation}
+            if name not in {PREPARE, "prepare_workout", "prepare_plan", *plan_preparation}
         )
         for version in (None, 1, 2):
             valid = prepare_arguments(version, payload())

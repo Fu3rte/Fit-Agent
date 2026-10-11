@@ -93,6 +93,14 @@ async def attachments_and_tools(root: Path) -> dict:
         tools = create_file_tools(session, tmp_root=tmp_root)
         reader, writer, editor = tools["read"], tools["write"], tools["edit"]
 
+        async def attach(body: bytes, name: str) -> str:
+            item = upload(body, name)
+            run = await service.accept_send(
+                send(session, "", [item]), system_message=SYSTEM
+            )
+            await service.finish_run(session, run.run.id, "completed")
+            return f"sessions/{session}/attachments/{item['attachment_id']}.txt"
+
         # 文字加文件、纯文件均进入同一分支并按真实节点投影。
         plan_body = "# 训练计划\n周一 深蹲 3 组\n周二 卧推 3 组\n"
         plan = upload(plan_body.encode("utf-8"), "plan.md")
@@ -142,6 +150,44 @@ async def attachments_and_tools(root: Path) -> dict:
         last = await tool_result(reader, {"path": long_path, "offset": 400, "limit": 2})
         assert text(last) == "400: 第400行\n" and "继续读取" not in text(last)
         assert (tmp_root / long_path).read_bytes().decode("utf-8") == long_body
+
+        # 单行超过 50,000 字符且附件恰为 100,000 字节：完整返回，逐字核对正文与末尾唯一标记。
+        single_marker = "END-SINGLE-MARK"
+        single_line = "b" * (100_000 - len(single_marker)) + single_marker
+        assert len(single_line.encode("utf-8")) == 100_000
+        single_path = await attach(single_line.encode("utf-8"), "single.txt")
+        single_read = await tool_result(reader, {"path": single_path})
+        assert text(single_read) == f"1: {single_line}\n"
+        assert (tmp_root / single_path).read_bytes() == single_line.encode("utf-8")
+
+        # UTF-8 中文长行完整返回：上传体积按字节计、正文按字符计，两者正确区分。
+        chinese = "中" * 33_000 + "END-中文标记"
+        chinese_bytes = chinese.encode("utf-8")
+        assert len(chinese_bytes) <= 100_000
+        chinese_path = await attach(chinese_bytes, "chinese.txt")
+        chinese_read = await tool_result(reader, {"path": chinese_path})
+        assert text(chinese_read) == f"1: {chinese}\n"
+        assert (tmp_root / chinese_path).read_bytes() == chinese_bytes
+
+        # 多行读取窗口超过 50,000 字符时，窗口内容与续读提示完整，下一页准确衔接。
+        lines = [f"窗口行{number:04d}:" + "z" * 985 for number in range(1, 101)]
+        multi_body = "".join(f"{line}\n" for line in lines)
+        assert sum(len(f"{number}: {lines[number - 1]}\n") for number in range(1, 61)) > 50_000
+        multi_path = await attach(multi_body.encode("utf-8"), "window.txt")
+        first_page = await tool_result(reader, {"path": multi_path, "offset": 1, "limit": 60})
+        expected_first = "".join(
+            f"{number}: {lines[number - 1]}\n" for number in range(1, 61)
+        )
+        assert text(first_page) == (
+            expected_first
+            + "\n[仅显示到第 60 行，文件仍有后续内容；继续读取请使用 offset=61]"
+        )
+        second_page = await tool_result(reader, {"path": multi_path, "offset": 61, "limit": 60})
+        expected_second = "".join(
+            f"{number}: {lines[number - 1]}\n" for number in range(61, 101)
+        )
+        assert text(second_page) == expected_second
+        assert (tmp_root / multi_path).read_bytes().decode("utf-8") == multi_body
 
         # 当前会话工作文件可写、可编辑、可查询。
         workspace = f"sessions/{session}/workspace"
@@ -276,6 +322,7 @@ def check() -> None:
     assert evidence["tmp_root"] == str(root / "tmp")
     print(
         "PASS: 项目 tmp 根与启动 cwd 无关；真实附件可定位读取且字节完整；长附件续读；"
+        "长行 read 不截断（单行超限/100,000 字节/中文/多行窗口）；"
         "workspace 可写可编辑；原附件只读；跨会话/穿越/链接拒绝；"
         "编辑/重新生成/已消费 Steering 按真实节点投影；pending 与 withdrawn 不进入上下文"
     )

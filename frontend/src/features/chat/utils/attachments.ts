@@ -52,24 +52,30 @@ export function attachmentBytes(drafts: readonly AttachmentDraft[]): number {
 }
 
 /**
- * 导入与拖拽共用入口：按给定顺序校验文件名、扩展名、剩余字节额度与 UTF-8，
- * 全部通过才追加进草稿集合；任一文件不合格即整次操作不改变原草稿。
+ * 读取一批文件为上传草稿：先按文件名、扩展名与实际大小校验，本批合计超过 100000 字节立即拒绝，
+ * 不读取也不编码任何超限字节；通过后再按顺序读取并做严格 UTF-8 校验，生成稳定 UUID 与原始字节。
+ * 任一文件不合格即整批拒绝，不返回部分结果。
  */
-export async function appendAttachmentFiles(
-  drafts: readonly AttachmentDraft[],
+export async function readAttachmentFiles(
   files: readonly File[],
 ): Promise<AttachmentDraft[]> {
-  const prepared: AttachmentDraft[] = [];
-  let total = attachmentBytes(drafts);
+  const names: string[] = [];
+  let batchBytes = 0;
   for (const file of files) {
     const fileName = requireAttachmentName(file.name, "文件名");
     if (!hasAttachmentExtension(fileName))
       throw new Error(`${fileName} 仅支持 .md 与 .txt 文件。`);
-    const bytes = new Uint8Array(await file.arrayBuffer());
-    if (total + bytes.length > ATTACHMENT_TOTAL_BYTES)
-      throw new Error(
-        `附件合计 ${total + bytes.length} 字节，超过 ${ATTACHMENT_TOTAL_BYTES} 字节上限。`,
-      );
+    names.push(fileName);
+    batchBytes += file.size;
+  }
+  if (batchBytes > ATTACHMENT_TOTAL_BYTES)
+    throw new Error(
+      `附件合计 ${batchBytes} 字节，超过 ${ATTACHMENT_TOTAL_BYTES} 字节上限。`,
+    );
+  const prepared: AttachmentDraft[] = [];
+  for (let at = 0; at < files.length; at += 1) {
+    const fileName = names[at];
+    const bytes = new Uint8Array(await files[at].arrayBuffer());
     requireUtf8(bytes, fileName);
     const attachmentId = crypto.randomUUID();
     prepared.push({
@@ -83,9 +89,34 @@ export async function appendAttachmentFiles(
         data_base64: bytesToBase64(bytes),
       },
     });
-    total += bytes.length;
   }
-  return [...drafts, ...prepared];
+  return prepared;
+}
+
+/**
+ * 合入一批已读取附件：并入前按最新集合（含保留附件）校验 100000 字节上限，
+ * 超限即整批拒绝并保持当前有效集合完整。
+ */
+export function mergeAttachmentDrafts(
+  current: readonly AttachmentDraft[],
+  batch: readonly AttachmentDraft[],
+): AttachmentDraft[] {
+  const total = attachmentBytes(current) + attachmentBytes(batch);
+  if (total > ATTACHMENT_TOTAL_BYTES)
+    throw new Error(
+      `附件合计 ${total} 字节，超过 ${ATTACHMENT_TOTAL_BYTES} 字节上限。`,
+    );
+  return [...current, ...batch];
+}
+
+/**
+ * 导入与拖拽共用入口：按给定顺序读取后并入草稿集合；任一文件不合格或并入超限即整次操作不改变原草稿。
+ */
+export async function appendAttachmentFiles(
+  drafts: readonly AttachmentDraft[],
+  files: readonly File[],
+): Promise<AttachmentDraft[]> {
+  return mergeAttachmentDrafts(drafts, await readAttachmentFiles(files));
 }
 
 /** 编辑默认保留原附件（§3.2）：按历史顺序恢复为引用项，移除即从草稿删除，替换为删除后追加上传项 */

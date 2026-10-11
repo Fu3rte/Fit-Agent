@@ -34,7 +34,8 @@ export default function ChatComposer({
   const [submitting, setSubmitting] = useState(false);
   const files = useAttachmentDrafts();
   const pending = useRef(false);
-  const revision = useRef(0);
+  /** 发送期间文本的改动代际：仅在文本未变时清空，保护迟到的受理结果不吞掉新输入 */
+  const requestRevision = useRef(0);
   const requestRef = useRef<HTMLTextAreaElement>(null);
   const [composerExpanded, setComposerExpanded] = useState(false);
   const [singleLine, setSingleLine] = useState(true);
@@ -55,10 +56,6 @@ export default function ChatComposer({
         element.scrollHeight >= maxHeight - 1,
     );
   }, [request, composerExpanded]);
-  // 附件集合的任何变化都推进代际，避免迟到的受理结果清掉发送后新挂入的附件
-  useEffect(() => {
-    revision.current += 1;
-  }, [files.drafts]);
   const hasContent = request.trim() !== "" || files.drafts.length > 0;
   const hasTray = files.drafts.length > 0 || files.error !== null;
   const showExpand = composerExpanded || (hasContent && atMaxHeight);
@@ -66,18 +63,19 @@ export default function ChatComposer({
 
   const valid = canSubmitChatInput(request, files.drafts, unknownKeys);
   const send = () => {
-    if (!ready || pending.current || !valid) return;
-    const submittedRevision = revision.current;
+    // 导入读取期间不提交：等待用户选中的附件处理完成后才提交准确集合
+    if (!ready || pending.current || !valid || files.pending) return;
+    const submittedRevision = requestRevision.current;
     const submitted = files.drafts;
     pending.current = true;
     setSubmitting(true);
     void onSend(request, submitted).then((accepted) => {
       pending.current = false;
       setSubmitting(false);
-      if (accepted && revision.current === submittedRevision) {
-        setRequest("");
-        files.clear();
-      }
+      if (!accepted) return;
+      // 仅移除本次提交的附件身份，提交期间新挂入的附件保持原值
+      files.discard(submitted);
+      if (requestRevision.current === submittedRevision) setRequest("");
     });
   };
 
@@ -122,7 +120,7 @@ export default function ChatComposer({
             ref={requestRef}
             value={request}
             onChange={(event) => {
-              revision.current += 1;
+              requestRevision.current += 1;
               setRequest(event.target.value);
             }}
             onKeyDown={(event) => {
@@ -192,7 +190,7 @@ export default function ChatComposer({
                   size="icon"
                   aria-label="发送"
                   onClick={send}
-                  disabled={!ready || submitting || !valid}
+                  disabled={!ready || submitting || !valid || files.pending}
                   className="size-8"
                 >
                   <SendHorizontal />

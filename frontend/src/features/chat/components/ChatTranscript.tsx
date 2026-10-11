@@ -1,4 +1,4 @@
-import { Fragment, useState } from "react";
+import { Fragment, useRef, useState } from "react";
 import { ChevronDown, Loader2, Pencil, RefreshCw, Undo2 } from "lucide-react";
 import { Bubble, BubbleContent } from "@/components/ui/bubble";
 import { Button } from "@/components/ui/button";
@@ -52,6 +52,7 @@ function Entry({
   onWithdraw,
   canEdit,
   editing,
+  editSubmitting,
   drafts,
   onStartEdit,
   onEditTextChange,
@@ -65,6 +66,7 @@ function Entry({
   onWithdraw: (roundId: string, steeringId: string) => void;
   canEdit: boolean;
   editing: EditState;
+  editSubmitting: boolean;
   drafts: DraftState;
   onStartEdit: (entry: ReActEntry) => void;
   onEditTextChange: (text: string) => void;
@@ -115,6 +117,7 @@ function Entry({
               <Textarea
                 value={activeEdit.text}
                 onChange={(event) => onEditTextChange(event.target.value)}
+                disabled={editSubmitting}
                 aria-label="编辑消息"
                 rows={2}
                 className="min-h-0 resize-none"
@@ -123,9 +126,13 @@ function Entry({
                 drafts={drafts.drafts}
                 error={drafts.error}
                 onRemove={drafts.remove}
+                disabled={editSubmitting}
               />
               <div className="flex items-center justify-between gap-2">
-                <AttachmentPicker onPick={drafts.pick} />
+                <AttachmentPicker
+                  onPick={drafts.pick}
+                  disabled={editSubmitting}
+                />
                 <div className="flex justify-end gap-2">
                   <Button
                     type="button"
@@ -140,6 +147,8 @@ function Entry({
                     size="sm"
                     disabled={
                       !canEdit ||
+                      editSubmitting ||
+                      drafts.pending ||
                       !canSubmitChatInput(activeEdit.text, drafts.drafts, [])
                     }
                     onClick={() => onEdit(activeEdit.entryId, activeEdit.text)}
@@ -248,7 +257,7 @@ function Entry({
               <Collapsible
                 key={block.content_index}
                 defaultOpen={false}
-                className="text-sm"
+                className="order-first text-sm"
               >
                 <CollapsibleTrigger asChild>
                   <Button
@@ -335,22 +344,34 @@ export default function ChatTranscript({
   onRegenerate: (entryId: string) => void;
 }) {
   const [editing, setEditing] = useState<EditState>(null);
+  const [editSubmitting, setEditSubmitting] = useState(false);
   const drafts = useAttachmentDrafts();
+  /** 编辑实例令牌：提交、取消与切换对象各自推进，迟到的受理结果仅在仍是同一实例时生效 */
+  const editInstanceRef = useRef(0);
   const startEdit = (entry: ReActEntry) => {
     if (entry.kind !== "user" || entry.entry_id === undefined) return;
+    editInstanceRef.current += 1;
+    setEditSubmitting(false);
     setEditing({
       entryId: entry.entry_id,
       text: entry.request ?? "",
     });
-    // 编辑界面默认载入并保留原附件（附件契约 §3.2）
+    // 编辑界面默认载入并保留原附件（附件契约 §3.2）；切换编辑对象使旧读取任务失效
     drafts.reset(entry.attachments ?? []);
   };
   const closeEdit = () => {
+    editInstanceRef.current += 1;
+    setEditSubmitting(false);
     setEditing(null);
     drafts.clear();
   };
   const submitEdit = (entryId: string, text: string) => {
+    const instance = editInstanceRef.current;
+    setEditSubmitting(true);
     void onEdit(entryId, text, drafts.drafts).then((accepted) => {
+      // 受理迟到时仅在同一编辑实例仍成立时关闭，取消或重新打开后的结果不回滚新草稿与输入
+      if (editInstanceRef.current !== instance) return;
+      setEditSubmitting(false);
       if (accepted) closeEdit();
     });
   };
@@ -394,6 +415,7 @@ export default function ChatTranscript({
                         onWithdraw={onWithdraw}
                         canEdit={canEdit}
                         editing={editing}
+                        editSubmitting={editSubmitting}
                         drafts={drafts}
                         onStartEdit={startEdit}
                         onEditTextChange={(text) =>

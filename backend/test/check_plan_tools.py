@@ -84,7 +84,11 @@ async def batch(f, session, calls, *, confirmation=None, bind=True):
     for name in NAMES:
         assert tools[name].execution_mode == ("sequential" if name in {"prepare_plan", "save_plan"} else "parallel")
         assert tools[name].max_output_chars is None
-        assert tools[name].prepare_arguments is None
+        if name == "prepare_plan":
+            assert tools[name].prepare_arguments is not None
+            assert tools[name].prepare_arguments.__module__ == "app.agent.tools.plans"
+        else:
+            assert tools[name].prepare_arguments is None
     execution = await run_tool_batch(calls, tools=tools, declared=DECLARED)
     assert execution.failure is None
     captured = {kind: dict(values) for kind, values in registrations.items()}
@@ -164,7 +168,7 @@ async def check():
         for message in messages:
             assert len(message.content[0].text) > 50000
         invalid = [
-            {**args, "base_plan_id": "None"}, {**args, "base_profile_version": "1"},
+            {**args, "base_profile_version": "1"},
             {**args, "base_profile_version": True}, {**args, "base_plan_id": "invalid"},
             {key: value for key, value in args.items() if key != "base_plan_id"},
             {**args, "base_plan_id": first["id"], "session_id": session},
@@ -206,6 +210,7 @@ async def check():
             "strict_arguments": await isolated(check_strict_arguments, "strict"),
             "error_shapes": await isolated(check_error_shapes, "error-shapes"),
             "modification_flow": await isolated(check_modification_flow, "modification"),
+            "none_basis": await isolated(check_none_basis, "none-basis"),
             **base,
         }
     finally:
@@ -336,6 +341,7 @@ async def check_strict_arguments(f):
     legal = {"base_profile_version": 1, "base_plan_id": None, "payload": base_content}
 
     legal_cases = [
+        ("空依据字符串 None 归一为 null", {**legal, "base_plan_id": "None"}),
         ("次数字符串改为合法整数", legal),
         ("reps 为空时使用时长", {**legal, "payload": exercise_update(reps=None, duration_seconds=30,
             exercise_id=real.id, name=real.name)}),
@@ -355,12 +361,17 @@ async def check_strict_arguments(f):
         assert proposal.payload.model_dump() == arguments["payload"]
         assert proposal.base_plan_id is None and proposal.base_profile_version == 1
         accepted[label] = proposal.proposal_id
-    assert len(accepted) == 7
+    assert len(accepted) == 8
 
     schema_cases = {
-        "base_plan_id 字符串 None": {**legal, "base_plan_id": "None"},
+        "base_plan_id 字符串 none": {**legal, "base_plan_id": "none"},
+        "base_plan_id 字符串 NONE": {**legal, "base_plan_id": "NONE"},
         "base_plan_id 字符串 null": {**legal, "base_plan_id": "null"},
-        "base_plan_id 空字符串": {**legal, "base_plan_id": " "},
+        "base_plan_id 空字符串": {**legal, "base_plan_id": ""},
+        "base_plan_id 空白字符串": {**legal, "base_plan_id": " "},
+        "base_plan_id 带空白 None": {**legal, "base_plan_id": " None "},
+        "base_plan_id 数字零": {**legal, "base_plan_id": 0},
+        "base_plan_id 布尔": {**legal, "base_plan_id": False},
         "base_plan_id 非标准 UUID": {**legal, "base_plan_id": uuid4().hex},
         "base_plan_id 花括号 UUID": {**legal, "base_plan_id": "{" + str(uuid4()) + "}"},
         "base_plan_id 缺失": {key: value for key, value in legal.items() if key != "base_plan_id"},
@@ -408,8 +419,6 @@ async def check_strict_arguments(f):
         assert "收到的参数" in text
         rows[label] = text
     assert await count_rows(f.database, "plan_snapshots") == before
-    assert '"type": "null"' in rows["base_plan_id 字符串 None"]
-    assert "String should match pattern" in rows["base_plan_id 字符串 None"]
     assert "payload.days.0.exercises.0.reps" in rows["次数字符串"]
     assert "payload.days.0.exercises.0.reps" in rows["次数范围字符串"]
     assert "payload.base_profile_version" not in rows["画像版本字符串"]
@@ -485,7 +494,7 @@ async def check_error_shapes(f):
     got3 = await batch(f, session, [invocation("save_plan", {"proposal_id": proposal_id,
         "display_entry_id": display, "confirmation_entry_id": stray})], bind=False)
     assert got3.messages[0].is_error and body(got3.messages[0])["code"] == "plan_confirmation_invalid"
-    failed = await batch(f, session, [invocation("prepare_plan", {**legal, "base_plan_id": "None"})], bind=False)
+    failed = await batch(f, session, [invocation("prepare_plan", {**legal, "base_plan_id": "null"})], bind=False)
     assert failed.messages[0].is_error and not failed.registrations["plan"]
     bindings = await f.business.list_plan_display_bindings(session)
     assert bindings == {display: proposal_id}
@@ -533,6 +542,58 @@ async def check_modification_flow(f):
         "get_plan_save_status", {"proposal_id": first["proposal_id"]})])).messages[0])).status == "invalidated"
     return {"new_snapshot_on_modification": second["proposal_id"], "old_pending_invalidated": first["proposal_id"],
             "modification_saved_nothing": True, "old_display_rejected": True, "independent_confirmation_saved": saved["id"]}
+
+
+async def check_none_basis(f):
+    """已保存画像、无当前计划：base_plan_id 精确字符串 "None" 经真实 harness 与业务服务归一为 null 依据并创建 generation 快照。"""
+    session = await f.session("计划空依据字符串")
+    await ensure_profile(f, session)
+    real = f.catalog.all()[0]
+    content = exercise_update(exercise_id=real.id, name=real.name)
+    arguments = {"base_profile_version": 1, "base_plan_id": "None", "payload": content}
+    baseline = copy.deepcopy(arguments)
+    call = invocation("prepare_plan", arguments)
+    got = await batch(f, session, [call])
+    assert not got.messages[0].is_error, got.messages[0].content[0].text
+    proposal = body(got.messages[0])
+    assert set(proposal) == {"proposal_id", "base_profile_version", "base_plan_id", "payload"}
+    assert proposal["base_plan_id"] is None and proposal["base_profile_version"] == 1
+    snapshot = await f.repository.get_plan_snapshot(proposal["proposal_id"])
+    assert snapshot.base_plan_id is None and snapshot.preparation_kind == "generation"
+    assert snapshot.status == "pending" and snapshot.display_entry_id == got.displays[call.id]
+    assert await count_rows(f.database, "plans") == 0
+    # 原始 ToolCall 参数未被修改；业务执行获得归一化后的参数。
+    assert call.arguments == baseline and call.arguments["base_plan_id"] == "None"
+
+    # JSON null 保持原值并同样创建 generation 快照，前一个 pending 失效。
+    null_call = invocation("prepare_plan", {**arguments, "base_plan_id": None})
+    got = await batch(f, session, [null_call])
+    assert not got.messages[0].is_error, got.messages[0].content[0].text
+    null_proposal = body(got.messages[0])
+    assert null_proposal["base_plan_id"] is None and set(null_proposal) == set(proposal)
+    assert (await f.repository.get_plan_snapshot(proposal["proposal_id"])).status == "invalidated"
+    assert (await f.repository.get_plan_snapshot(null_proposal["proposal_id"])).status == "pending"
+
+    # 准备只创建待确认快照；后续真实确认才保存。
+    save = {"proposal_id": null_proposal["proposal_id"], "display_entry_id": got.displays[null_call.id]}
+    _, messages, _, _, _, _, _, _ = await batch(f, session, [], confirmation=save)
+    first = body(messages[0])
+    assert not messages[0].is_error and first["content"] == content
+    assert await count_rows(f.database, "plans") == 1
+    assert (await f.business.get_current_plan()).id == first["id"]
+
+    # 合法 UUID 保持原值。
+    uuid_call = invocation("prepare_plan", {**arguments, "base_plan_id": first["id"]})
+    got = await batch(f, session, [uuid_call])
+    assert not got.messages[0].is_error and body(got.messages[0])["base_plan_id"] == first["id"]
+    # 已有当前计划时，转换后的空依据仍走正常业务冲突检查。
+    conflict = await batch(f, session, [invocation("prepare_plan", {**arguments, "base_plan_id": "None"})])
+    detail = body(conflict.messages[0])
+    assert conflict.messages[0].is_error and detail["code"] == "plan_version_conflict"
+    assert not conflict.registrations["plan"]
+    return {"none_basis_generation_snapshot": proposal["proposal_id"], "arguments_preserved": True,
+            "null_and_uuid_preserved": True, "empty_basis_conflict_checked": True,
+            "prepared_before_save": True, "confirmation_saved": first["id"]}
 
 
 def main():

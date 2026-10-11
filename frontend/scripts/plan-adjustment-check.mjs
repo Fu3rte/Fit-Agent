@@ -4,6 +4,7 @@
 // 实时与历史一致、保存落定后的计划查询刷新。输入均为契约样例，不代表后端实际运行结果；
 // 计划页查询使用本地契约样例传输层，真实后端 HTTP 与模型流程由后端专项及联调覆盖。
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { createServer as createHttpServer } from "node:http";
 import { QueryClientProvider, QueryObserver } from "@tanstack/react-query";
 import { createElement } from "react";
@@ -23,13 +24,13 @@ const history = await server.ssrLoadModule(
   "/src/features/chat/utils/sessionHistory.ts",
 );
 const api = await server.ssrLoadModule("/src/lib/api.ts");
-const { default: PlanFields } = await server.ssrLoadModule(
+const { PlanBoard: PlanFields } = await server.ssrLoadModule(
   "/src/features/plans/PlanFields.tsx",
 );
 const { default: PlansPage } = await server.ssrLoadModule(
   "/src/features/plans/PlansPage.tsx",
 );
-const { PLAN_QUERY_KEY, queryClient } = await server.ssrLoadModule(
+const { PLAN_QUERY_KEY, EXERCISE_EQUIPMENT_QUERY_KEY, queryClient } = await server.ssrLoadModule(
   "/src/lib/query.ts",
 );
 const { formatTimestamp } = await server.ssrLoadModule("/src/lib/utils.ts");
@@ -328,60 +329,45 @@ for (const name of [
   );
 
 /* ===== 展示组件 ===== */
+const equipment = Object.fromEntries(
+  JSON.parse(readFileSync(new URL("../../backend/dataset/actions.agent.json", import.meta.url), "utf8"))
+    .map((exercise) => [exercise.id, exercise.equipment]),
+);
 const renderPlan = (content) =>
-  renderToStaticMarkup(createElement(PlanFields, { content }));
-const withSuggested = (fields) =>
-  renderPlan({ ...adjustmentPayload, suggested_fields: fields });
-const rowOf = (markup, text) => {
-  const at = markup.indexOf(text);
-  assert.ok(at >= 0, `展示缺少内容：${text}`);
-  return markup.slice(markup.lastIndexOf("<li", at), markup.indexOf("</li>", at));
-};
+  renderToStaticMarkup(createElement(PlanFields, { content, equipment }));
 const shown = renderPlan(adjustmentPayload);
 
-/** 4. 完整计划展示：循环方式、全部训练日与休息日、主题、动作顺序与身份、逐字段数值 */
+// 看板完整展示训练日顺序、已知参数与核实状态。
 for (const text of [
-  "按序列执行",
-  "第 1 天 · 训练日",
-  "第 2 天 · 休息日",
-  "第 3 天 · 训练日",
-  ">推<",
-  ">腿<",
-  ">5 组<",
-  ">目标 5 次<",
-  ">重量 80 kg<",
-  ">重量口径：杠铃含杆总重<",
-  ">组间休息 180 秒<",
-  ">3 组<",
-  ">目标 8 次<",
-  ">重量 0 kg<",
-  ">组间不安排休息<",
-  ">组数未知<",
-  ">目标次数未知<",
-  ">时长 45 秒<",
-  ">重量未知<",
-  ">重量口径未知<",
-  ">组间休息未结构化指定<",
-  ">时长未知<",
+  "Day 1 · 推",
+  "Day 2",
+  "Day 3 · 腿",
+  "训练日",
+  "休息日",
+  ">5×5<",
+  ">80kg（杠铃含杆总重）<",
+  ">3×8<",
+  ">0kg（杠铃含杆总重）<",
+  ">45s<",
   "未在动作数据集内核实",
 ])
   assert.ok(shown.includes(text), `展示缺少业务内容：${text}`);
 assert.equal(shown.split(">未在动作数据集内核实<").length - 1, 1, "仅目录外动作标注核实状态");
-assert.equal(shown.split(">杠铃卧推</div>").length - 1, 2, "同名动作按位置各展示一次");
-assert.equal(shown.split(">重量未知<").length - 1, 1, "未知重量与已知 0 kg 分别呈现");
-assert.equal(shown.split(">组间休息未结构化指定<").length - 1, 1, "未结构化休息与不安排休息分别呈现");
+assert.equal(shown.split(">杠铃卧推</span>").length - 1, 2, "同名动作按位置各展示一次");
+assert.ok(!shown.includes("重量未知") && !shown.includes("组间休息未结构化指定"), "省略空值占位");
 assert.ok(
-  shown.indexOf("第 1 天 · 训练日") < shown.indexOf("第 2 天 · 休息日") &&
-    shown.indexOf("第 2 天 · 休息日") < shown.indexOf("第 3 天 · 训练日"),
+  shown.indexOf("Day 1 · 推") < shown.indexOf("Day 2") &&
+    shown.indexOf("Day 2") < shown.indexOf("Day 3 · 腿"),
   "训练日顺序沿用 payload 数组顺序",
 );
 assert.ok(
-  shown.indexOf(">重量 80 kg<") < shown.indexOf(">重量 0 kg<") &&
-    shown.indexOf(">重量 0 kg<") < shown.indexOf(">组数未知<"),
+  shown.indexOf(">80kg（杠铃含杆总重）<") < shown.indexOf(">0kg（杠铃含杆总重）<") &&
+    shown.indexOf(">0kg（杠铃含杆总重）<") < shown.indexOf(">45s<"),
   "动作顺序沿用 payload 数组顺序",
 );
 const unknownShown = renderPlan(unknownPayload);
-assert.ok(unknownShown.includes(">未知<"), "repeat 与 focus 的 null 保持未知语义");
+assert.ok(!unknownShown.includes("未知") && !unknownShown.includes("循环"), "空值与循环方式不显示");
+assert.ok(unknownShown.includes("Day 1") && unknownShown.includes("Day 2"), "不完整训练日与休息日保留标题");
 
 /** 5. notes 完整性：修改位置、原值、新值、理由、训练事实来源、删除说明与特殊字符 */
 for (const text of [
@@ -397,8 +383,8 @@ for (const text of [
 assert.ok(shown.includes(dayNotes) && shown.includes(planNotes), "多行 notes 按原文逐行展示");
 assert.equal(
   shown.split("whitespace-pre-wrap").length - 1,
-  4,
-  "三个训练日与整体说明段落保留换行排版",
+  2,
+  "有内容的训练日与整体说明保留换行排版",
 );
 const special = renderPlan({
   ...adjustmentPayload,
@@ -411,48 +397,21 @@ assert.ok(
   "特殊字符按组件既有安全方式转义",
 );
 
-/** 6. 字段级建议来源：精确路径、祖先路径、位置区分与用户现状保持原来源 */
-const fieldBadges = (fields) =>
-  withSuggested(fields).split(">建议<").length - 1;
-assert.equal(fieldBadges([]), 0, "没有建议字段时不出现建议标记");
-assert.equal(fieldBadges(["/days/0/exercises/0/name"]), 1, "动作名的建议来源按位置命中");
-assert.equal(fieldBadges(["/days/0/exercises/1/exercise_id"]), 1, "目录 ID 的建议来源按位置命中");
-assert.equal(fieldBadges(["/days/0/exercises/1/weight_kg"]), 1, "同名动作的重量来源按位置区分");
-assert.equal(fieldBadges(["/days/0/exercises/1"]), 7, "动作对象级来源覆盖其全部数值行");
-assert.equal(fieldBadges(["/days/0"]), 24, "训练日祖先路径覆盖其下全部字段");
-assert.equal(fieldBadges(["/days/2"]), 3, "不完整训练日的祖先路径覆盖主题与提示");
-assert.equal(fieldBadges(["/notes"]), 1, "整体说明的建议来源落在整体提示行");
-assert.equal(fieldBadges(["/repeat"]), 1, "循环方式的建议来源命中");
-assert.equal(
-  fieldBadges(adjustmentPayload.suggested_fields),
-  7,
-  "调整保留原有建议来源并叠加本次修改",
-);
-assert.equal(fieldBadges(["/days/0/exercises/1/name"]), 1, "同名动作的另一位置独立承载来源标记");
-for (const [text, path] of [
-  [">5 组<", "/days/0/exercises/0/sets"],
-  [">目标 5 次<", "/days/0/exercises/0/reps"],
-  [">时长未知<", "/days/0/exercises/0/duration_seconds"],
-  [">重量 80 kg<", "/days/0/exercises/0/weight_kg"],
-  [">组间休息 180 秒<", "/days/0/exercises/0/rest_seconds"],
-  [">重量口径：杠铃含杆总重<", "/days/0/exercises/0/load_convention"],
+// 来源元数据与组间休息参数不参与看板展示。
+for (const suggested_fields of [
+  [],
+  ["/days/0"],
+  ["/days/0/exercises/1"],
+  ["/days/0/exercises/0/sets", "/days/0/exercises/0/rest_seconds"],
+  ["/notes"],
+  adjustmentPayload.suggested_fields,
 ])
-  assert.ok(
-    rowOf(withSuggested([path]), text).includes(">建议<"),
-    `${path} 未标记对应字段行`,
+  assert.equal(
+    renderPlan({ ...adjustmentPayload, suggested_fields }),
+    shown,
+    "来源元数据不改变看板内容",
   );
-assert.ok(!rowOf(shown, ">5 组<").includes(">建议<"), "用户现状字段保持原来源语义");
-assert.ok(!rowOf(shown, ">目标 5 次<").includes(">建议<"), "未涉及内容继续保留原来源状态");
-assert.ok(!rowOf(shown, ">重量口径：杠铃含杆总重<").includes(">建议<"), "已知口径未修改时不新增建议标记");
-const moved = renderPlan({
-  ...adjustmentPayload,
-  days: [adjustmentPayload.days[1], adjustmentPayload.days[0], adjustmentPayload.days[2]],
-  suggested_fields: ["/days/1/exercises/1/rest_seconds"],
-});
-assert.ok(
-  rowOf(moved, ">组间不安排休息<").includes(">建议<"),
-  "训练日与动作位置变化后按最终 payload 路径展示来源",
-);
+assert.ok(!shown.includes(">建议<") && !shown.includes(">180s<") && !shown.includes("不安排休息"));
 
 /* ===== 实时事件与历史投影 ===== */
 const event = (name, data) => ({ event: name, data: { run_id: RUN_ID, ...data } });
@@ -998,6 +957,7 @@ const settle = async () => {
   }
   assert.fail("计划查询未收敛");
 };
+queryClient.setQueryData(EXERCISE_EQUIPMENT_QUERY_KEY, equipment);
 const renderPage = () =>
   renderToStaticMarkup(
     createElement(QueryClientProvider, { client: queryClient }, createElement(PlansPage)),
@@ -1011,11 +971,11 @@ scenario.current = { status: 200, body: { id: BASE_PLAN_ID, content: previousCon
 scenario.list = [previousRecord];
 await refreshPlans();
 let page = renderPage();
-assert.ok(page.includes(">推<") && page.includes("上一版本的整体说明。"), "当前计划按实时查询完整展示");
+assert.ok(page.includes("Day 1 · 推") && page.includes("上一版本的整体说明。"), "当前计划按实时查询完整展示");
 assert.ok(page.includes(formatTimestamp(previousRecord.created_at)), "版本列表沿用后端顺序");
 assert.equal(page.split(">当前<").length - 1, 1, "当前标记来自实时 is_current");
 assert.ok(page.includes("查看完整内容"), "已保存版本提供完整内容入口");
-assert.equal(page.split(">第 1 天 · 训练日<").length - 1, 1, "未展开版本不重复渲染计划字段");
+assert.equal(page.split(">Day 1 · 推<").length - 1, 1, "未展开版本不重复渲染计划字段");
 
 scenario.current = { status: 200, body: { id: null, content: null } };
 scenario.list = [];
@@ -1071,7 +1031,7 @@ assert.ok(
 const recordData = observers[2].observer.getCurrentResult().data;
 assert.deepEqual(recordData.content, adjustmentPayload, "版本详情查询解析完整调整内容");
 assert.ok(
-  page.includes(renderToStaticMarkup(createElement(PlanFields, { content: recordData.content }))),
+  page.includes(renderPlan(recordData.content)),
   "当前计划、版本详情与对话待确认展示使用同一组件与同一口径",
 );
 await assert.rejects(
@@ -1091,5 +1051,5 @@ queryClient.clear();
 await new Promise((resolve) => stub.close(resolve));
 
 console.log(
-  "PASS: 调整结果严格解析、完整计划与 notes 及字段来源渲染、实时与历史同一 schema 与身份、保存落定判定与计划查询刷新全部符合契约",
+  "PASS: 调整结果严格解析、紧凑看板与原始 notes 展示、实时与历史同一 schema 与身份、保存落定判定与计划查询刷新全部符合契约",
 );

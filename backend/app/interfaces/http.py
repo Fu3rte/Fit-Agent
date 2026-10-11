@@ -1449,6 +1449,15 @@ def workout_response(response) -> JSONResponse:
     return JSONResponse(payload, headers=NO_STORE)
 
 
+@app.get("/api/exercises/equipment", dependencies=[Depends(check_boundary)])
+async def get_exercise_equipment(request: Request):
+    check_workout_query(request, set())
+    payload = request.app.state.business.exercise_equipment()
+    if CredentialFilter(active_secrets()).contains(payload):
+        reject(422, "credential_detected", CREDENTIAL_SAFE_MESSAGE)
+    return JSONResponse(payload, headers=NO_STORE)
+
+
 @app.get("/api/plans/current", dependencies=[Depends(check_boundary)])
 async def get_current_plan(request: Request):
     check_workout_query(request, set())

@@ -4,7 +4,8 @@ import { Paperclip, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { getAttachmentContent } from "@/lib/api";
 import {
-  appendAttachmentFiles,
+  mergeAttachmentDrafts,
+  readAttachmentFiles,
   type AttachmentDraft,
 } from "../utils/attachments";
 
@@ -13,34 +14,120 @@ function attachmentQueryKey(sessionId: string, attachmentId: string) {
   return ["attachment", sessionId, attachmentId] as const;
 }
 
-/** 输入框与编辑框共用的附件草稿状态：追加、移除、重置与具体错误说明 */
+/** 一次导入读取任务（附件契约 §1）：按发起顺序排队，完成或失败后就地合入或整批拒绝 */
+interface ImportTask {
+  prepared?: AttachmentDraft[];
+  failure?: string;
+  settled: boolean;
+}
+
+/**
+ * 输入框与编辑框共用的附件草稿状态：追加、移除、重置与具体错误说明。
+ * 以 ref 作为最新状态基准，导入任务按发起顺序排队合入，避免迟到的读取结果覆盖期间的移除、
+ * 清空与重置；代际变化（clear／reset／取消编辑／切换编辑对象／卸载）使在途任务整体失效。
+ */
 export function useAttachmentDrafts() {
-  const [drafts, setDrafts] = useState<AttachmentDraft[]>([]);
-  const [error, setError] = useState<string | null>(null);
+  const [state, setState] = useState<{
+    drafts: AttachmentDraft[];
+    error: string | null;
+    pending: boolean;
+  }>({ drafts: [], error: null, pending: false });
+  const draftsRef = useRef<AttachmentDraft[]>([]);
+  const errorRef = useRef<string | null>(null);
+  const importsRef = useRef<ImportTask[]>([]);
+
+  /** 由最新草稿、错误与在途任务数发布一次状态，保证渲染读到的都是同步基准 */
+  const publish = () => {
+    setState({
+      drafts: draftsRef.current,
+      error: errorRef.current,
+      pending: importsRef.current.length > 0,
+    });
+  };
+
+  /**
+   * 按发起顺序推进已完成的导入：读取中的批次阻断其后批次，保证最终顺序与用户发起顺序一致；
+   * 每个批次独立读取，并入时按当时最新集合校验字节上限，失败保持当前有效集合完整。
+   */
+  const flush = () => {
+    const queue = importsRef.current;
+    let drafts = draftsRef.current;
+    let error = errorRef.current;
+    while (queue.length > 0 && queue[0].settled) {
+      const task = queue.shift() as ImportTask;
+      if (task.failure !== undefined) {
+        error = task.failure;
+        continue;
+      }
+      try {
+        drafts = mergeAttachmentDrafts(drafts, task.prepared ?? []);
+      } catch (failure) {
+        error =
+          failure instanceof Error ? failure.message : "附件读取失败。";
+      }
+    }
+    draftsRef.current = drafts;
+    errorRef.current = error;
+    publish();
+  };
+
   const pick = (files: File[]) => {
     if (files.length === 0) return;
-    void appendAttachmentFiles(drafts, files).then(
-      (next) => {
-        setDrafts(next);
-        setError(null);
+    // 与在途导入无重叠的新操作清除上一轮错误；同一并发轮内失败说明由失败批次保留
+    if (importsRef.current.length === 0) errorRef.current = null;
+    const task: ImportTask = { settled: false };
+    importsRef.current.push(task);
+    publish();
+    void readAttachmentFiles(files).then(
+      (prepared) => {
+        task.prepared = prepared;
+        task.settled = true;
+        flush();
       },
-      (failure: unknown) =>
-        setError(failure instanceof Error ? failure.message : "附件读取失败。"),
+      (failure: unknown) => {
+        task.failure =
+          failure instanceof Error ? failure.message : "附件读取失败。";
+        task.settled = true;
+        flush();
+      },
     );
   };
+
+  const invalidate = () => {
+    importsRef.current = [];
+  };
+
   return {
-    drafts,
-    error,
+    drafts: state.drafts,
+    error: state.error,
+    /** 存在尚未读取完成的导入：提交发送与编辑需等待，避免提交不完整集合 */
+    pending: state.pending,
     pick,
-    remove: (at: number) =>
-      setDrafts((list) => list.filter((_, index) => index !== at)),
+    remove: (at: number) => {
+      draftsRef.current = draftsRef.current.filter(
+        (_, index) => index !== at,
+      );
+      publish();
+    },
+    /** 移除已提交集合中的附件：仅按身份剔除，提交期间新挂入的附件保持原值 */
+    discard: (discarded: readonly AttachmentDraft[]) => {
+      const removed = new Set(discarded.map((item) => item.attachment_id));
+      draftsRef.current = draftsRef.current.filter(
+        (item) => !removed.has(item.attachment_id),
+      );
+      publish();
+    },
     reset: (next: AttachmentDraft[]) => {
-      setDrafts(next);
-      setError(null);
+      invalidate();
+      draftsRef.current = [...next];
+      errorRef.current = null;
+      publish();
     },
     clear: () => {
-      setDrafts([]);
-      setError(null);
+      invalidate();
+      draftsRef.current = [];
+      errorRef.current = null;
+      publish();
     },
   };
 }
@@ -48,8 +135,10 @@ export function useAttachmentDrafts() {
 /** 导入入口：与输入框同区的按钮，选择 UTF-8 的 `.md`／`.txt` 文件挂入附件草稿 */
 export function AttachmentPicker({
   onPick,
+  disabled,
 }: {
   onPick: (files: File[]) => void;
+  disabled?: boolean;
 }) {
   const input = useRef<HTMLInputElement>(null);
   return (
@@ -57,8 +146,9 @@ export function AttachmentPicker({
       <button
         type="button"
         aria-label="导入训练计划文件"
+        disabled={disabled}
         onClick={() => input.current?.click()}
-        className="grid size-8 place-items-center rounded-full text-muted-foreground hover:bg-secondary hover:text-foreground"
+        className="grid size-8 place-items-center rounded-full text-muted-foreground hover:bg-secondary hover:text-foreground disabled:pointer-events-none disabled:opacity-50"
       >
         <Paperclip aria-hidden className="size-4" />
       </button>
@@ -82,10 +172,12 @@ export function AttachmentChips({
   drafts,
   error,
   onRemove,
+  disabled,
 }: {
   drafts: AttachmentDraft[];
   error: string | null;
   onRemove: (at: number) => void;
+  disabled?: boolean;
 }) {
   if (drafts.length === 0 && error === null) return null;
   return (
@@ -99,8 +191,9 @@ export function AttachmentChips({
           <button
             type="button"
             aria-label={`移除 ${item.file_name}`}
+            disabled={disabled}
             onClick={() => onRemove(at)}
-            className="grid size-5 shrink-0 place-items-center rounded-full text-muted-foreground hover:bg-muted hover:text-foreground"
+            className="grid size-5 shrink-0 place-items-center rounded-full text-muted-foreground hover:bg-muted hover:text-foreground disabled:pointer-events-none disabled:opacity-50"
           >
             <X aria-hidden className="size-3" />
           </button>

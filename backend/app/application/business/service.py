@@ -165,6 +165,9 @@ class BusinessService:
             muscle_group=muscle_group,
         )
 
+    def exercise_equipment(self) -> dict[str, str]:
+        return {exercise.id: exercise.equipment for exercise in self._catalog.all()}
+
     # 准备工具：持久化完整不可变画像快照。
 
     async def prepare_profile_update(

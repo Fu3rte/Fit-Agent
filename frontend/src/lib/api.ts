@@ -882,6 +882,21 @@ export const listRunSteering = (
 
 /* ===== 训练计划查询（plan-generation-contract §5）===== */
 
+export const getExerciseEquipment = (signal?: AbortSignal) =>
+  sessionRequest(
+    "/api/exercises/equipment",
+    { method: "GET", signal },
+    (body): Record<string, string> => {
+      if (!isObject(body)) throw new Error("动作器械目录无效。");
+      return Object.fromEntries(
+        Object.entries(body).map(([id, equipment]) => {
+          if (!/^[0-9]{4}$/.test(id)) throw new Error("动作目录 ID 无效。");
+          return [id, requireString(equipment, "equipment")];
+        }),
+      );
+    },
+  );
+
 /** GET /api/plans/current（§5）：没有当前计划时 ``id`` 与 ``content`` 同时为 null，不接受查询参数 */
 export const getCurrentPlan = (signal?: AbortSignal) =>
   sessionRequest<CurrentPlanWire>(

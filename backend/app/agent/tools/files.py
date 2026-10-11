@@ -259,6 +259,7 @@ def create_file_tools(
             ReadArguments,
             read,
             execution_mode="parallel",
+            max_output_chars=None,
         ),
         AgentTool(
             "edit",

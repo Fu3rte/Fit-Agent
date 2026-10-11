@@ -2,6 +2,7 @@
 // 计划事件的展示绑定与刷新口径（plan-generation-contract §4、§6）：只有持久化成功的 prepare_plan 结果形成待确认展示，
 // 同一调用的进度／执行完成／持久化结果合并为一项，实时与历史一致，保存落定与 saved 核实才刷新计划查询（不触达后端）。
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { createServer } from "vite";
 
 const server = await createServer({
@@ -15,7 +16,7 @@ const { applyReActEvent, planSaved } = await server.ssrLoadModule(
 const { historyToRounds, mergeHistoryRounds } = await server.ssrLoadModule(
   "/src/features/chat/utils/sessionHistory.ts",
 );
-const { default: PlanFields } = await server.ssrLoadModule(
+const { PlanBoard: PlanFields } = await server.ssrLoadModule(
   "/src/features/plans/PlanFields.tsx",
 );
 const { PLAN_QUERY_KEY, queryClient } = await server.ssrLoadModule("/src/lib/query.ts");
@@ -408,46 +409,39 @@ for (const key of otherKeys)
   );
 queryClient.clear();
 
-/** 9. 业务展示渲染：全部字段可核对，建议标记只落在 suggested_fields 命中的字段上 */
+// 已知训练参数与原始说明在统一看板中展示。
 const { renderToStaticMarkup } = await import("react-dom/server");
 const { createElement } = await import("react");
 const render = (suggestedFields) =>
   renderToStaticMarkup(
     createElement(PlanFields, {
       content: { ...payload, suggested_fields: suggestedFields },
+      equipment: Object.fromEntries(
+        JSON.parse(readFileSync(new URL("../../backend/dataset/actions.agent.json", import.meta.url), "utf8"))
+          .map((exercise) => [exercise.id, exercise.equipment]),
+      ),
     }),
   );
-const badges = (html) => html.split(">建议<").length - 1;
 
 const shown = render(payload.suggested_fields);
 for (const text of [
-  "循环执行",
-  "第 1 天 · 训练日",
-  "第 2 天 · 休息日",
-  "推",
-  "3 组",
-  "目标 12 次",
-  "时长未知",
-  "重量未知",
-  "目标次数未知",
-  "时长 45 秒",
-  "重量 0 kg",
-  "单侧加载重量",
-  "组间不安排休息",
-  "组间休息未结构化指定",
+  "Day 1 · 推",
+  "Day 2",
+  "训练日",
+  "休息日",
+  "3×12",
+  "3×45s",
+  "0kg（单侧加载重量）",
   "组间可休息3–5分钟，结合心率恢复和自身状态判断。",
   "依据已保存画像安排。",
   "未在动作数据集内核实",
 ])
   assert.ok(shown.includes(text), `展示缺少业务内容：${text}`);
-assert.equal(badges(render([])), 0, "没有建议字段时不出现建议标记");
-assert.equal(
-  badges(render(["/days/0/exercises/0/sets"])),
-  1,
-  "建议标记只落在命中的字段行",
-);
-assert.equal(badges(render(["/notes"])), 1, "整体依据的建议标记落在整体提示行");
+assert.ok(!shown.includes("未知") && !shown.includes("循环执行"), "空值占位与循环方式不展示");
+assert.equal(render([]), shown, "来源元数据不改变展示");
+assert.equal(render(["/days/0/exercises/0/sets", "/notes"]), shown);
+assert.ok(!shown.includes(">建议<") && !shown.includes("不安排休息"));
 
 console.log(
-  "PASS: 待确认计划仅由持久化结果绑定、并行与历史同一口径且无重复展示、保存落定刷新计划查询、非 saved 不刷新、字段与建议来源完整渲染",
+  "PASS: 待确认计划仅由持久化结果绑定、并行与历史同一口径且无重复展示、保存落定刷新计划查询、非 saved 不刷新、已知字段与原始说明完整渲染",
 );

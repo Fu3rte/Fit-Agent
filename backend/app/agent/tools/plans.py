@@ -9,6 +9,7 @@ from app.agent.tools.common import (
     envelope,
     unbound,
 )
+from app.ai.messages import JsonObject
 from app.application.business.service import BusinessService
 from app.domain.business.models import (
     BusinessContext,
@@ -22,6 +23,13 @@ from app.domain.business.models import (
 
 class EmptyPlanArguments(BusinessModel):
     pass
+
+
+def _prepare_plan_arguments(args: JsonObject) -> JsonObject:
+    # 仅将顶层 base_plan_id 的精确字符串 "None" 归一为 null，其他字段与值原样交给严格校验。
+    if args.get("base_plan_id") == "None":
+        args["base_plan_id"] = None
+    return args
 
 
 def _tools(
@@ -49,10 +57,15 @@ def _tools(
             "prepare_plan",
             "创建完整训练计划待确认快照。base_profile_version使用已保存画像的版本，"
             "base_plan_id使用当前计划id原值，无当前计划时传JSON null；payload是完整内容。"
+            '参数预处理仅将base_plan_id精确字符串"None"转为JSON null，其他字段和值原样严格校验。'
             "训练日必须包含具体动作，每个动作sets有值，reps或duration_seconds至少一个有值。"
+            "生成调用参数校验失败时，依据返回的实际错误修正原prepare_plan调用后重试；"
+            "禁止改用prepare_plan_import或prepare_plan_adjustment绕过生成约束。"
             "结果持久化后绑定真实展示节点，完整payload由结果展示，等待后续用户自然语言明确确认。"
-            "用户修改建议时创建新快照并重新展示确认。",
-            PlanProposalArguments, prepare_plan, execution_mode="sequential", max_output_chars=None,
+            "用户修改建议时创建新快照并重新展示确认；尚未采纳的生成建议经用户修改时，"
+            "继续使用prepare_plan创建新快照。",
+            PlanProposalArguments, prepare_plan, execution_mode="sequential",
+            prepare_arguments=_prepare_plan_arguments, max_output_chars=None,
         ),
         "save_plan": AgentTool(
             "save_plan",

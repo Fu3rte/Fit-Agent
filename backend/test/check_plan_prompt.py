@@ -19,6 +19,10 @@ PLAN_REQUIRED = [
     "每个训练日有具体动作，每个动作sets为正整数，reps为明确正整数或duration_seconds为正数，两者至少一个有值；休息日exercises=[]",
     "有重量（包括0）必须明确load_convention",
     "rest_seconds允许null",
+    "计划看板不显示建议标签与rest_seconds参数",
+    "生成计划及新增动作的rest_seconds写JSON null",
+    "组间一般休息2–5分钟，结合心率恢复、呼吸和自身状态判断何时开始下一组",
+    "此说明放在对话回复中",
     "目录外动作exercise_id=null",
     "以可信business_context.business_date为截止日",
     "用calculate_date传days_offset=-6得到起始日期",
@@ -35,6 +39,9 @@ PLAN_REQUIRED = [
     "用户提供自己编写或他人给出的现有计划并要求录入或保存该计划时使用prepare_plan_import",
     "用户要求调整本次提供的计划内容或已保存的当前计划时使用prepare_plan_adjustment",
     "prepare_plan仅用于用户要求生成新的计划建议，用户提供既有计划内容时禁止改用prepare_plan",
+    '参数预处理仅将base_plan_id精确字符串"None"转为JSON null，其他字段和值原样严格校验',
+    "禁止改用prepare_plan_import或prepare_plan_adjustment绕过生成约束",
+    "尚未采纳的生成建议经用户修改时，继续使用prepare_plan创建新快照",
     "不含preparation_kind，准备类型由后端按实际工具确定",
     '禁止字符串"null"、空字符串、数字0或省略；参数预处理仅将两依据字段精确字符串"None"转为null，其他字段和值原样严格校验',
     '无画像且无当前计划的基础字段准确示例：{"base_profile_version":null,"base_plan_id":null}',
@@ -93,6 +100,14 @@ GENERATION_RECENT = [
     "逐页读取所需记录直至覆盖total",
 ]
 
+# 器械默认按训练环境判定：户外/居家默认仅徒手，其余及未知环境默认目录全部器械可用；
+# 用户明确声明的可用器械放行对应动作。业务规则与计划生成段两处同源，字面串逐条落地。
+EQUIPMENT_ENV_PROMPT = [
+    "器械默认按训练环境处理：训练环境为户外或居家（含「户外」「居家」「家里」「家中」「室外」等表述）时，默认仅徒手（目录 equipment 为 body weight）动作可用；其余环境、训练环境未知或未命中时，默认动作目录中的全部器械可用。",
+    "用户明确声明某器械可用时按声明放行对应器械动作",
+    "训练环境为户外或居家时默认仅徒手动作，其余及未知环境默认目录全部器械可用。",
+]
+
 # 工具声明即契约：模型可见的日期口径必须与注册声明逐条一致。
 DATE_DECLARATION = [
     "days_offset 为必填严格整数",
@@ -129,6 +144,10 @@ def check():
     generation_missing = [item for item in GENERATION_RECENT if item not in SYSTEM_PROMPT]
     assert not generation_missing, generation_missing
 
+    # 器械默认按训练环境的提示口径逐条落地，业务规则与计划生成段不得脱钩。
+    equipment_missing = [item for item in EQUIPMENT_ENV_PROMPT if item not in SYSTEM_PROMPT]
+    assert not equipment_missing, equipment_missing
+
     # 生产注册表与模型可见声明同源，二者 prepare_plan_adjustment 描述必须逐字一致。
     production = {item.name: item for item in business_tool_declarations()}
     declared = {item.name: item for item in plan_import_tool_declarations()}
@@ -163,6 +182,7 @@ def check():
           f"({len(PLAN_REQUIRED)} clauses), adjustment prompt ({len(ADJUSTMENT_PROMPT)} clauses) "
           f"and declaration ({len(ADJUSTMENT_DECLARATION)} clauses) with shared literals "
           f"({len(ADJUSTMENT_SHARED)}), generation caliber ({len(GENERATION_RECENT)}), "
+          f"equipment environment default ({len(EQUIPMENT_ENV_PROMPT)}), "
           f"calculate_date prompt contract ({len(DATE_PROMPT)} clauses) and declaration contract "
           f"({len(DATE_DECLARATION)} clauses) with real 7-day range")
 
