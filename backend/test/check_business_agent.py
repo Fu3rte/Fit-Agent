@@ -61,7 +61,10 @@ def check() -> None:
         assert profile.json() == {"version": None, "content": None}, profile.json()
 
         history = http.get(f"/api/sessions/{session}/history").json()
-        assert set(history) == {"session", "entries", "runs", "steering"}, set(history)
+        assert set(history) == {
+            "session", "entries", "runs", "steering", "confirmations", "pending_proposals",
+        }, set(history)
+        assert history["confirmations"] == []
         endings = [
             (
                 event["data"]["tool_name"],
@@ -87,10 +90,27 @@ def check() -> None:
         assert proposal["profile_id"] == 1
         assert proposal["payload"]["goal"], proposal
 
-        # 用户明确确认后由保存工具落库。
+        # 普通聊天文字不产生保存授权：模型注册表本就不提供保存工具，画像保持未保存。
         third = turn(http, session, TURN_THREE)
-        saved_names = tool_names(third)
-        assert "save_profile_update" in saved_names, saved_names
+        assert "save_profile_update" not in tool_names(third), tool_names(third)
+        assert http.get("/api/profile").json() == {"version": None, "content": None}
+
+        # 用户点击完整快照按钮：独立确认 HTTP 直接保存，不创建模型运行。
+        pending = http.get(f"/api/sessions/{session}/history").json()["pending_proposals"]
+        assert len(pending) == 1, pending
+        target = pending[0]
+        confirmed = http.post(
+            f"/api/sessions/{session}/confirmations",
+            json={
+                "operation_id": str(uuid4()),
+                "business_kind": "profile",
+                "proposal_id": target["proposal_id"],
+                "display_entry_id": target["display_entry_id"],
+            },
+        )
+        assert confirmed.status_code == 200, confirmed.text
+        operation = confirmed.json()
+        assert operation["status"] == "saved", operation
         saved = http.get("/api/profile").json()
         assert saved["version"] == 1, saved
         assert saved["content"]["goal"], saved
@@ -98,8 +118,9 @@ def check() -> None:
         (EVIDENCE / "business-agent.json").write_text(
             json.dumps(
                 {
-                    "tools": names + saved_names,
+                    "tools": names + tool_names(third),
                     "proposal": proposal,
+                    "confirmation_operation": operation["operation_id"],
                     "profile": saved,
                 },
                 ensure_ascii=False,
@@ -110,7 +131,7 @@ def check() -> None:
         print(
             "真实模型 HTTP 画像流程检查通过："
             + json.dumps(
-                {"tools": names + saved_names, "version": saved["version"]},
+                {"tools": names + tool_names(third), "version": saved["version"]},
                 ensure_ascii=False,
             )
         )

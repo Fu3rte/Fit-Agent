@@ -364,8 +364,19 @@ const baseHistory = () => ({
       updated_at: 3,
     },
   ],
+  confirmations: [],
+  pending_proposals: [],
 });
 const parsedHistory = api.parseSessionHistory(sessionId, baseHistory());
+for (const field of ["confirmations", "pending_proposals"]) {
+  const missing = structuredClone(baseHistory());
+  delete missing[field];
+  assert.throws(
+    () => api.parseSessionHistory(sessionId, missing),
+    /无效/,
+    `历史响应缺少 ${field} 属协议异常`,
+  );
+}
 assert.deepEqual(
   parsedHistory.entries[0].message.attachments,
   [attachment],

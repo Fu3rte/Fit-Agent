@@ -1,9 +1,11 @@
 import { createParser } from "eventsource-parser";
 import type {
   AttachmentInputWire,
+  ConfirmationBusinessKindWire,
+  ConfirmationStatusWire,
   DiscardReasonWire,
   PreparedPlanProposalWire,
-  ProfileContentWire,
+  ProfileProposalWire,
   ReActContent,
   ReActEvent,
   ReActStopReason,
@@ -16,16 +18,10 @@ import type {
 import {
   isObject,
   parsePlanBusinessError,
-  parsePlanSaveResult,
-  parsePlanStatusResult,
-  parseProfileSaveResult,
-  parseProfileStatusResult,
-  parseWorkoutSaveResult,
-  parseWorkoutStatusResult,
   preparedPlanAdjustmentProposal,
   preparedPlanImportProposal,
   preparedPlanProposal,
-  preparedProfilePayload,
+  preparedProfileProposal,
   preparedWorkoutProposal,
 } from "@/lib/business";
 import type { ToolCallCardProps } from "../components/ToolCallCard";
@@ -67,11 +63,12 @@ export type ReActEntry =
       stop_reason?: ReActStopReason;
     } & Partial<CommittedNode>)
   /** 业务待确认内容的完整展示（profile-plan §3.2、workout-http-sse-contract §5、plan-generation-contract §6、
-   *  plan-import-adjustment-contract §7）：仅在对应准备工具的结果节点提交后携带，实时与历史同一口径 */
+   *  plan-import-adjustment-contract §7）：仅在对应准备工具的结果节点提交后携带，实时与历史同一口径；
+   *  三类均保存完整快照对象，确认入口按其中 ``proposal_id`` 与该节点身份绑定（确认契约 §7.6） */
   | ({
       kind: "tool";
       id: string;
-      profile?: ProfileContentWire;
+      profile?: ProfileProposalWire;
       workout?: WorkoutProposalWire;
       plan?: PreparedPlanProposalWire;
     } & ToolCallCardProps &
@@ -103,6 +100,16 @@ export interface ChatDraft {
   pending_title: string | null;
 }
 
+/** 确认结果的展示投影（确认契约 §7.6）：与 Agent round 独立，取自真实操作对象，不含模型生成内容 */
+export interface ConfirmationDisplay {
+  business_kind: ConfirmationBusinessKindWire;
+  proposal_id: string;
+  status: ConfirmationStatusWire;
+  /** 状态文字与实际失败原因（§7.6） */
+  text: string;
+  detail?: string;
+}
+
 /** 客户端持久化状态（§5.1）：当前选择、本地草稿与按会话归属的未确认操作账本 */
 export interface ChatStore {
   selected_session_id: string | null;
@@ -129,6 +136,8 @@ export interface ReActRound {
   compaction_id?: string;
   /** 结果未知、等待确认或显式重试的操作（§5.5） */
   pending?: PendingOperation[];
+  /** 独立于 Agent round 的确认结果（确认契约 §7.6）：确认用户节点所在轮次携带 */
+  confirmation?: ConfirmationDisplay;
 }
 
 export function finishReActRound(
@@ -800,7 +809,7 @@ export function applyReActEvent(
         assertPlanBusinessError(entry.name, event.data.content);
       const displayed =
         !event.data.is_error && entry.name === PREPARE_PROFILE
-          ? { profile: preparedProfilePayload(event.data.content) }
+          ? { profile: preparedProfileProposal(event.data.content) }
           : !event.data.is_error && entry.name === PREPARE_WORKOUT
             ? { workout: preparedWorkoutProposal(event.data.content) }
             : !event.data.is_error
@@ -879,24 +888,18 @@ export function applyReActEvent(
   return { ...round, entries, run_id: data.run_id };
 }
 
-/* ===== 业务快照的展示与保存落定（profile-natural-confirmation-plan §3.2、§9；workout-record-contract §1；plan-generation-contract §4、§6）===== */
+/* ===== 业务快照的完整展示（profile-natural-confirmation-plan §3.2；workout-record-contract §1；plan-generation-contract §4、§6）===== */
 
-/** 三个画像业务工具的固定名称（profile-plan §4） */
+/** 画像准备工具固定名称（profile-plan §4） */
 export const PREPARE_PROFILE = "prepare_profile_update";
-const SAVE_PROFILE = "save_profile_update";
-const PROFILE_UPDATE_STATUS = "get_profile_update_status";
 
-/** 训练记录工具的固定名称（workout-record-contract §5） */
+/** 训练记录准备工具固定名称（workout-record-contract §5） */
 export const PREPARE_WORKOUT = "prepare_workout";
-const SAVE_WORKOUT = "save_workout";
-const UPDATE_WORKOUT = "update_workout";
-const WORKOUT_SAVE_STATUS = "get_workout_save_status";
 
-/** 计划工具的固定名称（plan-generation-contract §4、plan-import-adjustment-contract §7） */
+/** 计划准备工具固定名称（plan-generation-contract §4、plan-import-adjustment-contract §7） */
 export const PREPARE_PLAN = "prepare_plan";
 export const PREPARE_PLAN_IMPORT = "prepare_plan_import";
 export const PREPARE_PLAN_ADJUSTMENT = "prepare_plan_adjustment";
-const SAVE_PLAN = "save_plan";
 const PLAN_SAVE_STATUS = "get_plan_save_status";
 const PLAN_BUSINESS_TOOLS = [
   "get_current_plan",
@@ -905,7 +908,6 @@ const PLAN_BUSINESS_TOOLS = [
   PREPARE_PLAN,
   PREPARE_PLAN_IMPORT,
   PREPARE_PLAN_ADJUSTMENT,
-  SAVE_PLAN,
   PLAN_SAVE_STATUS,
 ];
 
@@ -939,83 +941,6 @@ export function assertPlanBusinessError(name: string, content: string): void {
     return;
   }
   if (isObject(value)) parsePlanBusinessError(value);
-}
-
-/** 保存落定的判定口径：保存工具名集合、状态查询工具名与两类结果的 schema 解析 */
-interface SaveVerification {
-  saveTools: readonly string[];
-  statusTool: string;
-  saveProposalId: (value: unknown) => string;
-  statusResult: (value: unknown) => { proposal_id: string; saved: boolean };
-}
-
-const PROFILE_SAVE: SaveVerification = {
-  saveTools: [SAVE_PROFILE],
-  statusTool: PROFILE_UPDATE_STATUS,
-  saveProposalId: (value) => parseProfileSaveResult(value).proposal_id,
-  statusResult: (value) => {
-    const status = parseProfileStatusResult(value);
-    return { proposal_id: status.proposal_id, saved: status.status === "saved" };
-  },
-};
-
-const WORKOUT_SAVE: SaveVerification = {
-  saveTools: [SAVE_WORKOUT, UPDATE_WORKOUT],
-  statusTool: WORKOUT_SAVE_STATUS,
-  saveProposalId: (value) => parseWorkoutSaveResult(value).proposal_id,
-  statusResult: (value) => {
-    const status = parseWorkoutStatusResult(value);
-    return { proposal_id: status.proposal_id, saved: status.status === "saved" };
-  },
-};
-
-const PLAN_SAVE: SaveVerification = {
-  saveTools: [SAVE_PLAN],
-  statusTool: PLAN_SAVE_STATUS,
-  saveProposalId: (value) => parsePlanSaveResult(value).proposal_id,
-  statusResult: (value) => {
-    const status = parsePlanStatusResult(value);
-    return { proposal_id: status.proposal_id, saved: status.status === "saved" };
-  },
-};
-
-/**
- * 保存落定（§6、§9.1）：仅保存工具的成功结果或状态查询核实 saved，且快照标识与本次调用参数一致。
- * 结果不合 schema 在解析位置报错；进度与执行完成事件不作为凭据，由 sessionRunManager 据此刷新查询缓存。
- */
-function proposalSaved(
-  event: ReActEvent,
-  round: ReActRound,
-  verification: SaveVerification,
-): boolean {
-  if (event.event !== "tool_result" || event.data.is_error) return false;
-  const entry = round.entries.find(
-    (item) => item.kind === "tool" && item.id === event.data.tool_call_id,
-  );
-  if (
-    entry?.kind !== "tool" ||
-    (!verification.saveTools.includes(entry.name) &&
-      entry.name !== verification.statusTool)
-  )
-    return false;
-  const value = JSON.parse(event.data.content) as unknown;
-  const proposalId = entry.arguments.proposal_id;
-  if (verification.saveTools.includes(entry.name))
-    return verification.saveProposalId(value) === proposalId;
-  const status = verification.statusResult(value);
-  return status.saved && status.proposal_id === proposalId;
-}
-
-export function profileSaved(event: ReActEvent, round: ReActRound): boolean {
-  return proposalSaved(event, round, PROFILE_SAVE);
-}
-
-export function workoutSaved(event: ReActEvent, round: ReActRound): boolean {
-  return proposalSaved(event, round, WORKOUT_SAVE);
-}
-
-export function planSaved(event: ReActEvent, round: ReActRound): boolean {
-  return proposalSaved(event, round, PLAN_SAVE);
 }
 
 function object(value: unknown): value is Record<string, unknown> {
@@ -1261,5 +1186,14 @@ export function isExpiredOperation(failure: unknown): boolean {
     failure instanceof ReActHttpError &&
     failure.code === "operation_conflict" &&
     failure.reason === "operation_expired"
+  );
+}
+
+/** 未登记的确认操作（确认契约 §7.3）：404 confirmation_not_found，不证明原请求已经结束 */
+export function isConfirmationNotFound(failure: unknown): boolean {
+  return (
+    failure instanceof ReActHttpError &&
+    failure.http_status === 404 &&
+    failure.code === "confirmation_not_found"
   );
 }

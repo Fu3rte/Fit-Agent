@@ -6,18 +6,29 @@ from concurrent.futures import ThreadPoolExecutor
 from threading import Event
 from uuid import uuid4
 
-from app.agent.tools.business import bind_business_tools
-from app.domain.business.models import BusinessContext
+from app.ai.messages import TextContent, ToolResultMessage
+from app.domain.business.errors import BusinessError
+from app.domain.business.models import (
+    BusinessContext,
+    ProfileSaveArguments,
+    SaveConfirmationRequest,
+)
 from app.infrastructure.persistence.sqlite import database as database_module
 from app.interfaces.http import app
 from test.check_business_profile import _StatementSync
 from test.check_http import events, wait_idle
-from test.check_profile_confirmation import Fixture, payload, prepare_arguments, propose
+from test.check_profile_confirmation import (
+    Fixture,
+    new_id,
+    now_ms,
+    payload,
+    prepare_arguments,
+    propose,
+)
 from test.regression_support import (
     Server,
     client,
     install_test_model_config,
-    run_tool,
     temporary_root,
 )
 
@@ -33,7 +44,9 @@ async def seed(path):
     fixture = await Fixture(path).seeded()
     try:
         session = await fixture.session('TASK5_SAVE_DELETE')
-        initial = await propose(fixture, session, prepare_arguments(None, payload()))
+        # 预受理真实结构化确认：登记确认节点与处理中操作，供直接业务保存核验授权。
+        initial = await fixture.accept(
+            await propose(fixture, session, prepare_arguments(None, payload())))
         saved = await fixture.service_save(initial)
         pending = await propose(fixture, session, prepare_arguments(1, payload(goal='提高耐力')))
         return pending, saved.model_dump()
@@ -41,13 +54,32 @@ async def seed(path):
         await fixture.close()
 
 
+def accept(ids):
+    # 服务启动后再受理真实结构化确认：登记确认节点与处理中操作，供并发删除场景的直接业务保存核验授权。
+    operation, is_first = call(app.state.confirmations._accept(
+        ids['session'], SaveConfirmationRequest(
+            operation_id=new_id(), business_kind='profile',
+            proposal_id=ids['proposal'], display_entry_id=ids['display']), now_ms()))
+    assert is_first and operation.status == 'processing', operation
+    return {**ids, 'confirmation': operation.confirmation_entry_id}
+
+
 def save(ids):
     context = BusinessContext(timezone='Asia/Shanghai', business_date='2026-10-07',
                               session_id=ids['session'], run_id=ids['run'],
                               request_entry_id=ids['request'], source_entry_id=ids['source'])
-    tool = bind_business_tools(app.state.business, context, call, {}, {})['save_profile_update']
-    return run_tool(tool, {'proposal_id': ids['proposal'], 'display_entry_id': ids['display'],
-                           'confirmation_entry_id': ids['confirmation']})
+    arguments = ProfileSaveArguments(proposal_id=ids['proposal'], display_entry_id=ids['display'],
+                                     confirmation_entry_id=ids['confirmation'])
+    try:
+        result = call(app.state.business.save_profile_update(context, arguments))
+    except BusinessError as error:
+        return ToolResultMessage(
+            role='toolResult', tool_call_id=new_id(), tool_name='confirm_save',
+            content=[TextContent(type='text', text=json.dumps(error.detail(), ensure_ascii=False))],
+            is_error=True, timestamp=0)
+    return ToolResultMessage(
+        role='toolResult', tool_call_id=new_id(), tool_name='confirm_save',
+        content=[TextContent(type='text', text=result.model_dump_json())], is_error=False, timestamp=0)
 
 
 def fingerprint(path):
@@ -65,6 +97,7 @@ def check() -> None:
         database_module.default_database_path = lambda: path
         with Server(app) as server, client(server.base_url) as http:
             connection = app.state.session_service._repository._database.connection
+            ids = accept(ids)
             if phase == 'before_commit':
                 sync = _StatementSync('COMMIT', nth=2)
                 call(connection.set_trace_callback(sync.trace))

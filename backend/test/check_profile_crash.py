@@ -18,6 +18,8 @@ async def worker(root: Path, phase: str) -> None:
     fixture = await Fixture(root / 'crash.db').seeded()
     session = await fixture.session('TASK5_CRASH')
     ids = await propose(fixture, session, prepare_arguments(None, payload()))
+    # 预受理真实结构化确认：登记确认节点与处理中操作，供直接业务保存核验授权。
+    ids = await fixture.accept(ids)
     identity = {key: ids[key] for key in ('session', 'request', 'source', 'display', 'confirmation', 'proposal')}
     (root / 'identity.json').write_text(json.dumps(identity), encoding='utf-8')
     blocked = Event()

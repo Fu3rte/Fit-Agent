@@ -2,6 +2,7 @@ import base64
 import json
 from uuid import uuid4
 
+from app.agent.tools.business import business_tool_declarations
 from app.infrastructure.persistence.sqlite import database as database_module
 from app.interfaces import http as interface
 from app.model_config import ModelConfigError, ModelNotConfigured, load_model_config
@@ -74,6 +75,9 @@ def check() -> dict:
         return {"blocked": str(error)}
     patch_default_database("attachment-agent-live")
     EVIDENCE.mkdir(parents=True, exist_ok=True)
+    # 模型可用注册表不提供四项保存工具：保存授权只来自独立确认 HTTP。
+    declared = {tool.name for tool in business_tool_declarations()}
+    assert not (declared & SAVING_TOOLS), sorted(declared & SAVING_TOOLS)
     plan_path_turns: list[dict] = []
     evidence: dict = {
         "api": config.api,

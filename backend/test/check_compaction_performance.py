@@ -38,8 +38,10 @@ ROOT = PROJECT_ROOT / "temp" / "p0-evaluation" / "compaction"
 # 真实 Stepfun 配置位于仓库 backend/data。
 REPO_DATA_ROOT = Path(__file__).resolve().parents[1] / "data"
 REPS = 3
-# check_compaction_joint 的 PARTS=6 在 128k 窗口下摘要输入超出预算；按窗口适配取 4 段。
-HISTORY_PARTS = 4
+# filler 节点按生产保留预算折算为约 20000 token（KEEP_RECENT_TOKENS），
+# 5 段历史加待测事实与 1 段 filler 共 6 段，才能越过 128k 窗口的阈值压缩线；
+# 4 段时上下文估算不足触发阈值，压缩不会发生。
+HISTORY_PARTS = 5
 TRIGGER = (
     "请只根据当前上下文用简体中文逐条回答，不要调用任何工具："
     "1) 我的训练目标是什么；2) 我需要避开哪类动作限制；"

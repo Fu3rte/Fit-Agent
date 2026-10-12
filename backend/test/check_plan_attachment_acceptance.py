@@ -106,35 +106,81 @@ def check() -> None:
                 "proposal_id": proposal["proposal_id"],
             }
 
-            second = run_turn(http, session, "确认，保存这个计划。")
-            starts2, results2 = validate_events(second)
-            save_calls = calls_named(starts2, {"save_plan"})
-            assert save_calls, list(starts2.values())
-            saved = json.loads(results2[save_calls[0]])
+            # 点击该快照的确认按钮：独立确认 HTTP 保存，后端从已绑定快照取得业务事实。
+            display_entry = next(
+                event["data"]["entry_id"]
+                for event in first
+                if event["event"] == "tool_result"
+                and event["data"]["tool_call_id"] == prepare_calls[0]
+            )
+            operation_id = str(uuid4())
+            confirmed = http.post(
+                f"/api/sessions/{session}/confirmations",
+                json={
+                    "operation_id": operation_id,
+                    "business_kind": "plan",
+                    "proposal_id": proposal["proposal_id"],
+                    "display_entry_id": display_entry,
+                },
+            )
+            assert confirmed.status_code == 200, confirmed.text
+            operation = confirmed.json()
+            assert operation["status"] == "saved", operation
+            saved = operation["result"]
             assert saved["proposal_id"] == proposal["proposal_id"]
             assert saved["id"] and saved["saved_at"] and saved["created_at"]
             evidence["turn2"] = saved
 
-            third = run_turn(
-                http, session, "请再次调用 save_plan 保存刚才那个已确认的计划。"
+            # 确认结果通过专用 GET 恢复；确认节点不接受模型重新生成。
+            fetched = http.get(f"/api/sessions/{session}/confirmations/{operation_id}")
+            assert fetched.status_code == 200 and fetched.json()["status"] == "saved"
+            regenerated = http.post(
+                "/api/agent/regenerate",
+                json={
+                    "session_id": session,
+                    "operation_id": str(uuid4()),
+                    "target_entry_id": operation["confirmation_entry_id"],
+                },
             )
-            starts3, results3 = validate_events(third)
-            save_calls3 = calls_named(starts3, {"save_plan"})
-            assert save_calls3, list(starts3.values())
-            again = json.loads(results3[save_calls3[0]])
-            assert again == saved, (again, saved)
-            evidence["turn3"] = again
+            assert regenerated.status_code == 409, regenerated.text
+            assert regenerated.json()["detail"]["code"] == "invalid_target_entry"
+
+            # 同键同请求重复确认返回原固定结果，不新增计划版本。
+            replay = http.post(
+                f"/api/sessions/{session}/confirmations",
+                json={
+                    "operation_id": operation_id,
+                    "business_kind": "plan",
+                    "proposal_id": proposal["proposal_id"],
+                    "display_entry_id": display_entry,
+                },
+            )
+            assert replay.status_code == 200, replay.text
+            assert replay.json()["result"] == saved, replay.text
+            evidence["turn3"] = replay.json()["result"]
 
             plans = http.get("/api/plans").json()
-            assert any(record["id"] == saved["id"] for record in plans), plans
+            assert len(plans) == 1 and plans[0]["id"] == saved["id"], plans
             evidence["plans"] = [record["id"] for record in plans]
+
+            history = http.get(f"/api/sessions/{session}/history").json()
+            assert set(history) == {
+                "session", "entries", "runs", "steering", "confirmations", "pending_proposals",
+            }, set(history)
+            assert [item["operation_id"] for item in history["confirmations"]] == [operation_id]
+            assert history["pending_proposals"] == []
+
+            # 模型只准备/展示：普通确认文字不构成保存授权，模型注册表也不提供保存工具。
+            second = run_turn(http, session, "确认，保存这个计划。")
+            starts2, _ = validate_events(second)
+            assert not calls_named(starts2, {"save_plan"}), list(starts2.values())
 
     (EVIDENCE / "acceptance.json").write_text(
         json.dumps(evidence, ensure_ascii=False, indent=2), encoding="utf-8"
     )
     print(
         "PASS: 真实模型单文件录入：读取附件真实路径 → 录入准备 → 持久化展示绑定 → "
-        "后续确认 save_plan → 固定幂等结果"
+        "独立确认 HTTP 保存 → 专用 GET 与同键幂等固定结果"
     )
     print(json.dumps(evidence, ensure_ascii=False))
 

@@ -383,7 +383,10 @@ def http_checks(ids: dict, path: Path) -> dict:
         assert response.status_code == 200, response.text
         assert response.headers["cache-control"] == "no-store"
         body = response.json()
-        assert set(body) == {"session", "entries", "runs", "steering"}
+        assert set(body) == {
+            "session", "entries", "runs", "steering", "confirmations", "pending_proposals",
+        }
+        assert body["confirmations"] == [] and body["pending_proposals"] == []
         entries = body["entries"]
         assert [entry["type"] for entry in entries] == [
             "message", "message", "message", "message", "compaction", "message", "compaction",

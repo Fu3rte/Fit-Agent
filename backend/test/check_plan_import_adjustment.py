@@ -19,6 +19,7 @@ from app.domain.business.models import (
     PlanImportProposal,
     PlanSaveArguments,
     PlanSnapshot,
+    SaveConfirmationRequest,
     WorkoutContent,
     WorkoutListArguments,
     WorkoutRecord,
@@ -44,7 +45,7 @@ from test.check_profile_confirmation import (
     now_ms,
 )
 from test.check_workout_service_http import assistant
-from test.check_workout_storage import make_record, raw, seed
+from test.check_workout_storage import make_record, raw, seed_legacy
 
 ROOT = Path(__file__).resolve().parents[2] / "tmp/backend-plan-import/checks" / uuid4().hex
 ROOT.mkdir(parents=True)
@@ -128,15 +129,13 @@ async def prepare(f, session, kind="import", version=None, base=None, content=No
     snapshot = await f.repository.get_plan_snapshot(proposal.proposal_id)
     assert snapshot.preparation_kind == kind and snapshot.base_profile_version == version
     assert snapshot.payload == args.payload
-    accepted = await f.service.accept_send(SendCommand(operation_id=new_id(), session_id=session,
-        request=SendRequest(text="确认保存")), system_message=SYSTEM)
-    run = accepted.run
+    # 预受理真实结构化确认：登记确认节点与处理中操作，供随后直接业务保存核验授权。
+    operation, is_first = await f.confirmations._accept(session, SaveConfirmationRequest(
+        operation_id=new_id(), business_kind="plan",
+        proposal_id=proposal.proposal_id, display_entry_id=display), now_ms())
+    assert is_first and operation.status == "processing", operation
     save = PlanSaveArguments(proposal_id=proposal.proposal_id, display_entry_id=display,
-                             confirmation_entry_id=run.request_entry_id)
-    saving = assistant("save_plan", new_id(), save.model_dump()).model_copy(update={
-        "content": [TextContent(type="text", text="处理用户确认")], "stop_reason": "stop"})
-    source = await f.append(session, run.id, run.request_entry_id, saving)
-    await f.service.finish_run(session, run.id, "completed")
+                             confirmation_entry_id=operation.confirmation_entry_id)
     return f.context(session, run.request_entry_id, source), save
 
 
@@ -223,7 +222,7 @@ async def check_migration():
     saved_id = None
     try:
         for status in ("pending", "processing", "saved", "invalidated", "conflicted"):
-            ids = await seed(db)
+            ids = await seed_legacy(db)
             proposal = new_id()
             await raw(db, "INSERT INTO plan_snapshots VALUES (?, ?, ?, ?, 1, NULL, ?, ?, ?, ?, ?)",
                       (proposal, ids["session"], ids["request"], ids["source"], json.dumps(CONTENT),

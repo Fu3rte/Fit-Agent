@@ -1,5 +1,3 @@
-from dataclasses import replace
-
 from app.agent.tool import (
     AgentTool,
     ExecuteFunction,
@@ -9,7 +7,6 @@ from app.agent.tools.common import (
     FrozenBusinessContext,
     MainLoopCall,
     business_result,
-    check_business_permission,
     unbound,
 )
 from app.ai.messages import JsonObject
@@ -18,7 +15,6 @@ from app.domain.business.models import (
     BusinessContext,
     BusinessModel,
     ProfileProposalArguments,
-    ProfileSaveArguments,
     ProfileStatusArguments,
 )
 
@@ -32,13 +28,7 @@ PREPARE_PROFILE_UPDATE_DESCRIPTION = (
     '未建档时该键必须存在且值为 JSON null；参数预处理仅将该字段的精确字符串 "None" 转为 null，'
     '其他字段和值保持原样，禁止使用 "null"、0 或省略。'
     "结果节点持久化后由后端绑定为展示消息，完整画像由该结果展示，无需重复输出；"
-    "本工具不保存画像，须等待用户后续自然语言确认。"
-)
-SAVE_PROFILE_UPDATE_DESCRIPTION = (
-    "保存用户已明确确认的画像快照；输入 proposal_id、该快照展示消息节点的 "
-    "display_entry_id、用户确认消息节点的 confirmation_entry_id，节点 ID 取上下文"
-    "message_nodes 中的真实值。成功返回 proposal_id、profile_id、version、content、"
-    "saved_at；重复调用返回原结果。"
+    "本工具不保存画像，须等待用户点击该快照的确认按钮。"
 )
 GET_PROFILE_UPDATE_STATUS_DESCRIPTION = (
     "查询画像快照的保存状态；输入 proposal_id，返回 proposal_id、status、result。"
@@ -60,10 +50,10 @@ def _prepare_profile_update_arguments(args: JsonObject) -> JsonObject:
 def _tools(
     get_profile: ExecuteFunction,
     prepare_profile_update: ExecuteFunction,
-    save_profile_update: ExecuteFunction,
     get_profile_update_status: ExecuteFunction,
 ) -> dict[str, AgentTool]:
-    # 画像工具返回完整 JSON，关闭输出截断。
+    # 画像工具返回完整 JSON，关闭输出截断。保存由独立确认 HTTP 调用内部业务服务，
+    # 模型注册表不提供保存工具。
     return {
         "get_profile": AgentTool(
             "get_profile",
@@ -81,14 +71,6 @@ def _tools(
             prepare_arguments=_prepare_profile_update_arguments,
             max_output_chars=None,
         ),
-        "save_profile_update": AgentTool(
-            "save_profile_update",
-            SAVE_PROFILE_UPDATE_DESCRIPTION,
-            ProfileSaveArguments,
-            save_profile_update,
-            execution_mode="sequential",
-            max_output_chars=None,
-        ),
         "get_profile_update_status": AgentTool(
             "get_profile_update_status",
             GET_PROFILE_UPDATE_STATUS_DESCRIPTION,
@@ -102,7 +84,7 @@ def _tools(
 def profile_tool_declarations() -> list[ToolDeclaration]:
     return [
         tool.definition()
-        for tool in _tools(unbound, unbound, unbound, unbound).values()
+        for tool in _tools(unbound, unbound, unbound).values()
     ]
 
 
@@ -128,11 +110,6 @@ def bind_profile_tools(
             service.prepare_profile_update(context, params, signal), call, register
         )
 
-    def save_profile_update(
-        tool_call_id, params: ProfileSaveArguments, signal, on_update
-    ):
-        return business_result(service.save_profile_update(context, params, signal), call)
-
     def get_profile_update_status(
         tool_call_id, params: ProfileStatusArguments, signal, on_update
     ):
@@ -140,19 +117,8 @@ def bind_profile_tools(
             service.get_profile_update_status(context, params.proposal_id, signal), call
         )
 
-    tools = _tools(
+    return _tools(
         get_profile,
         prepare_profile_update,
-        save_profile_update,
         get_profile_update_status,
-    )
-    tools["save_profile_update"] = replace(
-        tools["save_profile_update"], trusted_context=context
-    )
-    return tools
-
-
-async def check_profile_permission(context, service: BusinessService, call: MainLoopCall):
-    return await check_business_permission(
-        context, service.check_profile_save_authorization, call
     )

@@ -69,6 +69,9 @@ const history = {
   ],
   runs: [{ session_id: sessionId, run_id: RUN, request_entry_id: A, last_entry_id: ASSIST, status: "completed", started_at: 1, finished_at: 2, error_code: null, error_message: null }],
   steering: [],
+  // 确认契约 §7.6：确认操作与待确认引用为历史必填数组，本场景两份均为空
+  confirmations: [],
+  pending_proposals: [],
 };
 const accepted = reconcileLedger(history, [{ ...editOperation, run_id: RUN }]);
 assert.deepEqual(accepted.accepted, [editOperation.operation_id], "历史覆盖的终态编辑移出账本");
@@ -109,6 +112,9 @@ const historyRound = historyToRounds({
     { session_id: sessionId, run_id: RUN2, request_entry_id: S, last_entry_id: A2, status: "completed", started_at: 3, finished_at: 4, error_code: null, error_message: null },
   ],
   steering: [{ session_id: sessionId, run_id: RUN0, steering_id: steerId, text: "追加。", attachments: [], timestamp: 3, status: "consumed", entry_id: S, reason: null, created_at: 3, updated_at: 3 }],
+  // 确认契约 §7.6：确认操作与待确认引用为历史必填数组，本场景两份均为空
+  confirmations: [],
+  pending_proposals: [],
 });
 const byRun = new Map(historyRound.map((item) => [item.run_id, item]));
 assert.deepEqual(byRun.get(RUN0).entries.map((entry) => entry.id), [U0, A0], "目标节点不再留在旧运行轮次");

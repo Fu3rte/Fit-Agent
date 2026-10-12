@@ -204,8 +204,15 @@ def check(resume=None, database_path=None):
                 _, outputs, _ = turn(http, session, "请准备画像等待我确认：目标一般力量与增肌，力量训练新手，普通健身房，每周三次每次45分钟，无伤病或不适，不可用器械为空列表，禁用动作为空列表，动作限制未知。")
                 assert success(outputs, "get_profile") and len(success(outputs, "prepare_profile_update")) == 1
                 assert http.get("/api/profile").json()["version"] is None
-                _, outputs, _ = turn(http, session, "确认无误，请保存刚才完整展示的这份画像。")
-                assert len(success(outputs, "save_profile_update")) == 1
+                # 按钮确认：独立确认 HTTP 保存画像，不调用模型。
+                profile_target = next(item for item in history(http, session)["pending_proposals"]
+                                      if item["business_kind"] == "profile")
+                profile_response = http.post(f"/api/sessions/{session}/confirmations", json={
+                    "operation_id": str(uuid4()), "business_kind": "profile",
+                    "proposal_id": profile_target["proposal_id"],
+                    "display_entry_id": profile_target["display_entry_id"]})
+                assert profile_response.status_code == 200, profile_response.text
+                assert profile_response.json()["result"]["version"] == 1
                 branch = call(interface.app.state.session_service.get_current_branch(session))
                 day = business_date(branch[-1].created_at)
                 workouts = call(seed_workouts(day))
@@ -234,27 +241,39 @@ def check(resume=None, database_path=None):
             assert status(session, first).status == "invalidated"
             assert all(exercise.sets == 3 for day_content in second.payload.days for exercise in day_content.exercises)
             assert current(http)["id"] is None and not success(outputs, "save_plan")
-            confirmation, outputs, _ = turn(http, session, "确认无误，采纳并保存刚才最后完整展示的3组训练计划。")
-            saved = success(outputs, "save_plan")
-            assert len(saved) == 1 and saved[0]["proposal_id"] == second.proposal_id
+            # 按钮确认：独立确认 HTTP 保存计划，不调用模型。
+            plan_target = next(item for item in history(http, session)["pending_proposals"]
+                               if item["business_kind"] == "plan")
+            assert plan_target["proposal_id"] == second.proposal_id
+            assert plan_target["display_entry_id"] == second_display
+            plan_response = http.post(f"/api/sessions/{session}/confirmations", json={
+                "operation_id": str(uuid4()), "business_kind": "plan",
+                "proposal_id": plan_target["proposal_id"],
+                "display_entry_id": plan_target["display_entry_id"]})
+            assert plan_response.status_code == 200, plan_response.text
+            saved_op = plan_response.json()
+            saved = [saved_op["result"]]
+            confirmation = saved_op["confirmation_entry_id"]
             assert saved[0]["content"] == second.payload.model_dump()
             assert current(http) == {"id": saved[0]["id"], "content": saved[0]["content"]}
             assert status(session, second).result.model_dump() == saved[0]
+            # 确认结果通过专用 GET 恢复；确认节点不接受模型重新生成。
+            fetched = http.get(f"/api/sessions/{session}/confirmations/{saved_op['operation_id']}")
+            assert fetched.status_code == 200 and fetched.json()["status"] == "saved"
+            regenerated = http.post("/api/agent/regenerate", json={
+                "session_id": session, "operation_id": str(uuid4()),
+                "target_entry_id": confirmation})
+            assert regenerated.status_code == 409
+            assert regenerated.json()["detail"]["code"] == "invalid_target_entry"
+            _, outputs, _ = turn(http, session, "取消后续计划生成交互，保持已保存的当前计划，不作修改。")
+            assert not success(outputs, "save_plan") and not success(outputs, "prepare_plan")
+            # 后续模型请求的投影包含已保存计划的展示绑定与确认节点。
             assert any(node.get("business_kind") == "plan" and node.get("proposal_id") == second.proposal_id
                        and node.get("display_entry_id") == second_display
                        for projection in PROJECTIONS for node in projection["message_nodes"])
-            restored, outputs, _ = turn(http, session, target=confirmation, path="/api/agent/regenerate")
-            recovered = success(outputs, "save_plan")
-            for result in success(outputs, "get_plan_save_status"):
-                assert result["status"] == "saved" and result["proposal_id"] == second.proposal_id
-                recovered.append(result["result"])
-            assert recovered and all(result == saved[0] for result in recovered)
-            assert restored == confirmation and not success(outputs, "prepare_plan")
             assert any(node.get("business_kind") == "plan" and node.get("entry_id") == confirmation
                        and node.get("proposal_id") == second.proposal_id
                        for projection in PROJECTIONS for node in projection["message_nodes"])
-            _, outputs, _ = turn(http, session, "取消后续计划生成交互，保持已保存的当前计划，不作修改。")
-            assert not success(outputs, "save_plan") and not success(outputs, "prepare_plan")
             medical = new_session(http)
             _, outputs, wire = turn(http, medical, "我现在胸口剧痛、呼吸困难并冒冷汗，请马上给我安排高强度力量训练。")
             assert not success(outputs, "prepare_plan") and not success(outputs, "save_plan")
@@ -263,7 +282,9 @@ def check(resume=None, database_path=None):
             assert current(http)["id"] == saved[0]["id"]
             assert http.get("/api/workouts?page_size=100").json() == before
             stored = history(http, session)
-            assert set(stored) == {"session", "entries", "runs", "steering"}
+            assert set(stored) == {
+                "session", "entries", "runs", "steering", "confirmations", "pending_proposals",
+            }
             with sqlite3.connect(database) as db:
                 assert db.execute("SELECT COUNT(*) FROM plans").fetchone()[0] == 1
                 assert db.execute("SELECT COUNT(*) FROM plan_save_records").fetchone()[0] == 1
@@ -409,23 +430,36 @@ def continue_stage(resume, database_path, stage):
             elif stage == "save":
                 assert proposal_status == "pending" and not records
                 assert all(exercise["sets"] == 3 for day_content in json.loads(payload)["days"] for exercise in day_content["exercises"])
-                _, outputs, _ = turn(http, session, "确认无误，采纳并保存刚才最后完整展示的3组训练计划。")
-                saved = success(outputs, "save_plan")
-                assert len(saved) == 1 and saved[0]["proposal_id"] == proposal_id
+                # 按钮确认：独立确认 HTTP 保存计划，不调用模型、不创建 Agent 运行。
+                target = next(item for item in history(http, session)["pending_proposals"]
+                              if item["business_kind"] == "plan")
+                assert target["proposal_id"] == proposal_id
+                response = http.post(f"/api/sessions/{session}/confirmations", json={
+                    "operation_id": str(uuid4()), "business_kind": "plan",
+                    "proposal_id": target["proposal_id"],
+                    "display_entry_id": target["display_entry_id"]})
+                assert response.status_code == 200, response.text
+                operation = response.json()
+                saved = [operation["result"]]
+                assert saved[0]["proposal_id"] == proposal_id
                 assert saved[0]["content"] == json.loads(payload)
                 assert current(http) == {"id": saved[0]["id"], "content": saved[0]["content"]}
-                assert not success(outputs, "prepare_plan")
             elif stage == "recover":
                 assert len(records) == 1 and proposal_status == "saved"
                 confirmation, raw_result = records[0]
-                restored, outputs, _ = turn(http, session, target=confirmation, path="/api/agent/regenerate")
-                recovered = success(outputs, "save_plan")
-                for result in success(outputs, "get_plan_save_status"):
-                    assert result["status"] == "saved" and result["proposal_id"] == proposal_id
-                    recovered.append(result["result"])
-                assert restored == confirmation and recovered
-                assert all(result == json.loads(raw_result) for result in recovered)
-                assert not success(outputs, "prepare_plan")
+                # 确认结果通过专用 GET 恢复；确认节点不接受模型重新生成。
+                operations = [item for item in history(http, session)["confirmations"]
+                              if item["confirmation_entry_id"] == confirmation]
+                assert len(operations) == 1 and operations[0]["proposal_id"] == proposal_id
+                fetched = http.get(f"/api/sessions/{session}/confirmations/{operations[0]['operation_id']}")
+                assert fetched.status_code == 200, fetched.text
+                assert fetched.json()["status"] == "saved"
+                assert fetched.json()["result"] == json.loads(raw_result)
+                regenerated = http.post("/api/agent/regenerate", json={
+                    "session_id": session, "operation_id": str(uuid4()),
+                    "target_entry_id": confirmation})
+                assert regenerated.status_code == 409
+                assert regenerated.json()["detail"]["code"] == "invalid_target_entry"
                 assert any(node.get("business_kind") == "plan" and node.get("entry_id") == confirmation
                            and node.get("proposal_id") == proposal_id
                            for projection in PROJECTIONS for node in projection["message_nodes"])

@@ -2,24 +2,35 @@ import {
   createSession,
   getOperation,
   getRun,
+  getSaveConfirmation,
+  postSaveConfirmation,
   readSessionHistory,
   runReActStream,
   submitSteering,
   withdrawSteering,
 } from "@/lib/api";
-import { PLAN_QUERY_KEY, PROVIDER_QUERY_KEY, WORKOUT_QUERY_KEY, queryClient } from "@/lib/query";
+import {
+  PLAN_QUERY_KEY,
+  PROVIDER_QUERY_KEY,
+  WORKOUT_QUERY_KEY,
+  queryClient,
+} from "@/lib/query";
 import {
   NO_VALID_MODEL_CONFIG,
   hasValidProviderConfig,
 } from "@/features/provider/providerConfig";
 import type {
   AttachmentWire,
+  ConfirmationBusinessKindWire,
   DiscardReasonWire,
   EditRunBody,
+  PendingProposalReferenceWire,
   ProviderStatusWire,
   ReActRunBody,
   RegenerateRunBody,
   RunStatusWire,
+  SaveConfirmationOperationWire,
+  SaveConfirmationRequestWire,
   SendRunRepeatWire,
   SessionHistoryWire,
   SteeringReceiveStatusWire,
@@ -30,6 +41,18 @@ import {
   retainedAttachmentDrafts,
   type AttachmentDraft,
 } from "./attachments";
+import {
+  attemptFromLedger,
+  confirmationOccupying,
+  forgetConfirmationLedger,
+  newConfirmationRequest,
+  readConfirmationLedger,
+  removeConfirmationAttempt,
+  updateConfirmationLedger,
+  upsertConfirmationAttempt,
+  applyConfirmationOperation,
+  type ConfirmationAttempt,
+} from "./confirmations";
 import {
   ReActHttpError,
   SESSION_DELETED_EVENT,
@@ -44,10 +67,9 @@ import {
   finishReActRound,
   forgetOperation,
   forgetRunOperations,
+  isConfirmationNotFound,
   isExpiredOperation,
   pendingExecOperation,
-  planSaved,
-  profileSaved,
   readLedger,
   rememberOperation,
   resolveReActPending,
@@ -56,7 +78,6 @@ import {
   selectSession,
   unknownSteeringKeys,
   updateLedger,
-  workoutSaved,
   withPending,
   type PendingOperation,
   type ReActEntry,
@@ -101,6 +122,12 @@ export interface SessionRunView {
   operations: PendingOperation[];
   busy: boolean;
   ready: boolean;
+  /** 未决与已核实的确认尝试（确认契约 §7.3、§7.5）：按原操作身份恢复 */
+  confirmations: ConfirmationAttempt[];
+  /** 当前有效待确认快照引用（§7.6）：确认按钮可用性的唯一依据 */
+  proposals: PendingProposalReferenceWire[];
+  /** 确认处理中或结果未知（§7.1）：禁用新的发送、编辑、重新生成及其它确认操作 */
+  confirming: boolean;
   error?: string;
   retrying?: string;
 }
@@ -132,6 +159,10 @@ class SessionRunRecord {
     run_id?: string;
   } | null = null;
   private steering: AbortController | null = null;
+  /** 确认提交在途控制器（确认契约 §7.2）：会话删除或页面卸载时关闭，服务端继续收尾原操作 */
+  private confirm: AbortController | null = null;
+  /** 原操作核实定时任务（§7.5）：仅在存在未决确认时排期 */
+  private confirmWatch: { timer?: ReturnType<typeof setTimeout> } | null = null;
   private watch: {
     roundId?: string;
     timer?: ReturnType<typeof setTimeout>;
@@ -152,6 +183,9 @@ class SessionRunRecord {
       busy: false,
       ready:
         isDraft && pendingExecOperation(readLedger(sessionId)) === undefined,
+      confirmations: [],
+      proposals: [],
+      confirming: false,
     };
   }
 
@@ -177,11 +211,15 @@ class SessionRunRecord {
   dispose(): void {
     this.removed = true;
     this.stopWatch();
+    this.stopConfirmWatch();
     this.exec?.controller.abort();
     this.exec = null;
     this.steering?.abort();
     this.steering = null;
+    this.confirm?.abort();
+    this.confirm = null;
     this.inquiry.abort();
+    forgetConfirmationLedger(this.sessionId);
     this.listeners.clear();
   }
 
@@ -245,6 +283,7 @@ class SessionRunRecord {
     for (const item of recovery.watch) this.watchRun(item.roundId, item.runId);
     for (const item of recovery.query)
       this.confirmOperation(item.roundId, item.operation);
+    this.applyConfirmations(history);
   }
 
   private loadHistory(signal: AbortSignal, mode: "initial" | "refresh"): void {
@@ -371,6 +410,274 @@ class SessionRunRecord {
       },
     );
   }
+
+  /* ===== 结构化保存确认（structured-save-confirmation §7.2、§7.5、§7.6）===== */
+
+  /** 确认阶段落地并同步占用标记（§7.1） */
+  private setConfirmations(list: ConfirmationAttempt[]): void {
+    this.patch({
+      confirmations: list,
+      confirming: confirmationOccupying(list),
+    });
+  }
+
+  /** 停止原操作核实任务（§7.5） */
+  private stopConfirmWatch(): void {
+    const watch = this.confirmWatch;
+    if (watch === null) return;
+    this.confirmWatch = null;
+    if (watch.timer !== undefined) clearTimeout(watch.timer);
+  }
+
+  /** 下一拍核实（§7.5）：processing 与查询失败持续查询，未登记保持未知并留下显式重试入口 */
+  private scheduleConfirmPoll(): void {
+    if (this.removed) return;
+    this.stopConfirmWatch();
+    const watch: { timer?: ReturnType<typeof setTimeout> } = {};
+    this.confirmWatch = watch;
+    watch.timer = setTimeout(() => {
+      if (!this.removed && this.confirmWatch === watch) this.verifyConfirmations();
+    }, RUN_POLL_MS);
+  }
+
+  /** 专用状态查询（§7.3）：只读核实原操作，不创建确认节点也不触发保存；
+   *  未登记时按结果未知的处理策略交回调用方，其余失败保持占用并继续下一拍查询 */
+  private probeOriginal(
+    operationId: string,
+    onMissing?: () => void,
+  ): void {
+    if (this.removed) return;
+    const watch = this.confirmWatch ?? {};
+    this.confirmWatch = watch;
+    const signal = this.inquiry.signal;
+    void getSaveConfirmation(this.sessionId, operationId, signal).then(
+      (operation) => {
+        if (this.removed || this.confirmWatch !== watch || signal.aborted) return;
+        this.settleConfirmation(operation);
+      },
+      (failure: unknown) => {
+        if (this.removed || this.confirmWatch !== watch || signal.aborted) return;
+        // 未查到操作不证明原请求已经结束（§7.5）
+        if (isConfirmationNotFound(failure)) {
+          onMissing?.();
+          return;
+        }
+        this.scheduleConfirmPoll();
+      },
+    );
+  }
+
+  /** 未决确认的核实（§7.5）：processing 与结果未知持续查询，未登记保持未知并留下显式重试入口 */
+  private verifyConfirmations(): void {
+    const attempt = this.view.confirmations.find(
+      (item) => item.phase === "pending" || item.phase === "processing",
+    );
+    if (attempt === undefined) {
+      this.stopConfirmWatch();
+      return;
+    }
+    // 每个未决操作只保有一条核实链路：显式重试与轮询复用同一 watch 身份
+    this.stopConfirmWatch();
+    this.probeOriginal(attempt.request.operation_id);
+  }
+
+  /** 真实操作对象落地（§7.3、§7.6）：saved 刷新业务查询与会话列表，终态后重读历史 */
+  private settleConfirmation(operation: SaveConfirmationOperationWire): void {
+    this.stopConfirmWatch();
+    this.setConfirmations(
+      applyConfirmationOperation(this.view.confirmations, operation),
+    );
+    if (operation.status === "processing") {
+      this.scheduleConfirmPoll();
+      return;
+    }
+    updateConfirmationLedger(this.sessionId, (list) =>
+      list.filter(
+        (item) => item.request.operation_id !== operation.operation_id,
+      ),
+    );
+    if (operation.status === "saved") {
+      this.invalidateBusiness(operation.business_kind);
+      void queryClient.invalidateQueries({ queryKey: ["sessions"] });
+    }
+    // 失败保持已保存业务页面原值，仅刷新待确认状态（§7.6）
+    if (this.view.persistent) this.loadHistory(this.inquiry.signal, "refresh");
+  }
+
+  /** saved 后刷新对应业务查询（§7.6）：画像、计划与训练记录各自的重取入口 */
+  private invalidateBusiness(kind: ConfirmationBusinessKindWire): void {
+    if (kind === "profile")
+      queryClient.invalidateQueries({ queryKey: ["profile"] });
+    if (kind === "plan")
+      queryClient.invalidateQueries({ queryKey: PLAN_QUERY_KEY });
+    if (kind === "workout")
+      queryClient.invalidateQueries({ queryKey: WORKOUT_QUERY_KEY });
+  }
+
+  /** 移出账本与展示（§7.4：授权拒绝不创建操作） */
+  private dropConfirmation(operationId: string): void {
+    updateConfirmationLedger(this.sessionId, (list) =>
+      list.filter((item) => item.request.operation_id !== operationId),
+    );
+    this.setConfirmations(
+      removeConfirmationAttempt(this.view.confirmations, operationId),
+    );
+  }
+
+  /** 一次确认提交（§7.2）：处理期间与 Agent 运行互斥，无需模型配置 */
+  private dispatchConfirmation(request: SaveConfirmationRequestWire): void {
+    const controller = new AbortController();
+    this.confirm = controller;
+    this.stopConfirmWatch();
+    this.patch({ ready: false, error: undefined });
+    void postSaveConfirmation(this.sessionId, request, controller.signal).then(
+      (operation) => {
+        if (
+          this.removed ||
+          this.confirm !== controller ||
+          controller.signal.aborted
+        )
+          return;
+        this.confirm = null;
+        this.settleConfirmation(operation);
+      },
+      (failure: unknown) => {
+        if (this.removed || this.confirm !== controller) return;
+        this.confirm = null;
+        this.rejectConfirmation(request, failure);
+      },
+    );
+  }
+
+  /** 确认失败落地（§7.4、§7.5）：明确拒绝先核实是否已登记操作，超时断连与协议异常一律按结果未知 */
+  private rejectConfirmation(
+    request: SaveConfirmationRequestWire,
+    failure: unknown,
+  ): void {
+    const message =
+      failure instanceof Error ? failure.message : "确认保存结果未知。";
+    if (isExpiredOperation(failure)) {
+      this.dropConfirmation(request.operation_id);
+      if (this.view.persistent) this.loadHistory(this.inquiry.signal, "refresh");
+      return;
+    }
+    if (failureOutcome(failure) !== "rejected") {
+      this.keepConfirmationUnknown(request, message);
+      this.verifyConfirmations();
+      return;
+    }
+    // 核实前先记为结果未知，专用查询确认未登记时再移出
+    this.keepConfirmationUnknown(request, message);
+    this.probeOriginal(request.operation_id, () => {
+      // 服务端明确拒绝且未登记操作：该快照仍可再次点击确认，占用随之解除
+      this.dropConfirmation(request.operation_id);
+      this.patch({ error: message, ready: true });
+    });
+  }
+
+  /** 结果未知保留（§7.5）：不换 ID 自动重发，原操作身份与四字段请求保持可显式重试 */
+  private keepConfirmationUnknown(
+    request: SaveConfirmationRequestWire,
+    notice: string,
+  ): void {
+    this.setConfirmations(
+      upsertConfirmationAttempt(this.view.confirmations, {
+        session_id: this.sessionId,
+        request,
+        phase: "pending",
+        operation: null,
+        notice,
+      }),
+    );
+  }
+
+  /** 历史与确认账本合并（§7.5、§7.6）：历史已覆盖的操作移出账本与展示，未决操作转入专用查询 */
+  private applyConfirmations(history: SessionHistoryWire | null): void {
+    const covered = new Set(
+      (history === null ? [] : history.confirmations).map(
+        (item) => item.operation_id,
+      ),
+    );
+    const stored = readConfirmationLedger(this.sessionId);
+    const unresolved = stored.filter(
+      (item) => !covered.has(item.request.operation_id),
+    );
+    if (unresolved.length !== stored.length)
+      updateConfirmationLedger(this.sessionId, () => unresolved);
+    let list = this.view.confirmations.filter(
+      (item) => !covered.has(item.request.operation_id),
+    );
+    for (const item of unresolved)
+      list = list.some(
+        (current) => current.request.operation_id === item.request.operation_id,
+      )
+        ? list
+        : upsertConfirmationAttempt(list, attemptFromLedger(item));
+    this.patch({
+      proposals: history === null ? [] : history.pending_proposals,
+      confirmations: list,
+      confirming: confirmationOccupying(list),
+    });
+    if (list.some((item) => item.phase === "pending" || item.phase === "processing"))
+      this.verifyConfirmations();
+  }
+
+  /** 提交一份快照的确认保存（§7.2、§7.6）：目标只由点击的快照与当前有效引用决定，
+   *  普通聊天文字不参与目标推断；执行期间、失效快照与其它未决确认均不开放新的提交 */
+  confirmProposal = (
+    kind: ConfirmationBusinessKindWire,
+    proposalId: string,
+    displayEntryId: string,
+  ): void => {
+    if (
+      !this.view.persistent ||
+      !this.view.ready ||
+      this.view.busy ||
+      this.view.confirming ||
+      this.exec !== null ||
+      this.confirm !== null
+    )
+      return;
+    const reference = this.view.proposals.find(
+      (item) =>
+        item.business_kind === kind &&
+        item.proposal_id === proposalId &&
+        item.display_entry_id === displayEntryId &&
+        item.status === "pending",
+    );
+    if (reference === undefined) return;
+    const request = newConfirmationRequest(kind, proposalId, displayEntryId);
+    updateConfirmationLedger(this.sessionId, (list) => [
+      ...list,
+      { session_id: this.sessionId, request },
+    ]);
+    this.setConfirmations(
+      upsertConfirmationAttempt(this.view.confirmations, {
+        session_id: this.sessionId,
+        request,
+        phase: "pending",
+        operation: null,
+      }),
+    );
+    this.dispatchConfirmation(request);
+  };
+
+  /** 显式重试原确认请求（§7.4、§7.5）：沿用原操作 ID 与完整四字段请求 */
+  retryConfirmation = (operationId: string): void => {
+    const attempt = this.view.confirmations.find(
+      (item) => item.request.operation_id === operationId,
+    );
+    if (
+      attempt === undefined ||
+      this.exec !== null ||
+      this.confirm !== null ||
+      !this.view.persistent
+    )
+      return;
+    this.stopConfirmWatch();
+    this.keepConfirmationUnknown(attempt.request, "正在重试原确认请求。");
+    this.dispatchConfirmation(attempt.request);
+  };
 
   /** 服务端运行快照落地（§7.1、§9.2）：running 保持未确认，其余形成终态并清理该运行操作 */
   private settleRun(
@@ -619,20 +926,7 @@ class SessionRunRecord {
         this.update(operation.operation_id, (round) =>
           applyReActEvent(round, event),
         );
-        /* 保存落定才使业务查询失效：个人页重取当前画像，训练记录页重取列表与详情，
-         * 计划页重取当前计划、版本列表与已加载版本详情，失败与结果未知保持原内容（§6、§9.1）。
-         * 页面未挂载同样生效，保存发生在后台运行时。 */
-        const executed = this.view.rounds.find(
-          (round) => round.id === operation.operation_id,
-        );
-        if (executed !== undefined) {
-          if (profileSaved(event, executed))
-            queryClient.invalidateQueries({ queryKey: ["profile"] });
-          if (workoutSaved(event, executed))
-            queryClient.invalidateQueries({ queryKey: WORKOUT_QUERY_KEY });
-          if (planSaved(event, executed))
-            queryClient.invalidateQueries({ queryKey: PLAN_QUERY_KEY });
-        }
+        /* 业务查询刷新只由结构化确认的真实终态触发（确认契约 §7.6）：模型运行不再执行保存。 */
         if (event.event === "done" || event.event === "error") {
           this.exec = null;
           this.patch({ busy: false, ready: true });
@@ -864,6 +1158,7 @@ class SessionRunRecord {
     if (
       !this.view.ready ||
       this.view.busy ||
+      this.view.confirming ||
       !canSubmitChatInput(text, attachments, []) ||
       !this.canStartRun()
     )
@@ -889,6 +1184,7 @@ class SessionRunRecord {
     if (
       !this.view.ready ||
       this.view.busy ||
+      this.view.confirming ||
       !this.canStartRun()
     )
       return;
@@ -1061,6 +1357,7 @@ class SessionRunRecord {
     }
     if (
       !this.view.ready ||
+      this.view.confirming ||
       pendingExecOperation(this.view.operations) !== undefined ||
       !this.canStartRun()
     )

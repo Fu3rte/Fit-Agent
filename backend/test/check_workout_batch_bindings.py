@@ -4,12 +4,34 @@ from uuid import uuid4
 
 import pytest
 
-from app.ai.messages import AssistantMessage, TextContent, ToolCall, ToolResultMessage, UserMessage
-from app.domain.business.errors import BusinessError, ProfileConfirmationInvalid, WorkoutConfirmationInvalid
-from app.domain.business.models import ProfileProposalArguments, ProfileSaveArguments, WorkoutContent, WorkoutProposalArguments, WorkoutSaveArguments
+from app.ai.messages import (
+    AssistantMessage,
+    TextContent,
+    ToolCall,
+    ToolResultMessage,
+    UserMessage,
+)
+from app.domain.business.errors import (
+    BusinessError,
+    ProfileConfirmationInvalid,
+    WorkoutConfirmationInvalid,
+)
+from app.domain.business.models import (
+    ProfileProposalArguments,
+    WorkoutContent,
+    WorkoutProposalArguments,
+)
 from app.domain.session.errors import SessionConflict
 from app.domain.session.models import SendCommand, SendRequest
-from test.check_profile_confirmation import Fixture, SYSTEM, USAGE, new_id, now_ms, payload
+from test.check_profile_confirmation import (
+    SYSTEM,
+    USAGE,
+    Fixture,
+    count_rows,
+    new_id,
+    now_ms,
+    payload,
+)
 from test.check_workout_service_http import CONTENT
 from test.regression_support import temporary_root
 
@@ -78,16 +100,6 @@ async def batch(f, order, mutation=None):
     return session, run, context, proposals, displays
 
 
-async def confirm(f, session):
-    outcome = await f.service.accept_send(SendCommand(operation_id=new_id(), session_id=session,
-        request=SendRequest(text="确认指定内容")), system_message=SYSTEM)
-    run = outcome.run
-    source = await f.append(session, run.id, run.request_entry_id,
-        assistant([TextContent(type="text", text="执行确认保存")]))
-    await f.service.finish_run(session, run.id, "completed")
-    return f.context(session, run.request_entry_id, source)
-
-
 async def valid(order):
     f = await Fixture(ROOT / (uuid4().hex + ".db")).seeded()
     try:
@@ -95,15 +107,17 @@ async def valid(order):
         workout = proposals["prepare_workout"]
         await f.business.bind_workout_display_entry(workout.proposal_id, displays["prepare_workout"])
         await f.service.finish_run(session, run.id, "completed")
-        context = await confirm(f, session)
-        saved = await f.business.save_workout(context, WorkoutSaveArguments(proposal_id=workout.proposal_id,
-            display_entry_id=displays["prepare_workout"], confirmation_entry_id=context.request_entry_id))
+        # 合法保存只经独立确认入口：同一批次的两份快照分别由各自按钮确认。
+        workout_op = await f.confirm(
+            {"session": session, "proposal": workout.proposal_id,
+             "display": displays["prepare_workout"]}, business_kind="workout")
+        assert workout_op.status == "saved", workout_op
         profile = proposals["prepare_profile_update"]
-        context = await confirm(f, session)
-        profile_saved = await f.business.save_profile_update(context, ProfileSaveArguments(
-            proposal_id=profile.proposal_id, display_entry_id=displays["prepare_profile_update"],
-            confirmation_entry_id=context.request_entry_id))
-        assert saved.version == profile_saved.version == 1
+        profile_op = await f.confirm(
+            {"session": session, "proposal": profile.proposal_id,
+             "display": displays["prepare_profile_update"]}, business_kind="profile")
+        assert profile_op.status == "saved", profile_op
+        assert workout_op.result.version == profile_op.result.version == 1
         return {"order": order, "workout_version": 1, "profile_version": 1}
     finally:
         await f.close()
@@ -116,17 +130,14 @@ async def invalid(mutation):
             with pytest.raises(SessionConflict):
                 await batch(f, ["get_profile", "get_workout", "prepare_workout"], mutation)
             return "user:session_conflict"
-        session, run, context, proposals, displays = await batch(f,
-            ["get_profile", "get_workout", "prepare_workout", "prepare_profile_update"], mutation)
-        with pytest.raises(WorkoutConfirmationInvalid):
-            await f.business.bind_workout_display_entry(proposals["prepare_workout"].proposal_id,
-                                                        displays["prepare_workout"])
-        # 两业务共享检查按各自错误类别拒绝真实持久化的非法路径。
-        entries = f.business._entries(await f.service.get_current_branch(session))
-        with pytest.raises(ProfileConfirmationInvalid):
-            f.business._require_prepare_result(entries[displays["prepare_profile_update"]],
-                entries[context.source_entry_id], entries)
-        assert await f.repository.get_workout_save_record(proposals["prepare_workout"].proposal_id) is None
+        # 非法批次结果路径在展示绑定阶段就地拒绝：配对、角色与完整内容核验先于保存，零业务写入。
+        order = ["get_profile", "get_workout", "prepare_workout", "prepare_profile_update"]
+        with pytest.raises((ProfileConfirmationInvalid, WorkoutConfirmationInvalid)):
+            session, run, context, proposals, displays = await batch(f, order, mutation)
+            await f.business.bind_workout_display_entry(
+                proposals["prepare_workout"].proposal_id, displays["prepare_workout"])
+        assert await count_rows(f.database, "workout_save_records") == 0
+        assert await count_rows(f.database, "profile_save_records") == 0
         return mutation
     finally:
         await f.close()

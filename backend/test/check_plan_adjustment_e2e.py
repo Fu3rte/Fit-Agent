@@ -319,16 +319,20 @@ def stage_B(root: Path, state: dict, http) -> None:
         support.OBS, "确认无误，采纳并保存刚才最后完整展示的这份计划。"
     )
     support.dump(root, "B-save.json", run2)
-    saves = success_named(run2, "save_plan")
-    assert len(saves) == 1, [(call["name"], call["is_error"]) for call in support.tool_calls(run2)]
-    saved = json.loads(saves[0]["content"])
-    arguments = saves[0]["arguments"]
+    # 模型只准备/展示：普通确认文字不产生保存授权，模型注册表也不提供保存工具。
+    assert not success_named(run2, "save_plan"), [
+        (call["name"], call["is_error"]) for call in support.tool_calls(run2)]
+    display = display_for(session, proposal["proposal_id"])
+    target = pending_target(http, session, "plan", proposal["proposal_id"])
+    assert target["display_entry_id"] == display, target
+    response = confirm(http, session, "plan", target["proposal_id"], target["display_entry_id"])
+    assert response.status_code == 200, response.text
+    operation = response.json()
+    assert operation["status"] == "saved", operation
+    saved = operation["result"]
     assert saved["proposal_id"] == proposal["proposal_id"], (saved, proposal["proposal_id"])
     assert saved["content"] == proposal["payload"], "保存内容与准备 payload 不一致"
     assert saved["created_at"] == saved["saved_at"], saved
-    assert arguments["proposal_id"] == proposal["proposal_id"], arguments
-    display = display_for(session, proposal["proposal_id"])
-    assert arguments["display_entry_id"] == display, arguments
 
     after_plans = support.list_plans(http)
     assert len(after_plans) == len(before_plans) + 1, after_plans
@@ -342,7 +346,7 @@ def stage_B(root: Path, state: dict, http) -> None:
 
     entries = support.call(support.interface.app.state.session_service.get_current_branch(session))
     ids = [entry.id for entry in entries]
-    confirmation = arguments["confirmation_entry_id"]
+    confirmation = operation["confirmation_entry_id"]
     assert display in ids and confirmation in ids, (display, confirmation)
     assert ids.index(display) < ids.index(confirmation), "确认节点不在展示之后"
     confirmation_message = entry_message(session, confirmation)
@@ -407,9 +411,17 @@ def stage_C(root: Path, state: dict, http) -> None:
 
     run3 = support.send_and_wait(support.OBS, "确认保存这份训练记录。")
     support.dump(root, "C-workout-save.json", run3)
-    saved_workout = success_named(run3, "save_workout") + success_named(run3, "update_workout")
-    assert len(saved_workout) == 1, [call["name"] for call in support.tool_calls(run3)]
-    workout_result = json.loads(saved_workout[0]["content"])
+    # 模型只准备/展示：普通确认文字不产生保存授权，模型注册表也不提供保存工具。
+    assert not success_named(run3, "save_workout") and not success_named(run3, "update_workout"), [
+        call["name"] for call in support.tool_calls(run3)]
+    workout_target = pending_target(http, session, "workout")
+    workout_response = confirm(
+        http, session, "workout", workout_target["proposal_id"], workout_target["display_entry_id"]
+    )
+    assert workout_response.status_code == 200, workout_response.text
+    workout_operation = workout_response.json()
+    assert workout_operation["status"] == "saved", workout_operation
+    workout_result = workout_operation["result"]
     assert workout_result["performed_on"] == today, workout_result
 
     today_records = support.list_workouts(http, query=f"date_from={today}&date_to={today}")["items"]
@@ -437,9 +449,16 @@ def stage_C(root: Path, state: dict, http) -> None:
 
     run5 = support.send_and_wait(support.OBS, "确认，保存重新调整后的这份计划。")
     support.dump(root, "C-save.json", run5)
-    saves = success_named(run5, "save_plan")
-    assert len(saves) == 1, [call["name"] for call in support.tool_calls(run5)]
-    saved = json.loads(saves[0]["content"])
+    # 模型只准备/展示：普通确认文字不产生保存授权。
+    assert not success_named(run5, "save_plan"), [call["name"] for call in support.tool_calls(run5)]
+    display_c = display_for(session, proposal_c2["proposal_id"])
+    target_c = pending_target(http, session, "plan", proposal_c2["proposal_id"])
+    assert target_c["display_entry_id"] == display_c, target_c
+    response_c = confirm(http, session, "plan", target_c["proposal_id"], target_c["display_entry_id"])
+    assert response_c.status_code == 200, response_c.text
+    operation_c = response_c.json()
+    assert operation_c["status"] == "saved", operation_c
+    saved = operation_c["result"]
     assert saved["proposal_id"] == proposal_c2["proposal_id"]
     assert saved["content"] == proposal_c2["payload"], "保存内容与新展示不一致"
     after_plans = support.list_plans(http)
@@ -492,6 +511,30 @@ def session_history(http, session: str) -> dict:
     response = http.get(f"/api/sessions/{session}/history")
     assert response.status_code == 200, response.text
     return response.json()
+
+
+def confirm(http, session: str, business_kind: str, proposal_id: str, display_entry_id: str):
+    # 合法保存只走独立确认 HTTP：真实四字段请求，后端从已绑定快照取得业务事实。
+    return http.post(
+        f"/api/sessions/{session}/confirmations",
+        json={
+            "operation_id": str(uuid4()),
+            "business_kind": business_kind,
+            "proposal_id": proposal_id,
+            "display_entry_id": display_entry_id,
+        },
+    )
+
+
+def pending_target(http, session: str, business_kind: str, proposal_id: str | None = None) -> dict:
+    items = [
+        item for item in session_history(http, session)["pending_proposals"]
+        if item["business_kind"] == business_kind
+    ]
+    if proposal_id is not None:
+        items = [item for item in items if item["proposal_id"] == proposal_id]
+    assert len(items) == 1, items
+    return items[0]
 
 
 def stage_D1(root: Path, state: dict, http) -> None:
@@ -566,9 +609,16 @@ def stage_D2(root: Path, state: dict, http) -> None:
     plans_before = support.list_plans(http)
     run = support.send_and_wait(support.OBS, "确认，保存这份最终计划。")
     support.dump(root, "D-save.json", run)
-    saves = success_named(run, "save_plan")
-    assert len(saves) == 1, [call["name"] for call in support.tool_calls(run)]
-    saved = json.loads(saves[0]["content"])
+    # 模型只准备/展示：普通确认文字不产生保存授权。
+    assert not success_named(run, "save_plan"), [call["name"] for call in support.tool_calls(run)]
+    display_d = display_for(session, state["proposal_d"])
+    target_d = pending_target(http, session, "plan", state["proposal_d"])
+    assert target_d["display_entry_id"] == display_d, target_d
+    response_d = confirm(http, session, "plan", target_d["proposal_id"], target_d["display_entry_id"])
+    assert response_d.status_code == 200, response_d.text
+    operation_d = response_d.json()
+    assert operation_d["status"] == "saved", operation_d
+    saved = operation_d["result"]
     assert saved["proposal_id"] == state["proposal_d"]
     after = support.list_plans(http)
     assert len(after) == len(plans_before) + 1, "上传安排额外产生了历史版本"
@@ -631,38 +681,22 @@ def stage_D_check(root: Path, state: dict, http) -> None:
 
 
 def stage_F(root: Path, state: dict, http) -> None:
-    from app.domain.business.models import PlanSaveArguments
-
     session = state["session_a"]
     saved = state["saved_c"]
-    save_run = json.loads((root / "C-save.json").read_text(encoding="utf-8"))
-    save_calls = [
-        call
-        for call in support.tool_calls(save_run)
-        if call["name"] == "save_plan" and call["is_error"] is False
-    ]
-    assert save_calls, "缺少原保存调用"
-    arguments = save_calls[0]["arguments"]
-    context = BusinessContext(
-        timezone="Asia/Shanghai",
-        business_date=support.business_today().isoformat(),
-        session_id=session,
-        run_id=str(uuid4()),
-        request_entry_id=str(uuid4()),
-        source_entry_id=str(uuid4()),
-    )
     plans_before = support.list_plans(http)
-    repeat = support.call(
-        support.interface.app.state.business.save_plan(
-            context, PlanSaveArguments.model_validate(arguments)
-        )
-    ).model_dump()
+    # 同一快照重复确认：返回原固定结果，计划版本数不变，不新增业务版本或确认消息。
+    display = display_for(session, saved["proposal_id"])
+    response = confirm(http, session, "plan", saved["proposal_id"], display)
+    assert response.status_code == 200, response.text
+    operation = response.json()
+    assert operation["status"] == "saved", operation
+    repeat = operation["result"]
     assert repeat == saved, (repeat, saved)
-    assert len(support.list_plans(http)) == len(plans_before), "重复保存新增了计划版本"
+    assert len(support.list_plans(http)) == len(plans_before), "重复确认新增了计划版本"
     status = plan_status(session, saved["proposal_id"])
     assert status["status"] == "saved" and status["result"] == saved, status
-    support.dump(root, "F.json", {"repeat": repeat, "status": status, "arguments": arguments})
-    print("PASS F: 同一快照重复保存返回原固定结果，计划版本数不变，状态查询返回 saved 与原完整结果")
+    support.dump(root, "F.json", {"repeat": repeat, "status": status, "operation": operation})
+    print("PASS F: 同一快照重复确认返回原固定结果，计划版本数不变，状态查询返回 saved 与原完整结果")
 
 
 def stage_G(root: Path, state: dict, http) -> None:
@@ -798,20 +832,6 @@ def stage_D2_check(root: Path, state: dict, http) -> None:
     print("PASS D2: 确认后仅保存最终调整版本，原上传安排未成为额外历史版本")
 
 
-def business_error_codes(run: dict) -> list[tuple[str, str, str]]:
-    found = []
-    for item in support.tool_calls(run):
-        if item["is_error"] is not True or not item["content"]:
-            continue
-        try:
-            payload = json.loads(item["content"])
-        except json.JSONDecodeError:
-            continue
-        if isinstance(payload, dict) and payload.get("code"):
-            found.append((item["name"], payload["code"], item["content"]))
-    return found
-
-
 def profile_status(http) -> dict:
     return http.get("/api/profile").json()
 
@@ -855,9 +875,16 @@ def stage_E1_profile(root: Path, state: dict, http) -> None:
     ]
     run2 = support.send_and_wait(support.OBS, "确认，保存画像。")
     support.dump(root, "E1-profile-save.json", run2)
-    assert success_named(run2, "save_profile_update"), [
+    # 模型只准备/展示：普通确认文字不产生保存授权，模型注册表也不提供保存工具。
+    assert not success_named(run2, "save_profile_update"), [
         call["name"] for call in support.tool_calls(run2)
     ]
+    profile_target = pending_target(http, session, "profile")
+    profile_response = confirm(
+        http, session, "profile", profile_target["proposal_id"], profile_target["display_entry_id"]
+    )
+    assert profile_response.status_code == 200, profile_response.text
+    assert profile_response.json()["status"] == "saved", profile_response.text
     profile_after = profile_status(http)
     assert profile_after["version"] == profile_before["version"] + 1, profile_after
     assert profile_after["content"]["goal"] == "提升力量与围度", profile_after["content"]
@@ -874,27 +901,18 @@ def stage_E1_confirm(root: Path, state: dict, http) -> None:
     before = support.current_plan(http)
     plans = support.list_plans(http)
     profile = profile_status(http)
-    run = support.send_and_wait(support.OBS, "确认，采纳并保存这份计划。")
-    support.dump(root, "E1-confirm.json", run)
-    codes = business_error_codes(run)
-    reprepared = success_named(run, "prepare_plan_adjustment")
-    saved = success_named(run, "save_plan")
-    assert not saved, "依据变化后仍直接保存"
-    conflict = next((entry for entry in codes if entry[1] == "profile_version_conflict"), None)
-    if conflict is not None:
-        outcome = {"kind": "conflict", "code": conflict[1], "text": conflict[2]}
-    else:
-        assert reprepared, (codes, [call["name"] for call in support.tool_calls(run)])
-        proposal = json.loads(reprepared[0]["content"])
-        assert proposal["proposal_id"] != state["proposal_e1"], "未产生新方案"
-        assert plan_status(session, state["proposal_e1"])["status"] == "invalidated"
-        assert proposal["base_profile_version"] == profile["version"], proposal
-        outcome = {"kind": "reprepared", "proposal_id": proposal["proposal_id"]}
+    # 依据变化后点击原快照的确认按钮：后端在提交事务内检出冲突，零写入，不调用模型。
+    display = display_for(session, state["proposal_e1"])
+    response = confirm(http, session, "plan", state["proposal_e1"], display)
+    assert response.status_code == 409, response.text
+    detail = response.json()["detail"]
+    assert detail["code"] == "plan_version_conflict", detail
+    outcome = {"kind": "conflict", "code": detail["code"], "text": detail["message"]}
     assert support.current_plan(http) == before, "依据变化后覆盖了当前计划"
     assert [r["id"] for r in support.list_plans(http)] == [r["id"] for r in plans], "依据变化后新增了版本"
     assert profile_status(http)["version"] == profile["version"], "确认过程改动了画像"
     state["e1_outcome"] = outcome
-    support.dump(root, "E1.json", {"detail": outcome, "codes": codes, "profile": profile})
+    support.dump(root, "E1.json", {"detail": outcome, "profile": profile})
     print(f"PASS E1-confirm: 画像依据变化后未覆盖当前业务数据；实际行为={outcome['kind']}")
 
 
@@ -933,9 +951,16 @@ def stage_E2_plan(root: Path, state: dict, http) -> None:
     proposal, _ = prepare_success(run1)
     run2 = support.send_and_wait(support.OBS, "确认，保存这份计划。")
     support.dump(root, "E2-plan-save.json", run2)
-    saves = success_named(run2, "save_plan")
-    assert len(saves) == 1, [call["name"] for call in support.tool_calls(run2)]
-    saved = json.loads(saves[0]["content"])
+    # 模型只准备/展示：普通确认文字不产生保存授权。
+    assert not success_named(run2, "save_plan"), [call["name"] for call in support.tool_calls(run2)]
+    display = display_for(session, proposal["proposal_id"])
+    target = pending_target(http, session, "plan", proposal["proposal_id"])
+    assert target["display_entry_id"] == display, target
+    response = confirm(http, session, "plan", target["proposal_id"], target["display_entry_id"])
+    assert response.status_code == 200, response.text
+    operation = response.json()
+    assert operation["status"] == "saved", operation
+    saved = operation["result"]
     assert saved["proposal_id"] == proposal["proposal_id"]
     after = support.list_plans(http)
     assert len(after) == len(plans) + 1 and after[0]["id"] == saved["id"], after
@@ -949,26 +974,17 @@ def stage_E2_confirm(root: Path, state: dict, http) -> None:
     support.open_session(session)
     before = support.current_plan(http)
     plans = support.list_plans(http)
-    run = support.send_and_wait(support.OBS, "确认，采纳并保存这份计划。")
-    support.dump(root, "E2-confirm.json", run)
-    codes = business_error_codes(run)
-    reprepared = success_named(run, "prepare_plan_adjustment")
-    saved = success_named(run, "save_plan")
-    assert not saved, "依据变化后仍直接保存"
-    conflict = next((entry for entry in codes if entry[1] == "plan_version_conflict"), None)
-    if conflict is not None:
-        outcome = {"kind": "conflict", "code": conflict[1], "text": conflict[2]}
-    else:
-        assert reprepared, (codes, [call["name"] for call in support.tool_calls(run)])
-        proposal = json.loads(reprepared[0]["content"])
-        assert proposal["proposal_id"] != state["proposal_e2"], "未产生新方案"
-        assert plan_status(session, state["proposal_e2"])["status"] == "invalidated"
-        assert proposal["base_plan_id"] == before["id"], proposal
-        outcome = {"kind": "reprepared", "proposal_id": proposal["proposal_id"]}
+    # 依据变化后点击原快照的确认按钮：后端在提交事务内检出冲突，零写入，不调用模型。
+    display = display_for(session, state["proposal_e2"])
+    response = confirm(http, session, "plan", state["proposal_e2"], display)
+    assert response.status_code == 409, response.text
+    detail = response.json()["detail"]
+    assert detail["code"] == "plan_version_conflict", detail
+    outcome = {"kind": "conflict", "code": detail["code"], "text": detail["message"]}
     assert support.current_plan(http) == before, "依据变化后覆盖了当前计划"
     assert [r["id"] for r in support.list_plans(http)] == [r["id"] for r in plans], "依据变化后新增了版本"
     state["e2_outcome"] = outcome
-    support.dump(root, "E2.json", {"detail": outcome, "codes": codes})
+    support.dump(root, "E2.json", {"detail": outcome})
     print(f"PASS E2-confirm: 当前计划依据变化后未覆盖业务数据；实际行为={outcome['kind']}")
 
 

@@ -1,15 +1,10 @@
-import asyncio
 import json
 from collections.abc import Awaitable, Callable
 from typing import TypeVar
 
 from pydantic import ConfigDict
 
-from app.agent.tool import (
-    AgentToolResult,
-    BeforeToolCallContext,
-    BeforeToolCallResult,
-)
+from app.agent.tool import AgentToolResult
 from app.ai.messages import TextContent
 from app.domain.business.errors import BusinessError
 from app.domain.business.models import BusinessContext, BusinessModel
@@ -47,22 +42,6 @@ def business_result(
     if on_success is not None:
         on_success(response)
     return envelope(response.model_dump())
-
-
-async def check_business_permission(
-    context: BeforeToolCallContext, authorize: Callable, call: MainLoopCall,
-) -> BeforeToolCallResult | None:
-    if not isinstance(context.trusted_context, FrozenBusinessContext):
-        raise TypeError("保存工具缺少可信业务上下文绑定")
-    try:
-        await asyncio.to_thread(
-            call, authorize(context.trusted_context, context.arguments)
-        )
-    except BusinessError as error:
-        return BeforeToolCallResult(
-            block=True, reason=json.dumps(error.detail(), ensure_ascii=False)
-        )
-    return None
 
 
 def unbound(tool_call_id, params, signal, on_update) -> AgentToolResult:

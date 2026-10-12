@@ -96,6 +96,9 @@ class SessionRepository(Protocol):
 
     async def get_operation(self, operation_id: str) -> SessionOperation | None: ...
 
+    # 聊天与确认入口共享操作 ID 命名空间：确认账本占用同一 ID 时视为冲突。
+    async def confirmation_operation_exists(self, operation_id: str) -> bool: ...
+
     async def insert_operation_invalidation(
         self, operation_id: str, session_id: str
     ) -> None: ...

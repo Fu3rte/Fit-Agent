@@ -53,7 +53,10 @@ async def seed_tool_chain(path: Path, huge: int, retained: int) -> dict:
     try:
         session_id = await fixture.session()
         chain = await propose(fixture, session_id, prepare_arguments(None, payload()))
-        save = await fixture.service_save(chain)
+        # 合法保存只走独立确认入口：真实受理登记确认节点与操作后直接调用业务保存。
+        operation = await fixture.confirm(chain)
+        assert operation.status == "saved", operation
+        save = operation.result
         assert save.version == 1
         before = await fixture.profile_state()
         assert before == {"version": 1, "profile_rows": 1, "record_rows": 1}, before

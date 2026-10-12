@@ -2,13 +2,15 @@ import type {
   HistoryEntryWire,
   HistoryRunWire,
   HistorySteeringWire,
+  SaveConfirmationOperationWire,
   SessionHistoryWire,
 } from "@/lib/contract";
 import {
-  preparedProfilePayload,
+  preparedProfileProposal,
   preparedWorkoutProposal,
 } from "@/lib/business";
 import { retainedAttachmentDrafts } from "./attachments";
+import { confirmationOperationDisplay } from "./confirmations";
 import {
   PREPARE_PROFILE,
   PREPARE_WORKOUT,
@@ -99,7 +101,7 @@ function convertEntry(
     entry_id: entry.entry_id,
     parent_id: entry.parent_id,
     ...(message.tool_name === PREPARE_PROFILE && !message.is_error
-      ? { profile: preparedProfilePayload(message.content) }
+      ? { profile: preparedProfileProposal(message.content) }
       : {}),
     ...(message.tool_name === PREPARE_WORKOUT && !message.is_error
       ? { workout: preparedWorkoutProposal(message.content) }
@@ -113,10 +115,16 @@ function convertEntry(
 /**
  * 当前分支历史 → 展示轮次（§3）：按运行分组，祖先链顺序保持；系统节点不产生可见条目；
  * consumed Steering 只挂到关联用户节点一次；pending/withdrawn/discarded 输入按原运行展示。
+ * 结构化确认节点不属于任何运行，独立成轮并携带真实操作结果（确认契约 §7.6）。
  */
 export function historyToRounds(history: SessionHistoryWire): ReActRound[] {
   const { entries, runs, steering } = history;
   const produced = runsWithNodes(entries);
+
+  /* 重复结果按确认节点去重（§7.6）：同一确认节点上的多条操作保留最后一条 */
+  const confirmations = new Map<string, SaveConfirmationOperationWire>();
+  for (const operation of history.confirmations)
+    confirmations.set(operation.confirmation_entry_id, operation);
 
   const consumedByEntry = new Map<string, HistorySteeringWire>();
   for (const input of steering)
@@ -157,6 +165,19 @@ export function historyToRounds(history: SessionHistoryWire): ReActRound[] {
   };
 
   for (const entry of entries) {
+    /* 确认用户节点独立成轮（确认契约 §7.6、session-history-contract §3.3）：无对应运行也必须展示 */
+    const confirmed = confirmations.get(entry.entry_id);
+    if (confirmed !== undefined) {
+      const converted = convertEntry(entry, consumedByEntry, toolArgs);
+      if (converted === null) continue;
+      rounds.push({
+        id: `confirmation:${entry.entry_id}`,
+        entries: [converted],
+        status: "completed",
+        confirmation: confirmationOperationDisplay(confirmed),
+      });
+      continue;
+    }
     /* 用户节点优先归属以它为 request_entry_id 的运行（§3.3）：重新生成复用已消费 Steering
      * 节点时，该节点创建自旧运行但仍应展示在新运行下；无运行声明时按其创建运行归属。 */
     let owner: HistoryRunWire | undefined;

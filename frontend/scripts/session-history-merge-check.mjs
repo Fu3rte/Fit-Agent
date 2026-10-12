@@ -77,6 +77,9 @@ const history = {
     { session_id: sessionId, run_id: runOkId, steering_id: steerConsumedId, text: "追加A。", attachments: [], timestamp: 5, status: "consumed", entry_id: steerConsumedEntry, reason: null, created_at: 5, updated_at: 5 },
     { session_id: sessionId, run_id: runPendingId, steering_id: pendingSteerId, text: "待消费。", attachments: [], timestamp: 9, status: "pending", entry_id: null, reason: null, created_at: 9, updated_at: 9 },
   ],
+  // 历史契约 §7.6：确认操作与待确认引用为必填数组，本场景两份均为空
+  confirmations: [],
+  pending_proposals: [],
 };
 
 const rounds = historyToRounds(history);
@@ -170,4 +173,35 @@ assert.equal(confirmed[0].pending, undefined, "已确认操作不再保留未知
 const unresolved = mergeHistoryRounds(localUnknown, rounds, new Set());
 assert.equal(unresolved[0].pending?.length, 1, "未解决操作保留重试入口");
 
-console.log("PASS: 历史重建、账本合并去重、终态条目补齐、Steering 跨状态归并、已确认 pending 清理与终态保护");
+// 确认契约 §7.6：确认用户节点不属于任何运行，独立成轮并携带真实操作结果，重复操作按确认节点去重
+const confirmNode = u(70);
+const confirmOperation = (n, proposal) => ({
+  session_id: sessionId,
+  operation_id: u(n),
+  business_kind: "profile",
+  proposal_id: proposal,
+  display_entry_id: toolEntry,
+  confirmation_entry_id: confirmNode,
+  status: "processing",
+  result: null,
+  error: null,
+  created_at: 9,
+  updated_at: 9,
+});
+const confirmedHistory = {
+  ...history,
+  session: { ...history.session, active_leaf_id: confirmNode },
+  entries: [...history.entries, { type: "message", entry_id: confirmNode, parent_id: runPendingRequest, run_id: null, created_at: 9, message: { role: "user", text: "确认保存画像", timestamp: 9, attachments: [] } }],
+  confirmations: [confirmOperation(72, u(73)), confirmOperation(74, u(75))],
+};
+const confirmRounds = historyToRounds(confirmedHistory);
+assert.equal(confirmRounds.length, rounds.length + 1, "确认节点额外产生一个独立轮次");
+const standalone = confirmRounds.at(-1);
+assert.equal(standalone.id, `confirmation:${confirmNode}`, "独立轮次使用确认节点的保留身份");
+assert.equal(standalone.run_id, undefined, "确认轮次不归属任何 Agent 运行");
+assert.equal(standalone.status, "completed", "确认轮次按已提交节点为完成态");
+assert.deepEqual(standalone.entries.map((e) => e.id), [confirmNode], "确认轮次仅含该确认用户节点");
+assert.deepEqual(standalone.confirmation, { business_kind: "profile", proposal_id: u(75), status: "processing", text: "确认处理中" }, "确认结果按真实操作对象投影且重复操作按确认节点去重");
+assert.equal(mergeHistoryRounds(confirmRounds, confirmRounds).length, confirmRounds.length, "确认轮次按身份稳定归并不重复");
+
+console.log("PASS: 历史重建、账本合并去重、终态条目补齐、Steering 跨状态归并、已确认 pending 清理、终态保护与确认节点独立成轮");

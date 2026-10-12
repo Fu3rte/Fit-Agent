@@ -3,6 +3,7 @@ import json
 from contextlib import contextmanager
 from uuid import uuid4
 
+from app.domain.business.models import SaveConfirmationRequest
 from app.infrastructure.persistence.sqlite import database as database_module
 from app.interfaces.http import app
 from test.check_plan_core import prepare, profile
@@ -104,8 +105,18 @@ def check():
         assert query(http, "/api/plans/" + second.id)["is_current"] is True
         status = call(app.state.business.get_plan_save_status(context, pending.proposal_id))
         assert status.status == "pending" and status.result is None
-        saved = call(app.state.business.save_plan(context, pending))
-        assert call(app.state.business.save_plan(context, pending)) == saved
+
+        def confirmation() -> SaveConfirmationRequest:
+            return SaveConfirmationRequest(
+                operation_id=str(uuid4()), business_kind="plan",
+                proposal_id=pending.proposal_id, display_entry_id=pending.display_entry_id)
+
+        # 中断的处理中操作已在 lifespan 对账为失败并解除占用；新的按钮确认保存同一快照并保持幂等。
+        saved_op = call(app.state.confirmations.confirm(context.session_id, confirmation()))
+        assert saved_op.status == "saved", saved_op
+        saved = saved_op.result
+        replay = call(app.state.confirmations.confirm(context.session_id, confirmation()))
+        assert replay.result == saved
         assert len(query(http, "/api/plans")) == 3
         assert query(http, "/api/plans/current")["id"] == saved.id
         # 专用无生产权限token通过真实loader及HTTP过滤链路核实。

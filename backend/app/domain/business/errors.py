@@ -176,3 +176,72 @@ class ProfileSessionNotFound(BusinessError):
     code = "session_not_found"
     http_status = 404
     message = "当前会话不存在。"
+
+
+# 结构化保存确认操作账本的错误码（方案 §7.4）。
+
+class ConfirmationNotFound(BusinessError):
+    code = "confirmation_not_found"
+    http_status = 404
+    message = "确认操作不存在。"
+
+
+class ConfirmationOperationConflict(BusinessError):
+    code = "operation_conflict"
+    http_status = 409
+    message = "操作请求冲突。"
+
+    def __init__(self, message: str | None = None, *, reason: str | None = None) -> None:
+        super().__init__(message)
+        self.reason = reason
+
+    def detail(self) -> dict:
+        payload = super().detail()
+        # 方案 §7.4：原操作因内容编辑失效时携带 reason=operation_expired 供确认 HTTP 表达。
+        if self.reason is not None:
+            payload["reason"] = self.reason
+        return payload
+
+
+class ConfirmationBusy(BusinessError):
+    code = "run_busy"
+    http_status = 409
+    message = "已有任务正在执行。"
+
+
+class ConfirmationInterrupted(BusinessError):
+    code = "confirmation_interrupted"
+    http_status = 409
+    message = "确认操作已中断。"
+
+
+class ConfirmationSessionNotFound(BusinessError):
+    code = "session_not_found"
+    http_status = 404
+    message = "当前会话不存在。"
+
+
+# 确认账本记录的失败操作只保留 code/message/errors，HTTP 状态沿用各业务错误自身定义。
+# 遍历 BusinessError 子类按 code 建表，同码状态一致（如 session_not_found、invalid_business_payload）。
+def _build_status_by_code() -> dict[str, int]:
+    table: dict[str, int] = {}
+    seen: set[int] = set()
+    stack = [BusinessError]
+    while stack:
+        current = stack.pop()
+        if id(current) in seen:
+            continue
+        seen.add(id(current))
+        code = getattr(current, "code", None)
+        status = getattr(current, "http_status", None)
+        if code and status:
+            table.setdefault(code, status)
+        stack.extend(current.__subclasses__())
+    return table
+
+
+_STATUS_BY_CODE = _build_status_by_code()
+
+
+def business_http_status(code: str) -> int:
+    return _STATUS_BY_CODE[code]

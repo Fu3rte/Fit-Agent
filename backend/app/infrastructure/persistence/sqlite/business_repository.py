@@ -15,6 +15,7 @@ from app.domain.business.models import (
     ProfileRecord,
     ProfileSaveRecord,
     ProfileSnapshot,
+    SaveConfirmationOperation,
     WorkoutContent,
     WorkoutListArguments,
     WorkoutListResult,
@@ -57,6 +58,11 @@ _PLAN_SAVE_COLUMNS = (
     "proposal_id, session_id, display_entry_id, confirmation_entry_id, result, saved_at"
 )
 
+_CONFIRMATION_COLUMNS = (
+    "operation_id, session_id, business_kind, proposal_id, display_entry_id, "
+    "confirmation_entry_id, status, result, error, created_at, updated_at"
+)
+
 
 def _row_to_plan(row: sqlite3.Row) -> PlanRecord:
     data = dict(row)
@@ -93,6 +99,13 @@ def _row_to_workout_save_record(row: sqlite3.Row) -> WorkoutSaveRecord:
     data = dict(row)
     data["result"] = json.loads(data["result"])
     return WorkoutSaveRecord.model_validate(data)
+
+
+def _row_to_confirmation_operation(row: sqlite3.Row) -> SaveConfirmationOperation:
+    data = dict(row)
+    data["result"] = None if data["result"] is None else json.loads(data["result"])
+    data["error"] = None if data["error"] is None else json.loads(data["error"])
+    return SaveConfirmationOperation.model_validate(data)
 
 
 def _placeholders(count: int) -> str:
@@ -627,6 +640,126 @@ class SqliteBusinessRepository:
 
     async def recover_interrupted_plan_saves(self) -> int:
         return await self._write("UPDATE plan_snapshots SET status = 'pending' WHERE status = 'processing'", ())
+
+    # 结构化保存确认操作账本。
+
+    async def insert_confirmation_operation(self, operation: SaveConfirmationOperation) -> None:
+        await self._write(
+            "INSERT INTO save_confirmation_operations "
+            "(operation_id, session_id, business_kind, proposal_id, display_entry_id, "
+            "confirmation_entry_id, status, result, error, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                operation.operation_id,
+                operation.session_id,
+                operation.business_kind,
+                operation.proposal_id,
+                operation.display_entry_id,
+                operation.confirmation_entry_id,
+                operation.status,
+                None if operation.result is None else _dump_json(operation.result.model_dump()),
+                None if operation.error is None else _dump_json(operation.error.model_dump()),
+                operation.created_at,
+                operation.updated_at,
+            ),
+        )
+
+    async def get_confirmation_operation(self, operation_id: str) -> SaveConfirmationOperation | None:
+        row = await self._fetch_one(
+            f"SELECT {_CONFIRMATION_COLUMNS} FROM save_confirmation_operations "
+            "WHERE operation_id = ?",
+            (operation_id,),
+        )
+        return None if row is None else _row_to_confirmation_operation(row)
+
+    async def list_confirmation_operations_by_entry(
+        self, session_id: str, confirmation_entry_id: str
+    ) -> list[SaveConfirmationOperation]:
+        rows = await self._fetch_all(
+            f"SELECT {_CONFIRMATION_COLUMNS} FROM save_confirmation_operations "
+            "WHERE session_id = ? AND confirmation_entry_id = ? "
+            "ORDER BY created_at, operation_id",
+            (session_id, confirmation_entry_id),
+        )
+        return [_row_to_confirmation_operation(row) for row in rows]
+
+    async def set_confirmation_operation_outcome(
+        self, operation_id: str, status: str, result: str | None,
+        error: str | None, updated_at: int,
+    ) -> None:
+        await self._write(
+            "UPDATE save_confirmation_operations SET status = ?, result = ?, error = ?, "
+            "updated_at = ? WHERE operation_id = ?",
+            (status, result, error, updated_at, operation_id),
+        )
+
+    async def list_confirmation_operations(self, session_id: str) -> list[SaveConfirmationOperation]:
+        rows = await self._fetch_all(
+            f"SELECT {_CONFIRMATION_COLUMNS} FROM save_confirmation_operations "
+            "WHERE session_id = ? ORDER BY created_at, operation_id",
+            (session_id,),
+        )
+        return [_row_to_confirmation_operation(row) for row in rows]
+
+    async def list_processing_confirmation_operations(self) -> list[SaveConfirmationOperation]:
+        rows = await self._fetch_all(
+            f"SELECT {_CONFIRMATION_COLUMNS} FROM save_confirmation_operations "
+            "WHERE status = 'processing' ORDER BY created_at, operation_id",
+            (),
+        )
+        return [_row_to_confirmation_operation(row) for row in rows]
+
+    # 删除只清理未完成操作；已完成保存的操作与原结果保留追溯。
+    # 被清除的操作编号同时登记为失效，跨入口继续占用同一操作 ID 命名空间。
+    async def delete_confirmation_operations_for_entries(
+        self, session_id: str, entry_ids: set[str]
+    ) -> None:
+        if not entry_ids:
+            return
+        ids = tuple(entry_ids)
+        marks = _placeholders(len(ids))
+        where = f"WHERE session_id = ? AND status <> 'saved' AND confirmation_entry_id IN ({marks})"
+        await self._write(
+            "INSERT INTO session_operation_invalidations (operation_id, session_id) "
+            "SELECT operation_id, session_id FROM save_confirmation_operations " + where,
+            (session_id, *ids),
+        )
+        await self._write(
+            "DELETE FROM save_confirmation_operations " + where,
+            (session_id, *ids),
+        )
+
+    async def delete_confirmation_operations_for_session(self, session_id: str) -> None:
+        await self._write(
+            "DELETE FROM save_confirmation_operations WHERE session_id = ? AND status <> 'saved'",
+            (session_id,),
+        )
+
+    # 启动恢复：未提交的业务事务已回滚，解除本次操作的未完成占用与确认绑定。
+    # 无论快照处于 processing 还是已被其他恢复流程退回 pending，都只按原确认绑定解绑。
+    async def release_profile_processing(self, proposal_id: str, confirmation_entry_id: str) -> None:
+        await self._write(
+            "UPDATE profile_snapshots SET confirmation_entry_id = NULL, "
+            "status = CASE WHEN status = 'processing' THEN 'pending' ELSE status END "
+            "WHERE proposal_id = ? AND confirmation_entry_id = ?",
+            (proposal_id, confirmation_entry_id),
+        )
+
+    async def release_plan_processing(self, proposal_id: str, confirmation_entry_id: str) -> None:
+        await self._write(
+            "UPDATE plan_snapshots SET confirmation_entry_id = NULL, "
+            "status = CASE WHEN status = 'processing' THEN 'pending' ELSE status END "
+            "WHERE proposal_id = ? AND confirmation_entry_id = ?",
+            (proposal_id, confirmation_entry_id),
+        )
+
+    async def release_workout_processing(self, proposal_id: str, confirmation_entry_id: str) -> None:
+        await self._write(
+            "UPDATE workout_snapshots SET confirmation_entry_id = NULL, "
+            "status = CASE WHEN status = 'processing' THEN 'pending' ELSE status END "
+            "WHERE proposal_id = ? AND confirmation_entry_id = ?",
+            (proposal_id, confirmation_entry_id),
+        )
 
     async def replace_exercises(self, exercises: list[CatalogExercise]) -> None:
         await self._write("DELETE FROM exercises", ())

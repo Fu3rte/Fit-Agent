@@ -28,8 +28,10 @@ from app.domain.business.models import (
     PlanStatusArguments,
     PlanStatusResult,
     ProfileContent,
+    SaveConfirmationRequest,
     WorkoutListArguments,
 )
+from app.domain.session.errors import InvalidTargetEntry
 from app.domain.session.models import SendCommand, SendRequest
 from app.infrastructure.persistence.sqlite.business_repository import (
     SqliteBusinessRepository,
@@ -54,7 +56,7 @@ from test.check_profile_confirmation import (
 )
 from test.check_workout_service_http import assistant
 from test.check_workout_service_http import prepare as prepare_workout
-from test.check_workout_storage import make_record, raw, seed
+from test.check_workout_storage import make_record, raw, seed_legacy
 from test.regression_support import temporary_root
 
 ROOT = temporary_root("plan-core") / uuid4().hex
@@ -166,22 +168,24 @@ async def prepare(f, session, *, content=None, base_profile_version=1, base_plan
         raise
     finally:
         await f.service.finish_run(session, run.id, "completed")
-    accepted = await f.service.accept_send(SendCommand(operation_id=new_id(), session_id=session,
-        request=SendRequest(text="确认采纳计划")), system_message=SYSTEM)
-    run = accepted.run
-    arguments = PlanSaveArguments(proposal_id=proposal.proposal_id, display_entry_id=display,
-                                  confirmation_entry_id=run.request_entry_id)
-    saving = assistant("save_plan", new_id(), arguments.model_dump()).model_copy(update={
-        "content": [TextContent(type="text", text="处理用户确认")], "stop_reason": "stop",
-    })
-    source = await f.append(session, run.id, run.request_entry_id, saving)
-    await f.service.finish_run(session, run.id, "completed")
-    return f.context(session, run.request_entry_id, source), arguments
+    # 预受理真实结构化确认：登记确认节点与处理中操作，供随后直接业务保存核验授权。
+    # 不做任何手工账本补写，受理走 ConfirmationService 的真实入口。
+    operation, is_first = await f.confirmations._accept(session, SaveConfirmationRequest(
+        operation_id=new_id(), business_kind="plan",
+        proposal_id=proposal.proposal_id, display_entry_id=display), now_ms())
+    assert is_first and operation.status == "processing", operation
+    arguments = PlanSaveArguments(
+        proposal_id=proposal.proposal_id, display_entry_id=display,
+        confirmation_entry_id=operation.confirmation_entry_id,
+    )
+    return context, arguments
 
 
 async def profile(f, session, version=None, **updates):
     p = await propose(f, session, {"profile_id": 1, "base_profile_version": version, "payload": payload(**updates)})
-    return p, await f.service_save(p)
+    operation = await f.confirm(p)
+    assert operation.status == "saved", operation
+    return p, operation.result
 
 
 async def check_service():
@@ -287,7 +291,9 @@ async def check_constraints_and_cross_business():
         result = await f.business.save_plan(c, a)
         pp = await propose(f, session, {"profile_id": 1, "base_profile_version": 1, "payload": payload()})
         await assert_rejected("计划确认授权画像", f.service_save(pp, confirmation=a.confirmation_entry_id), "profile_confirmation_invalid")
-        await f.service_save(pp)
+        # 合法画像保存走独立确认入口：真实准备、展示绑定与结构化确认一致后直接提交。
+        saved_operation = await f.confirm(pp)
+        assert saved_operation.status == "saved", saved_operation
         wc2, wa2, _ = await prepare_workout(f, session, day, wr)
         await assert_rejected("计划确认授权训练", f.business.update_workout(wc2, wa2.model_copy(update={"confirmation_entry_id": a.confirmation_entry_id})), "workout_confirmation_invalid")
         # pending/processing 的跨业务确认关联在共享事务内检查。
@@ -330,7 +336,7 @@ async def check_migration_and_store():
         await apply_schema(connection, _MIGRATIONS[version].read_text(encoding="utf-8"), version)
     db = Database(connection)
     repo = SqliteBusinessRepository(db)
-    ids = await seed(db)
+    ids = await seed_legacy(db)
     workout = make_record("2026-06-01")
     from app.application.business.catalog import Catalog
     async with repo.transaction():
@@ -447,8 +453,9 @@ async def check_replacement_and_delete():
         assert await f.business.list_plans() == []
         c, a = await prepare(f, session)
         first = await f.business.save_plan(c, a)
-        outcome = await _regenerate(f, session, a.confirmation_entry_id)
-        await f.service.finish_run(session, outcome.run.id, "completed")
+        # 结构化确认节点不接受模型重新生成：拒绝且不启动新运行，已保存固定结果与确认绑定保持原值。
+        with pytest.raises(InvalidTargetEntry):
+            await _regenerate(f, session, a.confirmation_entry_id)
         assert await f.business.save_plan(c, a) == first
         assert (await f.business.list_plan_confirmation_bindings(session))[a.confirmation_entry_id] == a.proposal_id
         snap = await f.repository.get_plan_snapshot(a.proposal_id)

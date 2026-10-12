@@ -608,11 +608,69 @@ class WorkoutPendingProposal(WorkoutDateModel):
     source_entry_id: str = Field(pattern=STANDARD_UUID)
     display_entry_id: str = Field(pattern=STANDARD_UUID)
     confirmation_entry_id: str | None = Field(default=None, pattern=STANDARD_UUID)
-    base_workout_id: str | None = Field(pattern=STANDARD_UUID)
-    base_workout_version: int | None = Field(gt=0)
+    base_workout_id: str | None = Field(default=None, pattern=STANDARD_UUID)
+    base_workout_version: int | None = Field(default=None, gt=0)
 
     @model_validator(mode="after")
     def validate_base_pair(self) -> Self:
         if (self.base_workout_id is None) != (self.base_workout_version is None):
             raise ValueError("基础记录 ID 与版本必须同时为空或同时有值。")
+        return self
+
+
+# 结构化保存确认：独立确认请求、操作账本与失败对象（方案 §7.2、§7.3）。
+
+SaveConfirmationKind: TypeAlias = Literal["profile", "plan", "workout"]
+SaveConfirmationStatus: TypeAlias = Literal["processing", "saved", "failed"]
+
+
+class SaveConfirmationRequest(BusinessModel):
+    # 客户端只提交四个请求字段；业务正文、基础版本、训练记录 ID 由后端从快照取得。
+    operation_id: str = Field(pattern=STANDARD_UUID)
+    business_kind: SaveConfirmationKind
+    proposal_id: str = Field(pattern=STANDARD_UUID)
+    display_entry_id: str = Field(pattern=STANDARD_UUID)
+
+
+class ConfirmationError(BusinessModel):
+    code: str
+    message: str
+    errors: list[BusinessFieldError] | None = None
+
+
+SaveConfirmationResult: TypeAlias = (
+    ProfileSaveResult | PlanSaveResult | WorkoutSaveResult
+)
+_SAVE_RESULT_MODELS: dict[str, type[BusinessModel]] = {
+    "profile": ProfileSaveResult,
+    "plan": PlanSaveResult,
+    "workout": WorkoutSaveResult,
+}
+
+
+class SaveConfirmationOperation(BusinessModel):
+    session_id: str = Field(pattern=STANDARD_UUID)
+    operation_id: str = Field(pattern=STANDARD_UUID)
+    business_kind: SaveConfirmationKind
+    proposal_id: str = Field(pattern=STANDARD_UUID)
+    display_entry_id: str = Field(pattern=STANDARD_UUID)
+    confirmation_entry_id: str = Field(pattern=STANDARD_UUID)
+    status: SaveConfirmationStatus
+    result: SaveConfirmationResult | None
+    error: ConfirmationError | None
+    created_at: int = Field(gt=0)
+    updated_at: int = Field(gt=0)
+
+    @model_validator(mode="after")
+    def validate_outcome(self) -> Self:
+        if self.status == "processing" and (self.result is not None or self.error is not None):
+            raise ValueError("processing 状态不得携带 result 或 error。")
+        if self.status == "saved" and (self.result is None or self.error is not None):
+            raise ValueError("saved 状态必须携带 result 且不得携带 error。")
+        if self.status == "failed" and (self.result is not None or self.error is None):
+            raise ValueError("failed 状态必须携带 error 且不得携带 result。")
+        if self.result is not None:
+            expected = _SAVE_RESULT_MODELS[self.business_kind]
+            if not isinstance(self.result, expected):
+                raise ValueError("保存结果类型与业务类型不一致。")
         return self

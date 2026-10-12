@@ -40,6 +40,12 @@ function render(status, error) {
     onWithdraw: unexpectedAction,
     retrying: null,
     canEdit: false,
+    // 确认契约 §7.6：确认入口为必需属性，静态展示场景无待确认快照也不发起确认
+    canConfirm: false,
+    proposals: [],
+    confirmations: [],
+    onConfirm: unexpectedAction,
+    onRetryConfirmation: unexpectedAction,
     onEdit: unexpectedAction,
     onRegenerate: unexpectedAction,
   }));

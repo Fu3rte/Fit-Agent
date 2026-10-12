@@ -1,7 +1,6 @@
 import asyncio
 import json
 import sqlite3
-from pathlib import Path
 from uuid import uuid4
 
 import aiosqlite
@@ -12,24 +11,44 @@ from app.ai.messages import AssistantMessage, TextContent, ToolCall, ToolResultM
 from app.application.business.catalog import Catalog
 from app.application.session.service import SessionService
 from app.domain.business.errors import (
-    WorkoutAccessDenied, WorkoutConfirmationInvalid, WorkoutNotFound,
-    WorkoutProposalInvalidated, WorkoutProposalNotFound, WorkoutSaveProcessing,
+    WorkoutAccessDenied,
+    WorkoutConfirmationInvalid,
+    WorkoutNotFound,
+    WorkoutProposalInvalidated,
+    WorkoutProposalNotFound,
+    WorkoutSaveProcessing,
     WorkoutVersionConflict,
 )
 from app.domain.business.models import (
-    WorkoutContent, WorkoutExercise, WorkoutGetArguments, WorkoutListArguments,
-    WorkoutProposal, WorkoutProposalArguments, WorkoutRecord, WorkoutSaveArguments,
-    WorkoutSaveRecord, WorkoutSaveResult, WorkoutSet, WorkoutSnapshot,
-    WorkoutStatusArguments, WorkoutStatusResult,
+    ProfileContent,
+    WorkoutContent,
+    WorkoutExercise,
+    WorkoutGetArguments,
+    WorkoutListArguments,
+    WorkoutProposal,
+    WorkoutProposalArguments,
+    WorkoutRecord,
+    WorkoutSaveArguments,
+    WorkoutSaveRecord,
+    WorkoutSaveResult,
+    WorkoutSet,
+    WorkoutSnapshot,
+    WorkoutStatusArguments,
+    WorkoutStatusResult,
 )
 from app.domain.session.models import SendCommand, SendRequest, SessionMessageEntry
-from app.infrastructure.persistence.sqlite.business_repository import SqliteBusinessRepository
+from app.infrastructure.persistence.sqlite.business_repository import (
+    SqliteBusinessRepository,
+)
 from app.infrastructure.persistence.sqlite.database import (
-    Database, SCHEMA_VERSION, _MIGRATIONS, apply_schema, open_database,
+    _MIGRATIONS,
+    SCHEMA_VERSION,
+    Database,
+    apply_schema,
+    open_database,
 )
 from app.infrastructure.persistence.sqlite.repository import SqliteSessionRepository
 from test.check_profile_snapshot_store import FULL_PROFILE, SYSTEM, USAGE, stamp
-from app.domain.business.models import ProfileContent
 from test.regression_support import temporary_root
 
 ROOT = temporary_root("workout-storage")
@@ -172,6 +191,58 @@ async def seed(database: Database) -> dict:
             "display": display_id, "confirmation": confirmed.run.request_entry_id, "proposal": pid}
 
 
+async def seed_legacy(database: Database) -> dict:
+    # 低版本 schema 下直接写入会话节点：后续版本新增列与业务服务不参与，
+    # 保留“旧库写入数据后逐版本迁移保真”的核验口径。
+    session_id, run_id = identifier(), identifier()
+    request_id, source_id, display_id, confirmation_id = (identifier() for _ in range(4))
+    now = stamp()
+
+    def envelope(**fields) -> str:
+        return json.dumps([fields], ensure_ascii=False)
+
+    request_row = (request_id, None, None, "message",
+                   envelope(role="user", content="记录六月一日俯卧撑", timestamp=now))
+    source_row = (source_id, request_id, run_id, "message",
+                  envelope(role="assistant", content=[{"type": "text", "text": "准备训练"}],
+                           api="openai-completions", provider="example", model="model-1",
+                           usage={"input": 1, "output": 1, "cache_read": 0, "cache_write": 0,
+                                  "total_tokens": 2}, stop_reason="stop", timestamp=now))
+    display_row = (display_id, source_id, run_id, "message",
+                   envelope(role="toolResult", tool_call_id="prepare-1", tool_name="prepare_workout",
+                            content=[{"type": "text", "text": "{}"}], is_error=False, timestamp=now))
+    confirmation_row = (confirmation_id, display_id, None, "message",
+                        envelope(role="user", content="确认保存", timestamp=now))
+    async with database.transaction_scope():
+        connection = database.connection
+        await connection.execute(
+            "INSERT INTO sessions (id, title, active_leaf_id, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (session_id, "训练记录存储验证", None, now, now),
+        )
+        await connection.execute(
+            "INSERT INTO session_entries (session_id, id, parent_id, run_id, type, messages, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (session_id, *request_row, now),
+        )
+        await connection.execute(
+            "INSERT INTO session_runs (session_id, id, request_entry_id, last_entry_id, status, "
+            "started_at, finished_at, error_code, error_message) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (session_id, run_id, request_id, None, "completed", now, now, None, None),
+        )
+        for row in (source_row, display_row, confirmation_row):
+            await connection.execute(
+                "INSERT INTO session_entries (session_id, id, parent_id, run_id, type, messages, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (session_id, *row, now),
+            )
+        await connection.execute(
+            "UPDATE sessions SET active_leaf_id = ? WHERE id = ?", (confirmation_id, session_id),
+        )
+    return {"session": session_id, "request": request_id, "source": source_id,
+            "display": display_id, "confirmation": confirmation_id, "proposal": identifier()}
+
+
 def snapshot(ids: dict, **updates) -> WorkoutSnapshot:
     values = dict(proposal_id=ids["proposal"], session_id=ids["session"], request_entry_id=ids["request"],
         source_entry_id=ids["source"], performed_on="2026-06-01", base_workout_id=None,
@@ -193,6 +264,18 @@ async def raw(database: Database, sql: str, args: tuple = ()) -> None:
     await database.read(run)
 
 
+async def legacy_entries(database: Database, session_id: str) -> list[tuple]:
+    # 低版本与迁移后统一比对压缩能力新增列之前的消息列，避免在旧库读取当时不存在的列。
+    cursor = await database.connection.execute(
+        "SELECT session_id, id, parent_id, run_id, type, messages, created_at "
+        "FROM session_entries WHERE session_id = ? ORDER BY id",
+        (session_id,),
+    )
+    values = [tuple(row) for row in await cursor.fetchall()]
+    await cursor.close()
+    return values
+
+
 async def check_migration() -> dict:
     path = ROOT / f"migration-{identifier()}.db"
     connection = await aiosqlite.connect(path, isolation_level=None)
@@ -202,7 +285,7 @@ async def check_migration() -> dict:
         await apply_schema(connection, _MIGRATIONS[version].read_text(encoding="utf-8"), version)
     database = Database(connection)
     repo = SqliteBusinessRepository(database)
-    ids = await seed(database)
+    ids = await seed_legacy(database)
     profile = ProfileContent.model_validate(FULL_PROFILE)
     exercises = Catalog.load().all()
     async with repo.transaction():
@@ -210,7 +293,7 @@ async def check_migration() -> dict:
         await repo.replace_exercises(exercises)
     before = await repo.get_profile()
     before_session = await SqliteSessionRepository(database).get_session(ids["session"])
-    before_entries = await SqliteSessionRepository(database).list_entries(ids["session"])
+    before_entries = await legacy_entries(database, ids["session"])
     cursor = await database.connection.execute("SELECT * FROM exercises ORDER BY id")
     before_catalog = [tuple(row) for row in await cursor.fetchall()]
     await cursor.close()
@@ -220,12 +303,14 @@ async def check_migration() -> dict:
     assert await repo.get_profile() == before
     assert await repo.count_exercises() == len(exercises)
     assert await SqliteSessionRepository(database).get_session(ids["session"]) == before_session
-    assert await SqliteSessionRepository(database).list_entries(ids["session"]) == before_entries
+    assert await legacy_entries(database, ids["session"]) == before_entries
+    # 迁移后当前仓库可完整投影旧库节点。
+    assert len(await SqliteSessionRepository(database).list_entries(ids["session"])) == len(before_entries)
     cursor = await database.connection.execute("SELECT * FROM exercises ORDER BY id")
     assert [tuple(row) for row in await cursor.fetchall()] == before_catalog
     await cursor.close()
     cursor = await database.connection.execute("PRAGMA user_version")
-    assert (await cursor.fetchone())[0] == SCHEMA_VERSION == 7
+    assert (await cursor.fetchone())[0] == SCHEMA_VERSION
     await cursor.close()
     with pytest.raises(sqlite3.OperationalError):
         await apply_schema(database.connection, "CREATE TABLE migration_guard (id INTEGER); SELECT * FROM absent_table;", 7)

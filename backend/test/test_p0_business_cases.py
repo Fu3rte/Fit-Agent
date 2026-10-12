@@ -22,8 +22,8 @@ from app.infrastructure.persistence.sqlite.repository import SqliteSessionReposi
 from test import p0_business_cases as engine
 from test.check_profile_confirmation import Fixture, propose
 from test.p0_contract import (
-    CATEGORY_QUOTAS,
     CASE_ID_PREFIXES,
+    CATEGORY_QUOTAS,
     CaseRoundObservation,
     P0Case,
     TurnObservation,
@@ -133,7 +133,7 @@ def _turn(case_id: str, round_index: int, session_id: str, tool_calls) -> TurnOb
 
 def test_case_count_and_quotas():
     cases = load_cases()
-    assert len(cases) == 50, len(cases)
+    assert len(cases) == 25, len(cases)
     counter = Counter(case.category for case in cases)
     assert dict(counter) == CATEGORY_QUOTAS, counter
     assert set(counter) == set(CASE_ID_PREFIXES)
@@ -161,7 +161,7 @@ def test_case_ids_unique_and_prefixed():
 def test_case_structure_and_input_hygiene():
     cases = load_cases()
     for case in cases:
-        assert case.case_version == 1
+        assert case.case_version == 2
         assert case.turns, case.case_id
         assert case.checks, case.case_id
         assert case.manual_review, case.case_id
@@ -295,7 +295,7 @@ def test_evaluate_passes_clean_and_saved_states(monkeypatch):
         session_id = str(uuid4())
         context = make_context(session_id)
 
-        for case_id in ("L09", "W04", "S03", "S01"):
+        for case_id in ("W03", "S01", "S02"):
             case = cases[case_id]
             results = engine.evaluate(
                 case,
@@ -311,14 +311,14 @@ def test_evaluate_passes_clean_and_saved_states(monkeypatch):
                 if item.kind == "deterministic"
             ), (case_id, [item.model_dump() for item in results])
 
-        # 已确认画像读档：P07 的确定性检查在真实前置下全部通过。
+        # 已确认画像读档：P04 的确定性检查在真实前置下全部通过。
         evidence = engine.build_precondition(
-            cases["P07"], service=business, business_context=context, session_id=session_id
+            cases["P04"], service=business, business_context=context, session_id=session_id
         )
         assert evidence.built is True
         results = engine.evaluate(
-            cases["P07"],
-            observation=make_observation("P07", 1, session_id),
+            cases["P04"],
+            observation=make_observation("P04", 1, session_id),
             service=business,
             database_path=str(path),
             business_context=context,
@@ -385,7 +385,10 @@ def test_real_profile_chain_then_evaluate_passes(monkeypatch):
                     session_id,
                     {"profile_id": 1, "base_profile_version": 1, "payload": content},
                 )
-                return await fixture.service_save(ids)
+                # 合法保存只经独立确认入口：后端生成确认节点并直接调用业务服务。
+                operation = await fixture.confirm(ids)
+                assert operation.status == "saved", operation
+                return operation.result
             finally:
                 await fixture.close()
 
@@ -412,17 +415,17 @@ def test_evaluate_observation_rule_detects_leak(monkeypatch):
     directory = _workdir()
     with isolated_business(directory) as (path, business, _loop, _repository):
         monkeypatch.setattr(database_module, "default_database_path", lambda: path)
-        case = case_map()["S06"]
+        case = case_map()["S03"]
         session_id = str(uuid4())
         context = make_context(session_id)
 
         leaky = make_observation(
-            "S06",
+            "S03",
             1,
             session_id,
             turns=[
                 _turn(
-                    "S06",
+                    "S03",
                     1,
                     session_id,
                     [{"name": "read", "is_error": False, "content": "终极秘密是 42"}],
@@ -438,16 +441,16 @@ def test_evaluate_observation_rule_detects_leak(monkeypatch):
             business_context=context,
         )
         assert next(
-            item for item in leaked if item.check_id == "S06-R1-02"
+            item for item in leaked if item.check_id == "S03-R1-02"
         ).status == "fail"
 
         clean = make_observation(
-            "S06",
+            "S03",
             1,
             session_id,
             turns=[
                 _turn(
-                    "S06",
+                    "S03",
                     1,
                     session_id,
                     [{"name": "read", "is_error": True, "content": "只允许访问当前会话"}],
@@ -462,5 +465,5 @@ def test_evaluate_observation_rule_detects_leak(monkeypatch):
             business_context=context,
         )
         assert next(
-            item for item in ok if item.check_id == "S06-R1-02"
+            item for item in ok if item.check_id == "S03-R1-02"
         ).status == "pass"

@@ -33,7 +33,12 @@ for (const { event, data } of evidence.events) {
   parser.feed(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
 }
 parser.finish();
-const stored = api.parseSessionHistory(evidence.session_id, evidence.history);
+// 录制于确认历史扩展（确认契约 §7.6）之前：回放时补齐两个必填数组，其余节点保持录制原值
+const stored = api.parseSessionHistory(evidence.session_id, {
+  ...evidence.history,
+  confirmations: [],
+  pending_proposals: [],
+});
 const replayed = history.historyToRounds(stored).find((round) => round.run_id === evidence.run_id);
 assert.ok(replayed);
 assert.equal(live.status, "completed");

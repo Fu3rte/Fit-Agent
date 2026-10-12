@@ -827,7 +827,11 @@ def http_checks(evidence: dict) -> None:
         assert history.status_code == 200, history.text
         assert history.headers["cache-control"] == "no-store"
         body = history.json()
-        assert set(body) == {"session", "entries", "runs", "steering"}
+        assert set(body) == {
+            "session", "entries", "runs", "steering", "confirmations", "pending_proposals",
+        }
+        assert body["confirmations"] == []
+        assert body["pending_proposals"] == []
         assert set(body["session"]) == {
             "session_id",
             "title",

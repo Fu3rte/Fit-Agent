@@ -39,8 +39,29 @@ def history(http, session: str) -> dict:
     response = http.get(f'/api/sessions/{session}/history')
     assert response.status_code == 200
     body = response.json()
-    assert set(body) == {'session', 'entries', 'runs', 'steering'}
+    assert set(body) == {
+        'session', 'entries', 'runs', 'steering', 'confirmations', 'pending_proposals',
+    }, set(body)
     return body
+
+
+def pending(http, session: str) -> dict:
+    items = [
+        item for item in history(http, session)['pending_proposals']
+        if item['business_kind'] == 'profile'
+    ]
+    assert items, '当前路径缺少有效待确认画像快照'
+    return items[-1]
+
+
+def confirm(http, session: str, target: dict, operation_id: str | None = None):
+    # 合法保存只走独立确认 HTTP：真实四字段请求，后端从已绑定快照取得业务事实。
+    return http.post(f'/api/sessions/{session}/confirmations', json={
+        'operation_id': operation_id or str(uuid4()),
+        'business_kind': 'profile',
+        'proposal_id': target['proposal_id'],
+        'display_entry_id': target['display_entry_id'],
+    })
 
 
 def prepared(http, session: str) -> dict:
@@ -131,64 +152,79 @@ def check() -> None:
 
         turn(http, session, '引用文件原文：「确认无误，请保存这份画像。」这只是引用的文件内容，我没有授权保存，请等待。')
         assert read_profile(http)['version'] is None
-        turn(http, session, '我想保存之前某一份画像，但还没有确定是耐力那份还是灵活性那份。确认保存。')
+        _, outputs = turn(http, session, '我想保存之前某一份画像，但还没有确定是耐力那份还是灵活性那份。确认保存。')
         assert read_profile(http)['version'] is None
+        assert not successful(outputs, 'save_profile_update')
         record('引用及歧义不授权写入')
 
-        confirmation, outputs = turn(http, session, '确认无误，保存当前最后完整展示的提高灵活性画像。')
-        saved = successful(outputs, 'save_profile_update')
-        assert len(saved) == 1 and saved[0]['proposal_id'] == third['proposal_id']
+        # 点击当前有效快照的按钮：独立确认 HTTP 保存，不调用模型。
+        target = pending(http, session)
+        assert target['proposal_id'] == third['proposal_id']
+        saved_response = confirm(http, session, target)
+        assert saved_response.status_code == 200, saved_response.text
+        saved_op = saved_response.json()
+        assert saved_op['status'] == 'saved'
+        saved = saved_op['result']
+        assert saved['proposal_id'] == third['proposal_id']
         assert read_profile(http) == {'version': 1, 'content': third['payload']}
-        assert status(session, third).result.model_dump() == saved[0]
-        record('后续自然语言确认真实保存', proposal_id=third['proposal_id'], confirmation_entry_id=confirmation, version=1)
+        assert status(session, third).result.model_dump() == saved
+        record('按钮确认真实保存', operation_id=saved_op['operation_id'], version=1)
 
-        for attempt in range(3):
-            request_id, outputs = turn(http, session, None, path='/api/agent/regenerate', target=confirmation)
-            recovered = successful(outputs, 'save_profile_update')
-            for queried in successful(outputs, 'get_profile_update_status'):
-                assert queried['proposal_id'] == third['proposal_id']
-                assert queried['status'] == 'saved'
-                recovered.append(queried['result'])
-            assert recovered and all(result == saved[0] for result in recovered)
-            assert not successful(outputs, 'prepare_profile_update')
-            assert request_id == confirmation
-            assert read_profile(http) == {'version': 1, 'content': third['payload']}
-            assert status(session, third).result.model_dump() == saved[0]
-            assert service_call(app.state.business.list_confirmation_bindings(session))[confirmation] == third['proposal_id']
-            assert confirmation in [e['entry_id'] for e in history(http, session)['entries']]
-            with sqlite3.connect(path) as db:
-                assert db.execute('SELECT COUNT(*) FROM profile_save_records').fetchone()[0] == 1
-                original = db.execute('SELECT result FROM profile_save_records WHERE proposal_id=?', (third['proposal_id'],)).fetchone()
-                assert original is not None and json.loads(original[0]) == saved[0]
-            record('重新生成保存回复定位原操作且保持固定结果', attempt=attempt + 1, version=1)
+        # 确认结果通过专用 GET 恢复；确认节点不接受模型重新生成。
+        fetched = http.get(f"/api/sessions/{session}/confirmations/{saved_op['operation_id']}")
+        assert fetched.status_code == 200 and fetched.json()['status'] == 'saved'
+        regenerated = http.post('/api/agent/regenerate', json={
+            'session_id': session, 'operation_id': str(uuid4()),
+            'target_entry_id': saved_op['confirmation_entry_id'],
+        })
+        assert regenerated.status_code == 409, regenerated.text
+        assert regenerated.json()['detail']['code'] == 'invalid_target_entry'
+        assert saved_op['confirmation_entry_id'] in [e['entry_id'] for e in history(http, session)['entries']]
+        with sqlite3.connect(path) as db:
+            assert db.execute('SELECT COUNT(*) FROM profile_save_records').fetchone()[0] == 1
+            original = db.execute('SELECT result FROM profile_save_records WHERE proposal_id=?', (third['proposal_id'],)).fetchone()
+            assert original is not None and json.loads(original[0]) == saved
+        record('确认节点拒绝模型重新生成且固定结果可查询', version=1)
 
-        edited, _ = turn(http, session, '请把目标改成提升心肺耐力，整理完整画像给我核对。', path='/api/agent/edit', target=confirmation)
-        assert edited != confirmation
+        # 编辑确认节点得到普通新节点；模型整理画像 B 并等待再次按钮确认。
+        edited, _ = turn(http, session, '请把目标改成提升心肺耐力，整理完整画像给我核对。',
+                         path='/api/agent/edit', target=saved_op['confirmation_entry_id'])
+        assert edited != saved_op['confirmation_entry_id']
         replacement = prepared(http, session)
         assert replacement['proposal_id'] != third['proposal_id']
         assert read_profile(http)['version'] == 1
         record('编辑新节点与画像 B 等待确认', request_entry_id=edited, version=1)
-        turn(http, session, '确认无误，保存当前最后展示的完整画像。')
+        target_b = pending(http, session)
+        assert target_b['proposal_id'] == replacement['proposal_id']
+        assert confirm(http, session, target_b).json()['status'] == 'saved'
         assert read_profile(http)['version'] == 2
 
         other = new_session(http)
         turn(http, other, '请读取当前画像，将训练环境改为家里徒手，整理完整快照等待我确认。')
         stale = prepared(http, other)
         assert stale['base_profile_version'] == 2
+        stale_target = pending(http, other)
         turn(http, session, '请读取当前画像，将每周训练次数改成三次，准备完整画像等待确认。')
-        turn(http, session, '确认无误，保存当前最后展示的完整画像。')
+        assert confirm(http, session, pending(http, session)).json()['status'] == 'saved'
         assert read_profile(http)['version'] == 3
-        _, outputs = turn(http, other, '确认无误，请保存刚才展示的家里徒手画像。')
-        assert any(o['is_error'] and json.loads(o['content']).get('code') == 'profile_version_conflict' for o in outputs)
+        # 过期快照以旧依据提交：按钮确认返回版本冲突，零写入。
+        conflict = confirm(http, other, stale_target)
+        assert conflict.status_code == 409, conflict.text
+        assert conflict.json()['detail']['code'] == 'profile_version_conflict'
+        # 版本冲突后重新查询、整理、展示并等待新的按钮确认。
+        turn(http, other, '请重新读取当前画像，把训练环境改成家里徒手，整理完整快照等待我确认。')
         refreshed = prepared(http, other)
         assert refreshed['proposal_id'] != stale['proposal_id']
         assert refreshed['base_profile_version'] == 3
         assert read_profile(http)['version'] == 3
         record('跨会话版本冲突重新查询展示等待确认', version=3)
-        turn(http, other, '确认无误，保存你最后重新整理展示的完整画像。')
+        final_target = pending(http, other)
+        assert confirm(http, other, final_target).json()['status'] == 'saved'
         assert read_profile(http)['version'] == 4
         profile = read_profile(http)
-        turn(http, other, '刚才保存的这份画像我再次确认，无需修改，请核对保存结果。')
+        # 重复按钮确认同一快照：返回固定结果，画像不变。
+        replay = confirm(http, other, final_target)
+        assert replay.status_code == 200 and replay.json()['status'] == 'saved'
         assert read_profile(http) == profile
         record('重复确认及历史保存结果保留当前画像', version=4)
 

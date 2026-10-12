@@ -2,7 +2,13 @@ from time import time_ns
 from uuid import uuid4
 
 from app.agent.tool import run_tool_call
-from app.ai.messages import AssistantMessage, TextContent, ToolCall, Usage, text_projection
+from app.ai.messages import (
+    AssistantMessage,
+    TextContent,
+    ToolCall,
+    Usage,
+    text_projection,
+)
 from app.ai.types import check_cancelled
 
 

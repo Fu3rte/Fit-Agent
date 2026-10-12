@@ -551,3 +551,10 @@ class SqliteSessionRepository:
             (operation_id,),
         )
         return None if row is None else row[0]
+
+    async def confirmation_operation_exists(self, operation_id: str) -> bool:
+        row = await self._fetch_one(
+            "SELECT 1 FROM save_confirmation_operations WHERE operation_id = ?",
+            (operation_id,),
+        )
+        return row is not None

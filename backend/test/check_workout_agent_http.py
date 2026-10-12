@@ -83,6 +83,20 @@ def proposal(http, identity):
     return {**json.loads(last["message"]["content"]), "display_entry_id": last["entry_id"]}
 
 
+def pending(http, identity, business_kind="workout"):
+    items = [item for item in history(http, identity)["pending_proposals"]
+             if item["business_kind"] == business_kind]
+    assert items, f"当前路径缺少待确认的 {business_kind} 快照"
+    return items[-1]
+
+
+def confirm(http, identity, target, business_kind="workout"):
+    # 合法保存只走独立确认 HTTP：后端从已绑定快照取得业务事实，不调用模型。
+    return http.post(f"/api/sessions/{identity}/confirmations", json={
+        "operation_id": str(uuid4()), "business_kind": business_kind,
+        "proposal_id": target["proposal_id"], "display_entry_id": target["display_entry_id"]})
+
+
 def main():
     install_test_model_config()
     database = patch_default_database("workout-agent-http")
@@ -105,18 +119,22 @@ def main():
         with sqlite3.connect(database) as db:
             binding = db.execute("SELECT display_entry_id FROM workout_snapshots WHERE proposal_id=?", (a["proposal_id"],)).fetchone()
             assert binding[0] == a["display_entry_id"]
-        confirmation, outputs = turn(http, first, "确认无误，保存你刚完整展示的这份实际训练记录。")
-        saved = successful(outputs, "save_workout")
-        assert len(saved) == 1 and saved[0]["proposal_id"] == a["proposal_id"]
-        initial = saved[0]
+        # 按钮确认：独立确认 HTTP 保存训练记录，不调用模型、不创建 Agent 运行。
+        saved_operation = confirm(http, first, pending(http, first))
+        assert saved_operation.status_code == 200, saved_operation.text
+        saved_body = saved_operation.json()
+        assert saved_body["status"] == "saved" and saved_body["proposal_id"] == a["proposal_id"]
+        initial = saved_body["result"]
+        confirmation = saved_body["confirmation_entry_id"]
+        first_operation = saved_body["operation_id"]
         assert listing(http)["items"][0]["version"] == 1
-        _, outputs = turn(http, first, path="/api/agent/regenerate", target=confirmation)
-        recovered = successful(outputs, "save_workout")
-        for status in successful(outputs, "get_workout_save_status"):
-            assert status["status"] == "saved"
-            recovered.append(status["result"])
-        assert recovered and all(value == initial for value in recovered)
-        assert not successful(outputs, "prepare_workout")
+        # 确认结果通过专用 GET 恢复；确认节点不接受模型重新生成。
+        fetched = http.get(f"/api/sessions/{first}/confirmations/{first_operation}")
+        assert fetched.status_code == 200 and fetched.json()["result"] == initial
+        regenerated = http.post("/api/agent/regenerate", json={
+            "session_id": first, "operation_id": str(uuid4()), "target_entry_id": confirmation})
+        assert regenerated.status_code == 409, regenerated.text
+        assert regenerated.json()["detail"]["code"] == "invalid_target_entry"
         assert listing(http)["items"][0]["version"] == 1
         other, stale = session(http), session(http)
         turn(http, other, f"{a['performed_on']}实际训练的俯卧撑改为两组，每组12次，其余原内容保留。先查询当天完整记录，准备完整更新快照等我确认。")
@@ -125,22 +143,30 @@ def main():
         turn(http, stale, f"{a['performed_on']}实际训练感受改为良好，其余原内容保留。查询当天记录并准备完整更新等我确认。")
         old = proposal(http, stale)
         assert old["base_workout_version"] == 1
-        _, outputs = turn(http, other, "确认无误，保存刚展示的完整更新训练记录。")
-        updated = successful(outputs, "update_workout")
+        updated_target = pending(http, other)
+        assert updated_target["proposal_id"] == b["proposal_id"]
+        updated_operation = confirm(http, other, updated_target)
+        assert updated_operation.status_code == 200, updated_operation.text
+        updated_body = updated_operation.json()
+        assert updated_body["status"] == "saved"
+        updated = [updated_body["result"]]
         assert len(updated) == 1 and updated[0]["id"] == initial["id"] and updated[0]["version"] == 2
-        _, outputs = turn(http, stale, "确认无误，保存刚展示的感受良好的训练记录。")
-        assert any(o["is_error"] and json.loads(o["content"]).get("code") == "workout_version_conflict" for o in outputs)
-        conflict_outputs = outputs
+        # 过期快照以旧依据提交：按钮确认返回版本冲突，零写入。
+        stale_target = pending(http, stale)
+        assert stale_target["proposal_id"] == old["proposal_id"]
+        conflict = confirm(http, stale, stale_target)
+        assert conflict.status_code == 409, conflict.text
+        assert conflict.json()["detail"]["code"] == "workout_version_conflict"
         assert listing(http)["items"][0]["version"] == 2
         with sqlite3.connect(database) as db:
             assert db.execute("SELECT status FROM workout_snapshots WHERE proposal_id=?", (old["proposal_id"],)).fetchone()[0] == "conflicted"
         _, outputs = turn(http, stale, "明确修改意图：只把notes改为良好，其余采用当前最新已保存记录的动作和组次。请重新读取最新记录，整理并展示新快照等待我再次确认。")
         assert successful(outputs, "prepare_workout")
-        queried_versions = [item for page in successful(conflict_outputs + outputs, "list_workouts")
+        queried_versions = [item for page in successful(outputs, "list_workouts")
                             for item in page["items"]]
         assert any(item["id"] == initial["id"] and item["version"] == 2 for item in queried_versions)
-        assert not successful(conflict_outputs + outputs, "update_workout")
-        assert not successful(conflict_outputs + outputs, "save_workout")
+        assert not successful(outputs, "update_workout")
+        assert not successful(outputs, "save_workout")
         branch = history(http, stale)
         active = branch["session"]["active_leaf_id"]
         entries = {entry["entry_id"]: entry for entry in branch["entries"]}
@@ -148,7 +174,7 @@ def main():
         while active is not None:
             active_ids.add(active)
             active = entries[active]["parent_id"]
-        reads = [o for o in conflict_outputs + outputs if o["name"] == "list_workouts" and not o["is_error"]]
+        reads = [o for o in outputs if o["name"] == "list_workouts" and not o["is_error"]]
         assert any(o["entry_id"] in active_ids for o in reads)
         refreshed = proposal(http, stale)
         assert refreshed["proposal_id"] != old["proposal_id"] and refreshed["base_workout_version"] == 2
@@ -156,17 +182,24 @@ def main():
         assert refreshed["payload"]["exercises"] == updated[0]["content"]["exercises"]
         assert refreshed["payload"]["notes"] == "良好"
         assert listing(http)["items"][0]["version"] == 2
-        turn(http, stale, "确认无误，保存你最后重新整理展示的完整训练记录。")
+        final_target = pending(http, stale)
+        assert final_target["proposal_id"] == refreshed["proposal_id"]
+        final_operation = confirm(http, stale, final_target)
+        assert final_operation.status_code == 200, final_operation.text
+        assert final_operation.json()["status"] == "saved"
         assert listing(http)["items"][0]["version"] == 3
         # 真实画像流程与训练确认绑定同处HTTP投影。
         turn(http, first, "我的目标是增肌，每周三次，环境健身房，其余画像未知，禁用动作为空。请查询当前画像并准备完整画像等我确认。")
-        _, outputs = turn(http, first, "确认无误，保存刚展示的个人画像。")
-        assert successful(outputs, "save_profile_update")
+        profile_operation = confirm(http, first, pending(http, first, "profile"), "profile")
+        assert profile_operation.status_code == 200, profile_operation.text
+        assert profile_operation.json()["status"] == "saved"
         assert http.get("/api/profile").json()["version"] == 1
-        _, outputs = turn(http, first, path="/api/agent/regenerate", target=confirmation)
-        recovered = successful(outputs, "save_workout")
-        recovered += [s["result"] for s in successful(outputs, "get_workout_save_status") if s["status"] == "saved"]
-        assert recovered and all(value == initial for value in recovered)
+        fetched = http.get(f"/api/sessions/{first}/confirmations/{first_operation}")
+        assert fetched.status_code == 200 and fetched.json()["result"] == initial
+        regenerated = http.post("/api/agent/regenerate", json={
+            "session_id": first, "operation_id": str(uuid4()), "target_entry_id": confirmation})
+        assert regenerated.status_code == 409
+        assert regenerated.json()["detail"]["code"] == "invalid_target_entry"
         assert listing(http)["items"][0]["version"] == 3
         _, outputs = turn(http, first,
             f"仅核对原操作：调用get_workout_save_status查询proposal_id={initial['proposal_id']}，"
@@ -199,7 +232,7 @@ def main():
                 return [row[0] for row in await (await db.connection.execute("PRAGMA integrity_check")).fetchall()]
         assert asyncio.run_coroutine_threadsafe(audit(), app.state.loop).result() == ["ok"]
     (ROOT / "evidence.json").write_text(json.dumps(record, ensure_ascii=False, indent=2), encoding="utf-8")
-    print("PASS: real model Agent/HTTP/SSE; relative-date calculate_date; snapshot display; natural confirmation; cross-session update/conflict; original result regenerate; profile binding; edit/delete/restart:", ROOT)
+    print("PASS: real model Agent/HTTP/SSE; relative-date calculate_date; snapshot display; button confirmation via dedicated HTTP; cross-session update/conflict; fixed result via GET; profile binding; edit/delete/restart:", ROOT)
 
 
 if __name__ == "__main__":

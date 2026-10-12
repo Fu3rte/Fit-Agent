@@ -569,12 +569,73 @@ export type PlanBusinessErrorWire =
       message: string;
     };
 
-/** GET /api/sessions/{session_id}/history：会话头 ＋ 当前分支节点 ＋ 关联运行与输入（§3） */
+/* ===== 结构化保存确认（structured-save-confirmation §7.2–§7.6）===== */
+
+/** 确认业务类型：与三类保存目标一一对应（§7.2） */
+export type ConfirmationBusinessKindWire = "profile" | "plan" | "workout";
+
+/** 确认操作状态：结果与错误按状态固定配对（§7.3） */
+export type ConfirmationStatusWire = "processing" | "saved" | "failed";
+
+/** 待确认引用状态：仅当前路径中已绑定完整展示的有效快照（§7.6） */
+export type PendingProposalStatusWire = "pending" | "processing";
+
+/** ``POST /api/sessions/{session_id}/confirmations`` 请求体：恰好四个字段，
+ *  确认节点 ID、业务正文、基础版本、训练记录 ID、保存工具名、运行 ID 与文字确认内容均由后端从已绑定快照取得（§7.2） */
+export interface SaveConfirmationRequestWire {
+  operation_id: string;
+  business_kind: ConfirmationBusinessKindWire;
+  proposal_id: string;
+  display_entry_id: string;
+}
+
+/** 确认失败对象：``errors`` 仅内容校验错误携带（§7.3、§7.4） */
+export interface ConfirmationErrorWire {
+  code: string;
+  message: string;
+  errors?: { path: string; message: string }[];
+}
+
+/** 三类业务的完整固定保存结果（§7.3） */
+export type ConfirmationSaveResultWire =
+  | ProfileSaveResultWire
+  | PlanSaveResultWire
+  | WorkoutSaveResultWire;
+
+/** 确认操作对象：``result`` 按 ``business_kind`` 校验，处理中与失败时固定为 null（§7.3） */
+export interface SaveConfirmationOperationWire {
+  session_id: string;
+  operation_id: string;
+  business_kind: ConfirmationBusinessKindWire;
+  proposal_id: string;
+  display_entry_id: string;
+  confirmation_entry_id: string;
+  status: ConfirmationStatusWire;
+  result: ConfirmationSaveResultWire | null;
+  error: ConfirmationErrorWire | null;
+  created_at: number;
+  updated_at: number;
+}
+
+/** 会话内当前有效待确认快照引用（§7.6）：``display_entry_id`` 为已绑定的完整展示节点 */
+export interface PendingProposalReferenceWire {
+  business_kind: ConfirmationBusinessKindWire;
+  proposal_id: string;
+  status: PendingProposalStatusWire;
+  request_entry_id: string;
+  source_entry_id: string;
+  display_entry_id: string;
+  confirmation_entry_id: string | null;
+}
+
+/** GET /api/sessions/{session_id}/history：会话头 ＋ 当前分支节点 ＋ 关联运行与输入 ＋ 确认操作与待确认引用（§3、§7.6） */
 export interface SessionHistoryWire {
   session: SessionWire;
   entries: HistoryEntryWire[];
   runs: HistoryRunWire[];
   steering: HistorySteeringWire[];
+  confirmations: SaveConfirmationOperationWire[];
+  pending_proposals: PendingProposalReferenceWire[];
 }
 
 /* ===== 会话运行及 Steering 独立列表（session-list-contract §2、§3）===== */
@@ -730,6 +791,7 @@ export type ErrorCode =
   | "run_busy"
   | "run_closed"
   | "operation_conflict"
+  | "confirmation_not_found"
   | "steering_consumption_conflict"
   | "incomplete_tool_chain"
   | "workout_not_found"

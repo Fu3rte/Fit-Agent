@@ -367,7 +367,10 @@ def check(source: str) -> dict:
                 assert rows == before[table], table
 
             history = http.get(f"/api/sessions/{session}/history").json()
-            assert set(history) == {"session", "entries", "runs", "steering"}
+            assert set(history) == {
+                "session", "entries", "runs", "steering", "confirmations", "pending_proposals",
+            }
+            assert history["confirmations"] == []
             assert http.get("/api/plans/current").json() == {"id": None, "content": None}
             assert http.get("/api/plans").json() == []
             run = next(iter(history["runs"]))

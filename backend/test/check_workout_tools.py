@@ -7,7 +7,12 @@ from app.agent.tool import run_tool_batch
 from app.agent.tools.business import bind_business_tools, business_tool_declarations
 from app.agent.tools.dates import bind_date_tools
 from app.ai.messages import ToolCall
-from app.domain.business.models import BusinessContext, WorkoutListArguments
+from app.application.business.confirmation import ConfirmationService
+from app.domain.business.models import (
+    BusinessContext,
+    SaveConfirmationRequest,
+    WorkoutListArguments,
+)
 from app.domain.session.models import SendCommand, SendRequest
 from test.check_profile_confirmation import SYSTEM, Fixture, new_id, payload
 from test.check_workout_service_http import CONTENT, assistant
@@ -33,8 +38,7 @@ async def batch(f, session, calls):
     profiles, workouts = {}, {}
     tools = bind_business_tools(f.business, context, f.call, profiles, workouts)
     assert {name: tool.definition() for name, tool in tools.items()} == DECLARED
-    for name in ("prepare_workout", "save_workout", "update_workout"):
-        assert tools[name].execution_mode == "sequential"
+    assert tools["prepare_workout"].execution_mode == "sequential"
     for name in ("get_workout", "list_workouts", "get_workout_save_status"):
         assert tools[name].execution_mode == "parallel"
     assert all(tools[name].max_output_chars is None for name in DECLARED if name != "search_exercises")
@@ -77,26 +81,18 @@ async def check():
         snapshot = await f.repository.get_workout_snapshot(proposal["proposal_id"])
         assert snapshot.payload.model_dump() == CONTENT
         assert snapshot.display_entry_id == displays[prepare.id]
-        save_args = {"proposal_id": proposal["proposal_id"], "display_entry_id": displays[prepare.id],
-                     "confirmation_entry_id": new_id()}
-        # 确认节点采用真实新用户节点，在执行前构建保存调用。
-        async def save(session, name, save_args):
-            outcome = await f.service.accept_send(SendCommand(operation_id=new_id(), session_id=session,
-                request=SendRequest(text="确认保存指定训练快照")), system_message=SYSTEM)
-            request = outcome.run.request_entry_id
-            arguments = {**save_args, "confirmation_entry_id": request}
-            invocation = call(name, arguments)
-            source = await f.append(session, outcome.run.id, request,
-                                    assistant(name, invocation.id, arguments))
-            context = f.context(session, request, source)
-            tools = bind_business_tools(f.business, context, f.call, {}, {})
-            from app.agent.tool import run_tool_call
-            result = await run_tool_call(invocation, tools=tools, declared=DECLARED)
-            await f.append(session, outcome.run.id, source, result)
-            await f.service.finish_run(session, outcome.run.id, "completed")
-            return result
+        confirmations = ConfirmationService(f.repository, f.service, f.business)
 
-        first = body(await save(session, "save_workout", save_args))
+        # 保存只经独立确认入口：后端生成确认节点，不创建运行、不调用模型。
+        async def save(session, proposal_id, display_entry_id):
+            return await confirmations.confirm(session, SaveConfirmationRequest(
+                operation_id=new_id(), business_kind="workout",
+                proposal_id=proposal_id, display_entry_id=display_entry_id,
+            ))
+
+        first_op = await save(session, proposal["proposal_id"], displays[prepare.id])
+        assert first_op.status == "saved", first_op
+        first = first_op.result.model_dump()
         assert first["version"] == 1
         _, results, _ = await batch(f, session, [call("get_workout", {"workout_id": first["id"]}),
             call("get_workout_save_status", {"proposal_id": proposal["proposal_id"]})])
@@ -111,10 +107,12 @@ async def check():
             return {"proposal_id": body(messages[0])["proposal_id"],
                     "display_entry_id": nodes[invocation.id]}
         a2, a3 = await update_proposal(other), await update_proposal(stale)
-        second = body(await save(other, "update_workout", a2))
+        second_op = await save(other, a2["proposal_id"], a2["display_entry_id"])
+        assert second_op.status == "saved", second_op
+        second = second_op.result.model_dump()
         assert second["id"] == first["id"] and second["version"] == 2
-        rejected = await save(stale, "update_workout", a3)
-        assert rejected.is_error and body(rejected)["code"] == "workout_version_conflict"
+        rejected_op = await save(stale, a3["proposal_id"], a3["display_entry_id"])
+        assert rejected_op.status == "failed" and rejected_op.error.code == "workout_version_conflict"
         _, results, _ = await batch(f, session, [call("get_workout_save_status", {"proposal_id": proposal["proposal_id"]}),
             call("get_workout", {"workout_id": first["id"]}),
             call("list_workouts", {"session_id": session}),
@@ -151,7 +149,8 @@ async def check():
         await f.service.delete_session(other)
         assert await f.repository.get_workout_snapshot(a2["proposal_id"]) is None
         assert await f.repository.get_workout_save_record(a2["proposal_id"]) is not None
-        return {"first": first, "second": second, "conflict": body(rejected), "restart": "passed"}
+        return {"first": first, "second": second, "conflict": rejected_op.error.model_dump(),
+                "restart": "passed"}
     finally:
         await f.close()
 
@@ -170,7 +169,7 @@ def main():
         dates.append({"base": day, "days_offset": -offset, "result": expected})
     evidence["actual_date_tool"] = dates
     (ROOT / "evidence.json").write_text(json.dumps(evidence, ensure_ascii=False, indent=2), encoding="utf-8")
-    print("PASS: six actual tools/Harness; mixed snapshot bindings; insert/update/conflict; original status; "
+    print("PASS: actual tools/Harness; mixed snapshot bindings; insert/update/conflict; original status; "
           "strict identity; restart/delete; actual calculate_date results:", ROOT)
 
 

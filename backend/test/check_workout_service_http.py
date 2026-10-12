@@ -10,14 +10,25 @@ import pytest
 from app.ai.messages import AssistantMessage, TextContent, ToolCall, ToolResultMessage
 from app.domain.business.errors import WorkoutConfirmationInvalid
 from app.domain.business.models import (
-    WorkoutContent, WorkoutListArguments, WorkoutProposalArguments, WorkoutSaveArguments,
+    SaveConfirmationRequest,
+    WorkoutContent,
+    WorkoutListArguments,
+    WorkoutProposalArguments,
+    WorkoutSaveArguments,
 )
 from app.domain.session.models import SendCommand, SendRequest
 from app.infrastructure.persistence.sqlite import database as database_module
 from app.interfaces.http import app
-from test.check_business_profile import _StatementSync, _paused_save, _regenerate
+from test.check_business_profile import _paused_save, _regenerate, _StatementSync
 from test.check_profile_confirmation import (
-    Fixture, SYSTEM, USAGE, assert_rejected, new_id, now_ms, payload, propose,
+    SYSTEM,
+    USAGE,
+    Fixture,
+    assert_rejected,
+    new_id,
+    now_ms,
+    payload,
+    propose,
 )
 from test.regression_support import Server, client, temporary_root
 
@@ -63,9 +74,14 @@ async def prepare(f, session, performed_on, base=None, content=None, *, tamper=F
             api="openai-completions", provider="example", model="model-1", usage=USAGE,
             stop_reason="stop", timestamp=now_ms()))
     await f.service.finish_run(session, run.id, "completed")
+    # 预受理真实结构化确认：登记确认节点与处理中操作，供随后直接业务保存核验授权。
+    operation, is_first = await f.confirmations._accept(session, SaveConfirmationRequest(
+        operation_id=new_id(), business_kind="workout",
+        proposal_id=proposal.proposal_id, display_entry_id=display), now_ms())
+    assert is_first and operation.status == "processing", operation
     context = f.context(session, run.request_entry_id, saving_source)
     arguments = WorkoutSaveArguments(proposal_id=proposal.proposal_id,
-        display_entry_id=display, confirmation_entry_id=run.request_entry_id)
+        display_entry_id=display, confirmation_entry_id=operation.confirmation_entry_id)
     return context, arguments, run.id
 
 
@@ -129,7 +145,9 @@ async def check_service(path):
         await assert_rejected("训练确认不可授权画像", f.service_save(p, confirmation=a.confirmation_entry_id),
                               "profile_confirmation_invalid")
         # 已完成画像确认节点拒绝训练绑定。
-        saved_profile = await f.service_save(p)
+        profile_op = await f.confirm(p)
+        assert profile_op.status == "saved", profile_op
+        saved_profile = profile_op.result
         cp, ap, rp = await prepare(f, session, (date.fromisoformat(day) - timedelta(days=2)).isoformat())
         ap = ap.model_copy(update={"confirmation_entry_id": p["confirmation"]})
         await assert_rejected("画像确认不可授权训练", f.business.save_workout(cp, ap), "workout_confirmation_invalid")
@@ -150,7 +168,7 @@ async def check_constraints():
         exercise_id = next(iter(f.catalog.exercise_ids))
         profile = await propose(f, session, {"profile_id": 1, "base_profile_version": None,
             "payload": payload(forbidden_exercise_ids=[exercise_id])})
-        await f.service_save(profile)
+        assert (await f.confirm(profile)).status == "saved"
         actual = {"exercises": [{**CONTENT["exercises"][0], "exercise_id": exercise_id,
             "sets": [], "load_convention": None}], "notes": "真实受限动作"}
         c, a, _ = await prepare(f, session, day, content=actual)

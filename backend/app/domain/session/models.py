@@ -195,14 +195,9 @@ class SessionOperation(Model):
 class SendRequest(Model):
     text: str = Field(max_length=_MAX_TEXT_LENGTH)
     attachments: list[AttachmentInput] = Field(default_factory=list)
-    confirmation: SaveConfirmation | None = None
 
     @model_validator(mode="after")
     def validate_content(self) -> Self:
-        if self.confirmation is not None and (
-            self.text != self.confirmation.text or self.attachments
-        ):
-            raise ValueError("保存确认必须独立提交，不得附带修改或附件")
         if not self.text.strip() and not self.attachments:
             raise ValueError("请求必须包含文字或附件")
         return self
@@ -226,12 +221,6 @@ class RegenerateRequest(Model):
 
 class SteeringRequest(SendRequest):
     target_run_id: str
-
-    @model_validator(mode="after")
-    def reject_confirmation(self) -> Self:
-        if self.confirmation is not None:
-            raise ValueError("保存确认须在空闲时提交")
-        return self
 
 
 class SendCommand(Model):

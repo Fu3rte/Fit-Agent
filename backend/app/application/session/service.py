@@ -55,6 +55,7 @@ from app.domain.session.models import (
     RegenerateCommand,
     RegenerateRequest,
     RunOutcome,
+    SaveConfirmation,
     SendCommand,
     SendRequest,
     Session,
@@ -548,7 +549,6 @@ class SessionService:
                         role="user", content=request.text, timestamp=user_timestamp
                     )
                 ],
-                confirmation=request.confirmation,
                 created_at=now,
             )
             run = self._new_run(command.session_id, user_entry.id, now)
@@ -565,6 +565,30 @@ class SessionService:
             return OperationOutcome(
                 created=True, operation=operation, run=run, steering=None
             )
+
+    async def append_confirmation_entry(
+        self, session_id: str, confirmation: SaveConfirmation,
+    ) -> SessionMessageEntry:
+        # 独立确认用户节点：run_id 为空、不创建运行、无附件；由确认受理在同一事务内调用。
+        session = await self._require_session(session_id)
+        entries = await self._repository.list_entries(session_id)
+        await self._ensure_pairable(session_id, entries, session.active_leaf_id)
+        now = _now_ms()
+        entry = SessionMessageEntry(
+            session_id=session_id,
+            id=_new_id(),
+            parent_id=session.active_leaf_id,
+            run_id=None,
+            type="message",
+            messages=[
+                UserMessage(role="user", content=confirmation.text, timestamp=now)
+            ],
+            confirmation=confirmation,
+            created_at=now,
+        )
+        await self._repository.insert_entry(entry)
+        await self._set_leaf(session, entry.id, now)
+        return entry
 
     async def accept_edit(
         self,
@@ -653,6 +677,8 @@ class SessionService:
             )
             if target.messages[0].role != "user":
                 raise InvalidTargetEntry("重新生成目标必须是同会话用户消息节点")
+            if target.confirmation is not None:
+                raise InvalidTargetEntry("结构化确认节点不支持模型重新生成。")
             _reject_credentials(target.model_dump(), credentials)
             attachments = await self._accept_attachments(
                 command.session_id,
@@ -1061,6 +1087,10 @@ class SessionService:
         if running is not None:
             raise RunBusy(f"已有运行正在执行: {running.id}")
 
+    async def ensure_idle(self) -> None:
+        # 新确认与新 Agent 运行互斥：确认受理在空闲时校验，占用时拒绝登记。
+        await self._ensure_idle()
+
     async def _ensure_pairable(
         self,
         session_id: str,
@@ -1279,6 +1309,11 @@ class SessionService:
         await self._ensure_active(operation_id, session_id)
         stored = await self._repository.get_operation(operation_id)
         if stored is None:
+            # 操作 ID 在聊天与确认入口间统一防冲突：确认账本已占用即视为冲突。
+            if await self._repository.confirmation_operation_exists(operation_id):
+                raise OperationConflict(
+                    f"operation_id 已被确认操作占用: {operation_id}"
+                )
             return None
         if stored.session_id != session_id:
             raise SessionMismatch(f"operation_id 属于其他会话: {operation_id}")

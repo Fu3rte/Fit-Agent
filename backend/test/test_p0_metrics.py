@@ -9,6 +9,7 @@ from app.ai.messages import (
 from app.domain.session.models import CompactionEntry, SessionMessageEntry
 from test.p0_contract import (
     CATEGORY_QUOTAS,
+    ROUNDS,
     CaseCheck,
     CaseRoundObservation,
     CaseTurn,
@@ -132,49 +133,44 @@ def test_failure_denominator_keeps_failed_rounds():
     rounds = [
         round_obs("P01", 0, "pass"),
         round_obs("P01", 1, "pass"),
-        round_obs("P01", 2, "pass"),
         round_obs("P02", 0, "fail", checks=[check_result("P02", 0, "fail")]),
-        round_obs("P02", 1, "fail", checks=[check_result("P02", 1, "fail")]),
-        round_obs("P02", 2, "pass"),
+        round_obs("P02", 1, "pass"),
     ]
     summary = aggregate(rounds)
-    assert summary["executions"] == 6
-    assert summary["failure_denominator"] == 6
-    assert summary["passed_executions"] == 4
-    assert summary["execution_pass_rate"] == 4 / 6
+    assert summary["executions"] == 4
+    assert summary["failure_denominator"] == 4
+    assert summary["passed_executions"] == 3
+    assert summary["execution_pass_rate"] == 3 / 4
     assert summary["independent_cases"] == 2
     assert summary["expected_cases"] == sum(CATEGORY_QUOTAS.values())
     assert summary["per_round"][0] == {"round_index": 0, "observed": 2, "passed": 1, "rate": 0.5}
     assert {(item["case_id"], item["round_index"]) for item in summary["failures"]} == {
-        ("P02", 0),
-        ("P02", 1),
+        ("P02", 0)
     }
 
 
-def test_three_round_stability_distribution():
+def test_stability_distribution_over_configured_rounds():
     rounds = []
-    for round_index in range(3):
+    for round_index in range(ROUNDS):
         rounds.append(round_obs("P01", round_index, "pass"))
-        rounds.append(round_obs("P02", round_index, "pass" if round_index < 2 else "fail"))
-        rounds.append(round_obs("P03", round_index, "pass" if round_index == 0 else "fail"))
-        rounds.append(round_obs("P04", round_index, "fail"))
+        rounds.append(round_obs("P02", round_index, "pass" if round_index == 0 else "fail"))
+        rounds.append(round_obs("P03", round_index, "fail"))
     summary = aggregate(rounds)
-    assert summary["stability_distribution"] == {"0/3": 1, "1/3": 1, "2/3": 1, "3/3": 1}
+    assert summary["stability_distribution"] == {"0/2": 1, "1/2": 1, "2/2": 1}
     assert summary["stable_cases"] == 1
-    assert summary["stable_pass_rate"] == 0.25
-    assert summary["executions"] == 12
+    assert summary["stable_pass_rate"] == 1 / 3
+    assert summary["executions"] == 6
 
 
 def test_pending_review_is_not_a_pass():
     rounds = [
         round_obs("P01", 0, "pending_review", checks=[check_result("P01", 0, "pending_review")]),
         round_obs("P01", 1, "pass"),
-        round_obs("P01", 2, "pass"),
     ]
     summary = aggregate(rounds)
-    assert summary["passed_executions"] == 2
+    assert summary["passed_executions"] == 1
     assert summary["stable_cases"] == 0
-    assert summary["stability_distribution"]["2/3"] == 1
+    assert summary["stability_distribution"]["1/2"] == 1
     assert summary["pending_review"][0]["check_id"] == "c1"
     assert {item["round_index"] for item in summary["failures"]} == set()
 
@@ -296,23 +292,20 @@ def test_duration_statistics_use_real_values():
     rounds = [
         round_obs("P01", 0, "pass", duration_ms=100.0, turns=[turn_obs("P01", 0, duration_ms=100.0, first_text_delta_ms=30.0)]),
         round_obs("P01", 1, "pass", duration_ms=300.0, turns=[turn_obs("P01", 1, duration_ms=300.0, first_text_delta_ms=90.0)]),
-        round_obs("P01", 2, "pass", duration_ms=200.0, turns=[turn_obs("P01", 2, duration_ms=200.0, first_text_delta_ms=60.0)]),
     ]
     summary = aggregate(rounds)
     durations = summary["durations"]
-    assert durations["round_ms"] == {"n": 3, "median": 200.0, "min": 100.0, "max": 300.0}
-    assert durations["first_text_delta_ms"] == {"n": 3, "median": 60.0, "min": 30.0, "max": 90.0}
+    assert durations["round_ms"] == {"n": 2, "median": 200.0, "min": 100.0, "max": 300.0}
+    assert durations["first_text_delta_ms"] == {"n": 2, "median": 60.0, "min": 30.0, "max": 90.0}
 
 
 def test_missing_rounds_are_reported():
     rounds = [
         round_obs("W01", 0, "pass"),
-        round_obs("W01", 1, "pass"),
         round_obs("W02", 0, "pass"),
         round_obs("W02", 1, "pass"),
-        round_obs("W02", 2, "pass"),
     ]
     summary = aggregate(rounds)
-    assert summary["missing_rounds"] == [{"case_id": "W01", "missing_rounds": [2]}]
+    assert summary["missing_rounds"] == [{"case_id": "W01", "missing_rounds": [1]}]
     assert summary["categories"]["workout"]["cases"] == 2
     assert summary["categories"]["workout"]["stable_cases"] == 1

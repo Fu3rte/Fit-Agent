@@ -20,6 +20,8 @@ import type {
   RegenerateRunBody,
   RunSteeringItemWire,
   RunSteeringListWire,
+  SaveConfirmationOperationWire,
+  SaveConfirmationRequestWire,
   SendRunRepeatWire,
   SessionCreateBody,
   SessionDeleteWire,
@@ -52,6 +54,8 @@ import {
   parseProfileResponse,
   parseProviderStatus,
   parseProviderTest,
+  parsePendingProposalReference,
+  parseSaveConfirmationOperation,
   parseWorkoutList,
   parseWorkoutRecord,
   requireArray,
@@ -98,7 +102,8 @@ const DISCARD_REASONS = [
 ] as const;
 const OPERATION_KINDS = ["send", "edit", "regenerate", "steering"] as const;
 
-/** 会话持久化接口错误（§11.5）：body 形如 ``{"detail":{"code":"...","message":"..."}}`` */
+/** 会话持久化接口错误（§11.5、确认契约 §7.4）：body 形如 ``{"detail":{"code":"...","message":"..."}}``，
+ *  操作失效冲突附带 ``detail.reason`` */
 async function contractError(response: Response): Promise<ReActHttpError> {
   const body: unknown = await response.json().catch(() => null);
   const detail = isObject(body) && isObject(body.detail) ? body.detail : null;
@@ -641,8 +646,8 @@ function parseSessionList(body: unknown): SessionListWire {
 }
 
 /**
- * 历史响应（§3）：校验会话归属、祖先链顺序、运行请求节点、末节点归属与输入关联；
- * 协议异常就地报错，不转换为空历史。
+ * 历史响应（§3、确认契约 §7.6）：校验会话归属、祖先链顺序、运行请求节点、末节点归属、输入关联、
+ * 确认操作与待确认引用的节点归属及时序；协议异常就地报错，不转换为空历史。
  */
 export function parseSessionHistory(
   sessionId: string,
@@ -656,16 +661,33 @@ export function parseSessionHistory(
   const steering = requireArray(body.steering, "steering").map(
     parseHistorySteering,
   );
+  const confirmations = requireArray(
+    body.confirmations,
+    "confirmations",
+  ).map(parseSaveConfirmationOperation);
+  const proposals = requireArray(
+    body.pending_proposals,
+    "pending_proposals",
+  ).map(parsePendingProposalReference);
 
   const nodes = new Map<string, HistoryEntryWire>();
+  /** 祖先链顺序即分支时序（§3.1）：确认事件与快照关联按节点下标核验先后 */
+  const order = new Map<string, number>();
   entries.forEach((entry, index) => {
     if (nodes.has(entry.entry_id)) throw new Error("历史节点身份重复。");
     const expected = index === 0 ? null : entries[index - 1].entry_id;
     if (entry.parent_id !== expected) throw new Error("历史分支链无效。");
     nodes.set(entry.entry_id, entry);
+    order.set(entry.entry_id, index);
   });
   if (session.active_leaf_id === null) {
-    if (entries.length > 0 || runs.length > 0 || steering.length > 0)
+    if (
+      entries.length > 0 ||
+      runs.length > 0 ||
+      steering.length > 0 ||
+      confirmations.length > 0 ||
+      proposals.length > 0
+    )
       throw new Error("空分支历史无效。");
   } else if (entries.at(-1)?.entry_id !== session.active_leaf_id) {
     throw new Error("历史叶节点不匹配。");
@@ -714,7 +736,79 @@ export function parseSessionHistory(
     }
   }
 
-  return { session, entries, runs, steering };
+  /** 分支内指定角色节点的下标（§3.1）：缺失或角色不符属协议异常 */
+  const nodeOrder = (entryId: string, role: string, field: string) => {
+    const node = nodes.get(entryId);
+    if (
+      node === undefined ||
+      node.type !== "message" ||
+      node.message.role !== role
+    )
+      throw new Error(`${field} 无效。`);
+    return order.get(entryId) as number;
+  };
+
+  /** 确认节点必须是不属于任何 Agent 运行的独立用户节点（§7.2、§7.6） */
+  const confirmationOrder = (entryId: string) => {
+    const at = nodeOrder(entryId, "user", "确认节点");
+    if (nodes.get(entryId)?.run_id !== null)
+      throw new Error("确认节点 无效。");
+    return at;
+  };
+
+  const operationIds = new Set<string>();
+  for (const operation of confirmations) {
+    if (operation.session_id !== sessionId)
+      throw new Error("确认操作归属无效。");
+    if (operationIds.has(operation.operation_id))
+      throw new Error("确认操作身份重复。");
+    operationIds.add(operation.operation_id);
+    const display = nodeOrder(
+      operation.display_entry_id,
+      "toolResult",
+      "确认展示节点",
+    );
+    const confirmation = confirmationOrder(operation.confirmation_entry_id);
+    if (display >= confirmation) throw new Error("确认节点未晚于完整展示。");
+  }
+
+  const proposalIds = new Set<string>();
+  for (const reference of proposals) {
+    if (proposalIds.has(reference.proposal_id))
+      throw new Error("待确认快照标识重复。");
+    proposalIds.add(reference.proposal_id);
+    const request = nodeOrder(
+      reference.request_entry_id,
+      "user",
+      "待确认快照请求节点",
+    );
+    const source = nodeOrder(
+      reference.source_entry_id,
+      "assistant",
+      "待确认快照来源节点",
+    );
+    const display = nodeOrder(
+      reference.display_entry_id,
+      "toolResult",
+      "待确认快照展示节点",
+    );
+    if (!(request < source && source < display))
+      throw new Error("待确认快照节点时序无效。");
+    if (
+      reference.confirmation_entry_id !== null &&
+      display >= confirmationOrder(reference.confirmation_entry_id)
+    )
+      throw new Error("待确认快照确认时序无效。");
+  }
+
+  return {
+    session,
+    entries,
+    runs,
+    steering,
+    confirmations,
+    pending_proposals: proposals,
+  };
 }
 
 /** 会话列表（§2）：全量会话头，无分页与业务查询参数 */
@@ -749,6 +843,61 @@ export const deleteSession = (sessionId: string) =>
       return { session_id, deleted: true };
     },
   );
+
+/* ===== 结构化保存确认 HTTP（structured-save-confirmation §7.2、§7.3）===== */
+
+/**
+ * 提交确认（§7.2）：路径指定会话，正文恰好四字段。
+ * HTTP 200 固定为已保存终态，202 固定为处理中的同一操作；其余状态码沿用错误响应。
+ * 状态码与对象的配对不合契约属协议异常，由调用方按结果未知处理并核实原操作。
+ */
+export async function postSaveConfirmation(
+  sessionId: string,
+  body: SaveConfirmationRequestWire,
+  signal?: AbortSignal,
+): Promise<SaveConfirmationOperationWire> {
+  const response = await fetch(
+    `/api/sessions/${encodeURIComponent(sessionId)}/confirmations`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+      signal,
+    },
+  );
+  if (!response.ok) throw await contractError(response);
+  if (response.status !== 200 && response.status !== 202)
+    throw new Error("确认响应状态码无效。");
+  const operation = parseSaveConfirmationOperation(await response.json());
+  if (operation.session_id !== sessionId || operation.operation_id !== body.operation_id)
+    throw new Error("确认响应身份不匹配。");
+  if (response.status === 200 && operation.status !== "saved")
+    throw new Error("确认响应状态与 HTTP 200 不匹配。");
+  if (response.status === 202 && operation.status !== "processing")
+    throw new Error("确认响应状态与 HTTP 202 不匹配。");
+  return operation;
+}
+
+/** 专用状态查询（§7.3）：只读，未登记返回 404 confirmation_not_found，不触发保存也不创建节点 */
+export async function getSaveConfirmation(
+  sessionId: string,
+  operationId: string,
+  signal?: AbortSignal,
+): Promise<SaveConfirmationOperationWire> {
+  const response = await fetch(
+    `/api/sessions/${encodeURIComponent(sessionId)}/confirmations/${encodeURIComponent(operationId)}`,
+    { method: "GET", signal },
+  );
+  if (!response.ok) throw await contractError(response);
+  if (response.status !== 200) throw new Error("确认状态查询状态码无效。");
+  const operation = parseSaveConfirmationOperation(await response.json());
+  if (
+    operation.session_id !== sessionId ||
+    operation.operation_id !== operationId
+  )
+    throw new Error("确认状态查询响应身份不匹配。");
+  return operation;
+}
 
 /* ===== 画像查询（backend-http-sse-contract §11.9）===== */
 

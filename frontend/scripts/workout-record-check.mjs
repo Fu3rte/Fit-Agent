@@ -1,6 +1,6 @@
 // 运行：node scripts/workout-record-check.mjs
-// 纯函数检查（workout-record-contract、workout-http-sse-contract §2–§6）：待确认快照的完整展示仅在结果节点提交后出现、
-// 实时与历史同一解析口径且无重复展示、保存与状态查询核实落定才刷新查询缓存、
+// 纯函数检查（workout-record-contract、workout-http-sse-contract §2–§6，确认契约 §7.6）：待确认快照的完整展示仅在结果节点提交后出现、
+// 实时与历史同一解析口径且无重复展示、工具条目携带快照完整对象（确认入口按其中 proposal_id 与展示节点绑定）、
 // 逐组未知值不补 0、协议异常在解析位置报错（不触达后端）、
 // 记录页的日期筛选边界阻断、选中项按当前结果保持有效及组数摘要口径。
 import assert from "node:assert/strict";
@@ -11,7 +11,7 @@ const server = await createServer({
   logLevel: "silent",
   server: { middlewareMode: true },
 });
-const { applyReActEvent, workoutSaved } = await server.ssrLoadModule(
+const { applyReActEvent } = await server.ssrLoadModule(
   "/src/features/chat/utils/reactAgent.ts",
 );
 const { historyToRounds, mergeHistoryRounds } = await server.ssrLoadModule(
@@ -28,14 +28,9 @@ const userEntry = u(3);
 const assistantId = u(4);
 const prepareNode = u(5);
 const proposalId = u(6);
-const confirmationEntry = u(7);
 const baseWorkoutId = u(8);
 const savedWorkoutId = u(9);
 const prepareCall = "tc-prepare";
-const saveCall = "tc-save";
-const updateCall = "tc-update";
-const statusCall = "tc-status";
-const queryCall = "tc-query";
 
 /** 完整待确认内容：目录动作带口径，已知组含数值全为 null 的组，目录外动作组数未知（sets=[]） */
 const payload = {
@@ -60,12 +55,6 @@ const proposal = {
   base_workout_version: 2,
   payload,
 };
-const saveArguments = {
-  proposal_id: proposalId,
-  display_entry_id: prepareNode,
-  confirmation_entry_id: confirmationEntry,
-};
-const statusArguments = { proposal_id: proposalId };
 const prepared = JSON.stringify(proposal);
 const record = {
   id: savedWorkoutId,
@@ -75,13 +64,6 @@ const record = {
   created_at: 1780000000000,
   updated_at: 1780272000000,
 };
-const saveResult = JSON.stringify({
-  proposal_id: proposalId,
-  ...record,
-  saved_at: 1780272000000,
-});
-const statusResult = (status, result) =>
-  JSON.stringify({ proposal_id: proposalId, status, result });
 
 const event = (name, data) => ({ event: name, data: { run_id: runId, ...data } });
 const callBlock = (callId, name, args) => ({
@@ -154,6 +136,8 @@ const historyRounds = historyToRounds({
   ],
   runs: [{ session_id: sessionId, run_id: runId, request_entry_id: userEntry, last_entry_id: prepareNode, status: "completed", started_at: 1, finished_at: 4, error_code: null, error_message: null }],
   steering: [],
+  confirmations: [],
+  pending_proposals: [],
 });
 assert.equal(historyRounds.length, 1, "历史重建为单一轮次");
 const historyTool = historyRounds[0].entries.at(-1);
@@ -204,37 +188,7 @@ const failedRound = applyReActEvent(preparedRound(), event("tool_result", {
 assert.equal(failedRound.entries.at(-1).workout, undefined, "失败结果不展示待确认记录");
 assert.equal(failedRound.entries.at(-1).status, "failed", "失败结果按失败展示");
 
-/** 5. 保存落定：仅新增与更新工具的成功结果、状态查询核实 saved 作为刷新查询缓存的凭据 */
-const resultOf = (callId, name, args, content, is_error = false) => workoutSaved(
-  event("tool_result", { tool_call_id: callId, content, is_error, entry_id: u(20), parent_id: assistantId }),
-  roundWithTool(callId, name, args),
-);
-assert.equal(resultOf(saveCall, "save_workout", saveArguments, saveResult), true, "新增保存成功刷新查询缓存");
-assert.equal(resultOf(updateCall, "update_workout", saveArguments, saveResult), true, "整条更新成功刷新查询缓存");
-assert.equal(resultOf(saveCall, "save_workout", saveArguments, saveResult, true), false, "保存失败不刷新查询缓存");
-assert.equal(
-  workoutSaved(event("tool_execution_end", { tool_call_id: saveCall, tool_name: "save_workout", content: saveResult, is_error: false }), roundWithTool(saveCall, "save_workout", saveArguments)),
-  false,
-  "执行完成通知不作为保存凭据",
-);
-assert.equal(resultOf(statusCall, "get_workout_save_status", statusArguments, statusResult("saved", JSON.parse(saveResult))), true, "核实原操作已保存刷新查询缓存");
-for (const status of ["pending", "processing", "invalidated", "conflicted"])
-  assert.equal(resultOf(statusCall, "get_workout_save_status", statusArguments, statusResult(status, null)), false, `${status} 状态不刷新查询缓存`);
-assert.equal(resultOf(statusCall, "get_workout_save_status", { proposal_id: u(30) }, statusResult("saved", JSON.parse(saveResult))), false, "快照标识与调用参数不一致不作凭据");
-assert.equal(resultOf(queryCall, "get_workout", { workout_id: savedWorkoutId }, JSON.stringify(record)), false, "记录查询不作为保存凭据");
-assert.equal(resultOf(queryCall, "list_workouts", {}, JSON.stringify({ items: [record], page: 1, page_size: 10, total: 1 })), false, "记录列表查询不作为保存凭据");
-assert.throws(
-  () => resultOf(saveCall, "save_workout", saveArguments, statusResult("saved", null)),
-  /训练记录保存结果/,
-  "保存结果不合 schema 在解析位置报错",
-);
-assert.throws(
-  () => resultOf(statusCall, "get_workout_save_status", statusArguments, statusResult("saved", { ...JSON.parse(saveResult), proposal_id: u(40) })),
-  /快照标识不一致/,
-  "状态查询的固定结果快照标识不一致在解析位置报错",
-);
-
-/** 6. 新增快照依据同时为空；查询响应严格校验分页取值 */
+/** 5. 新增快照依据同时为空；查询响应严格校验分页取值 */
 const created = { ...proposal, base_workout_id: null, base_workout_version: null };
 assert.deepEqual(business.parseWorkoutProposal(created), created, "新增快照依据同时为空");
 assert.throws(() => business.parseWorkoutList({ items: [], page: 1, page_size: 101, total: 0 }), /page_size 无效/, "超出范围的每页条数被拒绝");
@@ -243,7 +197,7 @@ assert.throws(() => business.parseWorkoutList({ items: [record], page: 1, page_s
 assert.deepEqual(business.parseWorkoutRecord(record), record, "完整记录通过校验并保留全部字段");
 assert.throws(() => business.parseWorkoutRecord({ ...record, version: 0 }), /version 无效/, "非正整数版本被拒绝");
 
-/** 7. 记录页浏览状态：日期筛选边界就地阻断、选中项按当前结果保持有效、组数摘要标注未知语义 */
+/** 6. 记录页浏览状态：日期筛选边界就地阻断、选中项按当前结果保持有效、组数摘要标注未知语义 */
 const today = "2026-06-01";
 assert.equal(browse.isRejectedDateRange("", ""), false, "起止均不限日期");
 assert.equal(browse.isRejectedDateRange(today, ""), false, "仅起始日期");
@@ -270,4 +224,4 @@ assert.equal(browse.describeWorkoutContent({ exercises: [oneKnownSet, noSet, noS
 assert.equal(browse.describeWorkoutContent({ exercises: [noSet, noSet], notes: null }), "2 个动作 · 组数未知", "全部动作组数未知时不出现已知组数");
 assert.equal(browse.describeWorkoutContent({ exercises: [payload.exercises[0], oneKnownSet], notes: null }), "2 个动作 · 3 组", "无组数未知动作时直接给出组数");
 
-console.log("PASS: 训练记录待确认完整展示、实时与历史一致、保存与状态查询落定刷新、未知值保持 null、协议异常就地报错、日期筛选边界与列表选中保持有效");
+console.log("PASS: 训练记录待确认快照完整对象展示、实时与历史一致、未知值保持 null、协议异常就地报错、日期筛选边界与列表选中保持有效");

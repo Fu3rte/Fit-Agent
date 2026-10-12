@@ -361,14 +361,11 @@ def check() -> None:
                 "get_pending_proposal",
                 "search_exercises",
                 "prepare_profile_update",
-                "save_profile_update",
                 "get_profile_update_status",
                 "get_workout",
                 "get_workout_save_status",
                 "list_workouts",
                 "prepare_workout",
-                "save_workout",
-                "update_workout",
                 "get_current_plan",
                 "get_plan",
                 "get_plan_save_status",
@@ -376,7 +373,6 @@ def check() -> None:
                 "prepare_plan",
                 "prepare_plan_import",
                 "prepare_plan_adjustment",
-                "save_plan",
             }
             assert received_after <= history[1].timestamp <= time.time_ns() // 1_000_000
             assert history[0].timestamp == history[1].timestamp

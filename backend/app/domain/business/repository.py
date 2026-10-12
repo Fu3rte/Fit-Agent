@@ -4,10 +4,10 @@ from typing import Protocol
 
 from app.domain.business.models import (
     CatalogExercise,
-    PlanRecord,
-    PlanSnapshot,
-    PlanSaveRecord,
     PlanProposalStatus,
+    PlanRecord,
+    PlanSaveRecord,
+    PlanSnapshot,
     ProfileContent,
     ProfileProposalStatus,
     ProfileRecord,
@@ -169,6 +169,38 @@ class BusinessRepository(Protocol):
     async def delete_plan_snapshots_for_session(self, session_id: str) -> None: ...
 
     async def recover_interrupted_plan_saves(self) -> int: ...
+
+    # 结构化保存确认操作账本：独立确认 HTTP 与启动恢复共用。
+    # 已完成结果在会话与消息删除后保留；删除只清除未完成（非 saved）操作。
+
+    async def insert_confirmation_operation(self, operation) -> None: ...
+
+    async def get_confirmation_operation(self, operation_id: str): ...
+
+    async def list_confirmation_operations_by_entry(
+        self, session_id: str, confirmation_entry_id: str
+    ) -> list: ...
+
+    async def set_confirmation_operation_outcome(
+        self, operation_id: str, status: str, result: str | None,
+        error: str | None, updated_at: int,
+    ) -> None: ...
+
+    async def list_confirmation_operations(self, session_id: str) -> list: ...
+
+    async def list_processing_confirmation_operations(self) -> list: ...
+
+    async def delete_confirmation_operations_for_entries(
+        self, session_id: str, entry_ids: set[str]
+    ) -> None: ...
+
+    async def delete_confirmation_operations_for_session(self, session_id: str) -> None: ...
+
+    async def release_profile_processing(self, proposal_id: str, confirmation_entry_id: str) -> None: ...
+
+    async def release_plan_processing(self, proposal_id: str, confirmation_entry_id: str) -> None: ...
+
+    async def release_workout_processing(self, proposal_id: str, confirmation_entry_id: str) -> None: ...
 
     async def replace_exercises(self, exercises: list[CatalogExercise]) -> None: ...
 

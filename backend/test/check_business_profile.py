@@ -39,7 +39,6 @@ from test.check_profile_confirmation import (
     DECLARED,
     GET_PROFILE,
     PREPARE,
-    SAVE,
     SEARCH_EXERCISES,
     STATUS,
     Fixture,
@@ -49,6 +48,7 @@ from test.check_profile_confirmation import (
     payload,
     prepare_arguments,
     propose,
+    rejection,
 )
 from test.regression_support import install_test_model_config, temporary_root
 
@@ -69,7 +69,7 @@ WORKOUT_TOOLS = [item.name for item in workout_tool_declarations()]
 PLAN_TOOLS = [item.name for item in plan_tool_declarations()]
 PENDING_PROPOSAL_TOOLS = [item.name for item in pending_proposal_tool_declarations()]
 PLAN_IMPORT_TOOLS = [item.name for item in plan_import_tool_declarations()]
-BUSINESS_TOOLS = {GET_PROFILE, SEARCH_EXERCISES, CALCULATE_DATE, PREPARE, SAVE, STATUS,
+BUSINESS_TOOLS = {GET_PROFILE, SEARCH_EXERCISES, CALCULATE_DATE, PREPARE, STATUS,
                   *WORKOUT_TOOLS, *PLAN_TOOLS, *PENDING_PROPOSAL_TOOLS, *PLAN_IMPORT_TOOLS}
 
 
@@ -108,7 +108,6 @@ async def check_declarations() -> dict:
         SEARCH_EXERCISES,
         CALCULATE_DATE,
         PREPARE,
-        SAVE,
         STATUS,
         *PENDING_PROPOSAL_TOOLS,
         *WORKOUT_TOOLS,
@@ -117,7 +116,7 @@ async def check_declarations() -> dict:
     ]
     profile = profile_tool_declarations()
     exercises = exercise_tool_declarations()
-    assert {item.name for item in profile} == {GET_PROFILE, PREPARE, SAVE, STATUS}
+    assert {item.name for item in profile} == {GET_PROFILE, PREPARE, STATUS}
     assert [item.name for item in exercises] == [SEARCH_EXERCISES]
     assert {item.name: item for item in profile + exercises + date_tool_declarations()
             + workout_tool_declarations()
@@ -140,13 +139,6 @@ async def check_declarations() -> dict:
     }
     assert prepare["additionalProperties"] is False
     assert prepare["properties"]["payload"]["additionalProperties"] is False
-    save = DECLARED[SAVE].parameters
-    assert set(save["required"]) == {
-        "proposal_id",
-        "display_entry_id",
-        "confirmation_entry_id",
-    }
-    assert save["additionalProperties"] is False
     assert set(DECLARED[STATUS].parameters["required"]) == {"proposal_id"}
     return {
         "tools": sorted(item.name for item in declarations),
@@ -188,18 +180,12 @@ async def check_read_paths(root: Path) -> dict:
             rejected.append(message_text(message)[:40])
 
         # 保存与查询的参数格式：非标准 UUID、缺失字段与多余字段均拒绝。
+        # 保存由独立确认入口受理：未知快照与错误展示绑定按业务错误拒绝，零写入。
         ids = await propose(fixture, session_id, prepare_arguments(None, payload()))
-        for arguments in (
-            {
-                "proposal_id": "not-a-uuid",
-                "display_entry_id": ids["display"],
-                "confirmation_entry_id": ids["confirmation"],
-            },
-            {"proposal_id": ids["proposal"]},
-            {"proposal_id": ids["proposal"], "payload": payload()},
-        ):
-            message = await fixture.invoke(SAVE, arguments, context)
-            assert message.is_error is True
+        assert (await rejection(
+            fixture.confirm(ids, proposal=new_id()))).code == "profile_proposal_not_found"
+        assert (await rejection(
+            fixture.confirm(ids, display=new_id()))).code == "profile_confirmation_invalid"
         for arguments in ({}, {"proposal_id": "not-a-uuid"}):
             message = await fixture.invoke(STATUS, arguments, context)
             assert message.is_error is True
@@ -360,7 +346,6 @@ async def check_long_output_and_credentials(root: Path) -> dict:
         # 画像结果为业务事实：完整可解析，禁止截断。
         assert all(tool.max_output_chars is None for tool in tools.values())
         assert tools[PREPARE].execution_mode == "sequential"
-        assert tools[SAVE].execution_mode == "sequential"
         assert tools[STATUS].execution_mode == "parallel"
         assert tools[GET_PROFILE].execution_mode == "parallel"
 
@@ -413,7 +398,8 @@ async def check_concurrent_save(root: Path) -> dict:
     fixture = await Fixture(root / "concurrent.db").seeded()
     try:
         session_id = await fixture.session("并发保存会话")
-        ids = await propose(fixture, session_id, prepare_arguments(None, payload()))
+        ids = await fixture.accept(
+            await propose(fixture, session_id, prepare_arguments(None, payload())))
         outcomes = await asyncio.gather(
             fixture.service_save(ids),
             fixture.service_save(ids),
@@ -489,7 +475,8 @@ async def check_replacement_wins(root: Path) -> dict:
     sync = _StatementSync("COMMIT", nth=2)
     try:
         session_id = await fixture.session("替换优先会话")
-        ids = await propose(fixture, session_id, prepare_arguments(None, payload()))
+        ids = await fixture.accept(
+            await propose(fixture, session_id, prepare_arguments(None, payload())))
         async with _paused_save(
             fixture, sync, lambda: fixture.service_save(ids)
         ) as task:
@@ -531,7 +518,8 @@ async def check_replacement_fails(root: Path) -> dict:
     sync = _StatementSync("COMMIT", nth=2)
     try:
         session_id = await fixture.session("替换失败会话")
-        ids = await propose(fixture, session_id, prepare_arguments(None, payload()))
+        ids = await fixture.accept(
+            await propose(fixture, session_id, prepare_arguments(None, payload())))
         async with _paused_save(
             fixture, sync, lambda: fixture.service_save(ids)
         ) as task:
@@ -562,7 +550,8 @@ async def check_commit_before_replacement(root: Path) -> dict:
     fixture = await Fixture(root / "commit-first.db").seeded()
     try:
         session_id = await fixture.session("提交优先会话")
-        ids = await propose(fixture, session_id, prepare_arguments(None, payload()))
+        ids = await fixture.accept(
+            await propose(fixture, session_id, prepare_arguments(None, payload())))
         saved = await fixture.service_save(ids)
         assert saved.version == 1
         async with fixture.replacements.register(session_id):

@@ -1,12 +1,8 @@
-from dataclasses import replace
-from functools import partial
-
 from app.agent.tool import AgentTool, ExecuteFunction, ToolDeclaration
 from app.agent.tools.common import (
     FrozenBusinessContext,
     MainLoopCall,
     business_result,
-    check_business_permission,
     unbound,
 )
 from app.ai.messages import JsonObject
@@ -16,7 +12,6 @@ from app.domain.business.models import (
     WorkoutGetArguments,
     WorkoutListArguments,
     WorkoutProposalArguments,
-    WorkoutSaveArguments,
     WorkoutStatusArguments,
 )
 
@@ -32,8 +27,6 @@ def _tools(
     get_workout: ExecuteFunction,
     list_workouts: ExecuteFunction,
     prepare_workout: ExecuteFunction,
-    save_workout: ExecuteFunction,
-    update_workout: ExecuteFunction,
     get_workout_save_status: ExecuteFunction,
 ) -> dict[str, AgentTool]:
     return {
@@ -54,26 +47,10 @@ def _tools(
             '参数预处理仅将两基础字段精确字符串"None"转为null，其他字段和值保持原样；'
             '禁止"null"、0或省略。示例：{"base_workout_id":null,"base_workout_version":null}。'
             "同日已有记录时重写完整当天内容，保留本次未涉及的内容。结果持久化后绑定真实展示节点，"
-            "完整payload由结果展示，等待后续用户自然语言明确确认。日期禁止晚于可信business_date。",
+            "完整payload由结果展示，等待用户点击该快照的确认按钮。日期禁止晚于可信business_date。",
             WorkoutProposalArguments, prepare_workout,
             execution_mode="sequential", prepare_arguments=_prepare_workout_arguments,
             max_output_chars=None,
-        ),
-        "save_workout": AgentTool(
-            "save_workout",
-            "保存后续用户明确确认的新增训练快照（base_workout_id为null）。输入proposal_id、"
-            "display_entry_id、confirmation_entry_id，引用business_kind=workout的真实节点绑定。"
-            "返回完整固定保存结果；重复调用保持原版本和时间，结果未知时查询原操作状态。",
-            WorkoutSaveArguments, save_workout,
-            execution_mode="sequential", max_output_chars=None,
-        ),
-        "update_workout": AgentTool(
-            "update_workout",
-            "保存后续用户明确确认的同日更新快照（base_workout_id有值），完整覆盖当天内容。"
-            "输入proposal_id、display_entry_id、confirmation_entry_id，引用workout真实绑定。"
-            "保持记录ID并递增版本；冲突需重新读取、准备、展示并等待再次确认。",
-            WorkoutSaveArguments, update_workout,
-            execution_mode="sequential", max_output_chars=None,
         ),
         "get_workout_save_status": AgentTool(
             "get_workout_save_status",
@@ -88,7 +65,7 @@ def _tools(
 def workout_tool_declarations() -> list[ToolDeclaration]:
     return [
         tool.definition()
-        for tool in _tools(unbound, unbound, unbound, unbound, unbound, unbound).values()
+        for tool in _tools(unbound, unbound, unbound, unbound).values()
     ]
 
 
@@ -112,28 +89,9 @@ def bind_workout_tools(
 
         return business_result(service.prepare_workout(context, params, signal), call, register)
 
-    def save_workout(tool_call_id, params: WorkoutSaveArguments, signal, on_update):
-        return business_result(service.save_workout(context, params, signal), call)
-
-    def update_workout(tool_call_id, params: WorkoutSaveArguments, signal, on_update):
-        return business_result(service.update_workout(context, params, signal), call)
-
     def get_workout_save_status(tool_call_id, params: WorkoutStatusArguments, signal, on_update):
         return business_result(
             service.get_workout_save_status(context, params.proposal_id, signal), call
         )
 
-    tools = _tools(get_workout, list_workouts, prepare_workout, save_workout,
-                   update_workout, get_workout_save_status)
-    for name in ("save_workout", "update_workout"):
-        tools[name] = replace(tools[name], trusted_context=context)
-    return tools
-
-
-async def check_workout_permission(context, service: BusinessService, call: MainLoopCall):
-    return await check_business_permission(
-        context,
-        partial(service.check_workout_save_authorization,
-                updating=context.tool_call.name == "update_workout"),
-        call,
-    )
+    return _tools(get_workout, list_workouts, prepare_workout, get_workout_save_status)

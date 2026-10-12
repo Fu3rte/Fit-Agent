@@ -1,6 +1,7 @@
 // 运行：node scripts/plan-generation-check.mjs
-// 计划事件的展示绑定与刷新口径（plan-generation-contract §4、§6）：只有持久化成功的 prepare_plan 结果形成待确认展示，
-// 同一调用的进度／执行完成／持久化结果合并为一项，实时与历史一致，保存落定与 saved 核实才刷新计划查询（不触达后端）。
+// 计划事件的展示绑定与刷新口径（plan-generation-contract §4、§6；structured-save-confirmation §7.3、§7.6）：
+// 只有持久化成功的 prepare_plan 结果形成待确认展示，同一调用的进度／执行完成／持久化结果合并为一项，实时与历史一致；
+// 已保存事实只来自确认操作对象，核实为 saved 才刷新计划查询（不触达后端）。
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { createServer } from "vite";
@@ -10,12 +11,13 @@ const server = await createServer({
   logLevel: "silent",
   server: { middlewareMode: true },
 });
-const { applyReActEvent, planSaved } = await server.ssrLoadModule(
+const { applyReActEvent } = await server.ssrLoadModule(
   "/src/features/chat/utils/reactAgent.ts",
 );
 const { historyToRounds, mergeHistoryRounds } = await server.ssrLoadModule(
   "/src/features/chat/utils/sessionHistory.ts",
 );
+const { parseSessionHistory } = await server.ssrLoadModule("/src/lib/api.ts");
 const { PlanBoard: PlanFields } = await server.ssrLoadModule(
   "/src/features/plans/PlanFields.tsx",
 );
@@ -31,10 +33,7 @@ const prepareNode = u(5);
 const proposalId = u(6);
 const confirmationEntry = u(7);
 const savedPlanId = u(8);
-const displayEntry = prepareNode;
 const prepareCall = "tc-prepare";
-const saveCall = "tc-save";
-const statusCall = "tc-status";
 const queryCall = "tc-query";
 
 /** 两条同名动作按顺序保留（重复动作不靠 exercise_id 区分），休息日动作列表为空 */
@@ -80,11 +79,6 @@ const proposal = {
   payload,
 };
 const prepared = JSON.stringify(proposal);
-const saveArguments = {
-  proposal_id: proposalId,
-  display_entry_id: displayEntry,
-  confirmation_entry_id: confirmationEntry,
-};
 const saveResult = {
   proposal_id: proposalId,
   id: savedPlanId,
@@ -92,9 +86,6 @@ const saveResult = {
   created_at: 1780272000000,
   saved_at: 1780272000000,
 };
-const saveResultText = JSON.stringify(saveResult);
-const statusResult = (status, result) =>
-  JSON.stringify({ proposal_id: proposalId, status, result });
 const currentPlanText = JSON.stringify({ id: savedPlanId, content: payload });
 
 const event = (name, data) => ({ event: name, data: { run_id: runId, ...data } });
@@ -302,17 +293,45 @@ for (const [name, broken] of [
     `${name} 在解析位置报错`,
   );
 
-/** 6. 历史恢复与实时同一口径，合并后不重复展示 */
-const historyRounds = historyToRounds({
-  session: { session_id: sessionId, title: "会话", active_leaf_id: prepareNode, created_at: 1, updated_at: 2 },
+/** 6. 历史恢复与实时同一口径，合并后不重复展示；待确认引用与快照展示绑定同一结果节点 */
+const pendingReference = {
+  business_kind: "plan",
+  proposal_id: proposalId,
+  status: "pending",
+  request_entry_id: userEntry,
+  source_entry_id: assistantId,
+  display_entry_id: prepareNode,
+  confirmation_entry_id: null,
+};
+const historyBody = (confirmations, pending_proposals, extraEntries) => ({
+  session: {
+    session_id: sessionId,
+    title: "会话",
+    active_leaf_id: (extraEntries.at(-1) ?? { entry_id: prepareNode }).entry_id,
+    created_at: 1,
+    updated_at: 2,
+  },
   entries: [
     { type: "message", entry_id: userEntry, parent_id: null, run_id: null, created_at: 1, message: { role: "user", text: "给我一份训练计划。", timestamp: 1, attachments: [] } },
     { type: "message", entry_id: assistantId, parent_id: userEntry, run_id: runId, created_at: 2, message: { role: "assistant", content: [callBlock(0, prepareCall, "prepare_plan", prepareCallSpec.args)], stop_reason: "toolUse", timestamp: 2 } },
     { type: "message", entry_id: prepareNode, parent_id: assistantId, run_id: runId, created_at: 3, message: { role: "toolResult", tool_call_id: prepareCall, tool_name: "prepare_plan", content: prepared, is_error: false, timestamp: 3 } },
+    ...extraEntries,
   ],
   runs: [{ session_id: sessionId, run_id: runId, request_entry_id: userEntry, last_entry_id: prepareNode, status: "completed", started_at: 1, finished_at: 4, error_code: null, error_message: null }],
   steering: [],
+  confirmations,
+  pending_proposals,
 });
+const pendingHistory = parseSessionHistory(
+  sessionId,
+  historyBody([], [pendingReference], []),
+);
+assert.deepEqual(
+  pendingHistory.pending_proposals,
+  [pendingReference],
+  "待确认快照引用逐字段完整恢复",
+);
+const historyRounds = historyToRounds(pendingHistory);
 const historyTool = historyRounds[0].entries.at(-1);
 assert.deepEqual(historyTool.plan, liveTool.plan, "实时与历史计划展示一致");
 assert.equal(historyTool.id, liveTool.id, "计划展示按工具调用身份去重");
@@ -326,66 +345,112 @@ assert.equal(
   "历史刷新不重复待确认计划展示",
 );
 
-/** 7. 保存落定凭据：仅保存成功结果与 saved 状态核实，且快照标识与调用参数一致 */
-const resultOf = (callId, name, args, content, is_error = false) =>
-  planSaved(
-    event("tool_result", {
-      tool_call_id: callId,
-      content,
-      is_error,
-      entry_id: u(40),
-      parent_id: assistantId,
-    }),
-    roundWithCalls([{ id: callId, name, args }]),
-  );
-assert.equal(resultOf(saveCall, "save_plan", saveArguments, saveResultText), true, "保存成功刷新计划查询");
-assert.equal(resultOf(saveCall, "save_plan", saveArguments, saveResultText, true), false, "保存失败不刷新计划查询");
-assert.equal(
-  planSaved(
-    event("tool_execution_end", {
-      tool_call_id: saveCall,
-      tool_name: "save_plan",
-      content: saveResultText,
-      is_error: false,
-    }),
-    roundWithCalls([{ id: saveCall, name: "save_plan", args: saveArguments }]),
-  ),
-  false,
-  "执行完成通知不作为保存凭据",
-);
-assert.equal(resultOf(statusCall, "get_plan_save_status", { proposal_id: proposalId }, statusResult("saved", saveResult)), true, "核实原操作已保存刷新计划查询");
-for (const status of ["pending", "processing", "invalidated", "conflicted"])
-  assert.equal(
-    resultOf(statusCall, "get_plan_save_status", { proposal_id: proposalId }, statusResult(status, null)),
-    false,
-    `${status} 状态不刷新计划查询`,
-  );
-assert.equal(resultOf(prepareCall, "prepare_plan", prepareCallSpec.args, prepared), false, "准备完成不刷新计划查询");
-assert.equal(resultOf(queryCall, "get_current_plan", {}, currentPlanText), false, "当前计划查询不作为保存凭据");
-const planRecord = {
-  id: savedPlanId,
-  is_current: true,
+/** 7. 已保存事实只来自确认操作对象（确认契约 §7.3、§7.6）：saved 的固定结果完整校验，状态配对与 schema 异常就地失败 */
+const savedOperation = {
+  session_id: sessionId,
+  operation_id: u(60),
+  business_kind: "plan",
+  proposal_id: proposalId,
+  display_entry_id: prepareNode,
+  confirmation_entry_id: confirmationEntry,
+  status: "saved",
+  result: saveResult,
+  error: null,
   created_at: 1780272000000,
-  content: payload,
+  updated_at: 1780272000000,
 };
-assert.equal(resultOf(queryCall, "list_plans", {}, JSON.stringify([planRecord])), false, "版本列表查询不作为保存凭据");
+const confirmationNodeEntry = {
+  type: "message",
+  entry_id: confirmationEntry,
+  parent_id: prepareNode,
+  run_id: null,
+  created_at: 4,
+  message: { role: "user", text: "确认保存计划", timestamp: 4, attachments: [] },
+};
+const confirmedHistory = (operations) =>
+  parseSessionHistory(sessionId, historyBody(operations, [], [confirmationNodeEntry]));
+const savedHistory = confirmedHistory([savedOperation]);
+assert.deepEqual(
+  savedHistory.confirmations[0].result,
+  saveResult,
+  "saved 的计划固定保存结果逐字段完整恢复",
+);
+assert.deepEqual(
+  savedHistory.confirmations[0].result.content,
+  payload,
+  "保存结果内容与待确认快照 payload 一致",
+);
+const confirmationRound = historyToRounds(savedHistory).at(-1);
 assert.equal(
-  resultOf(statusCall, "get_plan_save_status", { proposal_id: u(50) }, statusResult("saved", saveResult)),
-  false,
-  "快照标识与调用参数不一致不作凭据",
+  confirmationRound.id,
+  `confirmation:${confirmationEntry}`,
+  "确认节点独立成轮，不属于任何 Agent 运行",
 );
-assert.throws(
-  () => resultOf(saveCall, "save_plan", saveArguments, statusResult("saved", null)),
-  /计划保存结果/,
-  "保存结果不合 schema 在解析位置报错",
+assert.equal(confirmationRound.entries.length, 1, "确认轮次不伪造助手消息");
+assert.equal(confirmationRound.entries[0].kind, "user", "确认轮次仅含真实确认用户节点");
+assert.deepEqual(
+  confirmationRound.confirmation,
+  { business_kind: "plan", proposal_id: proposalId, status: "saved", text: "已保存" },
+  "确认展示只陈述真实操作状态",
 );
+for (const [status, extra, display] of [
+  ["processing", { result: null, error: null }, { status: "processing", text: "确认处理中" }],
+  [
+    "failed",
+    { result: null, error: { code: "plan_version_conflict", message: "当前计划已变化。" } },
+    { status: "failed", text: "保存失败", detail: "当前计划已变化。" },
+  ],
+])
+  assert.deepEqual(
+    historyToRounds(confirmedHistory([{ ...savedOperation, status, ...extra }])).at(-1)
+      .confirmation,
+    { business_kind: "plan", proposal_id: proposalId, ...display },
+    `${status} 状态按真实操作对象展示`,
+  );
+
+/** 7.1 历史响应的确认数组为必填，配对与节点绑定异常在解析位置失败 */
+for (const field of ["confirmations", "pending_proposals"]) {
+  const missing = historyBody([], [pendingReference], []);
+  delete missing[field];
+  assert.throws(
+    () => parseSessionHistory(sessionId, missing),
+    /无效/,
+    `历史响应缺少 ${field} 属协议异常`,
+  );
+}
+const rejectedOperation = (values, message) =>
+  assert.throws(
+    () => confirmedHistory([{ ...savedOperation, ...values }]),
+    /无效|缺少|含未定义字段|不一致|携带|配对|晚于/,
+    message,
+  );
+rejectedOperation({ status: "processing" }, "处理中确认操作携带结果属协议异常");
+rejectedOperation({ status: "saved", result: null }, "已保存确认操作缺少结果属协议异常");
+rejectedOperation({ status: "failed" }, "失败确认操作缺少错误对象属协议异常");
+rejectedOperation(
+  { result: { ...saveResult, is_current: true } },
+  "固定结果携带动态当前标记属协议异常",
+);
+rejectedOperation(
+  { result: { ...saveResult, saved_at: saveResult.saved_at + 1 } },
+  "保存时间与创建时间必须一致",
+);
+rejectedOperation(
+  { result: { ...saveResult, proposal_id: u(61) } },
+  "结果快照标识与操作标识必须一致",
+);
+rejectedOperation({ confirmation_entry_id: userEntry }, "确认节点未晚于完整展示属协议异常");
 assert.throws(
-  () => resultOf(saveCall, "save_plan", saveArguments, JSON.stringify({ ...saveResult, is_current: true })),
-  /含未定义字段/,
-  "固定保存结果携带动态当前标记属协议异常",
+  () =>
+    parseSessionHistory(
+      sessionId,
+      historyBody([], [{ ...pendingReference, display_entry_id: assistantId }], []),
+    ),
+  /无效/,
+  "待确认引用的展示节点必须是工具结果节点",
 );
 
-/** 8. 保存落定按统一计划查询前缀失效，当前计划、版本列表与已加载详情同时覆盖，画像与训练记录查询保持 */
+/** 8. 确认 saved 后按统一计划查询前缀失效，当前计划、版本列表与已加载详情同时覆盖，画像与训练记录查询保持 */
 const planKeys = [
   [...PLAN_QUERY_KEY, "current"],
   [...PLAN_QUERY_KEY, "list"],
@@ -399,7 +464,7 @@ for (const key of planKeys)
   assert.equal(
     queryClient.getQueryCache().find({ queryKey: key }).isStale(),
     true,
-    `${key.join("/")} 随保存落定失效`,
+    `${key.join("/")} 随确认 saved 失效`,
   );
 for (const key of otherKeys)
   assert.equal(
@@ -443,5 +508,5 @@ assert.equal(render(["/days/0/exercises/0/sets", "/notes"]), shown);
 assert.ok(!shown.includes(">建议<") && !shown.includes("不安排休息"));
 
 console.log(
-  "PASS: 待确认计划仅由持久化结果绑定、并行与历史同一口径且无重复展示、保存落定刷新计划查询、非 saved 不刷新、已知字段与原始说明完整渲染",
+  "PASS: 待确认计划仅由持久化结果绑定、并行与历史同一口径且无重复展示、已保存事实仅来自确认操作对象且 saved 刷新计划查询、已知字段与原始说明完整渲染",
 );

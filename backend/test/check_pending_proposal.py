@@ -18,9 +18,7 @@ from app.domain.business.models import (
     PlanPendingProposal,
     PlanSaveArguments,
     ProfilePendingProposal,
-    ProfileSaveArguments,
     WorkoutPendingProposal,
-    WorkoutSaveArguments,
 )
 from app.domain.session.models import SendCommand, SendRequest
 from app.infrastructure.persistence.sqlite.repository import SqliteSessionRepository
@@ -65,12 +63,6 @@ def assistant(name, call_id, arguments):
         model="model-1", usage=USAGE, stop_reason="toolUse", timestamp=now_ms())
 
 
-def assistant_text():
-    return AssistantMessage(role="assistant", content=[TextContent(type="text", text="确认保存")],
-        api="openai-completions", provider="example", model="model-1", usage=USAGE,
-        stop_reason="stop", timestamp=now_ms())
-
-
 def code_of(message) -> str:
     assert message.is_error, message_text(message)
     return envelope(message)["code"]
@@ -111,38 +103,26 @@ async def prepare_via_tool(f, session, tool_name, arguments, binder):
 
 
 async def save_profile(f, info):
-    ids = {"session": info["session"], "request": info["confirmation"], "source": info["source"]}
-    return await f.business.save_profile_update(
-        f.save_context(ids),
-        ProfileSaveArguments(proposal_id=info["proposal"], display_entry_id=info["display"],
-                             confirmation_entry_id=info["confirmation"]),
-    )
+    # 合法保存只经独立确认入口：后端生成确认节点并直接调用业务服务。
+    operation = await f.confirm(info)
+    assert operation.status == "saved", operation
+    return operation.result
 
 
 async def save_plan(f, session, info):
-    outcome = await f.service.accept_send(SendCommand(operation_id=new_id(), session_id=session,
-        request=SendRequest(text="确认保存计划")), system_message=SYSTEM)
-    run = outcome.run
-    source = await f.append(session, run.id, run.request_entry_id, assistant_text())
-    context = f.context(session, run.request_entry_id, source)
-    arguments = PlanSaveArguments(proposal_id=info["proposal"], display_entry_id=info["display"],
-                                  confirmation_entry_id=run.request_entry_id)
-    result = await f.business.save_plan(context, arguments)
-    await f.service.finish_run(session, run.id, "completed")
-    return context, arguments, result
+    operation = await f.confirm({**info, "session": session}, business_kind="plan")
+    assert operation.status == "saved", operation
+    arguments = PlanSaveArguments(
+        proposal_id=info["proposal"], display_entry_id=info["display"],
+        confirmation_entry_id=operation.confirmation_entry_id,
+    )
+    return f.context(session, new_id(), new_id()), arguments, operation.result
 
 
 async def save_workout(f, session, info):
-    outcome = await f.service.accept_send(SendCommand(operation_id=new_id(), session_id=session,
-        request=SendRequest(text="确认保存训练")), system_message=SYSTEM)
-    run = outcome.run
-    source = await f.append(session, run.id, run.request_entry_id, assistant_text())
-    context = f.context(session, run.request_entry_id, source)
-    arguments = WorkoutSaveArguments(proposal_id=info["proposal"], display_entry_id=info["display"],
-                                     confirmation_entry_id=run.request_entry_id)
-    result = await f.business.save_workout(context, arguments)
-    await f.service.finish_run(session, run.id, "completed")
-    return result
+    operation = await f.confirm({**info, "session": session}, business_kind="workout")
+    assert operation.status == "saved", operation
+    return operation.result
 
 
 def check_declarations_and_binding():

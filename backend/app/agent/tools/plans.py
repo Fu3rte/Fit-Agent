@@ -1,11 +1,8 @@
-from dataclasses import replace
-
 from app.agent.tool import AgentTool, ExecuteFunction, ToolDeclaration
 from app.agent.tools.common import (
     FrozenBusinessContext,
     MainLoopCall,
     business_result,
-    check_business_permission,
     envelope,
     unbound,
 )
@@ -16,7 +13,6 @@ from app.domain.business.models import (
     BusinessModel,
     PlanGetArguments,
     PlanProposalArguments,
-    PlanSaveArguments,
     PlanStatusArguments,
 )
 
@@ -37,7 +33,6 @@ def _tools(
     get_plan: ExecuteFunction,
     list_plans: ExecuteFunction,
     prepare_plan: ExecuteFunction,
-    save_plan: ExecuteFunction,
     get_plan_save_status: ExecuteFunction,
 ) -> dict[str, AgentTool]:
     return {
@@ -61,18 +56,11 @@ def _tools(
             "训练日必须包含具体动作，每个动作sets有值，reps或duration_seconds至少一个有值。"
             "生成调用参数校验失败时，依据返回的实际错误修正原prepare_plan调用后重试；"
             "禁止改用prepare_plan_import或prepare_plan_adjustment绕过生成约束。"
-            "结果持久化后绑定真实展示节点，完整payload由结果展示，等待后续用户自然语言明确确认。"
+            "结果持久化后绑定真实展示节点，完整payload由结果展示，等待用户点击该快照的确认按钮。"
             "用户修改建议时创建新快照并重新展示确认；尚未采纳的生成建议经用户修改时，"
             "继续使用prepare_plan创建新快照。",
             PlanProposalArguments, prepare_plan, execution_mode="sequential",
             prepare_arguments=_prepare_plan_arguments, max_output_chars=None,
-        ),
-        "save_plan": AgentTool(
-            "save_plan",
-            "保存后续用户明确确认的计划快照。输入proposal_id、display_entry_id、confirmation_entry_id，"
-            "引用business_kind=plan的真实节点绑定。新增完整版本并设为当前计划，返回完整固定结果。"
-            "重复调用返回原id、内容和时间；依据冲突须重新查询、准备、展示并确认。",
-            PlanSaveArguments, save_plan, execution_mode="sequential", max_output_chars=None,
         ),
         "get_plan_save_status": AgentTool(
             "get_plan_save_status",
@@ -85,7 +73,7 @@ def _tools(
 
 
 def plan_tool_declarations() -> list[ToolDeclaration]:
-    return [tool.definition() for tool in _tools(unbound, unbound, unbound, unbound, unbound, unbound).values()]
+    return [tool.definition() for tool in _tools(unbound, unbound, unbound, unbound, unbound).values()]
 
 
 def bind_plan_tools(
@@ -111,16 +99,7 @@ def bind_plan_tools(
 
         return business_result(service.prepare_plan(context, params, signal), call, register)
 
-    def save_plan(tool_call_id, params: PlanSaveArguments, signal, on_update):
-        return business_result(service.save_plan(context, params, signal), call)
-
     def get_plan_save_status(tool_call_id, params: PlanStatusArguments, signal, on_update):
         return business_result(service.get_plan_save_status(context, params.proposal_id, signal), call)
 
-    tools = _tools(get_current_plan, get_plan, list_plans, prepare_plan, save_plan, get_plan_save_status)
-    tools["save_plan"] = replace(tools["save_plan"], trusted_context=context)
-    return tools
-
-
-async def check_plan_permission(context, service: BusinessService, call: MainLoopCall):
-    return await check_business_permission(context, service.check_plan_save_authorization, call)
+    return _tools(get_current_plan, get_plan, list_plans, prepare_plan, get_plan_save_status)

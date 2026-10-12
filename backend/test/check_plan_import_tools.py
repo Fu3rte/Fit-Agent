@@ -133,45 +133,30 @@ async def saved_chain(f, session, name, arguments):
     assert snapshot.preparation_kind == proposal["preparation_kind"]
     await f.service.finish_run(session, run.id, "completed")
 
-    accepted = await f.service.accept_send(
-        SendCommand(operation_id=new_id(), session_id=session, request=SendRequest(text="确认保存这份计划")),
-        system_message=SYSTEM,
-    )
-    save_run = accepted.run
-    save_args = {"proposal_id": proposal["proposal_id"], "display_entry_id": display,
-                 "confirmation_entry_id": save_run.request_entry_id}
-    save_call = invocation("save_plan", save_args)
-    save_source = await f.append(session, save_run.id, save_run.request_entry_id,
-        assistant("save_plan", save_call.id, save_args))
-    # 保存批次绑定自身可信上下文，登记集合沿用准备批次的同一对象。
-    save_tools = bind_business_tools(
-        f.business, f.context(session, save_run.request_entry_id, save_source), f.call, {}, {}, registrations
-    )
-    assert {tool_name: tool.definition() for tool_name, tool in save_tools.items()} == PRODUCTION
-    execution = await run_tool_batch([save_call], tools=save_tools, declared=PRODUCTION)
-    assert execution.failure is None
-    saved_message = execution.messages[0]
-    assert saved_message.tool_call_id == save_call.id and not saved_message.is_error, saved_message
-    saved = body(saved_message)
+    # 合法保存只经独立确认入口：后端生成确认节点并直接调用业务服务。
+    operation = await f.confirm(
+        {"session": session, "proposal": proposal["proposal_id"], "display": display},
+        business_kind="plan")
+    assert operation.status == "saved", operation
+    saved = operation.result.model_dump()
     assert set(saved) == {"proposal_id", "id", "content", "created_at", "saved_at"}
     assert saved["proposal_id"] == proposal["proposal_id"] and saved["content"] == arguments["payload"]
     assert saved["created_at"] == saved["saved_at"]
-    node = await f.append(session, save_run.id, save_source, saved_message)
-    assert (await f.service.get_entry(session, node)).messages[0] == saved_message
     assert (await f.business.get_current_plan()).id == saved["id"]
 
-    repeat, status_call = invocation("save_plan", save_args), invocation(
-        "get_plan_save_status", {"proposal_id": proposal["proposal_id"]})
-    execution = await run_tool_batch([repeat, status_call], tools=save_tools, declared=PRODUCTION)
-    assert execution.failure is None
-    assert [item.tool_call_id for item in execution.messages] == [repeat.id, status_call.id]
-    assert not any(item.is_error for item in execution.messages)
-    assert body(execution.messages[0]) == saved
-    assert body(execution.messages[1]) == {"proposal_id": proposal["proposal_id"], "status": "saved", "result": saved}
+    # 重复确认同一快照返回固定结果；状态查询保持原结果，不新增版本或消息节点。
+    replay = await f.confirm(
+        {"session": session, "proposal": proposal["proposal_id"], "display": display},
+        business_kind="plan")
+    assert replay.status == "saved" and replay.result.model_dump() == saved
+    assert replay.confirmation_entry_id == operation.confirmation_entry_id
+    status = await f.business.get_plan_save_status(
+        f.context(session, new_id(), new_id()), proposal["proposal_id"])
+    assert status.status == "saved" and status.result.model_dump() == saved
     snapshot = await f.repository.get_plan_snapshot(proposal["proposal_id"])
-    assert snapshot.status == "saved" and snapshot.confirmation_entry_id == save_run.request_entry_id
+    assert snapshot.status == "saved"
+    assert snapshot.confirmation_entry_id == operation.confirmation_entry_id
     assert sum(item.is_current for item in await f.business.list_plans()) == 1
-    await f.service.finish_run(session, save_run.id, "completed")
     return saved
 
 

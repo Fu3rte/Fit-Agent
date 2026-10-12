@@ -10,10 +10,18 @@ from pydantic import ValidationError
 from app.agent.tool import run_tool_batch
 from app.agent.tools.business import bind_business_tools, business_tool_declarations
 from app.agent.tools.plans import plan_tool_declarations
-from app.ai.messages import ToolCall
-from app.domain.business.models import BusinessContext, PlanProposal, PlanStatusResult
+from app.ai.messages import TextContent, ToolCall, ToolResultMessage
+from app.application.business.confirmation import ConfirmationService
+from app.domain.business.errors import BusinessError
+from app.domain.business.models import (
+    BusinessContext,
+    PlanProposal,
+    PlanStatusResult,
+    ProfileProposalArguments,
+    SaveConfirmationRequest,
+)
 from app.domain.session.models import SendCommand, SendRequest
-from test.check_plan_core import CONTENT, profile
+from test.check_plan_core import CONTENT
 from test.check_profile_confirmation import SYSTEM, Fixture, count_rows, new_id, payload
 from test.check_workout_service_http import CONTENT as WORKOUT
 from test.check_workout_service_http import assistant
@@ -21,7 +29,7 @@ from test.regression_support import temporary_root
 
 ROOT = temporary_root("plan-tools") / uuid4().hex
 ROOT.mkdir()
-NAMES = ["get_current_plan", "get_plan", "list_plans", "prepare_plan", "save_plan", "get_plan_save_status"]
+NAMES = ["get_current_plan", "get_plan", "list_plans", "prepare_plan", "get_plan_save_status"]
 IMPORT_NAMES = ["prepare_plan_import", "prepare_plan_adjustment"]
 DECLARED = {item.name: item for item in business_tool_declarations()}
 PREPARE_KIND = {"prepare_profile_update": "profile", "prepare_workout": "workout", "prepare_plan": "plan",
@@ -48,10 +56,62 @@ def invocation(name, arguments):
     return ToolCall(type="toolCall", id=new_id(), name=name, arguments=arguments)
 
 
+async def confirm_plan(f, session, save):
+    # 保存只经独立确认入口：后端生成确认节点，不创建运行、不调用模型。
+    confirmations = ConfirmationService(f.repository, f.service, f.business)
+    return await confirmations.confirm(session, SaveConfirmationRequest(
+        operation_id=new_id(), business_kind="plan",
+        proposal_id=save["proposal_id"], display_entry_id=save["display_entry_id"],
+    ))
+
+
+async def rejection(awaitable):
+    try:
+        await awaitable
+    except BusinessError as error:
+        return error
+    raise AssertionError("预期业务拒绝")
+
+
+def operation_message(operation) -> ToolResultMessage:
+    if operation.status == "saved":
+        text, is_error = operation.result.model_dump_json(), False
+    else:
+        text, is_error = operation.error.model_dump_json(), True
+    return ToolResultMessage(
+        role="toolResult", tool_call_id=new_id(), tool_name="confirm_plan",
+        content=[TextContent(type="text", text=text)], is_error=is_error, timestamp=0,
+    )
+
+
+async def seed_profile(f, session):
+    # 画像版本 1 经独立确认入口保存：准备 -> 绑定展示 -> 确认，不创建模型保存工具调用。
+    outcome = await f.service.accept_send(SendCommand(operation_id=new_id(), session_id=session,
+        request=SendRequest(text="整理画像")), system_message=SYSTEM)
+    run = outcome.run
+    call_id = "call-" + uuid4().hex[:8]
+    arguments = {"profile_id": 1, "base_profile_version": None, "payload": payload()}
+    source = await f.append(session, run.id, run.request_entry_id,
+        assistant("prepare_profile_update", call_id, arguments))
+    context = f.context(session, run.request_entry_id, source)
+    proposal = await f.business.prepare_profile_update(
+        context, ProfileProposalArguments.model_validate(arguments))
+    display = await f.append(session, run.id, source, ToolResultMessage(
+        role="toolResult", tool_call_id=call_id, tool_name="prepare_profile_update",
+        content=[TextContent(type="text", text=proposal.model_dump_json())], is_error=False, timestamp=0))
+    await f.business.bind_display_entry(proposal.proposal_id, display)
+    await f.service.finish_run(session, run.id, "completed")
+    confirmations = ConfirmationService(f.repository, f.service, f.business)
+    operation = await confirmations.confirm(session, SaveConfirmationRequest(
+        operation_id=new_id(), business_kind="profile",
+        proposal_id=proposal.proposal_id, display_entry_id=display))
+    assert operation.status == "saved", operation
+
+
 async def ensure_profile(f, session):
     # 画像全局共享：仅在尚未建档时保存版本 1，其余阶段直接复用。
     if (await f.business.get_profile()).version is None:
-        await profile(f, session)
+        await seed_profile(f, session)
     assert (await f.business.get_profile()).version == 1
 
 
@@ -67,12 +127,23 @@ class Outcome(NamedTuple):
 
 
 async def batch(f, session, calls, *, confirmation=None, bind=True):
-    """真实消息链：用户节点 -> 助手批次调用 -> 真实工具执行 -> 逐条结果持久化 -> 按业务绑定展示。"""
-    outcome = await f.service.accept_send(SendCommand(operation_id=new_id(), session_id=session,
-        request=SendRequest(text="确认采纳计划" if confirmation is not None else "处理计划请求")), system_message=SYSTEM)
-    run = outcome.run
+    """真实消息链：用户节点 -> 助手批次调用 -> 真实工具执行 -> 逐条结果持久化 -> 按业务绑定展示。
+
+    confirmation 走独立确认入口：后端生成确认节点，不创建运行、不调用模型。
+    """
     if confirmation is not None:
-        calls = [invocation("save_plan", {**confirmation, "confirmation_entry_id": run.request_entry_id})]
+        try:
+            message = operation_message(await confirm_plan(f, session, confirmation))
+        except BusinessError as error:
+            message = ToolResultMessage(
+                role="toolResult", tool_call_id=new_id(), tool_name="confirm_plan",
+                content=[TextContent(type="text", text=json.dumps(error.detail(), ensure_ascii=False))],
+                is_error=True, timestamp=0,
+            )
+        return Outcome(None, [message], {}, {}, {}, {}, None, None)
+    outcome = await f.service.accept_send(SendCommand(operation_id=new_id(), session_id=session,
+        request=SendRequest(text="处理计划请求")), system_message=SYSTEM)
+    run = outcome.run
     source = await f.append(session, run.id, run.request_entry_id,
         assistant(calls[0].name, calls[0].id, calls[0].arguments).model_copy(update={"content": calls}))
     context = f.context(session, run.request_entry_id, source)
@@ -80,9 +151,9 @@ async def batch(f, session, calls, *, confirmation=None, bind=True):
     tools = bind_business_tools(f.business, context, f.call, registrations["profile"],
                                 registrations["workout"], registrations["plan"])
     assert {name: tool.definition() for name, tool in tools.items()} == DECLARED
-    assert list(tools)[-8:][:6] == NAMES and list(tools)[-2:] == IMPORT_NAMES
+    assert list(tools)[-7:] == NAMES + IMPORT_NAMES
     for name in NAMES:
-        assert tools[name].execution_mode == ("sequential" if name in {"prepare_plan", "save_plan"} else "parallel")
+        assert tools[name].execution_mode == ("sequential" if name == "prepare_plan" else "parallel")
         assert tools[name].max_output_chars is None
         if name == "prepare_plan":
             assert tools[name].prepare_arguments is not None
@@ -126,7 +197,6 @@ async def check():
             assert set(schema["properties"]) == {
                 "get_current_plan": set(), "list_plans": set(), "get_plan": {"plan_id"},
                 "prepare_plan": {"base_profile_version", "base_plan_id", "payload"},
-                "save_plan": {"proposal_id", "display_entry_id", "confirmation_entry_id"},
                 "get_plan_save_status": {"proposal_id"},
             }[name]
             for identity in ("session_id", "run_id", "request_entry_id", "source_entry_id", "timezone", "business_date"):
@@ -151,20 +221,21 @@ async def check():
         save = {"proposal_id": proposal["proposal_id"], "display_entry_id": got.displays[prepare.id]}
         got = await batch(f, session, [invocation("get_plan_save_status", {"proposal_id": proposal["proposal_id"]})])
         assert body(got.messages[0]) == {"proposal_id": proposal["proposal_id"], "status": "pending", "result": None}
-        save_context, messages, _, _, _, _, _, confirmation = await batch(f, session, [], confirmation=save)
+        _, messages, _, _, _, _, _, _ = await batch(f, session, [], confirmation=save)
         first = body(messages[0])
         assert not messages[0].is_error and first["content"] == args["payload"]
         assert first["created_at"] == first["saved_at"] and "is_current" not in first
-        fixed_args = {**save, "confirmation_entry_id": confirmation}
-        got = await batch(f, session, [invocation("save_plan", fixed_args),
-            invocation("get_plan_save_status", {"proposal_id": proposal["proposal_id"]}),
+        # 重复确认同一快照复用固定结果，不产生新版本或新确认节点。
+        _, repeat_messages, _, _, _, _, _, _ = await batch(f, session, [], confirmation=save)
+        assert body(repeat_messages[0]) == first
+        got = await batch(f, session, [invocation("get_plan_save_status", {"proposal_id": proposal["proposal_id"]}),
             invocation("get_current_plan", {}), invocation("get_plan", {"plan_id": first["id"]}), invocation("list_plans", {})])
         messages = got.messages
         assert all(not item.is_error for item in messages)
-        assert body(messages[0]) == first and body(messages[1])["result"] == first
-        assert body(messages[2]) == {"id": first["id"], "content": first["content"]}
-        record = body(messages[3])
-        assert record["is_current"] and record["content"] == first["content"] and body(messages[4]) == [record]
+        assert body(messages[0])["result"] == first
+        assert body(messages[1]) == {"id": first["id"], "content": first["content"]}
+        record = body(messages[2])
+        assert record["is_current"] and record["content"] == first["content"] and body(messages[3]) == [record]
         for message in messages:
             assert len(message.content[0].text) > 50000
         invalid = [
@@ -183,21 +254,20 @@ async def check():
         assert got.messages[0].is_error and error["code"] == "invalid_business_payload" and not got.registrations["plan"]
         assert error["errors"][0]["path"] == "/payload/days/0/exercises/0/sets"
         other = await f.session("计划工具归属")
-        got = await batch(f, other, [invocation("get_plan_save_status", {"proposal_id": proposal["proposal_id"]}),
-            invocation("save_plan", fixed_args)])
-        assert all(message.is_error and body(message)["code"] == "plan_access_denied" for message in got.messages)
+        got = await batch(f, other, [invocation("get_plan_save_status", {"proposal_id": proposal["proposal_id"]})])
+        assert got.messages[0].is_error and body(got.messages[0])["code"] == "plan_access_denied"
+        assert (await rejection(confirm_plan(f, other, save))).code == "plan_access_denied"
         second_args = {**args, "base_plan_id": first["id"], "payload": {**args["payload"], "notes": "新版本依据"}}
         prepare2 = invocation("prepare_plan", second_args)
         got = await batch(f, session, [prepare2])
         proposal2 = body(got.messages[0])
-        _, messages, _, _, _, _, _, confirmation2 = await batch(f, session, [],
+        _, messages, _, _, _, _, _, _ = await batch(f, session, [],
             confirmation={"proposal_id": proposal2["proposal_id"], "display_entry_id": got.displays[prepare2.id]})
         second = body(messages[0])
-        got = await batch(f, session, [invocation("list_plans", {}), invocation("save_plan", fixed_args)])
+        got = await batch(f, session, [invocation("list_plans", {})])
         records = body(got.messages[0])
         assert len(records) == 2 and sum(item["is_current"] for item in records) == 1
         assert records[0]["id"] == second["id"] and records[1]["id"] == first["id"]
-        assert body(got.messages[1]) == first
         await f.restart()
         got = await batch(f, session, [invocation("get_plan_save_status", {"proposal_id": proposal["proposal_id"]})])
         assert body(got.messages[0])["result"] == first
@@ -240,7 +310,7 @@ async def check_mixed_batch(f):
         invocation("prepare_plan", legal),
         invocation("prepare_plan", {**legal, "payload": {**plan_content, "days": [
             {**plan_content["days"][0], "exercises": [{**EXERCISE, "sets": None, "exercise_id": None}]}]}}),
-        invocation("save_plan", {"proposal_id": new_id(), "display_entry_id": new_id(), "confirmation_entry_id": new_id()}),
+        invocation("get_plan_save_status", {"proposal_id": new_id()}),
         invocation("get_plan_save_status", {"proposal_id": new_id()}),
         invocation("prepare_profile_update", {"profile_id": 1, "base_profile_version": 1, "payload": payload(goal="力量")}),
         invocation("prepare_workout", {"performed_on": day, "base_workout_id": None, "base_workout_version": None,
@@ -314,9 +384,9 @@ async def check_persistence_before_binding(f):
     assert snapshot.display_entry_id is None and snapshot.status == "pending"
     unpersisted = await rejection_message(f.business.bind_plan_display_entry(proposal_id, new_id()))
     assert "当前消息路径" in unpersisted["message"]
-    arguments = {"proposal_id": proposal_id, "display_entry_id": new_id(), "confirmation_entry_id": got.request_entry_id}
-    got2 = await batch(f, session, [invocation("save_plan", arguments)])
-    assert got2.messages[0].is_error and body(got2.messages[0])["code"] == "plan_confirmation_invalid"
+    # 未绑定快照的展示节点为空，独立确认入口以展示不一致拒绝，快照保持未绑定。
+    denied = await rejection(confirm_plan(f, session, {"proposal_id": proposal_id, "display_entry_id": new_id()}))
+    assert denied.code == "plan_confirmation_invalid"
     assert (await f.repository.get_plan_snapshot(proposal_id)).display_entry_id is None
     display = got.nodes[call.id]
     await f.business.bind_plan_display_entry(proposal_id, display)
@@ -447,7 +517,7 @@ async def check_strict_arguments(f):
 
 
 async def check_error_shapes(f):
-    """六个工具的错误形状：业务错误为完整 PlanBusinessErrorWire JSON，harness 失败保留原始文本，身份与角色不变。"""
+    """各计划工具的错误形状：业务错误为完整 PlanBusinessErrorWire JSON，harness 失败保留原始文本，身份与角色不变。"""
     session = await f.session("计划错误形状")
     await ensure_profile(f, session)
     real = f.catalog.all()[0]
@@ -456,17 +526,10 @@ async def check_error_shapes(f):
     got = await batch(f, session, [invocation("prepare_plan", legal)])
     proposal_id = body(got.messages[0])["proposal_id"]
     display = got.displays[got.messages[0].tool_call_id]
-    stray = new_id()
     unknown = new_id()
     cases = [
         (invocation("get_plan", {"plan_id": unknown}), "business", "plan_not_found"),
         (invocation("get_plan", {"plan_id": "None"}), "harness", "String should match pattern"),
-        (invocation("save_plan", {"proposal_id": "None", "display_entry_id": display,
-                                  "confirmation_entry_id": stray}), "harness", "proposal_id"),
-        (invocation("save_plan", {"proposal_id": proposal_id, "display_entry_id": uuid4().hex,
-                                  "confirmation_entry_id": stray}), "harness", "display_entry_id"),
-        (invocation("save_plan", {"proposal_id": unknown, "display_entry_id": display,
-                                  "confirmation_entry_id": stray}), "business", "plan_proposal_not_found"),
         (invocation("get_plan_save_status", {"proposal_id": "not-a-uuid"}), "harness", "proposal_id"),
         (invocation("get_plan_save_status", {"proposal_id": unknown}), "business", "plan_proposal_not_found"),
         (invocation("prepare_plan", {**legal, "payload": {**content, "days": []}}), "harness", "days"),
@@ -487,20 +550,19 @@ async def check_error_shapes(f):
             assert not text.lstrip().startswith("{")
             assert "收到的参数" in text
             harness.append(call.name)
-    assert sorted(business) == ["plan_not_found", "plan_proposal_not_found", "plan_proposal_not_found"]
-    assert len(harness) == 5
+    assert sorted(business) == ["plan_not_found", "plan_proposal_not_found"]
+    assert len(harness) == 3
 
-    # 确认节点不在当前消息路径时拒绝保存；失败的准备结果不进入展示绑定表。
-    got3 = await batch(f, session, [invocation("save_plan", {"proposal_id": proposal_id,
-        "display_entry_id": display, "confirmation_entry_id": stray})], bind=False)
-    assert got3.messages[0].is_error and body(got3.messages[0])["code"] == "plan_confirmation_invalid"
+    # 确认目标与后端绑定不一致时独立确认入口拒绝；失败的准备结果不进入展示绑定表。
+    denied = await rejection(confirm_plan(f, session, {"proposal_id": proposal_id, "display_entry_id": new_id()}))
+    assert denied.code == "plan_confirmation_invalid"
     failed = await batch(f, session, [invocation("prepare_plan", {**legal, "base_plan_id": "null"})], bind=False)
     assert failed.messages[0].is_error and not failed.registrations["plan"]
     bindings = await f.business.list_plan_display_bindings(session)
     assert bindings == {display: proposal_id}
     assert failed.nodes[failed.messages[0].tool_call_id] not in bindings
     return {"business_error_codes": sorted(business), "harness_text_errors": harness,
-            "confirmation_path_rejected": True, "failed_display_unbound": True}
+            "confirmation_binding_rejected": True, "failed_display_unbound": True}
 
 
 async def check_modification_flow(f):
@@ -528,9 +590,9 @@ async def check_modification_flow(f):
     got = await batch(f, session, [], confirmation={"proposal_id": first["proposal_id"], "display_entry_id": first_display})
     assert got.messages[0].is_error and body(got.messages[0])["code"] == "plan_proposal_invalidated"
     assert await count_rows(f.database, "plans") == 0
-    got = await batch(f, session, [invocation("save_plan", {"proposal_id": second["proposal_id"],
-        "display_entry_id": first_display, "confirmation_entry_id": got.request_entry_id})])
-    assert got.messages[0].is_error and body(got.messages[0])["code"] == "plan_confirmation_invalid"
+    mismatch = await rejection(confirm_plan(f, session, {"proposal_id": second["proposal_id"],
+        "display_entry_id": first_display}))
+    assert mismatch.code == "plan_confirmation_invalid"
     assert await count_rows(f.database, "plans") == 0
     got = await batch(f, session, [], confirmation={"proposal_id": second["proposal_id"], "display_entry_id": second_display})
     saved = body(got.messages[0])
@@ -599,7 +661,7 @@ async def check_none_basis(f):
 def main():
     evidence = asyncio.run(check())
     (ROOT / "evidence.json").write_text(json.dumps(evidence, ensure_ascii=False, indent=2), encoding="utf-8")
-    print("PASS: six plan tools; strict stable declarations; real SQLite/catalog/message chain; full JSON; registration; ownership; fixed idempotency; restart;")
+    print("PASS: plan tools; strict stable declarations; real SQLite/catalog/message chain; full JSON; registration; ownership; independent confirmation idempotency; restart;")
     print("      mixed business batch correspondence; cross-kind display rejection; persist-then-bind; strict null/UUID/reps-range inputs;")
     print("      business and harness error shapes; modification creating new snapshot without saving. Evidence:", ROOT)
 

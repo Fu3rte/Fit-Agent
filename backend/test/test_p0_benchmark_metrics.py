@@ -148,7 +148,7 @@ def test_compaction_aggregate_counts_each_sample_once():
 
 def test_compaction_protocol_constants_anchor_history_length():
     assert REPS == 3
-    assert HISTORY_PARTS == 4
+    assert HISTORY_PARTS == 5
     assert len(FACTS) == 5
 
 

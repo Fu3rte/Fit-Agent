@@ -34,8 +34,8 @@ def _tools(
         '两依据字段未知时写JSON null字面量，禁止字符串"null"、空字符串、数字0或省略；'
         '参数预处理仅将两依据字段精确字符串"None"转为null，其他字段和值保持原样。'
         "notes完整记录依据和理由，suggested_fields标记助手建议来源。"
-        "仅创建待确认快照，完整结果持久化展示后等待后续用户自然语言明确确认，"
-        "再共用save_plan保存；本调用不授权或保存计划。"
+        "仅创建待确认快照，完整结果持久化展示后等待用户点击该快照的确认按钮；"
+        "本调用不授权或保存计划。"
     )
     return {
         "prepare_plan_import": AgentTool(
@@ -72,8 +72,7 @@ def _tools(
             "不能只写在对话回复文本中，原有suggested_fields必须全部保留。"
             "提案固定使用准备时查询到的训练事实，新增或修正训练记录保持原提案内容及状态；"
             "用户要求采用新事实时重新查询、准备完整提案、展示全部业务字段、notes、建议来源及所用依据，"
-            "等待后续再次明确确认；修改式确认按修改处理，同会话新快照成功使旧pending失效。"
-            "保存使用business_context.message_nodes中business_kind=plan的真实快照、展示及后续确认绑定；"
+            "等待用户点击新快照的确认按钮；修改式确认按修改处理，同会话新快照成功使旧pending失效。"
             "一条确认跨画像、计划及训练记录仅授权一份快照，结果未知时按原proposal_id调用"
             "get_plan_save_status核对原操作，核实前禁止创建新的保存操作。" + basis,
             PlanAdjustmentArguments,

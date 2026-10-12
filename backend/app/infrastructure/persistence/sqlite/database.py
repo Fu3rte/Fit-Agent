@@ -15,7 +15,7 @@ T = TypeVar("T")
 # 提交否决判据：由连接线程在 COMMIT 执行期间同步调用，返回真值表示本次提交让位。
 CommitVeto = Callable[[], bool]
 
-SCHEMA_VERSION = 12
+SCHEMA_VERSION = 13
 
 _MIGRATIONS_DIR = Path(__file__).resolve().parent / "migrations"
 _INITIAL_SCHEMA = _MIGRATIONS_DIR / "001_initial.sql"
@@ -37,6 +37,7 @@ _MIGRATIONS: dict[int, Path] = {
     10: _MIGRATIONS_DIR / "010_session_compaction.sql",
     11: _MIGRATIONS_DIR / "011_session_model_omission.sql",
     12: _MIGRATIONS_DIR / "012_structured_confirmation.sql",
+    13: _MIGRATIONS_DIR / "013_save_confirmation_operations.sql",
 }
 
 # 需要重建 session_entries 的迁移：重建期间临时关闭外键，避免级联删除关联附件。
@@ -167,6 +168,10 @@ _TABLE_COLUMNS: dict[str, frozenset[str]] = {
     "workout_save_records": frozenset({
         "proposal_id", "session_id", "display_entry_id", "confirmation_entry_id", "result", "saved_at",
     }),
+    "save_confirmation_operations": frozenset({
+        "operation_id", "session_id", "business_kind", "proposal_id", "display_entry_id",
+        "confirmation_entry_id", "status", "result", "error", "created_at", "updated_at",
+    }),
 }
 
 # 当前版本中允许为 NULL 的列。
@@ -181,6 +186,7 @@ _NULLABLE_COLUMNS = frozenset({
     ("session_entries", "usage"),
     ("session_entries", "system_message"),
     ("session_entries", "details"),
+    ("session_entries", "confirmation"),
     ("session_runs", "last_entry_id"),
     ("session_runs", "finished_at"),
     ("session_runs", "error_code"),
@@ -200,6 +206,8 @@ _NULLABLE_COLUMNS = frozenset({
     ("workout_snapshots", "base_workout_version"),
     ("workout_snapshots", "display_entry_id"),
     ("workout_snapshots", "confirmation_entry_id"),
+    ("save_confirmation_operations", "result"),
+    ("save_confirmation_operations", "error"),
 })
 
 # 版本 1 的外键基线：表 -> {(被引用表, {(子列, 父列), ...})}。
@@ -312,6 +320,7 @@ _FOREIGN_KEYS: dict[str, set[tuple[str, frozenset[tuple[str, str]]]]] = {
         ("session_entries", frozenset({("session_id", "session_id"), ("confirmation_entry_id", "id")})),
     },
     "workout_save_records": set(),
+    "save_confirmation_operations": set(),
 }
 
 _INDEXES = frozenset({
@@ -333,6 +342,8 @@ _INDEXES = frozenset({
     "idx_workout_snapshots_pending",
     "idx_workout_snapshots_confirmation",
     "idx_workout_save_records_confirmation",
+    "idx_save_confirmation_operations_session_status",
+    "idx_save_confirmation_operations_confirmation",
 })
 
 _TRIGGERS = frozenset({
@@ -362,6 +373,7 @@ _TRIGGERS = frozenset({
     "workout_snapshots_confirmation_entry_user",
     "workout_snapshots_immutable_update",
     "workout_save_records_immutable_update",
+    "save_confirmation_operations_immutable_update",
     "plans_immutable_update",
     "plan_snapshots_immutable_update",
     "plan_save_records_immutable_update",

@@ -4,6 +4,9 @@ import type {
   AttachmentContentWire,
   AttachmentInputWire,
   AttachmentWire,
+  ConfirmationBusinessKindWire,
+  ConfirmationErrorWire,
+  ConfirmationSaveResultWire,
   CurrentPlanWire,
   ModelApi,
   PlanBusinessErrorWire,
@@ -41,6 +44,9 @@ import type {
   WorkoutSaveResultWire,
   WorkoutSetWire,
   WorkoutStatusResultWire,
+  PendingProposalReferenceWire,
+  SaveConfirmationOperationWire,
+  SaveConfirmationRequestWire,
 } from "@/lib/contract";
 
 /** 标准带连字符 UUID 字符串（§11.2） */
@@ -259,11 +265,11 @@ export function parseProfileProposal(value: unknown): ProfileProposalWire {
 }
 
 /**
- * 准备工具的成功结果内容（§11.9）：单个 text 内容块里的完整快照 JSON，前端只展示其中的
- * 完整 ``payload``；内容不符合快照 schema 属协议异常，在解析位置报错。
+ * 准备工具的成功结果内容（§11.9）：单个 text 内容块里的完整快照 JSON，前端按完整 ``payload``
+ * 展示并从同一对象取得 ``proposal_id``；内容不符合快照 schema 属协议异常，在解析位置报错。
  */
-export function preparedProfilePayload(text: string): ProfileContentWire {
-  return parseProfileProposal(JSON.parse(text) as unknown).payload;
+export function preparedProfileProposal(text: string): ProfileProposalWire {
+  return parseProfileProposal(JSON.parse(text) as unknown);
 }
 
 export function parseProfileSaveArguments(
@@ -923,6 +929,21 @@ export function parsePlanStatusResult(
   };
 }
 
+/** 字段错误列表（§7.4、§8）：逐项校验 path 与 message，计划业务错误与确认失败对象共用 */
+function parseFieldErrors(
+  value: unknown,
+  label: string,
+): { path: string; message: string }[] {
+  return requireArray(value, label).map((item) => {
+    if (!isObject(item)) throw new Error(`${label}无效。`);
+    exactKeys(item, ["path", "message"], label);
+    return {
+      path: requireString(item.path, "path"),
+      message: requireString(item.message, "message"),
+    };
+  });
+}
+
 /** 工具失败结果内容（§8）：仅 invalid_business_payload 携带字段错误列表 */
 export function parsePlanBusinessError(
   value: unknown,
@@ -935,18 +956,170 @@ export function parsePlanBusinessError(
     return {
       code,
       message,
-      errors: requireArray(value.errors, "errors").map((item) => {
-        if (!isObject(item)) throw new Error("计划字段错误无效。");
-        exactKeys(item, ["path", "message"], "计划字段错误");
-        return {
-          path: requireString(item.path, "path"),
-          message: requireString(item.message, "message"),
-        };
-      }),
+      errors: parseFieldErrors(value.errors, "计划字段错误"),
     };
   }
   exactKeys(value, ["code", "message"], "计划业务错误");
   return { code: requireEnum(code, PLAN_ERROR_CODES, "code"), message };
+}
+
+/* ===== 结构化保存确认（structured-save-confirmation §7.2–§7.6）===== */
+
+const CONFIRMATION_KINDS = ["profile", "plan", "workout"] as const;
+const CONFIRMATION_STATUSES = ["processing", "saved", "failed"] as const;
+const PENDING_PROPOSAL_STATUSES = ["pending", "processing"] as const;
+const CONFIRMATION_REQUEST_KEYS = [
+  "operation_id",
+  "business_kind",
+  "proposal_id",
+  "display_entry_id",
+] as const;
+const CONFIRMATION_OPERATION_KEYS = [
+  ...CONFIRMATION_REQUEST_KEYS,
+  "session_id",
+  "confirmation_entry_id",
+  "status",
+  "result",
+  "error",
+  "created_at",
+  "updated_at",
+] as const;
+const CONFIRMATION_PENDING_KEYS = [
+  "business_kind",
+  "proposal_id",
+  "status",
+  "request_entry_id",
+  "source_entry_id",
+  "display_entry_id",
+  "confirmation_entry_id",
+] as const;
+
+/** 确认失败对象：``errors`` 仅内容校验错误携带，缺省以外逐项校验 path 与 message（§7.3、§7.4） */
+export function parseConfirmationError(
+  value: unknown,
+): ConfirmationErrorWire {
+  if (!isObject(value)) throw new Error("确认失败对象无效。");
+  for (const key of ["code", "message"] as const)
+    if (!(key in value)) throw new Error("确认失败对象缺少必填字段。");
+  for (const key of Object.keys(value))
+    if (key !== "code" && key !== "message" && key !== "errors")
+      throw new Error("确认失败对象含未定义字段。");
+  const error: ConfirmationErrorWire = {
+    code: requireString(value.code, "code"),
+    message: requireString(value.message, "message"),
+  };
+  if (value.errors === undefined) return error;
+  error.errors = parseFieldErrors(value.errors, "确认字段错误");
+  return error;
+}
+
+/** 完整固定保存结果按业务类型分流，并核对快照标识与本次绑定一致（§7.3） */
+export function parseConfirmationResult(
+  kind: ConfirmationBusinessKindWire,
+  value: unknown,
+  proposalId: string,
+): ConfirmationSaveResultWire {
+  const result =
+    kind === "profile"
+      ? parseProfileSaveResult(value)
+      : kind === "plan"
+        ? parsePlanSaveResult(value)
+        : parseWorkoutSaveResult(value);
+  if (result.proposal_id !== proposalId)
+    throw new Error("确认结果的快照标识不一致。");
+  return result;
+}
+
+/** 确认请求体：恰好四个字段，同一次提交与显式重试逐字沿用同一对象（§7.2） */
+export function parseSaveConfirmationRequest(
+  value: unknown,
+): SaveConfirmationRequestWire {
+  if (!isObject(value)) throw new Error("确认请求无效。");
+  exactKeys(value, CONFIRMATION_REQUEST_KEYS, "确认请求");
+  return {
+    operation_id: requireUuid(value.operation_id, "operation_id"),
+    business_kind: requireEnum(
+      value.business_kind,
+      CONFIRMATION_KINDS,
+      "business_kind",
+    ),
+    proposal_id: requireUuid(value.proposal_id, "proposal_id"),
+    display_entry_id: requireUuid(value.display_entry_id, "display_entry_id"),
+  };
+}
+
+/** 确认操作对象：状态与结果／错误固定配对，saved 的结果按业务类型完整校验（§7.3） */
+export function parseSaveConfirmationOperation(
+  value: unknown,
+): SaveConfirmationOperationWire {
+  if (!isObject(value)) throw new Error("确认操作对象无效。");
+  exactKeys(value, CONFIRMATION_OPERATION_KEYS, "确认操作对象");
+  const business_kind = requireEnum(
+    value.business_kind,
+    CONFIRMATION_KINDS,
+    "business_kind",
+  );
+  const status = requireEnum(value.status, CONFIRMATION_STATUSES, "status");
+  const proposal_id = requireUuid(value.proposal_id, "proposal_id");
+  const operation: SaveConfirmationOperationWire = {
+    session_id: requireUuid(value.session_id, "session_id"),
+    operation_id: requireUuid(value.operation_id, "operation_id"),
+    business_kind,
+    proposal_id,
+    display_entry_id: requireUuid(value.display_entry_id, "display_entry_id"),
+    confirmation_entry_id: requireUuid(
+      value.confirmation_entry_id,
+      "confirmation_entry_id",
+    ),
+    status,
+    result: null,
+    error: null,
+    created_at: requireMillis(value.created_at, "created_at"),
+    updated_at: requireMillis(value.updated_at, "updated_at"),
+  };
+  if (status === "processing") {
+    if (value.result !== null || value.error !== null)
+      throw new Error("处理中确认操作携带结果或错误。");
+    return operation;
+  }
+  if (status === "saved") {
+    if (value.error !== null || value.result === null)
+      throw new Error("已保存确认操作字段配对无效。");
+    operation.result = parseConfirmationResult(
+      business_kind,
+      value.result,
+      proposal_id,
+    );
+    return operation;
+  }
+  if (value.result !== null || value.error === null)
+    throw new Error("失败确认操作字段配对无效。");
+  operation.error = parseConfirmationError(value.error);
+  return operation;
+}
+
+/** 待确认快照引用：七字段必填，完整展示节点与请求来源节点均为标准 UUID（§7.6） */
+export function parsePendingProposalReference(
+  value: unknown,
+): PendingProposalReferenceWire {
+  if (!isObject(value)) throw new Error("待确认快照引用无效。");
+  exactKeys(value, CONFIRMATION_PENDING_KEYS, "待确认快照引用");
+  return {
+    business_kind: requireEnum(
+      value.business_kind,
+      CONFIRMATION_KINDS,
+      "business_kind",
+    ),
+    proposal_id: requireUuid(value.proposal_id, "proposal_id"),
+    status: requireEnum(value.status, PENDING_PROPOSAL_STATUSES, "status"),
+    request_entry_id: requireUuid(value.request_entry_id, "request_entry_id"),
+    source_entry_id: requireUuid(value.source_entry_id, "source_entry_id"),
+    display_entry_id: requireUuid(value.display_entry_id, "display_entry_id"),
+    confirmation_entry_id: nullableUuid(
+      value.confirmation_entry_id,
+      "confirmation_entry_id",
+    ),
+  };
 }
 
 /* ===== 附件（plan-import-adjustment-contract §1、§2、§4）===== */

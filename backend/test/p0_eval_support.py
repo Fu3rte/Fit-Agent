@@ -561,7 +561,7 @@ def aggregate(rounds: list[CaseRoundObservation]) -> dict:
 
     executions = len(ordered)
     passed_executions = sum(1 for r in ordered if r.status == "pass")
-    distribution = {f"{count}/3": 0 for count in range(ROUNDS + 1)}
+    distribution = {f"{count}/{ROUNDS}": 0 for count in range(ROUNDS + 1)}
     stable_cases = 0
     for case_id in case_ids:
         bucket = rounds_by_case[case_id]
@@ -570,7 +570,7 @@ def aggregate(rounds: list[CaseRoundObservation]) -> dict:
             for index in range(ROUNDS)
             if bucket.get(index) is not None and bucket[index].status == "pass"
         )
-        distribution[f"{passed_rounds}/3"] += 1
+        distribution[f"{passed_rounds}/{ROUNDS}"] += 1
         if passed_rounds == ROUNDS:
             stable_cases += 1
 

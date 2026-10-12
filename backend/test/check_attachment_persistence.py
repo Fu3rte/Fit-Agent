@@ -229,7 +229,7 @@ async def check_migration_and_files():
     from test.check_plan_core import CONTENT
     from test.check_profile_snapshot_store import FULL_PROFILE
     from test.check_workout_storage import make_record
-    from test.check_workout_storage import seed as business_seed
+    from test.check_workout_storage import seed_legacy as business_seed
 
     path = ROOT / "schema8.db"
     connection = await aiosqlite.connect(path, isolation_level=None)
@@ -258,11 +258,20 @@ async def check_migration_and_files():
                         payload=content, status=status, created_at=1000, display_entry_id=ids["display"],
                         confirmation_entry_id=ids["confirmation"] if status in ("processing", "saved") else None)
                     # 每条处理/保存快照使用真实独立确认节点。
+                    # 低版本 schema 下直接写入用户节点：v11/v12 才新增的
+                    # model_omitted / confirmation 列不参与旧库写入。
                     if status in ("processing", "saved"):
                         node = identifier()
-                        await repo.insert_entry(SessionMessageEntry(session_id=ids["session"], id=node,
-                            parent_id=ids["confirmation"], run_id=None, type="message", created_at=1000,
-                            messages=[UserMessage(role="user", content="确认", timestamp=1000)]))
+                        await execute(
+                            db,
+                            "INSERT INTO session_entries "
+                            "(session_id, id, parent_id, run_id, type, messages, created_at) "
+                            "VALUES (?, ?, ?, NULL, 'message', ?, ?)",
+                            (ids["session"], node, ids["confirmation"],
+                             json.dumps([{"role": "user", "content": "确认", "timestamp": 1000}],
+                                        ensure_ascii=False),
+                             1000),
+                        )
                         snapshot = snapshot.model_copy(update={"confirmation_entry_id": node})
                     await business.insert_plan_snapshot(snapshot)
                     if status == "saved":

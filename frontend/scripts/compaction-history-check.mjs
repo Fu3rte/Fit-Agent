@@ -96,6 +96,9 @@ const baseHistory = () => ({
       updated_at: 1,
     },
   ],
+  // 确认契约 §7.6：确认操作与待确认引用为历史响应必填数组，本场景两份均为空
+  confirmations: [],
+  pending_proposals: [],
 });
 
 const parsed = api.parseSessionHistory(SESSION, baseHistory());
@@ -185,6 +188,121 @@ reject((wire) => {
 reject((wire) => {
   wire.session.active_leaf_id = null;
 }, /空分支历史无效/);
+reject((wire) => {
+  delete wire.confirmations;
+}, /confirmations 无效/);
+reject((wire) => {
+  delete wire.pending_proposals;
+}, /pending_proposals 无效/);
+
+/* 确认契约 §7.6：确认操作与待确认引用按真实节点角色、归属与时序核验 */
+const P3 = u(93);
+const A3 = u(94);
+const T3 = u(95);
+const K1 = u(96);
+const R3 = u(97);
+const PROPOSAL = u(98);
+/** 完整待确认快照：展示节点携带 profile-plan §3.2 的完整快照对象（reactAgent 工具条目 profile 即该对象） */
+const proposalContent = JSON.stringify({
+  proposal_id: PROPOSAL,
+  profile_id: 1,
+  base_profile_version: 1,
+  payload: {
+    goal: "增肌",
+    experience: "一年训练经历",
+    environment: "健身房",
+    availability: "每周三次",
+    health_notes: null,
+    movement_restrictions: null,
+    unavailable_equipment: [],
+    forbidden_exercise_ids: [],
+  },
+});
+const confirmationWire = (overrides) => ({
+  session_id: SESSION,
+  operation_id: u(100),
+  business_kind: "profile",
+  proposal_id: PROPOSAL,
+  display_entry_id: T3,
+  confirmation_entry_id: K1,
+  status: "processing",
+  result: null,
+  error: null,
+  created_at: 1,
+  updated_at: 1,
+  ...overrides,
+});
+const proposalWire = (overrides) => ({
+  business_kind: "profile",
+  proposal_id: PROPOSAL,
+  status: "processing",
+  request_entry_id: P3,
+  source_entry_id: A3,
+  display_entry_id: T3,
+  confirmation_entry_id: K1,
+  ...overrides,
+});
+const confirmHistory = () => {
+  const wire = baseHistory();
+  wire.entries.push(
+    message(P3, C2, null, "user"),
+    message(A3, P3, R3, "assistant"),
+    {
+      type: "message",
+      entry_id: T3,
+      parent_id: A3,
+      run_id: R3,
+      created_at: 1,
+      message: { role: "toolResult", tool_call_id: "tc-prepare", tool_name: "prepare_profile_update", content: proposalContent, is_error: false, timestamp: 1 },
+    },
+    message(K1, T3, null, "user"),
+  );
+  wire.session.active_leaf_id = K1;
+  wire.runs.push(run(R3, P3, T3, "completed"));
+  wire.confirmations = [confirmationWire({})];
+  wire.pending_proposals = [proposalWire({})];
+  return wire;
+};
+const confirmed = api.parseSessionHistory(SESSION, confirmHistory());
+assert.equal(confirmed.confirmations.length, 1, "确认操作随历史返回");
+assert.equal(confirmed.pending_proposals.length, 1, "待确认引用随历史返回");
+const confirmedRounds = history.historyToRounds(confirmed);
+assert.deepEqual(
+  confirmedRounds.map((round) => round.id),
+  [R1, R2, R3, `confirmation:${K1}`],
+  "确认节点独立成轮且不改动既有运行轮次",
+);
+assert.deepEqual(
+  confirmedRounds[2].entries.map((entry) => entry.kind),
+  ["user", "assistant", "tool"],
+  "确认所在运行按链顺序展示完整内容",
+);
+assert.deepEqual(
+  confirmedRounds[2].entries[2].profile,
+  JSON.parse(proposalContent),
+  "展示工具条目携带完整快照对象而非仅 payload",
+);
+assert.equal(
+  confirmedRounds[3].confirmation.status,
+  "processing",
+  "确认轮次携带真实操作状态",
+);
+
+const rejectConfirm = (mutate, expected) => {
+  const wire = confirmHistory();
+  mutate(wire);
+  assert.throws(() => api.parseSessionHistory(SESSION, wire), expected);
+};
+// 压缩节点只参与祖先链与运行归属，不能作为确认展示、确认或待确认引用节点
+rejectConfirm((wire) => {
+  wire.confirmations = [confirmationWire({ display_entry_id: C2 })];
+}, /确认展示节点 无效/);
+rejectConfirm((wire) => {
+  wire.confirmations = [confirmationWire({ confirmation_entry_id: C2 })];
+}, /确认节点 无效/);
+rejectConfirm((wire) => {
+  wire.pending_proposals = [proposalWire({ confirmation_entry_id: C1 })];
+}, /确认节点 无效/);
 
 // length 保留已输出内容，并以 model_output_limit_exceeded 收尾。
 const RUN = u(70);
@@ -294,5 +412,5 @@ assert.deepEqual(flow.entries.map((entry) => entry.kind), ["assistant", "tool", 
 assert.equal(flow.entries[2].content[0].text, "最终回答。", "压缩后的真实助手内容完整");
 
 console.log(
-  "PASS: 压缩隐藏节点祖先链与叶节点、非法节点归属拒绝、length 截断失败终态，以及压缩阶段事件解析、保持 running、严格拒绝与失败/取消收尾",
+  "PASS: 压缩隐藏节点祖先链与叶节点、非法节点归属拒绝、length 截断失败终态、确认扩展必填数组与独立成轮，以及压缩阶段事件解析、保持 running、严格拒绝与失败/取消收尾",
 );

@@ -8,7 +8,6 @@ from app.application.session.service import SessionService
 from app.domain.business.models import (
     BusinessContext,
     ProfileProposalArguments,
-    ProfileSaveArguments,
 )
 from app.domain.session.models import SendCommand, SendRequest, SessionMessageEntry
 from app.interfaces.http import app
@@ -101,35 +100,27 @@ async def build_pending(
     )
     await business.bind_display_entry(proposal.proposal_id, display_id)
     await service.finish_run(session_id, run.id, "completed")
-    confirmation = await service.accept_send(
-        SendCommand(
-            operation_id=str(uuid4()),
-            session_id=session_id,
-            request=SendRequest(text="确认保存这份画像"),
-        ),
-        system_message=SYSTEM,
-    )
-    await service.finish_run(session_id, confirmation.run.id, "completed")
     return {
         "session": session_id,
         "request": request_id,
         "source": source_id,
         "display": display_id,
-        "confirmation": confirmation.run.request_entry_id,
         "proposal": proposal.proposal_id,
         "context": context,
         "payload": data,
     }
 
 
-async def save(business: BusinessService, ids: dict):
-    return await business.save_profile_update(
-        ids["context"],
-        ProfileSaveArguments(
-            proposal_id=ids["proposal"],
-            display_entry_id=ids["display"],
-            confirmation_entry_id=ids["confirmation"],
-        ),
+def save(http, ids: dict):
+    # 合法保存只走独立确认 HTTP：真实四字段请求，后端从已绑定快照取得业务事实。
+    return http.post(
+        f"/api/sessions/{ids['session']}/confirmations",
+        json={
+            "operation_id": str(uuid4()),
+            "business_kind": "profile",
+            "proposal_id": ids["proposal"],
+            "display_entry_id": ids["display"],
+        },
     )
 
 
@@ -163,14 +154,17 @@ def check() -> None:
             assert legacy_get.json() == {"detail": "Not Found"}, legacy_get.json()
             assert legacy_post.json() == {"detail": "Not Found"}, legacy_post.json()
 
-            # 历史接口只返回会话、消息、运行与输入四类数据。
+            # 历史接口返回会话、消息、运行、输入与结构化确认两组扩展。
             history = http.get(f"/api/sessions/{ids['session']}/history")
             assert history.status_code == 200, history.text
             body = history.json()
-            assert set(body) == {"session", "entries", "runs", "steering"}, set(body)
-            assert "confirmation" not in json.dumps(body, ensure_ascii=False).lower()
+            assert set(body) == {
+                "session", "entries", "runs", "steering", "confirmations", "pending_proposals",
+            }, set(body)
+            assert body["confirmations"] == []
+            assert [item["proposal_id"] for item in body["pending_proposals"]] == [ids["proposal"]]
             roles = [item["message"]["role"] for item in body["entries"]]
-            assert roles == ["system", "user", "assistant", "toolResult", "user"], roles
+            assert roles == ["system", "user", "assistant", "toolResult"], roles
             display = next(
                 item for item in body["entries"] if item["entry_id"] == ids["display"]
             )
@@ -178,9 +172,11 @@ def check() -> None:
             assert display["message"]["is_error"] is False
             assert json.loads(display["message"]["content"])["payload"] == payload()
 
-            # 保存后画像接口返回新版本与完整内容。
-            saved = run(save(business, ids))
-            assert saved.version == 1 and saved.profile_id == 1
+            # 独立确认保存后画像接口返回新版本与完整内容。
+            saved_response = save(http, ids)
+            assert saved_response.status_code == 200, saved_response.text
+            saved = saved_response.json()["result"]
+            assert saved["version"] == 1 and saved["profile_id"] == 1
             profile = http.get("/api/profile")
             assert profile.status_code == 200
             assert profile.json() == {"version": 1, "content": payload()}
@@ -197,8 +193,10 @@ def check() -> None:
                     service, business, payload(environment=f"环境 {secret}"), "凭据会话"
                 )
             )
-            leaked = run(save(business, leaky))
-            assert leaked.version == 2
+            leaky_response = save(http, leaky)
+            # 业务已提交，但确认响应公开画像内容时命中凭据保护。
+            assert leaky_response.status_code == 422, leaky_response.text
+            assert leaky_response.json()["detail"]["code"] == "credential_detected"
             blocked = http.get("/api/profile")
             assert blocked.status_code == 422, blocked.text
             assert blocked.json()["detail"]["code"] == "credential_detected"
@@ -207,7 +205,9 @@ def check() -> None:
             assert blocked_history.json()["detail"]["code"] == "credential_detected"
 
             clean = run(build_pending(service, business, payload(goal="减脂"), "更新会话"))
-            assert run(save(business, clean)).version == 3
+            clean_response = save(http, clean)
+            assert clean_response.status_code == 200, clean_response.text
+            assert clean_response.json()["result"]["version"] == 3
             restored = http.get("/api/profile")
             assert restored.status_code == 200
             assert restored.json() == {"version": 3, "content": payload(goal="减脂")}

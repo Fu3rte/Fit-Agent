@@ -138,6 +138,9 @@ const history = {
   ],
   runs: [{ session_id: u(50), run_id: runId, request_entry_id: userEntry, last_entry_id: nodeFast, status: "completed", started_at: 1, finished_at: 5, error_code: null, error_message: null }],
   steering: [],
+  // 确认契约 §7.6：确认操作与待确认引用为历史必填数组，本场景两份均为空
+  confirmations: [],
+  pending_proposals: [],
 };
 const historyRounds = historyToRounds(history);
 let local = startBatch();

@@ -1,6 +1,5 @@
 import asyncio
 import json
-import sqlite3
 import time
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -17,6 +16,7 @@ from app.ai.messages import (
     Usage,
 )
 from app.application.business.catalog import Catalog
+from app.application.business.confirmation import ConfirmationService
 from app.application.business.coordination import ReplacementCoordinator
 from app.application.business.service import BusinessService, business_date
 from app.application.session.service import SessionService
@@ -26,8 +26,8 @@ from app.domain.business.models import (
     ProfileContent,
     ProfileProposalArguments,
     ProfileSaveArguments,
-    ProfileSaveRecord,
-    ProfileSaveResult,
+    SaveConfirmationOperation,
+    SaveConfirmationRequest,
 )
 from app.domain.session.models import (
     EditCommand,
@@ -153,6 +153,7 @@ class Fixture:
         self.service: SessionService | None = None
         self.repository: SqliteBusinessRepository | None = None
         self.business: BusinessService | None = None
+        self.confirmations: ConfirmationService | None = None
         self.catalog: Catalog | None = None
         self.replacements: ReplacementCoordinator | None = None
         self.loop = None
@@ -164,7 +165,7 @@ class Fixture:
         self.replacements = ReplacementCoordinator()
         service = SessionService(SqliteSessionRepository(self.database))
         if recovered:
-            # 与 lifespan 等价：先恢复中断的运行，再恢复中断的保存。
+            # 与 lifespan 等价：先恢复中断的运行，再恢复中断的业务保存。
             await service.recover_interrupted()
             await self.repository.recover_interrupted_saves()
         self.business = BusinessService(
@@ -172,6 +173,7 @@ class Fixture:
         )
         service.attach_snapshots(self.business)
         self.service = service
+        self.confirmations = ConfirmationService(self.repository, service, self.business)
         self.loop = asyncio.get_running_loop()
         return self
 
@@ -279,11 +281,45 @@ class Fixture:
             declared={name: DECLARED[name]},
         )
 
+    def confirmation_request(self, ids: dict, **overrides) -> SaveConfirmationRequest:
+        # 独立确认入口恰好四字段：业务正文、基础版本与展示绑定由后端从已绑定快照取得。
+        return SaveConfirmationRequest(
+            operation_id=overrides.get("operation_id") or new_id(),
+            business_kind=overrides.get("business_kind", "profile"),
+            proposal_id=overrides.get("proposal", ids["proposal"]),
+            display_entry_id=overrides.get("display", ids["display"]),
+        )
+
+    async def confirm(self, ids: dict, **overrides) -> SaveConfirmationOperation:
+        # 合法保存只经独立确认入口：后端生成确认节点、登记账本并直接调用业务服务。
+        return await self.confirmations.confirm(
+            overrides.get("session", ids["session"]),
+            self.confirmation_request(ids, **overrides),
+        )
+
+    async def accept(self, ids: dict, *, business_kind: str = "profile") -> dict:
+        # 预受理真实结构化确认：返回带真实确认节点与操作编号的调用标识，
+        # 供随后直接业务保存或提交竞争场景核验授权，受理走 ConfirmationService 真实入口。
+        operation, is_first = await self.confirmations._accept(
+            ids["session"], self.confirmation_request(ids, business_kind=business_kind), now_ms()
+        )
+        assert is_first and operation.status == "processing", operation
+        return {**ids, "confirmation": operation.confirmation_entry_id, "operation": operation}
+
     async def tool_save(self, ids: dict, **overrides) -> ToolResultMessage:
-        return await self.invoke(
-            SAVE,
-            self.save_arguments(ids, **overrides).model_dump(),
-            self.save_context(ids, **overrides),
+        # 以确认操作的真实终态构造结果消息，保持既有 is_error/envelope 断言口径。
+        operation = await self.confirm(ids, **overrides)
+        if operation.status == "saved":
+            text, is_error = operation.result.model_dump_json(), False
+        else:
+            text, is_error = operation.error.model_dump_json(), True
+        return ToolResultMessage(
+            role="toolResult",
+            tool_call_id=new_id(),
+            tool_name="confirm_save",
+            content=[TextContent(type="text", text=text)],
+            is_error=is_error,
+            timestamp=now_ms(),
         )
 
     async def tool_status(
@@ -303,6 +339,8 @@ class Fixture:
         )
 
     async def service_save(self, ids: dict, **overrides):
+        # 直接业务保存：非法保存场景使用（普通节点、错误目标、失效快照等），
+        # 授权核验由业务服务就地拒绝，不经过确认受理。
         return await self.business.save_profile_update(
             self.save_context(ids, **overrides),
             self.save_arguments(ids, **overrides),
@@ -421,11 +459,9 @@ async def check_first_build(root: Path) -> dict:
             SEARCH_EXERCISES,
             CALCULATE_DATE,
             PREPARE,
-            SAVE,
             STATUS,
-            "get_workout", "list_workouts", "prepare_workout", "save_workout",
-            "update_workout", "get_workout_save_status",
-            "get_current_plan", "get_plan", "list_plans", "prepare_plan", "save_plan", "get_plan_save_status",
+            "get_workout", "list_workouts", "prepare_workout", "get_workout_save_status",
+            "get_current_plan", "get_plan", "list_plans", "prepare_plan", "get_plan_save_status",
             "get_pending_proposal", "prepare_plan_import", "prepare_plan_adjustment",
         }
         assert {name: tool.definition() for name, tool in tools.items()} == DECLARED
@@ -438,11 +474,6 @@ async def check_first_build(root: Path) -> dict:
             "profile_id",
             "base_profile_version",
             "payload",
-        }
-        assert set(DECLARED[SAVE].parameters["properties"]) == {
-            "proposal_id",
-            "display_entry_id",
-            "confirmation_entry_id",
         }
         assert set(DECLARED[STATUS].parameters["properties"]) == {"proposal_id"}
 
@@ -487,7 +518,9 @@ async def check_first_build(root: Path) -> dict:
             "result": None,
         }
 
-        saved = envelope(await fixture.tool_save(ids))
+        saved_operation = await fixture.confirm(ids)
+        assert saved_operation.status == "saved", saved_operation
+        saved = saved_operation.result.model_dump()
         assert set(saved) == SAVE_FIELDS, saved
         assert saved["proposal_id"] == ids["proposal"]
         assert saved["profile_id"] == 1 and type(saved["profile_id"]) is int
@@ -505,7 +538,7 @@ async def check_first_build(root: Path) -> dict:
         assert record.result.model_dump() == saved
         assert record.session_id == session_id
         assert record.display_entry_id == ids["display"]
-        assert record.confirmation_entry_id == ids["confirmation"]
+        assert record.confirmation_entry_id == saved_operation.confirmation_entry_id
 
         # 更新流程：以版本 1 为依据整理新画像并保存为版本 2。
         second = await propose(
@@ -534,7 +567,7 @@ async def check_first_build(root: Path) -> dict:
         assert await fixture.status_of(fourth["proposal"]) == "pending"
         detail = await assert_rejected(
             "失效快照保存",
-            fixture.service_save({**third, "confirmation": second["confirmation"]}),
+            fixture.service_save(third, confirmation=new_id()),
             "profile_proposal_invalidated",
         )
         assert "errors" not in detail
@@ -572,7 +605,7 @@ async def check_display_binding(root: Path) -> dict:
         assert "展示节点与后端绑定不一致" in detail["message"]
         assert await fixture.status_of(unbound["proposal"]) == "pending"
 
-        # 展示绑定只能指向同会话工具结果节点：助手节点、用户节点、跨会话节点均拒绝。
+        # 展示绑定只能指向同会话真实准备工具结果节点：助手节点、用户节点、跨会话节点均拒绝。
         rejected_bindings = []
         for label, target in (
             ("助手节点", unbound["source"]),
@@ -581,11 +614,11 @@ async def check_display_binding(root: Path) -> dict:
         ):
             try:
                 await fixture.business.bind_display_entry(unbound["proposal"], target)
-            except sqlite3.IntegrityError as error:
-                rejected_bindings.append(f"{label}:{type(error).__name__}")
+            except BusinessError as error:
+                rejected_bindings.append(f"{label}:{error.code}")
             else:
                 raise AssertionError(f"{label} 展示绑定未被拒绝")
-        assert all("IntegrityError" in item for item in rejected_bindings)
+        assert all(item.endswith("profile_confirmation_invalid") for item in rejected_bindings)
         assert (await fixture.snapshot(unbound["proposal"])).display_entry_id is None
 
         # 已绑定快照：保存使用其他会话的展示节点同样拒绝。
@@ -612,15 +645,15 @@ async def check_confirmation_binding(root: Path) -> dict:
         session_id = await fixture.session()
         probe = await propose(fixture, session_id, prepare_arguments(None, payload()))
 
-        # 确认节点早于展示节点。
+        # 普通用户节点（即使位于完整展示之前）不携带结构化授权，不能授权保存。
         detail = await assert_rejected(
-            "确认早于展示",
+            "普通节点无结构化授权",
             fixture.service_save(probe, confirmation=probe["request"]),
             "profile_confirmation_invalid",
         )
-        assert "确认消息必须晚于" in detail["message"]
+        assert "确认保存操作" in detail["message"]
 
-        # 确认节点角色为助手。
+        # 确认节点角色必须为用户消息。
         detail = await assert_rejected(
             "确认节点为助手",
             fixture.service_save(probe, confirmation=probe["source"]),
@@ -628,8 +661,11 @@ async def check_confirmation_binding(root: Path) -> dict:
         )
         assert "确认节点必须是用户消息" in detail["message"]
 
-        saved = envelope(await fixture.tool_save(probe))
+        saved_operation = await fixture.confirm(probe)
+        assert saved_operation.status == "saved", saved_operation
+        saved = saved_operation.result.model_dump()
         assert saved["version"] == 1
+        confirmation = saved_operation.confirmation_entry_id
 
         # 重复保存同一快照：返回完全相同的固定结果，版本不再递增。
         state = await fixture.profile_state()
@@ -644,13 +680,11 @@ async def check_confirmation_binding(root: Path) -> dict:
         )
         detail = await assert_rejected(
             "确认消息重复绑定",
-            fixture.service_save(second, confirmation=probe["confirmation"]),
+            fixture.service_save(second, confirmation=confirmation),
             "profile_confirmation_invalid",
         )
         assert "该确认消息已绑定其他快照" in detail["message"]
-        kept = await fixture.repository.find_snapshot_by_confirmation(
-            session_id, probe["confirmation"]
-        )
+        kept = await fixture.repository.find_snapshot_by_confirmation(session_id, confirmation)
         assert kept is not None and kept.proposal_id == probe["proposal"]
         assert kept.status == "saved"
         assert await fixture.status_of(second["proposal"]) == "pending"
@@ -658,27 +692,26 @@ async def check_confirmation_binding(root: Path) -> dict:
         assert await fixture.profile_state() == state
         duplicate_message = detail["message"]
 
-        # 编辑确认消息：原确认节点离开当前消息路径，快照保留待确认。
+        # 编辑待保存快照的普通确认节点：新普通节点不继承结构化授权，快照保持待确认。
         edited = await fixture.service.accept_edit(
             EditCommand(
                 operation_id=new_id(),
                 session_id=session_id,
-                request=EditRequest(
-                    target_entry_id=second["confirmation"], text="改成另一句确认"
-                ),
+                request=EditRequest(target_entry_id=second["confirmation"], text="改成普通消息"),
             )
         )
         await fixture.service.finish_run(session_id, edited.run.id, "completed")
         assert await fixture.status_of(second["proposal"]) == "pending"
         detail = await assert_rejected(
-            "确认节点不在当前路径",
-            fixture.service_save(second),
+            "编辑后普通节点保存",
+            fixture.service_save(second, confirmation=edited.run.request_entry_id),
             "profile_confirmation_invalid",
         )
-        assert "当前消息路径" in detail["message"]
-        # 编辑产生的新确认节点晚于展示节点，可完成保存。
-        replacement = {**second, "confirmation": edited.run.request_entry_id}
-        edited_saved = envelope(await fixture.tool_save(replacement))
+        assert "确认保存操作" in detail["message"]
+        # 已保存画像与固定结果保持；新快照由新的按钮确认保存。
+        assert (await fixture.repository.get_save_record(
+            probe["proposal"])).result.model_dump() == saved
+        edited_saved = envelope(await fixture.tool_save(second))
         assert edited_saved["version"] == 2
 
         # 跨会话归属校验。
@@ -808,7 +841,7 @@ async def check_status_branches(root: Path) -> dict:
         }
         assert await fixture.profile_state() == baseline
 
-        # 版本冲突：准备之后画像版本被其他路径推进。
+        # 版本冲突：准备之后画像版本被其他路径推进，合法确认在业务提交事务内检出冲突。
         stale = await propose(
             fixture, session_id, prepare_arguments(None, payload(goal="维持"))
         )
@@ -816,12 +849,11 @@ async def check_status_branches(root: Path) -> dict:
             await fixture.repository.save_profile(
                 ProfileContent.model_validate(payload(goal="他人写入")), 1, now_ms()
             )
-        detail = await assert_rejected(
-            "提交时版本冲突",
-            fixture.service_save(stale),
-            "profile_version_conflict",
-        )
-        assert "errors" not in detail
+        failed = await fixture.confirm(stale)
+        assert failed.status == "failed", failed
+        assert failed.error.code == "profile_version_conflict", failed.error
+        detail = failed.error.model_dump()
+        assert detail["errors"] is None, detail
         assert await fixture.status_of(stale["proposal"]) == "conflicted"
         profile = await fixture.business.get_profile()
         assert profile.version == 1 and profile.content.goal == "他人写入"
@@ -852,31 +884,23 @@ async def check_interrupted_save(root: Path) -> dict:
         proposal_id = ids["proposal"]
         saved_at = now_ms()
         content = ProfileContent.model_validate(payload())
-        record = ProfileSaveRecord(
-            proposal_id=proposal_id,
-            session_id=session_id,
-            profile_id=1,
-            display_entry_id=ids["display"],
-            confirmation_entry_id=ids["confirmation"],
-            result=ProfileSaveResult(
-                proposal_id=proposal_id,
-                profile_id=1,
-                version=1,
-                content=content,
-                saved_at=saved_at,
-            ),
-            saved_at=saved_at,
-        )
 
-        # 确认关联先落地，保存事务在提交前中断。
+        # 真实受理后让业务进入处理中但不提交，等价于进程在保存落地前中断。
+        request = fixture.confirmation_request(ids)
+        operation, accepted = await fixture.confirmations._accept(session_id, request, now_ms())
+        assert accepted and operation.status == "processing", operation
+        arguments = ProfileSaveArguments(
+            proposal_id=proposal_id,
+            display_entry_id=ids["display"],
+            confirmation_entry_id=operation.confirmation_entry_id,
+        )
+        context = fixture.save_context(ids, confirmation=operation.confirmation_entry_id)
         async with fixture.repository.transaction():
-            await fixture.repository.begin_save(proposal_id, ids["confirmation"])
+            await fixture.business._begin_save(context, arguments)
 
         async def broken_save() -> None:
             async with fixture.repository.transaction():
-                await fixture.repository.begin_save(proposal_id, ids["confirmation"])
                 await fixture.repository.save_profile(content, 1, saved_at)
-                await fixture.repository.complete_save(record)
                 raise RuntimeError("模拟保存事务提交前中断")
 
         interrupted = None
@@ -889,14 +913,17 @@ async def check_interrupted_save(root: Path) -> dict:
         assert await fixture.repository.get_save_record(proposal_id) is None
         assert await fixture.status_of(proposal_id) == "processing"
 
-        # 重启：lifespan 等价恢复把未提交的保存退回待确认并保留确认绑定。
+        # 重启：确认对账把未提交的处理中操作登记为中断失败并解除快照占用。
         fixture = await fixture.restart()
+        await fixture.confirmations.recover_interrupted()
         recovered = await fixture.snapshot(proposal_id)
         assert recovered.status == "pending"
-        assert recovered.confirmation_entry_id == ids["confirmation"]
+        assert recovered.confirmation_entry_id is None
         assert recovered.display_entry_id == ids["display"]
+        failed = await fixture.confirmations.get(session_id, operation.operation_id)
+        assert failed.status == "failed" and failed.error.code == "confirmation_interrupted"
 
-        # 按原快照与原确认绑定重试保存成功。
+        # 新的按钮确认重试同一快照成功。
         retried = envelope(await fixture.tool_save(ids))
         assert retried["proposal_id"] == proposal_id
         assert retried["version"] == 1
@@ -909,7 +936,7 @@ async def check_interrupted_save(root: Path) -> dict:
         assert await fixture.repository.recover_interrupted_saves() == 0
         return {
             "interrupted": interrupted,
-            "recovered": [recovered.status, recovered.confirmation_entry_id],
+            "recovered": [recovered.status, failed.status],
             "retry": retried,
         }
     finally:
@@ -921,7 +948,10 @@ async def check_regenerate_and_removal(root: Path) -> dict:
     try:
         session_id = await fixture.session()
         kept = await propose(fixture, session_id, prepare_arguments(None, payload()))
-        first = envelope(await fixture.tool_save(kept))
+        kept_operation = await fixture.confirm(kept)
+        assert kept_operation.status == "saved", kept_operation
+        first = kept_operation.result.model_dump()
+        kept_confirmation = kept_operation.confirmation_entry_id
         assert first["version"] == 1
         assert await fixture.business.list_display_bindings(session_id) == {
             kept["display"]: kept["proposal"]
@@ -938,7 +968,7 @@ async def check_regenerate_and_removal(root: Path) -> dict:
         )
         await fixture.service.finish_run(session_id, regenerated.run.id, "completed")
         record = await fixture.repository.find_save_record_by_confirmation(
-            session_id, kept["confirmation"]
+            session_id, kept_confirmation
         )
         assert record is not None and record.proposal_id == kept["proposal"]
         status = await fixture.service_status(kept)
@@ -947,7 +977,7 @@ async def check_regenerate_and_removal(root: Path) -> dict:
         assert await fixture.status_of(kept["proposal"]) == "saved"
         # 运行上下文按此映射在确认节点上投影 proposal_id。
         assert await fixture.business.list_confirmation_bindings(session_id) == {
-            kept["confirmation"]: kept["proposal"]
+            kept_confirmation: kept["proposal"]
         }
 
         # 新快照保存成功前，已保存画像保持不变。
@@ -958,7 +988,7 @@ async def check_regenerate_and_removal(root: Path) -> dict:
         assert state == {"version": 1, "profile_rows": 1, "record_rows": 1}
         detail = await assert_rejected(
             "新快照沿用旧确认消息",
-            fixture.service_save(second, confirmation=kept["confirmation"]),
+            fixture.service_save(second, confirmation=kept_confirmation),
             "profile_confirmation_invalid",
         )
         assert "errors" not in detail
@@ -983,7 +1013,7 @@ async def check_regenerate_and_removal(root: Path) -> dict:
         survived = await fixture.repository.get_save_record(kept["proposal"])
         assert survived.result.model_dump() == first
         located = await fixture.repository.find_save_record_by_confirmation(
-            session_id, kept["confirmation"]
+            session_id, kept_confirmation
         )
         assert located is not None and located.proposal_id == kept["proposal"]
 
@@ -1044,15 +1074,11 @@ async def check_tool_envelopes(root: Path) -> dict:
             PREPARE, prepare_arguments(99, payload(goal="冲突"))
         )
         assert failures["prepare"]["code"] == "profile_version_conflict"
-        failures["save"] = await failing(
-            SAVE,
-            {
-                "proposal_id": new_id(),
-                "display_entry_id": ids["display"],
-                "confirmation_entry_id": ids["confirmation"],
-            },
-        )
-        assert failures["save"]["code"] == "profile_proposal_not_found"
+        # 保存不再暴露模型工具：独立确认入口按缺失快照拒绝，错误结构保持 code/message。
+        save_error = await rejection(fixture.confirm(ids, proposal=new_id()))
+        assert save_error.code == "profile_proposal_not_found", save_error
+        failures["save"] = save_error.detail()
+        assert set(failures["save"]) == {"code", "message"}, failures["save"]
         failures["status"] = await failing(STATUS, {"proposal_id": new_id()})
         assert failures["status"]["code"] == "profile_proposal_not_found"
 
@@ -1188,28 +1214,22 @@ def check_legacy_http() -> dict:
         proposal = envelope(message)["proposal_id"]
         run(business.bind_display_entry(proposal, display_id))
         run(service.finish_run(session_id, run_id, "completed"))
-        confirm = run(
-            service.accept_send(
-                SendCommand(
-                    operation_id=new_id(),
-                    session_id=session_id,
-                    request=SendRequest(text="确认保存这份画像"),
-                ),
-                system_message=SYSTEM,
-            )
+        # 合法 HTTP 保存只走独立确认 POST：真实四字段请求，后端直接从快照取得业务事实。
+        operation_id = new_id()
+        confirmed = http.post(
+            f"/api/sessions/{session_id}/confirmations",
+            json={
+                "operation_id": operation_id,
+                "business_kind": "profile",
+                "proposal_id": proposal,
+                "display_entry_id": display_id,
+            },
         )
-        run(service.finish_run(session_id, confirm.run.id, "completed"))
-        saved = run(
-            business.save_profile_update(
-                context,
-                ProfileSaveArguments(
-                    proposal_id=proposal,
-                    display_entry_id=display_id,
-                    confirmation_entry_id=confirm.run.request_entry_id,
-                ),
-            )
-        )
-        assert saved.version == 1 and saved.content.model_dump() == payload()
+        assert confirmed.status_code == 200, confirmed.text
+        operation = confirmed.json()
+        assert operation["status"] == "saved" and operation["error"] is None
+        assert operation["result"]["version"] == 1
+        assert operation["result"]["content"] == payload()
 
         legacy_get = http.get(f"/api/confirmations/{new_id()}")
         legacy_post = http.post(f"/api/confirmations/{new_id()}/commit")
@@ -1219,8 +1239,12 @@ def check_legacy_http() -> dict:
         history = http.get(f"/api/sessions/{session_id}/history")
         assert history.status_code == 200, history.text
         body = history.json()
-        assert set(body) == {"session", "entries", "runs", "steering"}, set(body)
-        assert "confirmation" not in json.dumps(body, ensure_ascii=False).lower()
+        assert set(body) == {
+            "session", "entries", "runs", "steering", "confirmations", "pending_proposals",
+        }, set(body)
+        # 确认账本使用专用键而非卡片协议；已保存快照不再出现在待确认引用。
+        assert [item["operation_id"] for item in body["confirmations"]] == [operation_id]
+        assert body["pending_proposals"] == []
 
         profile = http.get("/api/profile")
         assert profile.status_code == 200
@@ -1244,11 +1268,9 @@ def check() -> None:
         SEARCH_EXERCISES,
         CALCULATE_DATE,
         PREPARE,
-        SAVE,
         STATUS,
-        "get_workout", "list_workouts", "prepare_workout", "save_workout",
-        "update_workout", "get_workout_save_status",
-        "get_current_plan", "get_plan", "list_plans", "prepare_plan", "save_plan", "get_plan_save_status",
+        "get_workout", "list_workouts", "prepare_workout", "get_workout_save_status",
+        "get_current_plan", "get_plan", "list_plans", "prepare_plan", "get_plan_save_status",
         "get_pending_proposal", "prepare_plan_import", "prepare_plan_adjustment",
     }
     evidence: dict = {}

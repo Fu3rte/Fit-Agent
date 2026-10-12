@@ -1,7 +1,7 @@
 // 运行：node scripts/plan-adjustment-check.mjs
-// 调整计划前端专项（plan-adjustment-contract §2–§9、plan-import-adjustment-contract §6–§10、plan-generation-contract §6）：
-// 直接调用生产解析函数、事件归约、历史投影与展示组件，核验调整结果解析、完整计划与 notes 展示、
-// 实时与历史一致、保存落定后的计划查询刷新。输入均为契约样例，不代表后端实际运行结果；
+// 调整计划前端专项（plan-adjustment-contract §2–§9、plan-import-adjustment-contract §6–§10、plan-generation-contract §6、
+// structured-save-confirmation §7.3、§7.6）：直接调用生产解析函数、事件归约、历史投影与展示组件，核验调整结果解析、
+// 完整计划与 notes 展示、实时与历史一致、确认操作 saved 后的计划查询刷新。输入均为契约样例，不代表后端实际运行结果；
 // 计划页查询使用本地契约样例传输层，真实后端 HTTP 与模型流程由后端专项及联调覆盖。
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
@@ -52,8 +52,6 @@ const RESULT_NODE = u(0xaaaaaaaa);
 const STATUS_NODE = u(0xbbbbbbbb);
 const ADJUSTMENT = "prepare_plan_adjustment";
 const ADJUST_CALL = "tc-adjust-prepare";
-const SAVE_CALL = "tc-adjust-save";
-const STATUS_CALL = "tc-adjust-status";
 const WORKOUTS_CALL = "tc-recent-workouts";
 const CREATED_AT = 1780272000000;
 
@@ -427,11 +425,6 @@ const adjustArguments = {
   base_plan_id: BASE_PLAN_ID,
   payload: adjustmentPayload,
 };
-const saveArguments = {
-  proposal_id: PROPOSAL_ID,
-  display_entry_id: RESULT_NODE,
-  confirmation_entry_id: CONFIRM_ENTRY,
-};
 const saveResult = {
   proposal_id: PROPOSAL_ID,
   id: SAVED_PLAN_ID,
@@ -439,9 +432,6 @@ const saveResult = {
   created_at: CREATED_AT,
   saved_at: CREATED_AT,
 };
-const saveResultText = JSON.stringify(saveResult);
-const statusText = (status, result) =>
-  JSON.stringify({ proposal_id: PROPOSAL_ID, status, result });
 
 function roundWithCalls(calls) {
   const content = calls.map((call, index) =>
@@ -664,68 +654,83 @@ for (const [label, broken] of [
     `${label} 的成功结果在解析位置报错`,
   );
 
-/** 10. 历史恢复：同一 schema 与展示投影，身份与完整内容保留 */
-const historyWire = (toolName, content, isError) => ({
-  session: {
-    session_id: SESSION_ID,
-    title: "调整会话",
-    active_leaf_id: RESULT_NODE,
-    created_at: 1,
-    updated_at: 2,
-  },
-  entries: [
-    {
-      type: "message",
-      entry_id: USER_ENTRY,
-      parent_id: null,
-      run_id: null,
-      created_at: 1,
-      message: { role: "user", text: "把卧推重量提到 80 kg。", timestamp: 1, attachments: [] },
-    },
-    {
-      type: "message",
-      entry_id: ASSISTANT_ENTRY,
-      parent_id: USER_ENTRY,
-      run_id: RUN_ID,
-      created_at: 2,
-      message: {
-        role: "assistant",
-        content: [callBlock(0, ADJUST_CALL, ADJUSTMENT, adjustArguments)],
-        stop_reason: "toolUse",
-        timestamp: 2,
-      },
-    },
-    {
-      type: "message",
-      entry_id: RESULT_NODE,
-      parent_id: ASSISTANT_ENTRY,
-      run_id: RUN_ID,
-      created_at: 3,
-      message: {
-        role: "toolResult",
-        tool_call_id: ADJUST_CALL,
-        tool_name: toolName,
-        content,
-        is_error: isError,
-        timestamp: 3,
-      },
-    },
-  ],
-  runs: [
-    {
+/** 10. 历史恢复：同一 schema 与展示投影，身份与完整内容保留（确认契约 §7.6） */
+const pendingReference = {
+  business_kind: "plan",
+  proposal_id: PROPOSAL_ID,
+  status: "pending",
+  request_entry_id: USER_ENTRY,
+  source_entry_id: ASSISTANT_ENTRY,
+  display_entry_id: RESULT_NODE,
+  confirmation_entry_id: null,
+};
+const historyWire = (toolName, content, isError, confirmation = null) => {
+  const appended = confirmation === null ? [] : [confirmation.entry];
+  return {
+    session: {
       session_id: SESSION_ID,
-      run_id: RUN_ID,
-      request_entry_id: USER_ENTRY,
-      last_entry_id: RESULT_NODE,
-      status: "completed",
-      started_at: 1,
-      finished_at: 4,
-      error_code: null,
-      error_message: null,
+      title: "调整会话",
+      active_leaf_id: appended.at(-1)?.entry_id ?? RESULT_NODE,
+      created_at: 1,
+      updated_at: 2,
     },
-  ],
-  steering: [],
-});
+    entries: [
+      {
+        type: "message",
+        entry_id: USER_ENTRY,
+        parent_id: null,
+        run_id: null,
+        created_at: 1,
+        message: { role: "user", text: "把卧推重量提到 80 kg。", timestamp: 1, attachments: [] },
+      },
+      {
+        type: "message",
+        entry_id: ASSISTANT_ENTRY,
+        parent_id: USER_ENTRY,
+        run_id: RUN_ID,
+        created_at: 2,
+        message: {
+          role: "assistant",
+          content: [callBlock(0, ADJUST_CALL, ADJUSTMENT, adjustArguments)],
+          stop_reason: "toolUse",
+          timestamp: 2,
+        },
+      },
+      {
+        type: "message",
+        entry_id: RESULT_NODE,
+        parent_id: ASSISTANT_ENTRY,
+        run_id: RUN_ID,
+        created_at: 3,
+        message: {
+          role: "toolResult",
+          tool_call_id: ADJUST_CALL,
+          tool_name: toolName,
+          content,
+          is_error: isError,
+          timestamp: 3,
+        },
+      },
+      ...appended,
+    ],
+    runs: [
+      {
+        session_id: SESSION_ID,
+        run_id: RUN_ID,
+        request_entry_id: USER_ENTRY,
+        last_entry_id: RESULT_NODE,
+        status: "completed",
+        started_at: 1,
+        finished_at: 4,
+        error_code: null,
+        error_message: null,
+      },
+    ],
+    steering: [],
+    confirmations: confirmation === null ? [] : [confirmation.operation],
+    pending_proposals: confirmation === null && !isError ? [pendingReference] : [],
+  };
+};
 const historyTool = history.historyToRounds(historyWire(ADJUSTMENT, adjustmentText, false))[0]
   .entries.at(-1);
 assert.deepEqual(historyTool.plan, liveTool.plan, "历史与实时使用相同 schema 与展示对象");
@@ -781,7 +786,7 @@ assert.deepEqual(plans[0].plan, adjustmentProposal, "合并保持完整调整内
 assert.equal(plans[0].id, ADJUST_CALL, "合并保持原工具调用身份");
 assert.equal(plans[0].entry_id, RESULT_NODE, "合并后仍为真实结果节点身份");
 
-/* ===== 保存落定与刷新 ===== */
+/* ===== 已保存事实与刷新（确认契约 §7.3、§7.6） ===== */
 const resultEvent = (callId, content, isError = false) =>
   event("tool_result", {
     tool_call_id: callId,
@@ -790,77 +795,122 @@ const resultEvent = (callId, content, isError = false) =>
     entry_id: STATUS_NODE,
     parent_id: ASSISTANT_ENTRY,
   });
-const savedFor = (callId, name, args, content, isError) =>
-  reactAgent.planSaved(resultEvent(callId, content, isError), roundWithCalls([{ id: callId, name, args }]));
 
-/** 11. 保存凭据：仅成功保存或 saved 核实，且快照标识与本次调用参数一致 */
-assert.equal(savedFor(SAVE_CALL, "save_plan", saveArguments, saveResultText), true, "调整快照保存成功识别为落定");
-assert.equal(savedFor(SAVE_CALL, "save_plan", saveArguments, saveResultText, true), false, "保存失败不落定");
+/** 11. 待确认引用与快照展示绑定同一结果节点，saved 操作对象携带完整固定结果 */
+const pendingParsed = api.parseSessionHistory(
+  SESSION_ID,
+  historyWire(ADJUSTMENT, adjustmentText, false),
+);
+assert.deepEqual(
+  pendingParsed.pending_proposals,
+  [pendingReference],
+  "待确认快照引用逐字段完整恢复",
+);
+const pendingTool = history.historyToRounds(pendingParsed)[0].entries.at(-1);
 assert.equal(
-  reactAgent.planSaved(
-    event("tool_execution_end", { tool_call_id: SAVE_CALL, tool_name: "save_plan", content: saveResultText, is_error: false }),
-    roundWithCalls([{ id: SAVE_CALL, name: "save_plan", args: saveArguments }]),
-  ),
-  false,
-  "执行完成事件不作为保存凭据",
+  pendingReference.display_entry_id,
+  pendingTool.entry_id,
+  "确认入口的展示节点即快照结果节点",
 );
 assert.equal(
-  reactAgent.planSaved(
-    event("tool_execution_update", { tool_call_id: SAVE_CALL, tool_name: "save_plan", content: saveResultText, is_error: false }),
-    roundWithCalls([{ id: SAVE_CALL, name: "save_plan", args: saveArguments }]),
-  ),
-  false,
-  "进度事件不作为保存凭据",
+  pendingReference.proposal_id,
+  pendingTool.plan.proposal_id,
+  "确认入口的快照标识即待确认调整快照标识",
 );
-assert.equal(savedFor(STATUS_CALL, "get_plan_save_status", { proposal_id: PROPOSAL_ID }, statusText("saved", saveResult)), true, "saved 状态核实支持恢复保存状态");
-for (const status of ["pending", "processing", "invalidated", "conflicted"])
-  assert.equal(
-    savedFor(STATUS_CALL, "get_plan_save_status", { proposal_id: PROPOSAL_ID }, statusText(status, null)),
-    false,
-    `${status} 状态不落定`,
+const confirmationNodeEntry = {
+  type: "message",
+  entry_id: CONFIRM_ENTRY,
+  parent_id: RESULT_NODE,
+  run_id: null,
+  created_at: 4,
+  message: { role: "user", text: "确认保存计划", timestamp: 4, attachments: [] },
+};
+const savedOperation = {
+  session_id: SESSION_ID,
+  operation_id: u(0x12121212),
+  business_kind: "plan",
+  proposal_id: PROPOSAL_ID,
+  display_entry_id: RESULT_NODE,
+  confirmation_entry_id: CONFIRM_ENTRY,
+  status: "saved",
+  result: saveResult,
+  error: null,
+  created_at: CREATED_AT,
+  updated_at: CREATED_AT,
+};
+const confirmedHistory = (operation) =>
+  api.parseSessionHistory(
+    SESSION_ID,
+    historyWire(ADJUSTMENT, adjustmentText, false, {
+      operation,
+      entry: confirmationNodeEntry,
+    }),
   );
-assert.equal(savedFor(ADJUST_CALL, ADJUSTMENT, adjustArguments, adjustmentText), false, "调整准备完成不触发保存");
-assert.equal(savedFor(WORKOUTS_CALL, "list_workouts", {}, recentWorkouts), false, "查询类工具结果不误判为已保存");
-assert.equal(
-  savedFor("tc-query", "get_current_plan", {}, JSON.stringify({ id: SAVED_PLAN_ID, content: adjustmentPayload })),
-  false,
-  "当前计划查询不作保存凭据",
+const savedHistory = confirmedHistory(savedOperation);
+assert.deepEqual(
+  savedHistory.confirmations[0].result,
+  saveResult,
+  "saved 确认操作携带完整调整保存结果",
 );
 assert.equal(
-  savedFor(STATUS_CALL, "get_plan_save_status", { proposal_id: OTHER_PROPOSAL_ID }, statusText("saved", saveResult)),
-  false,
-  "旧快照标识与当前调用参数不一致不作凭据",
+  savedHistory.confirmations[0].display_entry_id,
+  pendingReference.display_entry_id,
+  "确认操作对应的正是待确认快照的完整展示",
 );
+assert.deepEqual(
+  business.parsePlanSaveResult(saveResult).content,
+  adjustmentPayload,
+  "固定保存结果与调整 payload 完整一致",
+);
+const confirmationRound = history.historyToRounds(savedHistory).at(-1);
 assert.equal(
-  reactAgent.planSaved(
-    resultEvent(SAVE_CALL, saveResultText),
-    roundWithCalls([
-      adjustCall(),
-      { id: SAVE_CALL, name: "save_plan", args: { ...saveArguments, proposal_id: OTHER_PROPOSAL_ID } },
-    ]),
-  ),
-  false,
-  "另一快照的保存结果不误关联为当前调用的保存",
+  confirmationRound.id,
+  `confirmation:${CONFIRM_ENTRY}`,
+  "确认节点独立成轮，不属于任何 Agent 运行",
 );
+assert.equal(confirmationRound.entries.length, 1, "确认轮次不伪造助手消息");
 assert.equal(
-  reactAgent.planSaved(resultEvent(SAVE_CALL, saveResultText), roundWithCalls([adjustCall()])),
-  false,
-  "未知调用身份不作保存凭据",
+  confirmationRound.entries[0].request,
+  "确认保存计划",
+  "确认轮次仅含真实确认用户节点",
 );
-assert.throws(() => savedFor(SAVE_CALL, "save_plan", saveArguments, statusText("saved", null)), /计划保存结果/, "保存结果不合 schema 就地失败");
-assert.throws(
-  () => savedFor(SAVE_CALL, "save_plan", saveArguments, JSON.stringify({ ...saveResult, is_current: true })),
-  /含未定义字段/,
-  "固定结果携带动态当前标记属协议异常",
+assert.deepEqual(
+  confirmationRound.confirmation,
+  { business_kind: "plan", proposal_id: PROPOSAL_ID, status: "saved", text: "已保存" },
+  "确认展示只陈述真实操作状态",
 );
-assert.throws(
-  () => savedFor(SAVE_CALL, "save_plan", saveArguments, JSON.stringify({ ...saveResult, created_at: CREATED_AT + 1 })),
-  /不一致/,
-  "保存时间与创建时间必须一致",
-);
-assert.deepEqual(business.parsePlanSaveResult(saveResult).content, adjustmentPayload, "固定保存结果与调整 payload 完整一致");
+for (const [status, extra, display] of [
+  ["processing", { result: null, error: null }, { status: "processing", text: "确认处理中" }],
+  [
+    "failed",
+    { result: null, error: { code: "plan_version_conflict", message: "当前计划已变化。" } },
+    { status: "failed", text: "保存失败", detail: "当前计划已变化。" },
+  ],
+])
+  assert.deepEqual(
+    history.historyToRounds(confirmedHistory({ ...savedOperation, status, ...extra })).at(-1)
+      .confirmation,
+    { business_kind: "plan", proposal_id: PROPOSAL_ID, ...display },
+    `${status} 状态按真实操作对象展示`,
+  );
 
-/** 12. 真实查询缓存：仅保存落定使计划查询失效，其它业务查询保持 */
+/** 11.1 状态配对、结果 schema 与节点时序异常均在解析位置失败 */
+for (const [label, values] of [
+  ["处理中携带结果", { status: "processing" }],
+  ["已保存缺少结果", { status: "saved", result: null }],
+  ["失败缺少错误对象", { status: "failed" }],
+  ["固定结果携带动态当前标记", { result: { ...saveResult, is_current: true } }],
+  ["保存时间与创建时间不一致", { result: { ...saveResult, created_at: CREATED_AT + 1 } }],
+  ["结果快照标识与操作不一致", { result: { ...saveResult, proposal_id: OTHER_PROPOSAL_ID } }],
+  ["确认节点早于完整展示", { confirmation_entry_id: USER_ENTRY }],
+])
+  assert.throws(
+    () => confirmedHistory({ ...savedOperation, ...values }),
+    /无效|缺少|含未定义字段|不一致|携带|配对|晚于/,
+    `${label} 属协议异常`,
+  );
+
+/** 12. saved 后计划查询按统一前缀失效：当前计划、版本列表与已加载详情同时覆盖，画像与训练记录查询保持 */
 const planKeys = [
   [...PLAN_QUERY_KEY, "current"],
   [...PLAN_QUERY_KEY, "list"],
@@ -873,23 +923,10 @@ const seed = () => {
 };
 const staleOf = (key) =>
   queryClient.getQueryCache().find({ queryKey: key }).isStale();
-const applySaveRefresh = (callId, name, args, content, isError) => {
-  const executed = roundWithCalls([{ id: callId, name, args }]);
-  if (reactAgent.planSaved(resultEvent(callId, content, isError), executed))
-    queryClient.invalidateQueries({ queryKey: PLAN_QUERY_KEY });
-};
 seed();
-applySaveRefresh(SAVE_CALL, "save_plan", saveArguments, saveResultText, true);
-for (const key of [...planKeys, ...otherKeys])
-  assert.equal(staleOf(key), false, `${key.join("/")} 在保存失败后保持原状态`);
-seed();
-applySaveRefresh(STATUS_CALL, "get_plan_save_status", { proposal_id: PROPOSAL_ID }, statusText("processing", null));
+await queryClient.invalidateQueries({ queryKey: PLAN_QUERY_KEY });
 for (const key of planKeys)
-  assert.equal(staleOf(key), false, `${key.join("/")} 在结果未落定时不失效`);
-seed();
-applySaveRefresh(SAVE_CALL, "save_plan", saveArguments, saveResultText);
-for (const key of planKeys)
-  assert.equal(staleOf(key), true, `${key.join("/")} 随保存落定失效`);
+  assert.equal(staleOf(key), true, `${key.join("/")} 随确认 saved 失效`);
 for (const key of otherKeys)
   assert.equal(staleOf(key), false, `${key.join("/")} 不受计划刷新影响`);
 queryClient.clear();
@@ -996,22 +1033,20 @@ assert.ok(page.includes("上一版本的整体说明。"), "失败态保留已�
 assert.ok(!page.includes("没有当前计划。"), "查询失败不误显示为空状态");
 assert.equal(observers[0].observer.getCurrentResult().isError, true, "计划页读取的查询结果保持错误态");
 
-/** 保存落定驱动的刷新：与 sessionRunManager 相同的判定与失效调用 */
+/** 确认 saved 驱动的刷新：与 sessionRunManager 相同的 saved 判定与失效调用 */
 const persistedAdjust = reactAgent.applyReActEvent(
   roundWithCalls([adjustCall()]),
   resultEvent(ADJUST_CALL, adjustmentText),
 );
-assert.deepEqual(entryOf(persistedAdjust, ADJUST_CALL).plan, adjustmentProposal, "待保存调整内容来自真实持久化结果");
+assert.deepEqual(entryOf(persistedAdjust, ADJUST_CALL).plan, adjustmentProposal, "待确认调整内容来自真实持久化结果");
 scenario.current = { status: 200, body: { id: SAVED_PLAN_ID, content: adjustmentPayload } };
 scenario.list = [savedRecord, { ...previousRecord, is_current: false }];
 assert.equal(
-  reactAgent.planSaved(
-    resultEvent(SAVE_CALL, saveResultText),
-    roundWithCalls([adjustCall(), { id: SAVE_CALL, name: "save_plan", args: saveArguments }]),
-  ),
-  true,
-  "保存结果与调整快照标识一致",
+  savedHistory.confirmations[0].result.proposal_id,
+  entryOf(persistedAdjust, ADJUST_CALL).plan.proposal_id,
+  "已保存操作对应的正是当前待确认调整快照",
 );
+assert.equal(savedHistory.confirmations[0].status, "saved", "刷新依据为核实到的真实 saved 终态");
 await queryClient.invalidateQueries({ queryKey: PLAN_QUERY_KEY });
 await settle();
 page = renderPage();
@@ -1051,5 +1086,5 @@ queryClient.clear();
 await new Promise((resolve) => stub.close(resolve));
 
 console.log(
-  "PASS: 调整结果严格解析、紧凑看板与原始 notes 展示、实时与历史同一 schema 与身份、保存落定判定与计划查询刷新全部符合契约",
+  "PASS: 调整结果严格解析、紧凑看板与原始 notes 展示、实时与历史同一 schema 与身份、确认操作配对与 saved 刷新计划查询全部符合契约",
 );

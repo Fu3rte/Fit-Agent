@@ -3,12 +3,12 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field
 
 CATEGORY_QUOTAS: dict[str, int] = {
-    "profile": 8,
-    "plan_entry": 10,
-    "plan_adjust": 8,
-    "workout": 8,
-    "confirm_idempotency": 10,
-    "risk_unknown": 6,
+    "profile": 4,
+    "plan_entry": 5,
+    "plan_adjust": 4,
+    "workout": 4,
+    "confirm_idempotency": 5,
+    "risk_unknown": 3,
 }
 
 CASE_CATEGORIES: tuple[str, ...] = tuple(CATEGORY_QUOTAS)
@@ -22,7 +22,7 @@ CASE_ID_PREFIXES: dict[str, str] = {
     "risk_unknown": "S",
 }
 
-ROUNDS = 3
+ROUNDS = 2
 
 EXPERIMENT_ROOT_NAME = "p0-evaluation"
 
@@ -68,7 +68,7 @@ class P0Case(BaseModel):
     forbidden: list[str] = Field(default_factory=list)
     manual_review: list[ManualReviewItem] = Field(default_factory=list)
     product_basis: str
-    case_version: int = 1
+    case_version: int = 2
 
 
 class PreconditionEvidence(BaseModel):

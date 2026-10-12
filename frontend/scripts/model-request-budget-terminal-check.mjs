@@ -308,6 +308,9 @@ const truncationHistory = {
     },
   ],
   steering: [],
+  // 确认契约 §7.6：确认操作与待确认引用为历史必填数组，本场景两份均为空
+  confirmations: [],
+  pending_proposals: [],
 };
 const parsedHistory = api.parseSessionHistory(SESSION, truncationHistory);
 const replay = history.historyToRounds(parsedHistory);

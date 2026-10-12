@@ -109,7 +109,12 @@ async def stream_assistant_response(
         signal=signal,
     )
     for declaration in get_current_tools(messages):
-        registered = context["tools"][declaration.name].definition()
+        # 历史会话可能保留已移除工具的声明；这类声明不进入当前执行注册表，
+        # 对应调用在单次调用生命周期内按“工具不存在”拒绝，不阻断运行。
+        tool = context["tools"].get(declaration.name)
+        if tool is None:
+            continue
+        registered = tool.definition()
         if (
             declaration.description != registered.description
             or declaration.parameters != registered.parameters

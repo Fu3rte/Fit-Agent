@@ -10,7 +10,7 @@ from queue import Queue
 from threading import Event, Lock
 from time import time_ns
 from traceback import walk_tb
-from typing import Annotated
+from typing import Annotated, Literal
 from uuid import UUID, uuid4
 from weakref import WeakValueDictionary
 
@@ -71,6 +71,7 @@ from app.ai.overflow import ContextOverflowError
 from app.ai.quota import ProviderQuotaExceeded
 from app.ai.types import check_cancelled
 from app.application.business.catalog import Catalog
+from app.application.business.confirmation import ConfirmationService
 from app.application.business.coordination import ReplacementCoordinator
 from app.application.business.service import (
     BUSINESS_TIMEZONE,
@@ -80,8 +81,17 @@ from app.application.business.service import (
 from app.application.session.attachment_files import AttachmentFiles
 from app.application.session.service import CREDENTIAL_SAFE_MESSAGE, SessionService
 from app.application.session.steering import SteeringCoordinator
-from app.domain.business.errors import BusinessError
-from app.domain.business.models import BusinessContext, WorkoutListArguments
+from app.domain.business.errors import (
+    BusinessError,
+    ConfirmationNotFound,
+    business_http_status,
+)
+from app.domain.business.models import (
+    BusinessContext,
+    SaveConfirmationOperation,
+    SaveConfirmationRequest,
+    WorkoutListArguments,
+)
 from app.domain.session.attachments import (
     AttachmentError,
     AttachmentInput,
@@ -111,7 +121,6 @@ from app.domain.session.models import (
     RegenerateRequest,
     SendCommand,
     SendRequest,
-    SaveConfirmation,
     SessionEntry,
     SessionMessageEntry,
     SteeringCommand,
@@ -241,7 +250,6 @@ class RunRequest(BaseModel):
     operation_id: PathUUID
     request: str = Field(max_length=32000)
     attachments: list[AttachmentInput] = Field(default_factory=list)
-    confirmation: SaveConfirmation | None = None
 
     @model_validator(mode="after")
     def validate_content(self):
@@ -289,6 +297,16 @@ class SteeringRequest(BaseModel):
 class WithdrawRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     session_id: PathUUID
+
+
+class SaveConfirmationWire(BaseModel):
+    # §7.2：确认请求恰好四字段。确认节点、业务正文、基础版本、训练记录 ID、
+    # 保存工具名、运行 ID 及文字确认内容一律由后端从已绑定快照取得，客户端不得提交。
+    model_config = ConfigDict(extra="forbid", strict=True)
+    operation_id: PathUUID
+    business_kind: Literal["profile", "plan", "workout"]
+    proposal_id: PathUUID
+    display_entry_id: PathUUID
 
 
 class ProviderWriteBody(BaseModel):
@@ -368,10 +386,13 @@ async def lifespan(app: FastAPI):
     replacements = ReplacementCoordinator()
     business = BusinessService(business_repository, catalog, service, replacements)
     service.attach_snapshots(business)
+    confirmations = ConfirmationService(business_repository, service, business)
     # 中断的保存在事务未提交时已随数据库回滚；恢复完成前不接收任何保存请求。
     await business_repository.recover_interrupted_saves()
     await business_repository.recover_interrupted_workout_saves()
     await business_repository.recover_interrupted_plan_saves()
+    # 确认对账排在业务保存恢复之后：核对处理中操作的保存记录，恢复 saved 或登记中断失败。
+    await confirmations.recover_interrupted()
     async with business_repository.transaction():
         await business_repository.replace_exercises(catalog.all())
     loop = asyncio.get_running_loop()
@@ -379,6 +400,8 @@ async def lifespan(app: FastAPI):
     app.state.session_service = service
     app.state.steering = SteeringCoordinator(service)
     app.state.business = business
+    app.state.confirmations = confirmations
+    app.state.database = database
     app.state.replacements = replacements
     app.state.loop = loop
     app.state.executor = executor
@@ -1190,7 +1213,7 @@ def execute(
         on_steering_consumed=on_steering_consumed,
         save_message=save_message,
         bind_tools=execution_registry,
-        before_tool_call=create_before_tool_call(business, call),
+        before_tool_call=create_before_tool_call(),
         on_tool_update=on_tool_update,
         contains_credentials=guard.contains,
     )
@@ -1529,18 +1552,29 @@ async def get_attachment(session_id: PathUUID, attachment_id: PathUUID, request:
 async def get_history(session_id: PathUUID, request: Request):
     check_workout_query(request, set())
     service: SessionService = app.state.session_service
+    confirmations: ConfirmationService = app.state.confirmations
+    database = app.state.database
     guard = CredentialFilter(active_secrets(session_id))
+    # 消息、会话、运行、Steering 与确认扩展在同一数据库读取快照内取得：
+    # 会话与业务仓库共用同一 Database，同事务对当前 Task 可重入。
     try:
-        history = await service.get_session_history(str(session_id))
+        async with database.transaction_scope():
+            try:
+                history = await service.get_session_history(str(session_id))
+            except SessionNotFound:
+                reject(404, "session_not_found", "会话不存在。")
+            extension = await confirmations.history(str(session_id))
     except SessionNotFound:
         reject(404, "session_not_found", "会话不存在。")
-    # 投影前先检查完整原始记录：系统内容、隐藏块、签名、嵌套元数据及身份字段。
+    # 投影前先检查完整原始记录：系统内容、隐藏块、签名、嵌套元数据、身份字段及确认结果与错误。
     if guard.contains(
         {
             "session": history.session.model_dump(),
             "entries": [entry.model_dump() for entry in history.entries],
             "runs": [run.model_dump() for run in history.runs],
             "steering": [item.model_dump() for item in history.steering],
+            "confirmations": [item.model_dump() for item in extension.confirmations],
+            "pending_proposals": [_pending_reference(item) for item in extension.pending_proposals],
         }
     ):
         reject(422, "credential_detected", CREDENTIAL_SAFE_MESSAGE)
@@ -1549,10 +1583,112 @@ async def get_history(session_id: PathUUID, request: Request):
         "entries": [history_entry(entry) for entry in history.entries],
         "runs": [run_object(run) for run in history.runs],
         "steering": [history_steering(item) for item in history.steering],
+        "confirmations": [confirmation_operation_object(item) for item in extension.confirmations],
+        "pending_proposals": [_pending_reference(item) for item in extension.pending_proposals],
     }
     if guard.contains(payload):
         reject(422, "credential_detected", CREDENTIAL_SAFE_MESSAGE)
     return JSONResponse(payload, headers={"Cache-Control": "no-store"})
+
+
+def _pending_reference(reference) -> dict:
+    # PendingProposalReference 为 dataclass；按 §7.6 字段白名单投影。
+    return {
+        "business_kind": reference.business_kind,
+        "proposal_id": reference.proposal_id,
+        "status": reference.status,
+        "request_entry_id": reference.request_entry_id,
+        "source_entry_id": reference.source_entry_id,
+        "display_entry_id": reference.display_entry_id,
+        "confirmation_entry_id": reference.confirmation_entry_id,
+    }
+
+
+def confirmation_operation_object(operation: SaveConfirmationOperation) -> dict:
+    # §7.3 公开投影：保留 result 与 error 的必填 null 及业务结果内的合法 null；
+    # 无字段错误明细时省略 error.errors，避免前端把 null 当作明细数组拒绝解析。
+    payload = operation.model_dump()
+    error = payload["error"]
+    if error is not None and error["errors"] is None:
+        del error["errors"]
+    return payload
+
+
+def _confirmation_object(operation: SaveConfirmationOperation, status_code: int) -> JSONResponse:
+    payload = confirmation_operation_object(operation)
+    if CredentialFilter(active_secrets(operation.session_id)).contains(payload):
+        reject(422, "credential_detected", CREDENTIAL_SAFE_MESSAGE)
+    return JSONResponse(payload, status_code=status_code, headers=NO_STORE)
+
+
+def _confirmation_error_response(operation: SaveConfirmationOperation) -> JSONResponse:
+    # failed 操作按真实 error 返回既有 detail 结构；仅内容校验错误携带 errors，状态沿用业务定义。
+    error = operation.error
+    detail: dict = {"code": error.code, "message": error.message}
+    if error.code == "invalid_business_payload":
+        detail["errors"] = [item.model_dump() for item in (error.errors or [])]
+    if CredentialFilter(active_secrets(operation.session_id)).contains(detail):
+        reject(422, "credential_detected", CREDENTIAL_SAFE_MESSAGE)
+    return JSONResponse({"detail": detail}, status_code=business_http_status(error.code), headers=NO_STORE)
+
+
+def _confirmation_post_response(operation: SaveConfirmationOperation) -> JSONResponse:
+    if operation.status == "failed":
+        return _confirmation_error_response(operation)
+    return _confirmation_object(operation, 200 if operation.status == "saved" else 202)
+
+
+@app.post(
+    "/api/sessions/{session_id}/confirmations",
+    dependencies=[Depends(check_boundary)],
+)
+async def create_confirmation(session_id: PathUUID, payload: SaveConfirmationWire, request: Request):
+    check_workout_query(request, set())
+    confirmations: ConfirmationService = request.app.state.confirmations
+    session = str(session_id)
+    operation_id = str(payload.operation_id)
+    req = SaveConfirmationRequest(
+        operation_id=operation_id,
+        business_kind=payload.business_kind,
+        proposal_id=str(payload.proposal_id),
+        display_entry_id=str(payload.display_entry_id),
+    )
+
+    async def execute_new():
+        # 后台执行：受理即登记处理中操作并直接调用业务保存；客户端断连不打断收尾，active 恰好释放一次。
+        try:
+            return await confirmations.confirm(session, req)
+        finally:
+            active.release()
+
+    async with operation_lock(operation_id), session_gate(session):
+        # 同键幂等查询先于新操作占用检查：已登记操作复用原对象，处理中同键不误判为新操作。
+        try:
+            registered = await confirmations.get(session, operation_id)
+        except ConfirmationNotFound:
+            registered = None
+        if registered is not None:
+            return _confirmation_post_response(await confirmations.confirm(session, req))
+        if not request.app.state.accepting_runs:
+            reject(409, "run_busy", "服务正在关闭，暂不接受新确认。")
+        if not active.acquire(blocking=False):
+            reject(409, "run_busy", "已有任务正在执行。")
+        task = asyncio.get_running_loop().create_task(execute_new())
+        track(request.app, task)
+        # shield 令断连取消只关闭响应，后台任务继续完成原操作并持久化终态。
+        return _confirmation_post_response(await asyncio.shield(task))
+
+
+@app.get(
+    "/api/sessions/{session_id}/confirmations/{operation_id}",
+    dependencies=[Depends(check_boundary)],
+)
+async def get_confirmation(session_id: PathUUID, operation_id: PathUUID, request: Request):
+    check_workout_query(request, set())
+    confirmations: ConfirmationService = request.app.state.confirmations
+    # 查询只读：不触发保存、不创建确认节点；未登记或会话不存在沿用服务的 404 错误。
+    operation = await confirmations.get(str(session_id), str(operation_id))
+    return _confirmation_object(operation, 200)
 
 
 async def resolve_existing(
@@ -1676,7 +1812,7 @@ async def run(payload: RunRequest, request: Request):
     session_id = str(payload.session_id)
     operation_id = str(payload.operation_id)
     send_request = SendRequest(
-        text=payload.request, attachments=payload.attachments, confirmation=payload.confirmation,
+        text=payload.request, attachments=payload.attachments,
     )
 
     async def accept(svc: SessionService, tools: dict, secrets: tuple[str, ...]):

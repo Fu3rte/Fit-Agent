@@ -39,7 +39,8 @@ from test.regression_support import (
 ROOT = Path(__file__).resolve().parents[2] / "tmp" / "agent-compaction-joint-acceptance"
 FILLER = "the quick brown fox jumps over the lazy dog and keeps training hard. "
 # 20k token 级 filler 节点：生产保留预算 20000 决定切点，多节点保证切点可推进。
-PART_CHARS = 80_000
+# 按统一估算系数 CHARS_PER_TOKEN=3.5 折算，70000 字符即约 20000 token。
+PART_CHARS = 70_000
 PARTS = 6
 EXTRA_PARTS = 5
 
@@ -217,27 +218,34 @@ def scenario_read_and_save(http, ids: dict) -> dict:
         "read_payload_goal": body["payload"]["goal"],
     }
 
-    # 回合二：真实模型以真实引用保存；授权来自真实用户确认节点。
-    confirmation_id, result2 = turn(
-        http, session_id,
-        "我确认保存。调用 save_profile_update：proposal_id 与 display_entry_id 取 message_nodes 中 "
-        "pendingProposal 引用的值，confirmation_entry_id 取 business_context 的 request_entry_id。",
+    # 回合二：确认走独立确认 HTTP，不调用模型、不创建 Agent 运行；后端从已绑定快照直接保存。
+    operation_id = new_id()
+    response = http.post(
+        f"/api/sessions/{session_id}/confirmations",
+        json={
+            "operation_id": operation_id,
+            "business_kind": "profile",
+            "proposal_id": ids["proposal"],
+            "display_entry_id": ids["display"],
+        },
     )
-    saved = [
-        o for o in outputs_of(result2)
-        if o["name"] == "save_profile_update" and not o["is_error"]
-    ]
-    assert len(saved) == 1, outputs_of(result2)
-    result_body = json_content(saved[0])
+    assert response.status_code == 200, response.text
+    operation = response.json()
+    assert operation["status"] == "saved", operation
+    result_body = operation["result"]
+    confirmation_id = operation["confirmation_entry_id"]
     assert result_body["proposal_id"] == ids["proposal"]
     assert result_body["version"] == 1 and result_body["content"] == payload()
     profile = call(app.state.business.get_profile(), loop)
     assert profile.version == 1 and profile.content.model_dump() == payload()
-    run2 = call(service.list_runs(session_id), loop)[-1]
-    assert run2.status == "completed" and str(run2.request_entry_id) == confirmation_id
+    # 确认节点为后端生成的用户节点，run_id 为空且不创建 session_runs。
+    confirmation_entry = call(service.get_entry(session_id, confirmation_id), loop)
+    assert confirmation_entry.run_id is None
+    assert confirmation_entry.messages[0].role == "user"
     return {
         "read": read_evidence,
         "save": {
+            "operation_id": operation_id,
             "confirmation_entry_id": confirmation_id,
             "saved": result_body,
             "profile_version": profile.version,

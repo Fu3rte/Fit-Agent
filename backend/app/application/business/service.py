@@ -210,10 +210,21 @@ class BusinessService:
                 payload=snapshot.payload,
             )
 
-    # 展示绑定：准备结果节点持久化成功后由消息保存入口调用。
+    # 展示绑定：准备结果节点持久化成功后由消息保存入口调用；绑定前核验展示内容与快照一致。
 
     async def bind_display_entry(self, proposal_id: str, display_entry_id: str) -> None:
         async with self._repository.transaction():
+            snapshot = await self._repository.get_snapshot(proposal_id)
+            if snapshot is None:
+                raise ProfileProposalNotFound()
+            entries = self._entries(await self._require_branch(snapshot.session_id))
+            self._require_role(entries, snapshot.source_entry_id, "assistant", "来源节点")
+            display = entries.get(display_entry_id)
+            if display is None:
+                raise ProfileConfirmationInvalid("展示节点须在当前消息路径中。")
+            self._require_prepare_result(
+                display, snapshot, entries[snapshot.source_entry_id], entries
+            )
             await self._repository.bind_display_entry(proposal_id, display_entry_id)
 
     # 保存工具：确认关联先于保存事务落地，画像写入、saved 状态及固定结果原子提交。
@@ -223,14 +234,18 @@ class BusinessService:
         context: BusinessContext,
         arguments: ProfileSaveArguments,
         signal: Event | None = None,
+        *,
+        on_committed=None,
     ) -> ProfileSaveResult:
         return await self._save_with_replacement(
             context, arguments, signal, self._begin_save, self._commit_save,
             self._repository.set_snapshot_status, ProfileVersionConflict,
+            on_committed=on_committed,
         )
 
     async def _save_with_replacement(
-        self, context, arguments, signal, begin, commit, reset, conflict_type
+        self, context, arguments, signal, begin, commit, reset, conflict_type,
+        *, on_committed=None,
     ):
         while True:
             check_cancelled(signal)
@@ -244,6 +259,10 @@ class BusinessService:
                     lambda: self._replacements.pending_count(context.session_id) > 0
                 ):
                     result = await commit(snapshot, bound, context)
+                    # 确认操作为成功终态时，与业务写入在同一提交事务内落地。
+                    if (on_committed is not None and result is not None
+                            and not isinstance(result, BusinessError)):
+                        await on_committed(result)
             except CommitVetoed:
                 check_cancelled(signal)
                 # 让位给编辑与重新生成：撤回本次关联，按替换后的消息路径重新校验。
@@ -315,11 +334,13 @@ class BusinessService:
         await self._repository.delete_snapshots_for_entries(session_id, entry_ids)
         await self._repository.delete_workout_snapshots_for_entries(session_id, entry_ids)
         await self._repository.delete_plan_snapshots_for_entries(session_id, entry_ids)
+        await self._repository.delete_confirmation_operations_for_entries(session_id, entry_ids)
 
     async def remove_for_session(self, session_id: str) -> None:
         await self._repository.delete_snapshots_for_session(session_id)
         await self._repository.delete_workout_snapshots_for_session(session_id)
         await self._repository.delete_plan_snapshots_for_session(session_id)
+        await self._repository.delete_confirmation_operations_for_session(session_id)
 
     # 内部协作。
 
@@ -461,9 +482,11 @@ class BusinessService:
             raise ProfileConfirmationInvalid("展示及确认节点须在当前消息路径中。")
         if confirmation.messages[0].role != "user":
             raise ProfileConfirmationInvalid("确认节点必须是用户消息。")
-        self._check_explicit_confirmation(entries, arguments, "profile", ProfileConfirmationInvalid)
+        await self._check_explicit_confirmation(
+            context.session_id, entries, arguments, "profile", ProfileConfirmationInvalid
+        )
         self._require_prepare_result(
-            display, entries[snapshot.source_entry_id], entries
+            display, snapshot, entries[snapshot.source_entry_id], entries
         )
         order = {entry.id: index for index, entry in enumerate(branch)}
         if order[confirmation.id] <= order[display.id]:
@@ -478,6 +501,7 @@ class BusinessService:
     def _require_prepare_result(
         self,
         display: SessionMessageEntry,
+        snapshot: ProfileSnapshot,
         source: SessionMessageEntry,
         entries: dict[str, SessionMessageEntry],
     ) -> None:
@@ -485,6 +509,14 @@ class BusinessService:
         result = display.messages[0]
         if result.tool_name != PREPARE_TOOL_NAME or result.is_error:
             raise ProfileConfirmationInvalid("展示节点不是该准备工具的结果节点。")
+        if len(result.content) != 1 or not isinstance(result.content[0], TextContent):
+            raise ProfileConfirmationInvalid("展示结果须为完整 JSON text。")
+        displayed = ProfileProposal.model_validate(json.loads(result.content[0].text))
+        expected = ProfileProposal.model_validate(snapshot.model_dump(include={
+            "proposal_id", "profile_id", "base_profile_version", "payload",
+        }))
+        if displayed != expected:
+            raise ProfileConfirmationInvalid("展示内容与快照不一致。")
 
     def _require_batch_result(
         self, display: SessionMessageEntry, source: SessionMessageEntry,
@@ -511,8 +543,8 @@ class BusinessService:
                 raise error_type("展示路径与来源批次调用顺序或结果配对不一致。")
             parent_id = entry.id
 
-    def _check_explicit_confirmation(
-        self, entries: dict[str, SessionMessageEntry], arguments,
+    async def _check_explicit_confirmation(
+        self, session_id: str, entries: dict[str, SessionMessageEntry], arguments,
         business_kind: str, error_type: type[BusinessError],
     ) -> None:
         entry = entries.get(arguments.confirmation_entry_id)
@@ -523,6 +555,18 @@ class BusinessService:
                 or authorization.proposal_id != arguments.proposal_id
                 or authorization.display_entry_id != arguments.display_entry_id):
             raise error_type("用户确认操作与保存目标不一致。")
+        # 节点字段只是授权声明；有效授权必须由确认账本中同目标且正在执行的操作证明，
+        # 失败或已解除绑定的事件不能重新授权业务写入。
+        authorized = any(
+            operation.status == "processing"
+            and (operation.business_kind, operation.proposal_id, operation.display_entry_id)
+            == (business_kind, arguments.proposal_id, arguments.display_entry_id)
+            for operation in await self._repository.list_confirmation_operations_by_entry(
+                session_id, arguments.confirmation_entry_id
+            )
+        )
+        if not authorized:
+            raise error_type("确认事件已失效，无法授权保存。")
 
     def _entries(
         self, branch: list[SessionMessageEntry]
@@ -743,11 +787,12 @@ class BusinessService:
 
     async def save_plan(
         self, context: BusinessContext, arguments: PlanSaveArguments,
-        signal: Event | None = None,
+        signal: Event | None = None, *, on_committed=None,
     ) -> PlanSaveResult:
         return await self._save_with_replacement(
             context, arguments, signal, self._begin_plan_save, self._commit_plan_save,
             self._repository.set_plan_snapshot_status, PlanVersionConflict,
+            on_committed=on_committed,
         )
 
     async def check_plan_save_authorization(
@@ -809,20 +854,20 @@ class BusinessService:
         entries = self._entries(branch)
         for entry_id, role in [
             (snapshot.request_entry_id, "user"), (snapshot.source_entry_id, "assistant"),
-            (context.request_entry_id, "user"), (context.source_entry_id, "assistant"),
             (arguments.confirmation_entry_id, "user"),
         ]:
             self._plan_role(entries, entry_id, role)
-        self._check_explicit_confirmation(entries, arguments, "plan", PlanConfirmationInvalid)
+        await self._check_explicit_confirmation(
+            context.session_id, entries, arguments, "plan", PlanConfirmationInvalid
+        )
         display = entries.get(arguments.display_entry_id)
         if display is None:
             raise PlanConfirmationInvalid("展示节点须在当前消息路径中。")
         self._require_plan_result(display, snapshot, entries[snapshot.source_entry_id], entries)
         order = {entry.id: index for index, entry in enumerate(branch)}
         if not (order[snapshot.request_entry_id] < order[snapshot.source_entry_id]
-                < order[display.id] < order[arguments.confirmation_entry_id]
-                <= order[context.request_entry_id] < order[context.source_entry_id]):
-            raise PlanConfirmationInvalid("展示、确认及当前请求时序不合法。")
+                < order[display.id] < order[arguments.confirmation_entry_id]):
+            raise PlanConfirmationInvalid("展示与确认节点时序不合法。")
         return snapshot.model_copy(update={
             "status": "processing", "confirmation_entry_id": arguments.confirmation_entry_id,
         })
@@ -999,22 +1044,24 @@ class BusinessService:
 
     async def save_workout(
         self, context: BusinessContext, arguments: WorkoutSaveArguments,
-        signal: Event | None = None,
+        signal: Event | None = None, *, on_committed=None,
     ) -> WorkoutSaveResult:
         return await self._save_with_replacement(
             context, arguments, signal,
             partial(self._begin_workout_save, updating=False), self._commit_workout_save,
             self._repository.set_workout_snapshot_status, WorkoutVersionConflict,
+            on_committed=on_committed,
         )
 
     async def update_workout(
         self, context: BusinessContext, arguments: WorkoutSaveArguments,
-        signal: Event | None = None,
+        signal: Event | None = None, *, on_committed=None,
     ) -> WorkoutSaveResult:
         return await self._save_with_replacement(
             context, arguments, signal,
             partial(self._begin_workout_save, updating=True), self._commit_workout_save,
             self._repository.set_workout_snapshot_status, WorkoutVersionConflict,
+            on_committed=on_committed,
         )
 
     def _workout_saved_result(
@@ -1091,19 +1138,19 @@ class BusinessService:
         entries = self._entries(branch)
         for entry_id, role in [
             (snapshot.request_entry_id, "user"), (snapshot.source_entry_id, "assistant"),
-            (context.request_entry_id, "user"), (context.source_entry_id, "assistant"),
             (arguments.confirmation_entry_id, "user"),
         ]:
             self._workout_role(entries, entry_id, role)
-        self._check_explicit_confirmation(entries, arguments, "workout", WorkoutConfirmationInvalid)
+        await self._check_explicit_confirmation(
+            context.session_id, entries, arguments, "workout", WorkoutConfirmationInvalid
+        )
         display = entries.get(arguments.display_entry_id)
         if display is None:
             raise WorkoutConfirmationInvalid("展示节点须在当前消息路径中。")
         self._require_workout_result(display, snapshot, entries[snapshot.source_entry_id], entries)
         order = {entry.id: index for index, entry in enumerate(branch)}
-        if not (order[display.id] < order[arguments.confirmation_entry_id]
-                <= order[context.request_entry_id] < order[context.source_entry_id]):
-            raise WorkoutConfirmationInvalid("展示、确认及当前请求时序不合法。")
+        if not order[display.id] < order[arguments.confirmation_entry_id]:
+            raise WorkoutConfirmationInvalid("展示与确认节点时序不合法。")
         self._check_workout_date(context, snapshot.performed_on)
         return snapshot.model_copy(update={
             "status": "processing", "confirmation_entry_id": arguments.confirmation_entry_id,
@@ -1263,7 +1310,7 @@ class BusinessService:
         if display_id is None:
             raise ProfileConfirmationInvalid("展示节点尚未绑定。")
         self._require_prepare_result(
-            entries[display_id], entries[snapshot.source_entry_id], entries
+            entries[display_id], snapshot, entries[snapshot.source_entry_id], entries
         )
         return ProfilePendingProposal(
             business_kind="profile", proposal_id=snapshot.proposal_id, status=snapshot.status,

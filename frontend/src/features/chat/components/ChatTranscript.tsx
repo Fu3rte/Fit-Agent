@@ -35,15 +35,88 @@ import PlanFields from "@/features/plans/PlanFields";
 import { WorkoutProposalFields } from "@/features/workout/WorkoutFields";
 import {
   canSubmitChatInput,
+  type ConfirmationDisplay,
   type ReActEntry,
   type ReActRound,
 } from "../utils/reactAgent";
+import {
+  CONFIRMATION_LABELS,
+  confirmationAttemptDisplay,
+  confirmationButtonState,
+  type ConfirmationAttempt,
+} from "../utils/confirmations";
 import type { AttachmentDraft } from "../utils/attachments";
+import type {
+  ConfirmationBusinessKindWire,
+  PendingProposalReferenceWire,
+} from "@/lib/contract";
 
 /** 就地编辑状态（用户约定）：正在编辑的消息节点、文本；附件草稿由本页统一的草稿状态持有 */
 type EditState = { entryId: string; text: string } | null;
 
 type DraftState = ReturnType<typeof useAttachmentDrafts>;
+
+/** 待确认快照的确认入口（确认契约 §2、§7.6）：按钮位于该份完整内容外部，与快照标识和展示节点绑定 */
+function ConfirmButton({
+  kind,
+  proposalId,
+  displayEntryId,
+  proposals,
+  attempts,
+  open,
+  onConfirm,
+}: {
+  kind: ConfirmationBusinessKindWire;
+  proposalId: string;
+  displayEntryId?: string;
+  proposals: PendingProposalReferenceWire[];
+  attempts: ConfirmationAttempt[];
+  open: boolean;
+  onConfirm: (
+    kind: ConfirmationBusinessKindWire,
+    proposalId: string,
+    displayEntryId: string,
+  ) => void;
+}) {
+  if (displayEntryId === undefined) return null;
+  const state = confirmationButtonState(
+    kind,
+    proposalId,
+    displayEntryId,
+    proposals,
+    attempts,
+    open,
+  );
+  if (state === "unavailable") return null;
+  return (
+    <Button
+      type="button"
+      size="sm"
+      variant="secondary"
+      disabled={state !== "available"}
+      onClick={() => onConfirm(kind, proposalId, displayEntryId)}
+    >
+      {CONFIRMATION_LABELS[kind]}
+    </Button>
+  );
+}
+
+/** 确认结果行（§7.6）：与 Agent round 独立，只陈述真实操作状态与实际失败原因 */
+function ConfirmationResult({ display }: { display: ConfirmationDisplay }) {
+  return (
+    <p
+      role={display.status === "failed" ? "alert" : "status"}
+      className={
+        display.status === "failed"
+          ? "text-sm text-destructive"
+          : "text-sm text-muted-foreground"
+      }
+    >
+      {`${CONFIRMATION_LABELS[display.business_kind]} · ${display.text}`}
+      {display.detail === undefined ? "" : `：${display.detail}`}
+    </p>
+  );
+}
 
 function Entry({
   entry,
@@ -51,9 +124,14 @@ function Entry({
   sessionId,
   onWithdraw,
   canEdit,
+  canRegenerate,
   editing,
   editSubmitting,
   drafts,
+  proposals,
+  attempts,
+  confirmOpen,
+  onConfirm,
   onStartEdit,
   onEditTextChange,
   onCloseEdit,
@@ -65,9 +143,19 @@ function Entry({
   sessionId: string;
   onWithdraw: (roundId: string, steeringId: string) => void;
   canEdit: boolean;
+  /** 确认节点不提供模型重新生成入口（§7.6）：结果只通过专用状态查询恢复 */
+  canRegenerate: boolean;
   editing: EditState;
   editSubmitting: boolean;
   drafts: DraftState;
+  proposals: PendingProposalReferenceWire[];
+  attempts: ConfirmationAttempt[];
+  confirmOpen: boolean;
+  onConfirm: (
+    kind: ConfirmationBusinessKindWire,
+    proposalId: string,
+    displayEntryId: string,
+  ) => void;
   onStartEdit: (entry: ReActEntry) => void;
   onEditTextChange: (text: string) => void;
   onCloseEdit: () => void;
@@ -76,15 +164,28 @@ function Entry({
 }) {
   if (entry.kind === "tool") {
     /* 业务待确认内容的完整展示（profile-plan §3.2、workout-http-sse-contract §5、plan-generation-contract §6）：
-     * 准备工具的结果节点以 AI 一侧普通消息样式呈现全部字段，无确认入口；其余工具沿用通用工具展示。 */
+     * 准备工具的结果节点以 AI 一侧普通消息样式呈现全部字段，确认入口位于该份完整内容外部并与
+     * 快照标识、展示节点绑定（确认契约 §2、页面布局约定）；其余工具沿用通用工具展示。 */
     const prepared =
-      entry.profile !== undefined ? (
-        <ProfileFields content={entry.profile} />
-      ) : entry.workout !== undefined ? (
-        <WorkoutProposalFields proposal={entry.workout} />
-      ) : entry.plan !== undefined ? (
-        <PlanFields content={entry.plan.payload} />
-      ) : null;
+      entry.profile !== undefined
+        ? {
+            kind: "profile" as const,
+            proposalId: entry.profile.proposal_id,
+            body: <ProfileFields content={entry.profile.payload} />,
+          }
+        : entry.workout !== undefined
+          ? {
+              kind: "workout" as const,
+              proposalId: entry.workout.proposal_id,
+              body: <WorkoutProposalFields proposal={entry.workout} />,
+            }
+          : entry.plan !== undefined
+            ? {
+                kind: "plan" as const,
+                proposalId: entry.plan.proposal_id,
+                body: <PlanFields content={entry.plan.payload} />,
+              }
+            : null;
     if (prepared === null) return <ToolCallCard {...entry} />;
     return (
       <Message align="start">
@@ -94,8 +195,17 @@ function Entry({
             align="start"
             className="w-full max-w-full"
           >
-            <BubbleContent className="w-full">{prepared}</BubbleContent>
+            <BubbleContent className="w-full">{prepared.body}</BubbleContent>
           </Bubble>
+          <ConfirmButton
+            kind={prepared.kind}
+            proposalId={prepared.proposalId}
+            displayEntryId={entry.entry_id}
+            proposals={proposals}
+            attempts={attempts}
+            open={confirmOpen}
+            onConfirm={onConfirm}
+          />
         </MessageContent>
       </Message>
     );
@@ -181,21 +291,23 @@ function Entry({
                       </TooltipTrigger>
                       <TooltipContent>编辑</TooltipContent>
                     </Tooltip>
-                    <Tooltip>
-                      <TooltipTrigger asChild>
-                        <Button
-                          type="button"
-                          variant="ghost"
-                          size="icon"
-                          className="size-7 text-muted-foreground hover:text-foreground"
-                          aria-label="重新生成"
-                          onClick={() => onRegenerate(nodeId)}
-                        >
-                          <RefreshCw />
-                        </Button>
-                      </TooltipTrigger>
-                      <TooltipContent>重新生成</TooltipContent>
-                    </Tooltip>
+                    {canRegenerate && (
+                      <Tooltip>
+                        <TooltipTrigger asChild>
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            size="icon"
+                            className="size-7 text-muted-foreground hover:text-foreground"
+                            aria-label="重新生成"
+                            onClick={() => onRegenerate(nodeId)}
+                          >
+                            <RefreshCw />
+                          </Button>
+                        </TooltipTrigger>
+                        <TooltipContent>重新生成</TooltipContent>
+                      </Tooltip>
+                    )}
                   </div>
                 ) : undefined
               }
@@ -322,6 +434,11 @@ export default function ChatTranscript({
   onWithdraw,
   retrying,
   canEdit,
+  canConfirm,
+  proposals,
+  confirmations,
+  onConfirm,
+  onRetryConfirmation,
   onEdit,
   onRegenerate,
 }: {
@@ -331,6 +448,16 @@ export default function ChatTranscript({
   onWithdraw: (roundId: string, steeringId: string) => void;
   retrying?: string;
   canEdit: boolean;
+  /** 确认入口可用性（确认契约 §7.1、§7.6）：Agent 执行期间与其它未决确认处理期间均不开放 */
+  canConfirm: boolean;
+  proposals: PendingProposalReferenceWire[];
+  confirmations: ConfirmationAttempt[];
+  onConfirm: (
+    kind: ConfirmationBusinessKindWire,
+    proposalId: string,
+    displayEntryId: string,
+  ) => void;
+  onRetryConfirmation: (operationId: string) => void;
   /** 编辑提交完整附件集合：保留项为引用，新增或替换项为上传，全部移除为空集合 */
   onEdit: (
     entryId: string,
@@ -410,9 +537,14 @@ export default function ChatTranscript({
                         sessionId={sessionId}
                         onWithdraw={onWithdraw}
                         canEdit={canEdit}
+                        canRegenerate={round.confirmation === undefined}
                         editing={editing}
                         editSubmitting={editSubmitting}
                         drafts={drafts}
+                        proposals={proposals}
+                        attempts={confirmations}
+                        confirmOpen={canConfirm}
+                        onConfirm={onConfirm}
                         onStartEdit={startEdit}
                         onEditTextChange={(text) =>
                           setEditing((current) =>
@@ -425,6 +557,11 @@ export default function ChatTranscript({
                       />
                     </MessageScrollerItem>
                   ))}
+                {round.confirmation !== undefined && (
+                  <MessageScrollerItem messageId={`${round.id}:confirmation`}>
+                    <ConfirmationResult display={round.confirmation} />
+                  </MessageScrollerItem>
+                )}
                 {round.pending?.map((operation) => (
                   <MessageScrollerItem
                     key={`pending:${operation.operation_id}`}
@@ -510,6 +647,31 @@ export default function ChatTranscript({
                     </MessageScrollerItem>
                   )}
               </Fragment>
+            ))}
+            {/* 提交在途与结果未知的确认（确认契约 §7.5）：历史覆盖确认后由确认节点轮次展示真实结果 */}
+            {confirmations.map((attempt) => (
+              <MessageScrollerItem
+                key={`confirm:${attempt.request.operation_id}`}
+                messageId={`confirm:${attempt.request.operation_id}`}
+              >
+                <div className="flex items-center gap-2">
+                  <ConfirmationResult
+                    display={confirmationAttemptDisplay(attempt)}
+                  />
+                  {attempt.operation === null && (
+                    <Button
+                      type="button"
+                      variant="secondary"
+                      size="sm"
+                      onClick={() =>
+                        onRetryConfirmation(attempt.request.operation_id)
+                      }
+                    >
+                      重试
+                    </Button>
+                  )}
+                </div>
+              </MessageScrollerItem>
             ))}
           </MessageScrollerContent>
         </MessageScrollerViewport>
