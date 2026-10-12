@@ -15,7 +15,7 @@ T = TypeVar("T")
 # 提交否决判据：由连接线程在 COMMIT 执行期间同步调用，返回真值表示本次提交让位。
 CommitVeto = Callable[[], bool]
 
-SCHEMA_VERSION = 11
+SCHEMA_VERSION = 12
 
 _MIGRATIONS_DIR = Path(__file__).resolve().parent / "migrations"
 _INITIAL_SCHEMA = _MIGRATIONS_DIR / "001_initial.sql"
@@ -36,6 +36,7 @@ _MIGRATIONS: dict[int, Path] = {
     9: _MIGRATIONS_DIR / "009_session_attachments.sql",
     10: _MIGRATIONS_DIR / "010_session_compaction.sql",
     11: _MIGRATIONS_DIR / "011_session_model_omission.sql",
+    12: _MIGRATIONS_DIR / "012_structured_confirmation.sql",
 }
 
 # 需要重建 session_entries 的迁移：重建期间临时关闭外键，避免级联删除关联附件。
@@ -67,6 +68,7 @@ _TABLE_COLUMNS: dict[str, frozenset[str]] = {
             "details",
             "created_at",
             "model_omitted",
+            "confirmation",
         }
     ),
     "session_runs": frozenset(

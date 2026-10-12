@@ -111,6 +111,7 @@ from app.domain.session.models import (
     RegenerateRequest,
     SendCommand,
     SendRequest,
+    SaveConfirmation,
     SessionEntry,
     SessionMessageEntry,
     SteeringCommand,
@@ -240,6 +241,7 @@ class RunRequest(BaseModel):
     operation_id: PathUUID
     request: str = Field(max_length=32000)
     attachments: list[AttachmentInput] = Field(default_factory=list)
+    confirmation: SaveConfirmation | None = None
 
     @model_validator(mode="after")
     def validate_content(self):
@@ -889,6 +891,8 @@ def execute(
             if isinstance(message, UserMessage):
                 # 附件读取引用已在模型投影中表达为用户内容，此处不再重复注入。
                 node = {"entry_id": entry.id, "role": "user"}
+                if entry.confirmation is not None:
+                    node["confirmation"] = entry.confirmation.model_dump()
                 proposal_id = bindings.get(entry.id)
                 if proposal_id is not None:
                     node["proposal_id"] = proposal_id
@@ -1671,7 +1675,9 @@ async def run(payload: RunRequest, request: Request):
     service: SessionService = request.app.state.session_service
     session_id = str(payload.session_id)
     operation_id = str(payload.operation_id)
-    send_request = SendRequest(text=payload.request, attachments=payload.attachments)
+    send_request = SendRequest(
+        text=payload.request, attachments=payload.attachments, confirmation=payload.confirmation,
+    )
 
     async def accept(svc: SessionService, tools: dict, secrets: tuple[str, ...]):
         system_message = SystemMessage(

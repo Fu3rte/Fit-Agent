@@ -31,7 +31,7 @@
 
 确认载荷包含 `workout.performed_on`、逐组事实、`plan_session_id`、`auto_link` 和 `candidate_plan_sessions`。模型只负责复述这些事实。
 
-确认前禁止写入。用户确认后，确认端点调用 `RecordsService.commit_workout`；同一 Run 的重复确认使用现有幂等路径。自动关联时，候选数量不等于一个会触发 `PlanSessionLinkAmbiguous`。
+完整内容展示后，用户点击具体快照的确认按钮，通过独立确认 HTTP 调用现有保存服务；普通聊天文字不产生授权。确认请求绑定操作 ID、业务类型、快照与展示节点，重复提交返回原结果，模型不参与保存。HTTP 基线见 [结构化保存确认方案](../../../../tmp/optimization/structured-save-confirmation.md)。
 
 ## 范围
 

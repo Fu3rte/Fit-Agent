@@ -461,6 +461,7 @@ class BusinessService:
             raise ProfileConfirmationInvalid("展示及确认节点须在当前消息路径中。")
         if confirmation.messages[0].role != "user":
             raise ProfileConfirmationInvalid("确认节点必须是用户消息。")
+        self._check_explicit_confirmation(entries, arguments, "profile", ProfileConfirmationInvalid)
         self._require_prepare_result(
             display, entries[snapshot.source_entry_id], entries
         )
@@ -509,6 +510,19 @@ class BusinessService:
                     or message.tool_call_id != call.id or message.tool_name != call.name):
                 raise error_type("展示路径与来源批次调用顺序或结果配对不一致。")
             parent_id = entry.id
+
+    def _check_explicit_confirmation(
+        self, entries: dict[str, SessionMessageEntry], arguments,
+        business_kind: str, error_type: type[BusinessError],
+    ) -> None:
+        entry = entries.get(arguments.confirmation_entry_id)
+        if entry is None or entry.confirmation is None:
+            raise error_type("请点击待确认内容的确认保存操作。")
+        authorization = entry.confirmation
+        if (authorization.business_kind != business_kind
+                or authorization.proposal_id != arguments.proposal_id
+                or authorization.display_entry_id != arguments.display_entry_id):
+            raise error_type("用户确认操作与保存目标不一致。")
 
     def _entries(
         self, branch: list[SessionMessageEntry]
@@ -799,6 +813,7 @@ class BusinessService:
             (arguments.confirmation_entry_id, "user"),
         ]:
             self._plan_role(entries, entry_id, role)
+        self._check_explicit_confirmation(entries, arguments, "plan", PlanConfirmationInvalid)
         display = entries.get(arguments.display_entry_id)
         if display is None:
             raise PlanConfirmationInvalid("展示节点须在当前消息路径中。")
@@ -1080,6 +1095,7 @@ class BusinessService:
             (arguments.confirmation_entry_id, "user"),
         ]:
             self._workout_role(entries, entry_id, role)
+        self._check_explicit_confirmation(entries, arguments, "workout", WorkoutConfirmationInvalid)
         display = entries.get(arguments.display_entry_id)
         if display is None:
             raise WorkoutConfirmationInvalid("展示节点须在当前消息路径中。")

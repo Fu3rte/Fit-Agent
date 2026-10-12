@@ -548,6 +548,7 @@ class SessionService:
                         role="user", content=request.text, timestamp=user_timestamp
                     )
                 ],
+                confirmation=request.confirmation,
                 created_at=now,
             )
             run = self._new_run(command.session_id, user_entry.id, now)

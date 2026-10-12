@@ -33,7 +33,7 @@ active 计划走 `plan-adjustment`。
 ## 修订与确认
 
 校验或评审失败时只按返回理由修订一次，保留已通过部分；再次失败不产生计划。候选在用户确认前不生效，
-本 Skill 无 Repository、数据库连接和写权限。
+本 Skill 无 Repository、数据库连接和写权限。完整展示后由用户点击具体快照的确认按钮，独立确认 HTTP 直接保存；普通聊天确认不授权写入，模型不参与保存。契约见 [结构化保存确认方案](../../../tmp/optimization/structured-save-confirmation.md)。
 
 ## 边界与参考
 

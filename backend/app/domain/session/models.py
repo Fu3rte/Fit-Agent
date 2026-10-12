@@ -47,6 +47,16 @@ RequestText: TypeAlias = Annotated[
 ]
 
 
+class SaveConfirmation(Model):
+    business_kind: Literal["profile", "plan", "workout"]
+    proposal_id: OperationId
+    display_entry_id: OperationId
+
+    @property
+    def text(self) -> str:
+        return "确认保存" + {"profile": "画像", "plan": "计划", "workout": "训练记录"}[self.business_kind]
+
+
 class SessionMessageEntry(Model):
     session_id: str
     id: str
@@ -58,6 +68,7 @@ class SessionMessageEntry(Model):
     attachments: list[AttachmentMetadata] = Field(default_factory=list)
     # 明确上下文溢出的失败助手消息：持久化其模型投影省略标记，重启后继续跳过。
     model_omitted: bool = False
+    confirmation: SaveConfirmation | None = None
 
     @model_validator(mode="after")
     def validate_messages(self) -> Self:
@@ -66,6 +77,11 @@ class SessionMessageEntry(Model):
         message = self.messages[0]
         if isinstance(message, AssistantMessage) and message.stop_reason == "pending":
             raise ValueError("会话节点拒绝 stop_reason 为 pending 的助手消息")
+        if self.confirmation is not None and (
+            not isinstance(message, UserMessage) or message.content != self.confirmation.text
+            or self.attachments
+        ):
+            raise ValueError("保存确认只接受绑定快照的独立用户操作")
         if self.model_omitted and not (
             isinstance(message, AssistantMessage) and message.stop_reason == "error"
         ):
@@ -179,9 +195,14 @@ class SessionOperation(Model):
 class SendRequest(Model):
     text: str = Field(max_length=_MAX_TEXT_LENGTH)
     attachments: list[AttachmentInput] = Field(default_factory=list)
+    confirmation: SaveConfirmation | None = None
 
     @model_validator(mode="after")
     def validate_content(self) -> Self:
+        if self.confirmation is not None and (
+            self.text != self.confirmation.text or self.attachments
+        ):
+            raise ValueError("保存确认必须独立提交，不得附带修改或附件")
         if not self.text.strip() and not self.attachments:
             raise ValueError("请求必须包含文字或附件")
         return self
@@ -205,6 +226,12 @@ class RegenerateRequest(Model):
 
 class SteeringRequest(SendRequest):
     target_run_id: str
+
+    @model_validator(mode="after")
+    def reject_confirmation(self) -> Self:
+        if self.confirmation is not None:
+            raise ValueError("保存确认须在空闲时提交")
+        return self
 
 
 class SendCommand(Model):

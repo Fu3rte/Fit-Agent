@@ -100,6 +100,7 @@ def _row_to_entry(row: sqlite3.Row) -> SessionEntry:
             "messages": json.loads(data["messages"]),
             "created_at": data["created_at"],
             "model_omitted": bool(data["model_omitted"]),
+            "confirmation": None if data["confirmation"] is None else json.loads(data["confirmation"]),
         }
     )
 
@@ -298,8 +299,8 @@ class SqliteSessionRepository:
         await self._write(
             "INSERT INTO session_entries "
             "(session_id, id, parent_id, run_id, type, messages, created_at, "
-            "model_omitted) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            "model_omitted, confirmation) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 entry.session_id,
                 entry.id,
@@ -309,6 +310,7 @@ class SqliteSessionRepository:
                 _dump_messages(entry),
                 entry.created_at,
                 int(entry.model_omitted),
+                None if entry.confirmation is None else _dump_json(entry.confirmation.model_dump()),
             ),
         )
 
