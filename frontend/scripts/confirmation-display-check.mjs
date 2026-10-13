@@ -1,7 +1,7 @@
 // 运行：node scripts/confirmation-display-check.mjs
 // 纯前端展示检查：确认按钮与快照标识及展示节点的绑定、待确认状态与占用下的可用性、
 // 确认节点与真实结果的独立展示、确认结果不提供模型重新生成入口。
-// 渲染树夹具 frontend/temp/confirmation-display-tree.tsx 与被测组件同一模块图。
+// 渲染树夹具 frontend/scripts/confirmation-display-tree.tsx 与被测组件同一模块图。
 import assert from "node:assert/strict";
 import { createServer } from "vite";
 
@@ -18,11 +18,11 @@ const confirmations = await server.ssrLoadModule(
   "/src/features/chat/utils/confirmations.ts",
 );
 const { renderTranscript, primeEquipment } = await server.ssrLoadModule(
-  "/temp/confirmation-display-tree.tsx",
+  "/scripts/confirmation-display-tree.tsx",
 );
 await server.close();
 // 目录查询无数据时看板不渲染，先落到应用级缓存再展示
-primeEquipment({});
+primeEquipment();
 
 const u = (n) =>
   `${n.toString(16).padStart(8, "0")}-0000-4000-8000-000000000000`;
