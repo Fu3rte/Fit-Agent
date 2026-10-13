@@ -46,7 +46,10 @@ def _tools(
             "base_workout_version、payload；基础ID/版本使用先前查询的原值，新增两键必须存在且值为JSON null字面量，"
             '参数预处理仅将两基础字段精确字符串"None"转为null，其他字段和值保持原样；'
             '禁止"null"、0或省略。示例：{"base_workout_id":null,"base_workout_version":null}。'
-            "同日已有记录时重写完整当天内容，保留本次未涉及的内容。结果持久化后绑定真实展示节点，"
+            "同日已有记录时重写完整当天内容，保留本次未涉及的内容。"
+            "payload.notes 仅记录用户明确表达的训练感受或不适；新增记录未提供时必须为 JSON null。"
+            "更新同日记录时保留本次未涉及的已有真实反馈。日期换算、目录匹配、字段缺失及处理过程"
+            "等说明放在普通对话回复中，禁止写入 notes。结果持久化后绑定真实展示节点，"
             "完整payload由结果展示，等待用户点击该快照的确认按钮。日期禁止晚于可信business_date。",
             WorkoutProposalArguments, prepare_workout,
             execution_mode="sequential", prepare_arguments=_prepare_workout_arguments,

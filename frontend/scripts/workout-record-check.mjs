@@ -19,6 +19,9 @@ const { historyToRounds, mergeHistoryRounds } = await server.ssrLoadModule(
 );
 const business = await server.ssrLoadModule("/src/lib/business.ts");
 const browse = await server.ssrLoadModule("/src/features/workout/workoutBrowse.ts");
+const { renderWorkoutFields } = await server.ssrLoadModule(
+  "/scripts/workout-fields-tree.tsx",
+);
 await server.close();
 
 const u = (n) => `${n.toString(16).padStart(8, "0")}-0000-4000-8000-000000000000`;
@@ -48,6 +51,14 @@ const payload = {
   ],
   notes: null,
 };
+const withoutFeedback = renderWorkoutFields(payload);
+assert.ok(withoutFeedback.includes("杠铃深蹲"));
+assert.ok(!withoutFeedback.includes("训练感受"), "notes=null 时隐藏训练感受区域");
+const feedback = "最后一组很吃力，右肩有点不适";
+const withFeedback = renderWorkoutFields({ ...payload, notes: feedback });
+assert.ok(withFeedback.includes("训练感受"));
+assert.ok(withFeedback.includes(feedback), "明确训练反馈完整展示");
+
 const proposal = {
   proposal_id: proposalId,
   performed_on: "2026-06-01",

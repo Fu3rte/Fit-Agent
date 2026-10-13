@@ -207,7 +207,11 @@ class WorkoutExercise(BusinessModel):
 
 class WorkoutContent(BusinessModel):
     exercises: list[WorkoutExercise] = Field(min_length=1)
-    notes: str | None
+    notes: str | None = Field(
+        description="仅记录用户明确表达的训练感受或不适；新增记录未提供时必须为 JSON null。"
+        "更新同日记录时保留本次未涉及的已有真实反馈。日期换算、目录匹配、字段缺失及处理过程"
+        "等说明放在普通对话回复中，禁止写入 notes。"
+    )
 
 
 class WorkoutDateModel(BusinessModel):
