@@ -92,7 +92,8 @@ function ConfirmButton({
     <Button
       type="button"
       size="sm"
-      variant="secondary"
+      variant="default"
+      className="self-end"
       disabled={state !== "available"}
       onClick={() => onConfirm(kind, proposalId, displayEntryId)}
     >
