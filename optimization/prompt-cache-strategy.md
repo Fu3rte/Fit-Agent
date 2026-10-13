@@ -9,9 +9,9 @@
 3. 后端固定 5 分钟的缓存保留策略目标。
 4. 逐模型调用的缓存观测与回归验证。
 
-当前没有需要新增拍板的方案项。服务商能力核验按用户要求暂停；具体 TTL 请求参数在恢复核验后，依据服务商协议确定。
+数据结构、持久化和前后端公开历史契约单独记录在 [prompt-cache-contract.md](prompt-cache-contract.md)。已确认独立 `custom_message` 节点、通用泛型消息与节点基类、强类型资料、完整基线与增量、失效引用表示、公开身份节点及旧会话不回填。运行中的节点通知契约已确认，见第 9 节。服务商能力核验按用户要求暂停；具体 TTL 请求参数在恢复核验后，依据服务商协议确定。
 
-本文件记录设计约束与验收要求，业务实现尚未修改。
+本文件记录设计约束与验收要求，仅在方案变更时更新。任务进度、实现事实与验证结果见独立的 [实施简报](prompt-cache-implementation-report.md)。
 
 ## 2. 当前问题与证据
 
@@ -42,7 +42,15 @@
 
 ### 3.1 承载内容
 
-内部增加业务上下文 `custom_message`，承载后端主动生成的上下文元数据：
+内部消息采用通用泛型基类 `CustomMessage[TData]`，节点采用 `CustomMessageEntry[TMessage]`，节点字段为 `message: TMessage`。`TData` 约束为 `Model`，`TMessage` 约束为 `CustomMessage`。
+
+`BusinessContextMessage` 继承 `CustomMessage[BusinessContextData]`，固定 `role="custom" / custom_type="business_context" / display=false`，必填强类型 `details` 与固定文本 `content`。
+
+`BusinessContextEntry` 继承 `CustomMessageEntry[BusinessContextMessage]`，节点 `type="custom_message"`，要求关联当前真实运行。节点时间与消息时间一致。
+
+`SessionEntry` 登记业务节点，`AgentMessage` 登记业务消息，服务商协议 `Message` 保持既有联合。既有工具执行身份 `BusinessContext` 继续由后端绑定。
+
+业务消息通过 `BusinessContextData` 承载后端主动生成的上下文元数据：
 
 - 业务时区与对应真实用户节点的业务日期。
 - 当前处理的 `request_entry_id`。
@@ -56,15 +64,24 @@
 ### 3.2 持久化与追加规则
 
 - 资料事件持久化到对应会话分支，保留固定内容、来源与发生位置。
-- 新增或变化的资料追加为新事件。
-- 已发送的历史事件内容与位置保持不变。
-- 资料事件按实际变化生成，控制重复节点信息的规模。
-- 分支重放与重启恢复得到相同的历史资料内容和顺序。
+- `BusinessContextData` 按 `mode` 判别 `BusinessContextSnapshot` 与 `BusinessContextDelta`。
+- 首次资料事件保存完整 `request / message_nodes / pending_proposals` 基线。
+- 已有基线的分支在资料变化时追加增量，包含请求整份替换、节点新增或移出、提案新增或移出。
+- 移出提案使用 `RemovedPendingProposal`，明确后端核实的 `saved / invalidated / conflicted / deleted / out_of_scope` 原因。
+- 节点按 `entry_id`、提案按 `(business_kind, proposal_id)` 合并；空增量、重复键与新增移除键冲突拒绝入库。
+- `details` 是结构化依据，后端一次性生成带来源标记的 `content`，两者同事务保存。
+- 历史重放直接使用固定 `content`，渲染模板更新只影响新事件。
+- 资料事件按实际变化生成，控制重复节点信息的规模；资料节点自身不进入 `message_nodes`。
+- 下一次模型请求前追加变化资料并更新执行位置；准备调用的全部结果与展示绑定完成后追加该批资料。
+- Steering 消费后，使用对应真实用户节点更新请求资料与业务日期。
+- 已发送的历史事件内容与位置保持不变；分支重放与重启恢复得到相同历史顺序。
 - 新事件表达更新后的资料；历史资料保留其发生时的事实。
+
+强类型字段、空值规则、校验与 JSON 样例以 [prompt-cache-contract.md 第 5 节](prompt-cache-contract.md#5-已确认的基类与业务资料结构) 为准。
 
 ### 3.3 模型协议转换
 
-`convert_to_llm` 将内部资料消息转换为原位置的 user-role 内容，并明确标记后端资料来源。
+`convert_to_llm` 将内部资料消息的固定 `content` 与时间转换为原位置的 user-role 消息。后端资料来源与无保存授权标记已包含在 `content` 中，`custom_type / display / details` 不作为额外协议字段发送。
 
 资料转换后的协议角色不会创建用户保存授权。真实聊天、编辑输入与附件不能创建内部资料类型。
 
@@ -91,7 +108,9 @@
 
 - 编辑与重新生成使用各自真实分支的资料事件。
 - 压缩检查点保留后续读取所需的业务关联。
-- 被压缩资料进入固定的新上下文基线。
+- 压缩后持久化完整的新业务资料基线；基线与压缩提交共同保证恢复完整性。
+- 当前分支资料状态从最近完整基线开始，按顺序应用后续增量。
+- 消息来源资料使用模型可见集合，待确认提案引用使用完整当前分支核验，保留被压缩来源的受控读取关联。
 - 压缩前后的请求预算包含实际发送的资料内容。
 - 提案来源、展示节点、完整内容读取与确认状态保持可核验。
 - 后端继续独立核验来源、当前路径、快照状态及业务限制。
@@ -134,7 +153,9 @@
 
 ## 8. 验收要求与未验证边界
 
-客户端回归覆盖：
+每项改动执行必要的实际运行、局部功能验证与相关小范围测试，保证本任务功能正常。每项任务无需执行全量测试或重新记录量化指标。
+
+最终业务验收由用户执行，覆盖范围包括：
 
 - 普通对话和多工具循环。
 - Steering 与附件。
@@ -146,4 +167,12 @@
 
 服务端实际缓存效果需要真实模型验证；TTL 生效需要对应服务商协议证据。这两项在用户允许模型核验时执行。
 
-当前状态：设计已确定；新的消息类型、资料事件持久化、请求投影与观测逻辑尚未实现。业务功能与服务端缓存效果均不能据此声明已优化。
+## 9. 已确认的运行中节点通知
+
+资料节点落库后通过当前运行事件流发送 SSE `custom_message`，仅携带 `type / entry_id / parent_id / run_id / created_at`，`run_id` 必填且与当前流一致。
+
+节点身份通知按真实父子关系发送：前端先获知父节点身份，再接收资料节点身份，随后开始下一次模型消息。工具批次全部结果通知、Steering 消费通知及压缩完成通知先于相应资料节点通知；历史已经公开的身份继续复用。
+
+前端保留隐藏结构节点及祖先链，按 `entry_id` 合并，相同身份的字段冲突按协议错误处理。连接中断与刷新沿用既有运行查询及历史读取恢复流程。
+
+具体契约以 [prompt-cache-contract.md 第 8 节](prompt-cache-contract.md#8-已确认的运行中节点通知) 为准。
