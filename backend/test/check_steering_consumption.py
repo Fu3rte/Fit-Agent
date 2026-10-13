@@ -7,6 +7,7 @@ from tempfile import TemporaryDirectory
 import aiosqlite
 
 from app.agent.agent_loop import run_agent_loop
+from app.agent.budget import RequestBudget
 from app.agent.config import AgentLoopConfig
 from app.ai.messages import (
     AssistantMessage,
@@ -218,6 +219,7 @@ async def scenario_no_model_after_failure(service: SessionService, path: Path) -
     config = AgentLoopConfig(
         model=install_test_model_config(),
         max_turns=4,
+        request_budget=RequestBudget(),
         get_steering_messages=get_steering,
         on_steering_consumed=on_consumed,
     )
