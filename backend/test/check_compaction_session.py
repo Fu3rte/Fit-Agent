@@ -32,14 +32,19 @@ from app.application.session.service import (
 from app.domain.session.attachments import AttachmentMetadata, attachment_storage_ref
 from app.domain.session.errors import SessionConflict
 from app.domain.session.models import (
+    BusinessContextEntry,
+    BusinessContextSnapshot,
     CompactionAttachmentReference,
     CompactionDetails,
     CompactionEntry,
+    RequestContext,
     SendCommand,
     SendRequest,
     Session,
     SessionMessageEntry,
     SessionRun,
+    build_business_context_entry,
+    business_baseline_entry_id,
 )
 from app.infrastructure.persistence.sqlite.database import open_database
 from app.infrastructure.persistence.sqlite.repository import SqliteSessionRepository
@@ -174,6 +179,33 @@ def compaction_node(
         tokens_before=1234,
         usage=USAGE,
         system_message=system_message(),
+        details=details,
+        created_at=tick() if created_at is None else created_at,
+    )
+
+
+# 压缩新基线节点由检查点身份确定性派生：直调服务时同样按检查点父节点构造完整快照。
+BASELINE_REQUEST = "00000000-0000-4000-8000-000000000001"
+
+
+def baseline_node(
+    session_id: str, checkpoint: CompactionEntry, *, created_at: int | None = None
+) -> BusinessContextEntry:
+    details = BusinessContextSnapshot(
+        mode="snapshot",
+        request=RequestContext(
+            timezone="Asia/Shanghai",
+            business_date="2026-01-01",
+            request_entry_id=BASELINE_REQUEST,
+        ),
+        message_nodes=[],
+        pending_proposals=[],
+    )
+    return build_business_context_entry(
+        session_id=session_id,
+        id=business_baseline_entry_id(checkpoint.id),
+        parent_id=checkpoint.id,
+        run_id=checkpoint.run_id,
         details=details,
         created_at=tick() if created_at is None else created_at,
     )
@@ -376,7 +408,9 @@ async def scenario_tool_batch_and_attachments(root: Path) -> dict:
             SID, "c1", "a2", preparation.first_kept_entry_id, RUN,
             details=CompactionDetails(attachments=[reference()]),
         )
-        outcome = await service.commit_compaction(checkpoint, prepared_position="a2")
+        outcome = await service.commit_compaction(
+            checkpoint, baseline_node(SID, checkpoint), prepared_position="a2"
+        )
         assert outcome.created is True
         projection = await service.get_projection(SID, "c1")
         # 保留原文默认包含完整工具批次（切点在 u2）：u2、a2。
@@ -483,18 +517,24 @@ async def scenario_commit_success(root: Path) -> dict:
             SID, "c1", "a1", "u1", RUN,
             details=CompactionDetails(attachments=[reference()]),
         )
-        outcome = await service.commit_compaction(checkpoint, prepared_position="a1")
+        baseline = baseline_node(SID, checkpoint)
+        outcome = await service.commit_compaction(
+            checkpoint, baseline, prepared_position="a1"
+        )
         assert outcome.created is True and outcome.credential_detected is False
         assert outcome.entry.id == "c1" and outcome.entry.parent_id == "a1"
-        assert outcome.run.last_entry_id == "c1"
+        assert outcome.baseline.id == baseline.id and outcome.baseline.parent_id == "c1"
+        assert outcome.run.last_entry_id == baseline.id
 
         stored = await service.get_entry(SID, "c1")
         assert isinstance(stored, CompactionEntry) and stored.model_dump() == checkpoint.model_dump()
         assert stored.details.attachments == [reference()]
+        stored_baseline = await service.get_entry(SID, baseline.id)
+        assert isinstance(stored_baseline, BusinessContextEntry)
         session = await service.get_session(SID)
-        assert session.active_leaf_id == "c1"
+        assert session.active_leaf_id == baseline.id
         run = await service.get_run(SID, RUN)
-        assert run.last_entry_id == "c1" and run.request_entry_id == "u1"
+        assert run.last_entry_id == baseline.id and run.request_entry_id == "u1"
 
         projection = await service.get_projection(SID, "c1")
         assert projection.context.source_entry_ids == ["c1", "c1", "u1", "a1"]
@@ -503,6 +543,9 @@ async def scenario_commit_success(root: Path) -> dict:
         ]
         assert next(entry for entry in projection.path if entry.id == "u1").attachments == [metadata]
         assert ids(await service.get_branch(SID, "c1")) == ["sys", "u1", "a1"]
+        # 以新基线为叶：投影在其压缩后原文之上追加资料节点自身的 user 投影。
+        baseline_projection = await service.get_projection(SID, baseline.id)
+        assert baseline_projection.context.source_entry_ids == ["c1", "c1", "u1", "a1", baseline.id]
         return {"last_entry_id": run.last_entry_id, "active_leaf_id": session.active_leaf_id}
     finally:
         await database.close()
@@ -521,9 +564,9 @@ async def scenario_commit_rejections(root: Path) -> dict:
 
         # entry.parent_id 与摘要准备位置不一致。
         with pytest.raises(SessionConflict, match="父节点与摘要准备位置不一致"):
+            checkpoint = compaction_node(SID, "cx", "a1", "u1", RUN, created_at=100)
             await service.commit_compaction(
-                compaction_node(SID, "cx", "a1", "u1", RUN, created_at=100),
-                prepared_position="u1",
+                checkpoint, baseline_node(SID, checkpoint), prepared_position="u1"
             )
 
         # 非法保留起点（同会话但不在当前路径）拒绝，且不产生部分写入。
@@ -533,9 +576,9 @@ async def scenario_commit_rejections(root: Path) -> dict:
             "leaf": (await service.get_session(SID)).active_leaf_id,
         }
         with pytest.raises(ValueError, match="不在当前路径"):
+            checkpoint = compaction_node(SID, "cy", "a1", "u2", RUN, created_at=101)
             await service.commit_compaction(
-                compaction_node(SID, "cy", "a1", "u2", RUN, created_at=101),
-                prepared_position="a1",
+                checkpoint, baseline_node(SID, checkpoint), prepared_position="a1"
             )
         assert ids(await service.list_entries(SID)) == before["entries"]
         assert (await service.get_run(SID, RUN)).last_entry_id == before["run"]
@@ -548,9 +591,9 @@ async def scenario_commit_rejections(root: Path) -> dict:
                 session.model_copy(update={"active_leaf_id": "u1", "updated_at": 5})
             )
         with pytest.raises(SessionConflict, match="当前分支指针与运行进度不一致"):
+            checkpoint = compaction_node(SID, "cz", "a1", "u1", RUN, created_at=102)
             await service.commit_compaction(
-                compaction_node(SID, "cz", "a1", "u1", RUN, created_at=102),
-                prepared_position="a1",
+                checkpoint, baseline_node(SID, checkpoint), prepared_position="a1"
             )
         async with repository.transaction():
             await repository.update_session(
@@ -565,17 +608,17 @@ async def scenario_commit_rejections(root: Path) -> dict:
             )
         )
         with pytest.raises(SessionConflict, match="摘要准备位置与运行当前进度不一致"):
+            checkpoint = compaction_node(SID, "cw", "a1", "u1", RUN, created_at=103)
             await service.commit_compaction(
-                compaction_node(SID, "cw", "a1", "u1", RUN, created_at=103),
-                prepared_position="a1",
+                checkpoint, baseline_node(SID, checkpoint), prepared_position="a1"
             )
 
         # 终态运行拒绝提交。
         await service.finish_run(SID, RUN, "completed")
         with pytest.raises(SessionConflict, match="运行未在运行"):
+            checkpoint = compaction_node(SID, "cv", "a2", "u1", RUN, created_at=104)
             await service.commit_compaction(
-                compaction_node(SID, "cv", "a2", "u1", RUN, created_at=104),
-                prepared_position="a2",
+                checkpoint, baseline_node(SID, checkpoint), prepared_position="a2"
             )
         return {"rejected": ["parent", "first_kept", "leaf", "position", "terminal"]}
     finally:
@@ -598,14 +641,16 @@ async def scenario_commit_credential_and_identity(root: Path) -> dict:
             summary=f"摘要内命中 {CREDENTIAL_KEY}", created_at=200,
         )
         outcome = await service.commit_compaction(
-            credential, prepared_position="a1", credentials=(CREDENTIAL_KEY,)
+            credential, baseline_node(SID, credential), prepared_position="a1",
+            credentials=(CREDENTIAL_KEY,),
         )
         assert outcome.created is False and outcome.credential_detected is True
-        assert outcome.entry is None
+        assert outcome.entry is None and outcome.baseline is None
         assert outcome.run.status == "failed"
         assert outcome.run.error_code == CREDENTIAL_ERROR_CODE
         assert outcome.run.error_message == CREDENTIAL_SAFE_MESSAGE
         assert await repository.get_entry(SID, "cred") is None
+        assert await repository.get_entry(SID, business_baseline_entry_id("cred")) is None
         return {"credential": outcome.run.error_code}
     finally:
         await database.close()
@@ -622,20 +667,27 @@ async def scenario_commit_idempotent_and_conflict(root: Path) -> dict:
         await seed(repository, SID, entries, run=running_run(SID, "u1", "a1"), leaf="a1")
 
         checkpoint = compaction_node(SID, "c1", "a1", "u1", RUN)
-        first = await service.commit_compaction(checkpoint, prepared_position="a1")
+        baseline = baseline_node(SID, checkpoint)
+        first = await service.commit_compaction(
+            checkpoint, baseline, prepared_position="a1"
+        )
         assert first.created is True
+        assert first.run.last_entry_id == baseline.id
         second = await service.commit_compaction(
-            checkpoint.model_copy(update={"created_at": 999}),
-            prepared_position="c1",
+            checkpoint.model_copy(update={"created_at": 999}), baseline,
+            prepared_position=baseline.id,
         )
         assert second.created is False and second.entry.id == "c1"
-        assert len([entry for entry in await service.list_entries(SID) if entry.id == "c1"]) == 1
+        assert second.baseline.id == baseline.id
+        entries_after = await service.list_entries(SID)
+        assert len([entry for entry in entries_after if entry.id == "c1"]) == 1
+        assert len([e for e in entries_after if e.id == baseline.id]) == 1
 
         # 节点 ID 与既有消息节点冲突：载荷不同按节点身份冲突拒绝。
         with pytest.raises(SessionConflict, match="节点 ID 冲突"):
+            conflicting = compaction_node(SID, "a1", "c1", "u1", RUN, created_at=300)
             await service.commit_compaction(
-                compaction_node(SID, "a1", "c1", "u1", RUN, created_at=300),
-                prepared_position="c1",
+                conflicting, baseline_node(SID, conflicting), prepared_position=baseline.id
             )
         return {"idempotent_created": [first.created, second.created]}
     finally:
@@ -668,11 +720,18 @@ async def scenario_portal_commit_and_projection(root: Path) -> dict:
         assert projection.context.messages[0].role == "system"
 
         checkpoint = compaction_node(SID, "pc1", "pa1", request_entry.id, run.id)
-        outcome = await service.commit_compaction(checkpoint, prepared_position="pa1")
+        outcome = await service.commit_compaction(
+            checkpoint, baseline_node(SID, checkpoint), prepared_position="pa1"
+        )
         assert outcome.created is True
+        assert outcome.run.last_entry_id == outcome.baseline.id
         refreshed = await service.get_projection(SID, "pc1")
         assert refreshed.context.source_entry_ids == ["pc1", "pc1", request_entry.id, "pa1"]
-        return {"projection": refreshed.context.source_entry_ids}
+        leaf_projection = await service.get_projection(SID, outcome.baseline.id)
+        assert leaf_projection.context.source_entry_ids == [
+            "pc1", "pc1", request_entry.id, "pa1", outcome.baseline.id
+        ]
+        return {"projection": leaf_projection.context.source_entry_ids}
     finally:
         await database.close()
 
@@ -723,8 +782,10 @@ async def scenario_live_summary_commit(root: Path) -> dict:
             details=CompactionDetails(attachments=preparation.attachments) if preparation.attachments else None,
             created_at=tick(),
         )
-        outcome = await service.commit_compaction(checkpoint, prepared_position="a3")
-        assert outcome.created is True and outcome.run.last_entry_id == "lc1"
+        outcome = await service.commit_compaction(
+            checkpoint, baseline_node(SID, checkpoint), prepared_position="a3"
+        )
+        assert outcome.created is True and outcome.run.last_entry_id == outcome.baseline.id
         stored = await service.get_entry(SID, "lc1")
         assert stored.tokens_before == preparation.tokens_before
         assert stored.usage == result.usage

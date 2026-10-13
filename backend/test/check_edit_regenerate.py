@@ -41,7 +41,9 @@ def entry_ids(body: dict) -> list[str]:
 
 def assistant_entries(body: dict) -> list[dict]:
     return [
-        entry for entry in body["entries"] if entry["message"]["role"] == "assistant"
+        entry
+        for entry in body["entries"]
+        if entry["type"] == "message" and entry["message"]["role"] == "assistant"
     ]
 
 
@@ -194,7 +196,7 @@ def check_flow(http, evidence: dict) -> dict:
     assert [
         entry["entry_id"]
         for entry in body["entries"]
-        if entry["message"]["role"] == "user"
+        if entry["type"] == "message" and entry["message"]["role"] == "user"
     ] == [new_user]
     assert all(entry["run_id"] == regen_run for entry in assistant_entries(body))
     operation = http.get(

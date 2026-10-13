@@ -219,7 +219,8 @@ export type PublicMessageWire =
 
 /** 一个已提交节点（§3.1、compaction-contract-decisions §A）：entries 为 active_leaf_id 的祖先链，
  *  按根到叶排列；message 节点公开消息投影，compaction 节点只公开身份与父子关系，摘要、usage、system_message
- *  及内部附件路径保留在后端，两种节点都参与祖先链、运行归属与叶节点校验 */
+ *  及内部附件路径保留在后端，custom_message 节点只公开身份与父子关系，业务资料与模型文本保留在后端；
+ *  三种节点都参与祖先链、运行归属与叶节点校验 */
 export type HistoryEntryWire =
   | {
       type: "message";
@@ -231,6 +232,13 @@ export type HistoryEntryWire =
     }
   | {
       type: "compaction";
+      entry_id: string;
+      parent_id: string | null;
+      run_id: string | null;
+      created_at: number;
+    }
+  | {
+      type: "custom_message";
       entry_id: string;
       parent_id: string | null;
       run_id: string | null;
@@ -749,6 +757,17 @@ export type ReActEvent = { data: { run_id: string } } & (
       data: ReActCommittedEntry & { compaction_id: string };
     }
   | { event: "steering_status"; data: { steering_id: string } & SteeringStatus }
+  /** 内部资料节点提交成功后发送（业务上下文契约 §8）：``data`` 仅五个身份字段，业务资料与内部字段保持私有；
+   *  ``parent_id`` 为真实父节点（前端先获知父节点身份），``run_id`` 与当前流一致 */
+  | {
+      event: "custom_message";
+      data: {
+        type: "custom_message";
+        entry_id: string;
+        parent_id: string | null;
+        created_at: number;
+      };
+    }
   | {
       event: "done";
       data: { status: "completed"; stop_reason: "stop" };

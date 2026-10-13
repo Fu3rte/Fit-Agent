@@ -37,6 +37,29 @@ interface CommittedNode {
   parent_id: string | null;
 }
 
+/** 内部资料隐藏节点身份（业务上下文契约 §8.3）：只登记结构身份、祖先链与运行归属，不产生可见条目 */
+export interface HiddenNode {
+  parent_id: string | null;
+  run_id: string;
+}
+
+/** 隐藏节点登记（业务上下文契约 §8.3）：按 entry_id 合并，相同身份的字段冲突按协议错误处理 */
+export function registerHiddenNode(
+  hidden: Record<string, HiddenNode> | undefined,
+  node: { entry_id: string } & HiddenNode,
+): Record<string, HiddenNode> {
+  const existing = hidden?.[node.entry_id];
+  if (existing !== undefined) {
+    if (existing.parent_id !== node.parent_id || existing.run_id !== node.run_id)
+      throw new Error("资料节点身份冲突。");
+    return hidden as Record<string, HiddenNode>;
+  }
+  return {
+    ...(hidden ?? {}),
+    [node.entry_id]: { parent_id: node.parent_id, run_id: node.run_id },
+  };
+}
+
 /** Steering 状态（§6.1、§11.6）：终态来自 SSE 通知、接收、撤回或操作查询，pending 表示受理后尚未取得终态 */
 export type SteeringState =
   { status: "pending"; entry_id: null; reason: null } | SteeringStatus;
@@ -138,6 +161,8 @@ export interface ReActRound {
   pending?: PendingOperation[];
   /** 独立于 Agent round 的确认结果（确认契约 §7.6）：确认用户节点所在轮次携带 */
   confirmation?: ConfirmationDisplay;
+  /** 内部资料隐藏节点（业务上下文契约 §8.3）：只登记结构身份与运行归属，不生成可见聊天条目 */
+  hidden?: Record<string, HiddenNode>;
 }
 
 export function finishReActRound(
@@ -845,6 +870,17 @@ export function applyReActEvent(
         throw new Error("Steering 标识冲突。");
       return applySteeringStatus(round, event.data);
     }
+    /* 内部资料隐藏节点（业务上下文契约 §8.3）：只登记结构身份与运行归属，不生成可见条目；
+     * 同身份字段冲突、运行身份不一致均按协议错误处理（运行身份已在入口核对）。 */
+    case "custom_message":
+      return {
+        ...round,
+        hidden: registerHiddenNode(round.hidden, {
+          entry_id: event.data.entry_id,
+          parent_id: event.data.parent_id,
+          run_id: event.data.run_id,
+        }),
+      };
     case "done": {
       // 压缩进行中收到完成事件视为协议异常：关闭连接保留已有内容，由运行查询确认真实终态
       if (round.compaction_id !== undefined)
@@ -1098,6 +1134,17 @@ export function createReActParser(
             !uuid(data.parent_id)
           )
             throw new Error("压缩完成事件无效。");
+          break;
+        /* 内部资料身份通知（业务上下文契约 §8）：只公开五个身份字段，run_id 与当前流一致 */
+        case "custom_message":
+          if (
+            data.type !== "custom_message" ||
+            !uuid(data.entry_id) ||
+            !(data.parent_id === null || uuid(data.parent_id)) ||
+            !Number.isSafeInteger(data.created_at) ||
+            (data.created_at as number) < 0
+          )
+            throw new Error("资料节点事件无效。");
           break;
         case "steering_status":
           if (!uuid(data.steering_id)) throw new Error("Steering 状态无效。");

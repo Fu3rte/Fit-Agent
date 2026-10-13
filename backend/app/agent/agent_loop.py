@@ -7,6 +7,7 @@ from threading import Event
 from typing import Literal, NotRequired, TypedDict
 from uuid import uuid4
 
+from app.agent.cache_observation import NORMAL_CALL
 from app.agent.compaction import ContextBudgetExceeded, should_compact
 from app.agent.config import AgentLoopConfig, CompactionHooks
 from app.agent.message_context import prepare_message_context
@@ -46,6 +47,7 @@ class LoopEvent(TypedDict):
         "tool_result",
         "compaction_start",
         "compaction_end",
+        "custom_message",
     ]
     trace_id: NotRequired[str]
     turn_id: NotRequired[str]
@@ -54,6 +56,8 @@ class LoopEvent(TypedDict):
     reason: NotRequired[Literal["threshold", "overflow"]]
     entry_id: NotRequired[str]
     parent_id: NotRequired[str]
+    run_id: NotRequired[str]
+    created_at: NotRequired[int]
     message_id: NotRequired[str]
     message: NotRequired[AssistantMessage]
     assistant_event: NotRequired[AssistantStreamEvent]
@@ -127,6 +131,11 @@ async def stream_assistant_response(
         "signal": signal,
         "max_tokens": min(DEFAULT_MAX_OUTPUT_TOKENS, spec.max_tokens),
     }
+    if config.observation is not None:
+        # 逐次真实调用绑定本回合助手节点身份；观测按实际发送的最终投影记录。
+        options["observation"] = config.observation.start_call(
+            NORMAL_CALL, message_id=node_id
+        )
     llm_context: LlmContext = {"messages": messages}
     if config.request_budget is None:
         raise RuntimeError("正式运行必须装配共享模型请求预算")
@@ -224,6 +233,16 @@ async def run_compaction(
         "entry_id": result.entry_id,
         "parent_id": result.parent_id,
     })
+    # 节点对提交成功后先公开 compaction_end，再公开新基线 custom_message，随后才进入下一次模型消息。
+    if result.baseline is not None:
+        baseline = result.baseline
+        await emit({
+            "type": "custom_message",
+            "entry_id": baseline.id,
+            "parent_id": baseline.parent_id,
+            "run_id": baseline.run_id,
+            "created_at": baseline.created_at,
+        })
 
 
 async def recover_context_overflow(
@@ -328,6 +347,8 @@ async def run_loop(
                 )
                 context["messages"].extend(projected_pending)
                 messages.extend(projected_pending)
+                if config.observation is not None and projected_pending:
+                    config.observation.note_event("steering")
                 if pending_messages and config.on_steering_consumed is not None:
                     await config.on_steering_consumed(pending_messages)
                 pending_messages = []
@@ -356,6 +377,8 @@ async def run_loop(
                     await recover_context_overflow(
                         context, config.compaction, signal, emit
                     )
+                    if config.observation is not None:
+                        config.observation.note_event("overflow_recovery")
                     # 恢复后必须重试一次：无论本回合由工具续接还是 Steering 触发，都要求循环再入。
                     has_more_tool_calls = True
                     continue
@@ -426,6 +449,8 @@ async def run_loop(
                         "content": text_projection(tool_result.content),
                         "is_error": tool_result.is_error,
                     })
+                if config.observation is not None:
+                    config.observation.note_event("tool_batch")
                 if batch.failure is not None:
                     # 已取得的安全结果按调用顺序保存后，再传播框架/取消异常。
                     raise batch.failure

@@ -13,9 +13,12 @@ from app.agent.compaction_summary import (
 )
 from app.ai.context import normalize_context
 from app.ai.messages import Message, TextContent, UserMessage
+from app.domain.session.models import BusinessContextMessage
 
+# 消息层联合登记内部资料消息；服务商协议 Message 联合保持原样。
+# 业务资料在 convert_to_llm 中按已保存的固定 content 与原时间转换为原位置 user 消息。
 AgentMessage: TypeAlias = Annotated[
-    Message | CompactionSummaryMessage,
+    Message | CompactionSummaryMessage | BusinessContextMessage,
     Field(discriminator="role"),
 ]
 
@@ -61,12 +64,24 @@ def _summary_to_user_message(message: CompactionSummaryMessage) -> Message:
     )
 
 
+def business_context_to_llm(message: BusinessContextMessage) -> Message:
+    # 内部资料消息按已保存的固定 content 与原时间转换为原位置 user 消息；历史 details 不重渲染，
+    # custom_type / display / details 不作为额外协议字段。display=false 的资料同样进入模型输入。
+    return UserMessage(
+        role="user",
+        content=[TextContent(type="text", text=message.content)],
+        timestamp=message.timestamp,
+    )
+
+
 def convert_to_llm(messages: list[AgentMessage]) -> list[Message]:
     projected = _project_agent_messages(messages)
     return _project_messages(
         [
             _summary_to_user_message(message)
             if isinstance(message, CompactionSummaryMessage)
+            else business_context_to_llm(message)
+            if isinstance(message, BusinessContextMessage)
             else message
             for message in projected
         ]

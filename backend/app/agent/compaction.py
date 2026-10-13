@@ -6,8 +6,13 @@ from threading import Event
 from time import time_ns
 
 from app.agent.budget import CHARS_PER_TOKEN, SAFETY_MARGIN_TOKENS, RequestBudget
+from app.agent.cache_observation import (
+    HISTORY_SUMMARY_CALL,
+    TURN_PREFIX_SUMMARY_CALL,
+    CacheObserver,
+)
 from app.agent.compaction_summary import CompactionSummaryMessage
-from app.agent.message_context import convert_to_llm
+from app.agent.message_context import business_context_to_llm, convert_to_llm
 from app.ai.messages import (
     AssistantMessage,
     ImageContent,
@@ -28,6 +33,7 @@ from app.domain.session.attachments import (
     attachment_storage_ref,
 )
 from app.domain.session.models import (
+    BusinessContextEntry,
     CompactionAttachmentReference,
     CompactionEntry,
     SessionEntry,
@@ -281,8 +287,15 @@ def _project_entry_messages(entry: SessionEntry) -> list[Message]:
     return [project_user_message(message, entry.attachments) for message in messages]
 
 
+def _counted_messages(entry: SessionEntry) -> list[Message]:
+    # 保留预算按实际模型投影计入：真实消息含附件引用投影，内部资料节点按已保存的固定 content。
+    if isinstance(entry, BusinessContextEntry):
+        return [business_context_to_llm(entry.message)]
+    return _project_entry_messages(entry)
+
+
 def _summarizable_messages(entry: SessionEntry) -> list[Message]:
-    return [m for m in _project_entry_messages(entry) if m.role != "system"]
+    return [m for m in _counted_messages(entry) if m.role != "system"]
 
 
 def _is_cut_point(entry: SessionEntry) -> bool:
@@ -355,6 +368,10 @@ def build_effective_context(path: Sequence[SessionEntry]) -> EffectiveContext:
             for message in _project_entry_messages(entry):
                 messages.append(message)
                 source_entry_ids.append(entry.id)
+        elif isinstance(entry, BusinessContextEntry):
+            # 内部资料节点在原发生位置贡献已保存的 user-role 投影，来源映射到真实资料节点身份。
+            messages.append(business_context_to_llm(entry.message))
+            source_entry_ids.append(entry.id)
     return EffectiveContext(messages, source_entry_ids)
 
 
@@ -403,7 +420,7 @@ def find_cut_point(
     accumulated = 0
     cut_index = cut_points[0]
     for index in range(end_index - 1, start_index - 1, -1):
-        tokens = sum(estimate_tokens(message) for message in _entry_messages(path[index]))
+        tokens = sum(estimate_tokens(message) for message in _counted_messages(path[index]))
         if tokens == 0:
             continue
         accumulated += tokens
@@ -724,6 +741,8 @@ async def _call_summary(
     label: str,
     budget: RequestBudget | None,
     turn_prefix: bool = False,
+    observation: CacheObserver | None = None,
+    compaction_id: str | None = None,
 ) -> CompactionSummaryResult:
     check_cancelled(signal)
     prompt = _summary_prompt(
@@ -734,6 +753,12 @@ async def _call_summary(
         "signal": signal,
         "max_tokens": _summary_max_tokens(settings.reserve_tokens, model.max_tokens, ratio),
     }
+    if observation is not None:
+        # 每个实际摘要请求各记录一次，标明历史摘要或任务前缀摘要并关联真实压缩身份。
+        kind = TURN_PREFIX_SUMMARY_CALL if turn_prefix else HISTORY_SUMMARY_CALL
+        options["observation"] = observation.start_call(
+            kind, compaction_id=compaction_id
+        )
     _check_summary_budget(prompt, model, options["max_tokens"], label)
     if budget is None:
         raise ValueError(f"{label}缺少共享请求预算，无法计数")
@@ -772,6 +797,8 @@ async def generate_compaction_summary(
     settings: CompactionSettings = DEFAULT_SETTINGS,
     signal: Event | None = None,
     budget: RequestBudget | None = None,
+    observation: CacheObserver | None = None,
+    compaction_id: str | None = None,
 ) -> CompactionSummaryResult:
     # 独立摘要请求：只有摘要系统提示词与序列化历史，不注册任何业务工具。
     if not api_key:
@@ -788,6 +815,8 @@ async def generate_compaction_summary(
                 ratio=HISTORY_SUMMARY_RATIO,
                 label="历史摘要",
                 budget=budget,
+                observation=observation,
+                compaction_id=compaction_id,
             )
             if preparation.messages_to_summarize
             else None
@@ -803,6 +832,8 @@ async def generate_compaction_summary(
             label="任务前缀摘要",
             budget=budget,
             turn_prefix=True,
+            observation=observation,
+            compaction_id=compaction_id,
         )
         history_text = (
             history.summary if history is not None else preparation.previous_summary or "无先前历史。"
@@ -826,4 +857,6 @@ async def generate_compaction_summary(
         ratio=HISTORY_SUMMARY_RATIO,
         label="历史摘要",
         budget=budget,
+        observation=observation,
+        compaction_id=compaction_id,
     )

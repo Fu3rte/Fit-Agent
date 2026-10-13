@@ -390,6 +390,7 @@ assert.equal(cancelled.compaction_id, undefined, "取消收尾清除压缩阶段
 const FASSIST = u(85);
 const FTOOL = u(86);
 const FANSWER = u(87);
+const CBASE = u(88);
 const TC = "tc-compact";
 const call = [{ content_index: 0, type: "tool_call", tool_call_id: TC, name: "read", arguments: {} }];
 const answer = [{ content_index: 0, type: "text", text: "最终回答。" }];
@@ -401,15 +402,20 @@ flow = step(flow, "tool_start", { tool_call_id: TC, name: "read", arguments: {} 
 flow = step(flow, "tool_result", { tool_call_id: TC, content: "ok", is_error: false, entry_id: FTOOL, parent_id: FASSIST });
 flow = step(flow, "compaction_start", { compaction_id: CID, reason: "threshold" });
 assert.equal(flow.compaction_id, CID);
+// 节点对提交成功后先公开 compaction_end（检查点身份），再公开新基线 custom_message（父为检查点），
+// 随后的助手节点 parent_id 指向新基线，保持压缩→基线→后续的真实父子链。
 flow = step(flow, "compaction_end", { compaction_id: CID, entry_id: CID, parent_id: FTOOL });
+flow = step(flow, "custom_message", { type: "custom_message", entry_id: CBASE, parent_id: CID, created_at: 1 });
+assert.deepEqual(flow.hidden, { [CBASE]: { parent_id: CID, run_id: CRUN } }, "压缩新基线登记为隐藏节点");
 flow = step(flow, "message_start", { message_id: FANSWER, content: [] });
 flow = step(flow, "message_update", { message_id: FANSWER, content: answer, content_index: 0, update_type: "text_delta" });
-flow = step(flow, "message_end", { message_id: FANSWER, content: answer, stop_reason: "stop", entry_id: FANSWER, parent_id: CID });
+flow = step(flow, "message_end", { message_id: FANSWER, content: answer, stop_reason: "stop", entry_id: FANSWER, parent_id: CBASE });
 flow = step(flow, "done", { status: "completed", stop_reason: "stop" });
 assert.equal(flow.status, "completed", "压缩后继续执行并正常收尾");
 assert.equal(flow.compaction_id, undefined, "收尾后无残留阶段");
-assert.deepEqual(flow.entries.map((entry) => entry.kind), ["assistant", "tool", "assistant"], "压缩节点不作为可见条目");
+assert.deepEqual(flow.entries.map((entry) => entry.kind), ["assistant", "tool", "assistant"], "压缩节点与基线不作为可见条目");
 assert.equal(flow.entries[2].content[0].text, "最终回答。", "压缩后的真实助手内容完整");
+assert.equal(flow.entries[2].parent_id, CBASE, "后续助手父节点指向压缩新基线");
 
 console.log(
   "PASS: 压缩隐藏节点祖先链与叶节点、非法节点归属拒绝、length 截断失败终态、确认扩展必填数组与独立成轮，以及压缩阶段事件解析、保持 running、严格拒绝与失败/取消收尾",

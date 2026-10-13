@@ -285,7 +285,7 @@ async def scenario_migration(root: Path) -> None:
     database = await open_database(path)
     connection = database.connection
     try:
-        assert (await one(connection, "PRAGMA user_version"))[0] == SCHEMA_VERSION == 11
+        assert (await one(connection, "PRAGMA user_version"))[0] == SCHEMA_VERSION
         assert (await one(connection, "PRAGMA foreign_keys"))[0] == 1
         assert (await one(connection, "SELECT count(*) FROM session_entries"))[0] == 4
         assert (

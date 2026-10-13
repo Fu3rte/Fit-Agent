@@ -395,6 +395,9 @@ async def stream(
     signal = options.get("signal")
     check_cancelled(signal)
     request = to_openai_request(context["messages"], model, options)
+    observation = options.get("observation")
+    if observation is not None:
+        observation.observe(request, model)
     output = AssistantMessage(
         role="assistant",
         content=[],
@@ -445,6 +448,8 @@ async def stream(
                     reason="error",
                     message=build_overflow_message(output, error),
                 )
+                if observation is not None:
+                    observation.finish(None, "error")
                 return
             async with raw:
                 yield StartEvent(type="start", partial=output)
@@ -626,4 +631,6 @@ async def stream(
         timestamp=created if created is not None else output.timestamp,
         aborted=aborted,
     )
+    if observation is not None:
+        observation.finish(final_message.usage, final_message.stop_reason)
     yield DoneEvent(type="done", reason=final_message.stop_reason, message=final_message)

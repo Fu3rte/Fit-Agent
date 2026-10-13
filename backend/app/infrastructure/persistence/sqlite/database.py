@@ -15,7 +15,7 @@ T = TypeVar("T")
 # 提交否决判据：由连接线程在 COMMIT 执行期间同步调用，返回真值表示本次提交让位。
 CommitVeto = Callable[[], bool]
 
-SCHEMA_VERSION = 13
+SCHEMA_VERSION = 14
 
 _MIGRATIONS_DIR = Path(__file__).resolve().parent / "migrations"
 _INITIAL_SCHEMA = _MIGRATIONS_DIR / "001_initial.sql"
@@ -38,10 +38,11 @@ _MIGRATIONS: dict[int, Path] = {
     11: _MIGRATIONS_DIR / "011_session_model_omission.sql",
     12: _MIGRATIONS_DIR / "012_structured_confirmation.sql",
     13: _MIGRATIONS_DIR / "013_save_confirmation_operations.sql",
+    14: _MIGRATIONS_DIR / "014_business_context_nodes.sql",
 }
 
 # 需要重建 session_entries 的迁移：重建期间临时关闭外键，避免级联删除关联附件。
-_FOREIGN_KEY_REBUILDS = frozenset({10, 11})
+_FOREIGN_KEY_REBUILDS = frozenset({10, 11, 14})
 
 # 当前版本的结构基线：表 -> 列集合。
 _TABLE_COLUMNS: dict[str, frozenset[str]] = {
@@ -61,6 +62,7 @@ _TABLE_COLUMNS: dict[str, frozenset[str]] = {
             "run_id",
             "type",
             "messages",
+            "message",
             "summary",
             "first_kept_entry_id",
             "tokens_before",
@@ -180,6 +182,7 @@ _NULLABLE_COLUMNS = frozenset({
     ("session_entries", "parent_id"),
     ("session_entries", "run_id"),
     ("session_entries", "messages"),
+    ("session_entries", "message"),
     ("session_entries", "summary"),
     ("session_entries", "first_kept_entry_id"),
     ("session_entries", "tokens_before"),

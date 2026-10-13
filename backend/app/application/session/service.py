@@ -47,6 +47,9 @@ from app.domain.session.errors import (
 )
 from app.domain.session.models import (
     AppendOutcome,
+    BusinessContextEntry,
+    BusinessContextOutcome,
+    BusinessContextSnapshot,
     CompactionEntry,
     CompactionOutcome,
     EditCommand,
@@ -70,6 +73,7 @@ from app.domain.session.models import (
     SteeringRequest,
     SteeringWithdrawal,
     TerminalRunStatus,
+    validate_business_context_projection,
 )
 from app.domain.session.repository import SessionRepository
 
@@ -829,16 +833,91 @@ class SessionService:
                 run=run,
             )
 
+    async def append_business_context(
+        self,
+        entry: BusinessContextEntry,
+        *,
+        credentials: Sequence[str] = (),
+    ) -> BusinessContextOutcome:
+        # 内部资料节点受控写入：写入前核对固定投影，父节点必须等于运行追加位置。
+        validate_business_context_projection(entry.message)
+        if _contains_credential(entry.model_dump(exclude_unset=True), credentials):
+            async with self._repository.transaction():
+                run = await self._require_run(entry.session_id, entry.run_id)
+                if run.status == "running":
+                    now = _now_ms()
+                    run = run.model_copy(
+                        update={
+                            "status": "failed",
+                            "finished_at": now,
+                            "error_code": CREDENTIAL_ERROR_CODE,
+                            "error_message": CREDENTIAL_SAFE_MESSAGE,
+                        }
+                    )
+                    await self._repository.update_run(run)
+                    await self._discard_pending(entry.session_id, run.id, "failed", now)
+                return BusinessContextOutcome(
+                    created=False,
+                    credential_detected=True,
+                    entry=None,
+                    run=run,
+                )
+        async with self._repository.transaction():
+            existing = await self._repository.get_entry(entry.session_id, entry.id)
+            if existing is not None:
+                if existing.model_dump() != entry.model_dump():
+                    raise SessionConflict(f"节点 ID 冲突: {entry.id}")
+                run = await self._require_run(entry.session_id, entry.run_id)
+                return BusinessContextOutcome(
+                    created=False,
+                    credential_detected=False,
+                    entry=entry,
+                    run=run,
+                )
+            run = await self._require_run(entry.session_id, entry.run_id)
+            if run.status != "running":
+                raise SessionConflict("运行未在运行，拒绝追加内部资料节点")
+            session = await self._require_session(entry.session_id)
+            position = self._run_position(run)
+            if entry.parent_id != position:
+                raise SessionConflict("父节点与运行追加位置不一致")
+            if session.active_leaf_id != position:
+                raise SessionConflict("当前分支指针与运行进度不一致")
+            now = _now_ms()
+            await self._repository.insert_entry(entry)
+            run = run.model_copy(update={"last_entry_id": entry.id})
+            await self._repository.update_run(run)
+            await self._set_leaf(session, entry.id, now)
+            return BusinessContextOutcome(
+                created=True,
+                credential_detected=False,
+                entry=entry,
+                run=run,
+            )
+
     async def commit_compaction(
         self,
         entry: CompactionEntry,
+        baseline: BusinessContextEntry,
         *,
         prepared_position: str,
         credentials: Sequence[str] = (),
     ) -> CompactionOutcome:
-        # 检查点提交：摘要、真实 usage、系统状态、tokens_before 与附件详情均由调用方在
-        # 事务外生成。事务内核对摘要准备位置未变化，原子写入检查点、运行末节点与分支指针。
-        if _contains_credential(entry.model_dump(), credentials):
+        # 检查点提交：摘要、真实 usage、系统状态、tokens_before 与附件详情由调用方在事务外生成；
+        # 新基线为压缩后完整业务投影，同样事务外构造。事务内核对摘要准备位置未变化，原子写入
+        # 检查点、新基线节点、运行末节点与分支指针；基线失败则检查点与位置更新一并回滚。
+        validate_business_context_projection(baseline.message)
+        if not isinstance(baseline.message.details, BusinessContextSnapshot):
+            raise SessionConflict("压缩新基线必须是完整业务快照")
+        if (
+            baseline.parent_id != entry.id
+            or baseline.session_id != entry.session_id
+            or baseline.run_id != entry.run_id
+        ):
+            raise SessionConflict("新基线节点必须紧跟其压缩检查点")
+        if _contains_credential(
+            {"checkpoint": entry.model_dump(), "baseline": baseline.model_dump()}, credentials
+        ):
             async with self._repository.transaction():
                 run = await self._require_run(entry.session_id, entry.run_id)
                 if run.status == "running":
@@ -857,6 +936,7 @@ class SessionService:
                     created=False,
                     credential_detected=True,
                     entry=None,
+                    baseline=None,
                     run=run,
                 )
         async with self._repository.transaction():
@@ -864,11 +944,15 @@ class SessionService:
             if existing is not None:
                 if not self._same_compaction(existing, entry):
                     raise SessionConflict(f"节点 ID 冲突: {entry.id}")
+                committed = await self._repository.get_entry(entry.session_id, baseline.id)
+                if committed is None or committed.model_dump() != baseline.model_dump():
+                    raise SessionConflict(f"基线节点冲突: {baseline.id}")
                 run = await self._require_run(entry.session_id, entry.run_id)
                 return CompactionOutcome(
                     created=False,
                     credential_detected=False,
                     entry=existing,
+                    baseline=committed,
                     run=run,
                 )
             run = await self._require_run(entry.session_id, entry.run_id)
@@ -888,13 +972,15 @@ class SessionService:
             build_effective_context([*path, entry])
             now = _now_ms()
             await self._repository.insert_entry(entry)
-            run = run.model_copy(update={"last_entry_id": entry.id})
+            await self._repository.insert_entry(baseline)
+            run = run.model_copy(update={"last_entry_id": baseline.id})
             await self._repository.update_run(run)
-            await self._set_leaf(session, entry.id, now)
+            await self._set_leaf(session, baseline.id, now)
             return CompactionOutcome(
                 created=True,
                 credential_detected=False,
                 entry=entry,
+                baseline=baseline,
                 run=run,
             )
 

@@ -1,11 +1,13 @@
 from collections.abc import AsyncGenerator, AsyncIterator
 from contextlib import aclosing
+from threading import Event
 
 from app.ai.api import anthropic_messages, openai_completions
 from app.ai.context import normalize_context
 from app.ai.messages import AssistantMessage, ToolCall
 from app.ai.types import (
     AssistantStreamEvent,
+    CallObservation,
     LlmContext,
     ModelSpec,
     StreamFunction,
@@ -109,6 +111,23 @@ class AssistantResponse:
             raise RuntimeError("模型流缺少终止事件")
 
 
+async def _observed(
+    source: AsyncGenerator[AssistantStreamEvent, None],
+    observation: CallObservation | None,
+    signal: Event | None,
+) -> AsyncGenerator[AssistantStreamEvent, None]:
+    # 包裹适配器流：适配器在正常结局或明确错误处上报真实用量；此处兜底异常、取消与提前关闭，
+    # 使已发送请求保留可核实状态，缺失的用量保持缺失。
+    # 转发层持有底层流的关闭责任：消费者提前退出时同样关闭底层生成器，观测结局只写一次。
+    async with aclosing(source):
+        try:
+            async for event in source:
+                yield event
+        finally:
+            if observation is not None and not observation.finished:
+                observation.fail(signal is not None and signal.is_set())
+
+
 def stream(
     model: ModelSpec, context: LlmContext, options: StreamOptions
 ) -> AssistantResponse:
@@ -116,7 +135,13 @@ def stream(
     if adapter is None:
         raise ValueError(f"未注册的协议: {model.api}")
     _validate_request(context, options)
-    return AssistantResponse(adapter(model, context, options))
+    return AssistantResponse(
+        _observed(
+            adapter(model, context, options),
+            options.get("observation"),
+            options.get("signal"),
+        )
+    )
 
 
 async def complete(

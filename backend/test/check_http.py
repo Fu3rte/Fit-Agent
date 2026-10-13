@@ -100,6 +100,12 @@ def validate_events(result):
         if kind == "steering_status":
             assert data["status"] in {"consumed", "discarded"}
             continue
+        if kind == "custom_message":
+            # 内部资料与压缩新基线身份通知：五字段白名单，父节点为真实或压缩节点身份。
+            assert data["type"] == "custom_message"
+            UUID(data["entry_id"])
+            UUID(data["parent_id"])
+            continue
         if kind.startswith("message_"):
             identifier = data["message_id"]
             UUID(identifier)

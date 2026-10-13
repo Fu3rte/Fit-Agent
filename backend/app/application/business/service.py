@@ -1262,6 +1262,38 @@ class BusinessService:
                     ))
             return references
 
+    # 提案移出原因只读判定：以真实状态、保存幂等记录或记录缺失为证据，无法确定时抛错停止报告。
+
+    async def removed_proposal_reason(self, business_kind: str, proposal_id: str) -> str:
+        async with self._repository.transaction():
+            if business_kind == "profile":
+                snapshot = await self._repository.get_snapshot(proposal_id)
+                record = await self._repository.get_save_record(proposal_id)
+            elif business_kind == "plan":
+                snapshot = await self._repository.get_plan_snapshot(proposal_id)
+                record = await self._repository.get_plan_save_record(proposal_id)
+            elif business_kind == "workout":
+                snapshot = await self._repository.get_workout_snapshot(proposal_id)
+                record = await self._repository.get_workout_save_record(proposal_id)
+            else:
+                raise ValueError(f"未知业务类型: {business_kind}")
+            if record is not None:
+                return "saved"
+            if snapshot is None:
+                return "deleted"
+            reasons = {
+                "saved": "saved",
+                "invalidated": "invalidated",
+                "conflicted": "conflicted",
+                "pending": "out_of_scope",
+                "processing": "out_of_scope",
+            }
+            if snapshot.status in reasons:
+                return reasons[snapshot.status]
+            raise RuntimeError(
+                f"无法确定提案移出原因: {business_kind}/{proposal_id} 状态 {snapshot.status}"
+            )
+
     # 待确认提案受控只读读取：复用三类业务的快照、路径及展示校验，不写库。
 
     def _pending_status(

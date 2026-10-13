@@ -575,7 +575,7 @@ function parsePublicMessage(value: unknown): PublicMessageWire {
   throw new Error("历史消息角色无效。");
 }
 
-/** 历史节点的公共身份字段（§3.1）：message 与 compaction 两种节点共有 */
+/** 历史节点的公共身份字段（§3.1）：message、compaction 与 custom_message 三种节点共有 */
 const HISTORY_ENTRY_KEYS = [
   "type",
   "entry_id",
@@ -585,19 +585,19 @@ const HISTORY_ENTRY_KEYS = [
 ] as const;
 
 /** 历史节点判别联合（§3.1、compaction-contract-decisions §A）：未知类型、字段缺失或多余字段均报错；
- *  compaction 节点只公开身份与父子关系，不携带 message */
+ *  compaction 与 custom_message 节点只公开身份与父子关系，不携带 message */
 function parseHistoryEntry(value: unknown): HistoryEntryWire {
   if (!isObject(value)) throw new Error("历史节点无效。");
   const type = requireEnum(
     value.type,
-    ["message", "compaction"] as const,
+    ["message", "compaction", "custom_message"] as const,
     "type",
   );
   const entry_id = requireUuid(value.entry_id, "entry_id");
   const parent_id = nullableUuid(value.parent_id, "parent_id");
   const run_id = nullableUuid(value.run_id, "run_id");
   const created_at = requireMillis(value.created_at, "created_at");
-  if (type === "compaction") {
+  if (type === "compaction" || type === "custom_message") {
     exactKeys(value, HISTORY_ENTRY_KEYS, "历史节点");
     return { type, entry_id, parent_id, run_id, created_at };
   }

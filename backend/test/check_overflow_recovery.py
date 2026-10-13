@@ -28,14 +28,18 @@ from app.ai.overflow import (
 from app.ai.types import ModelSpec
 from app.application.session.service import SessionService
 from app.domain.session.models import (
+    BusinessContextSnapshot,
     CompactionEntry,
     EditCommand,
     EditRequest,
     RegenerateCommand,
     RegenerateRequest,
+    RequestContext,
     Session,
     SessionMessageEntry,
     SessionRun,
+    build_business_context_entry,
+    business_baseline_entry_id,
 )
 from app.infrastructure.persistence.sqlite.database import open_database
 from app.infrastructure.persistence.sqlite.repository import SqliteSessionRepository
@@ -446,7 +450,9 @@ async def scenario_budget_recheck() -> None:
         provider="test",
         id="test-model",
         base_url="http://localhost:1",
-        context_window=20000,
+        # 窗口须容纳预留空间 16384 与安全余量 4096，压缩才能启动；
+        # 压缩后保留原文加摘要的投影仍超过“窗口-预留-余量”，触发预算复核失败路径。
+        context_window=24000,
         max_tokens=16384,
     )
     settings = C.CompactionSettings(reserve_tokens=16384, keep_recent_tokens=1000)
@@ -479,8 +485,25 @@ async def scenario_budget_recheck() -> None:
                 details=None,
                 created_at=tick(),
             )
+            baseline = build_business_context_entry(
+                session_id=SID,
+                id=business_baseline_entry_id(checkpoint.id),
+                parent_id=checkpoint.id,
+                run_id=checkpoint.run_id,
+                details=BusinessContextSnapshot(
+                    mode="snapshot",
+                    request=RequestContext(
+                        timezone="Asia/Shanghai",
+                        business_date="2026-01-01",
+                        request_entry_id="00000000-0000-4000-8000-000000000001",
+                    ),
+                    message_nodes=[],
+                    pending_proposals=[],
+                ),
+                created_at=tick(),
+            )
             outcome = await service.commit_compaction(
-                checkpoint, prepared_position=checkpoint.parent_id, credentials=()
+                checkpoint, baseline, prepared_position=checkpoint.parent_id, credentials=()
             )
             assert outcome.credential_detected is False
             position["id"] = outcome.entry.id

@@ -1,11 +1,11 @@
 from collections.abc import AsyncGenerator, Callable
 from concurrent.futures import CancelledError
 from threading import Event
-from typing import Literal, NotRequired, TypeAlias, TypedDict
+from typing import Literal, NotRequired, Protocol, TypeAlias, TypedDict
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from app.ai.messages import AssistantMessage, Message, ToolCall
+from app.ai.messages import AssistantMessage, Message, ToolCall, Usage
 
 
 class ModelSpec(BaseModel):
@@ -20,6 +20,18 @@ class ModelSpec(BaseModel):
     headers: dict[str, str] | None = None
 
 
+class CallObservation(Protocol):
+    # 逐次真实调用的观测句柄：适配器在最终投影处上报请求，在结局处上报用量与状态。
+    @property
+    def finished(self) -> bool: ...
+
+    def observe(self, request: dict, model: ModelSpec) -> None: ...
+
+    def finish(self, usage: Usage | None, status: str) -> None: ...
+
+    def fail(self, aborted: bool) -> None: ...
+
+
 class LlmContext(TypedDict):
     messages: list[Message]
 
@@ -30,6 +42,7 @@ class StreamOptions(TypedDict):
     max_tokens: NotRequired[int | None]
     temperature: NotRequired[float | None]
     headers: NotRequired[dict[str, str] | None]
+    observation: NotRequired[CallObservation | None]
 
 
 DoneReason: TypeAlias = Literal["stop", "length", "toolUse", "error", "aborted"]

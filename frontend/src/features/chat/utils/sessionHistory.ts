@@ -17,6 +17,8 @@ import {
   assertPlanBusinessError,
   attachmentDisplay,
   preparedPlanDisplay,
+  registerHiddenNode,
+  type HiddenNode,
   type PendingOperation,
   type ReActEntry,
   type ReActRound,
@@ -55,7 +57,8 @@ function convertEntry(
   consumedByEntry: Map<string, HistorySteeringWire>,
   toolArgs: Map<string, Record<string, unknown>>,
 ): ReActEntry | null {
-  // 仅 message 节点产生可见消息（compaction-contract-decisions §A）：压缩节点只参与祖先链、运行归属与叶节点校验
+  // 仅 message 节点产生可见消息（compaction-contract-decisions §A、业务上下文契约 §3）：
+  // 压缩节点与内部资料节点只参与祖先链、运行归属与叶节点校验
   if (entry.type !== "message") return null;
   const { message } = entry;
   if (message.role === "system") return null;
@@ -165,6 +168,19 @@ export function historyToRounds(history: SessionHistoryWire): ReActRound[] {
   };
 
   for (const entry of entries) {
+    /* 内部资料节点（业务上下文契约 §3、§8.3）：只登记隐藏结构身份与运行归属，不生成可见条目 */
+    if (entry.type === "custom_message") {
+      if (entry.run_id === null) throw new Error("资料节点缺少运行归属。");
+      const owner = runById.get(entry.run_id);
+      if (owner === undefined) throw new Error("资料节点运行归属无效。");
+      const round = ensureRound(owner);
+      round.hidden = registerHiddenNode(round.hidden, {
+        entry_id: entry.entry_id,
+        parent_id: entry.parent_id,
+        run_id: entry.run_id,
+      });
+      continue;
+    }
     /* 确认用户节点独立成轮（确认契约 §7.6、session-history-contract §3.3）：无对应运行也必须展示 */
     const confirmed = confirmations.get(entry.entry_id);
     if (confirmed !== undefined) {
@@ -454,6 +470,18 @@ function unconfirmedPending(
   return remaining.length === 0 ? undefined : remaining;
 }
 
+/** 隐藏节点合并（§8.3）：历史为已提交事实，按 entry_id 补齐；相同身份字段冲突按协议错误处理 */
+function mergeHidden(
+  existing: Record<string, HiddenNode> | undefined,
+  incoming: Record<string, HiddenNode> | undefined,
+): Record<string, HiddenNode> | undefined {
+  if (incoming === undefined) return existing;
+  let merged = existing;
+  for (const [entryId, node] of Object.entries(incoming))
+    merged = registerHiddenNode(merged, { entry_id: entryId, ...node });
+  return merged;
+}
+
 /**
  * 历史刷新并入既有展示（§5.2-6、§5.2-7、§5.3）：按 run_id 关联轮次、按稳定节点身份合并条目；
  * 历史终态优先于旧 running 快照，本页终态与仍在生成的未提交快照不被较早快照覆盖。
@@ -478,6 +506,7 @@ export function mergeHistoryRounds(
     return {
       ...base,
       entries,
+      hidden: mergeHidden(existing.hidden, round.hidden),
       pending: unconfirmedPending(existing.pending, confirmed),
     };
   });

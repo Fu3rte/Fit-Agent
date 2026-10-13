@@ -3,6 +3,7 @@ from dataclasses import dataclass
 from threading import Event
 
 from app.agent.budget import RequestBudget
+from app.agent.cache_observation import CacheObserver
 from app.agent.message_context import ConvertToLlm, TransformContext, convert_to_llm
 from app.agent.tool import (
     AfterToolCall,
@@ -14,15 +15,18 @@ from app.agent.tool import (
 )
 from app.ai.messages import Message
 from app.ai.types import ModelSpec
+from app.domain.session.models import BusinessContextEntry
 from app.model_config import ModelConfig
 
 
 @dataclass(frozen=True)
 class LoopCompactionResult:
-    # 提交成功的压缩检查点身份；messages 为提交后可直接发送的模型投影。
+    # 提交成功的压缩检查点身份；messages 为提交后可直接发送的模型投影；
+    # baseline 为同事务提交的完整新基线节点，供压缩完成后按检查点→基线顺序公开身份。
     entry_id: str
     parent_id: str
     messages: list[Message]
+    baseline: BusinessContextEntry | None = None
 
 
 @dataclass
@@ -57,3 +61,5 @@ class AgentLoopConfig:
     after_tool_call: AfterToolCall | None = None
     on_tool_update: OnToolUpdate | None = None
     contains_credentials: CredentialCheck | None = None
+    # 逐模型调用缓存观测：普通调用与摘要调用在最终投影处上报；未装配时不做观测。
+    observation: CacheObserver | None = None

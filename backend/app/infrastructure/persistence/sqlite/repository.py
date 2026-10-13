@@ -6,6 +6,7 @@ import aiosqlite
 
 from app.domain.session.attachments import AttachmentMetadata, attachment_storage_ref
 from app.domain.session.models import (
+    BusinessContextEntry,
     CompactionEntry,
     Session,
     SessionEntry,
@@ -87,6 +88,18 @@ def _row_to_entry(row: sqlite3.Row) -> SessionEntry:
                 "details": None
                 if data["details"] is None
                 else json.loads(data["details"]),
+                "created_at": data["created_at"],
+            }
+        )
+    if data["type"] == "custom_message":
+        return BusinessContextEntry.model_validate(
+            {
+                "session_id": data["session_id"],
+                "id": data["id"],
+                "parent_id": data["parent_id"],
+                "run_id": data["run_id"],
+                "type": "custom_message",
+                "message": json.loads(data["message"]),
                 "created_at": data["created_at"],
             }
         )
@@ -271,6 +284,22 @@ class SqliteSessionRepository:
         await self._write("DELETE FROM sessions WHERE id = ?", (session_id,))
 
     async def insert_entry(self, entry: SessionEntry) -> None:
+        if isinstance(entry, BusinessContextEntry):
+            await self._write(
+                "INSERT INTO session_entries "
+                "(session_id, id, parent_id, run_id, type, message, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (
+                    entry.session_id,
+                    entry.id,
+                    entry.parent_id,
+                    entry.run_id,
+                    entry.type,
+                    _dump_json(entry.message.model_dump(exclude_unset=True)),
+                    entry.created_at,
+                ),
+            )
+            return
         if isinstance(entry, CompactionEntry):
             await self._write(
                 "INSERT INTO session_entries "

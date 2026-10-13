@@ -31,6 +31,7 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 
 from app.agent.agent_loop import ModelOutputLimitExceeded, run_agent_loop
 from app.agent.budget import ModelRequestLimitExceeded, RequestBudget
+from app.agent.cache_observation import CacheObserver
 from app.agent.compaction import (
     KEEP_RECENT_TOKENS,
     RESERVE_TOKENS,
@@ -38,6 +39,7 @@ from app.agent.compaction import (
     CompactionSummaryError,
     ContextBudgetExceeded,
     NoSummarizableHistory,
+    build_effective_context,
     estimate_context_tokens,
     generate_compaction_summary,
     prepare_compaction,
@@ -46,6 +48,7 @@ from app.agent.compaction import (
 from app.agent.config import AgentLoopConfig, CompactionHooks, LoopCompactionResult
 from app.agent.diagnostic import run_diagnostic
 from app.agent.events import AgentEvent
+from app.agent.message_context import business_context_to_llm
 from app.agent.permissions import create_before_tool_call
 from app.agent.prompts import SYSTEM_PROMPT
 from app.agent.tool import CredentialDetectedError
@@ -79,6 +82,12 @@ from app.application.business.service import (
     business_date,
 )
 from app.application.session.attachment_files import AttachmentFiles
+from app.application.session.business_context import (
+    BusinessBindings,
+    collect_message_nodes,
+    collect_pending_proposals,
+    next_business_context_event,
+)
 from app.application.session.service import CREDENTIAL_SAFE_MESSAGE, SessionService
 from app.application.session.steering import SteeringCoordinator
 from app.domain.business.errors import (
@@ -112,6 +121,9 @@ from app.domain.session.errors import (
     SteeringConsumptionConflict,
 )
 from app.domain.session.models import (
+    BusinessContextData,
+    BusinessContextEntry,
+    BusinessContextSnapshot,
     CompactionDetails,
     CompactionEntry,
     EditCommand,
@@ -119,12 +131,16 @@ from app.domain.session.models import (
     OperationOutcome,
     RegenerateCommand,
     RegenerateRequest,
+    RequestContext,
     SendCommand,
     SendRequest,
     SessionEntry,
     SessionMessageEntry,
     SteeringCommand,
     SteeringInput,
+    build_business_context_entry,
+    build_business_context_message,
+    business_baseline_entry_id,
 )
 from app.domain.session.models import (
     SteeringRequest as SteeringParams,
@@ -349,6 +365,8 @@ class RunState:
         self.task: asyncio.Task | None = None
         self.closed_without_terminal = False
         self.secrets: tuple[str, ...] = ()
+        # 运行来源：send / edit / regenerate；观测据此标注编辑与分支等已知事件。
+        self.origin = "send"
 
     def publish(self, name: str, data: dict) -> None:
         self.events.put(AgentEvent(name, {"run_id": str(self.run_id), **data}))
@@ -642,8 +660,8 @@ def attachment_object(metadata) -> dict:
 
 
 def history_entry(entry: SessionEntry) -> dict:
-    # 公开投影按节点类型白名单：压缩节点只公开身份与父子关系，摘要、用量、
-    # 系统状态及内部附件路径保留在后端，不能直接 model_dump 作为公开响应。
+    # 公开投影按节点类型白名单：压缩节点与内部资料节点只公开身份与父子关系，摘要、用量、
+    # 系统状态、业务资料及内部附件路径保留在后端，不能直接 model_dump 作为公开响应。
     public = {
         "type": entry.type,
         "entry_id": entry.id,
@@ -651,7 +669,7 @@ def history_entry(entry: SessionEntry) -> dict:
         "run_id": entry.run_id,
         "created_at": entry.created_at,
     }
-    if isinstance(entry, CompactionEntry):
+    if isinstance(entry, (CompactionEntry, BusinessContextEntry)):
         return public
     message = public_message(entry.messages[0])
     if message["role"] == "user":
@@ -833,6 +851,18 @@ def retire(state: RunState) -> None:
 PLAN_PREPARE_TOOLS = {"prepare_plan", "prepare_plan_import", "prepare_plan_adjustment"}
 
 
+def model_visible_entries(
+    path: list[SessionEntry], visible: set[str]
+) -> list[SessionMessageEntry]:
+    # message_nodes 白名单：只接纳模型可见集合内的真实消息节点。内部资料节点与压缩
+    # 结构节点即使参与祖先链读取，其身份也不会成为资料来源。
+    return [
+        entry
+        for entry in path
+        if isinstance(entry, SessionMessageEntry) and entry.id in visible
+    ]
+
+
 def execute(
     run,
     session_id: str,
@@ -847,6 +877,14 @@ def execute(
 ) -> str:
     coordinator = state.coordinator
     guard = CredentialFilter(secrets)
+    # 逐模型调用缓存观测：普通调用、摘要子调用与恢复重试均按真实请求记录，身份绑定当前运行。
+    observer = CacheObserver(
+        session_id=session_id, run_id=run.id, contains=guard.contains
+    )
+    if state.origin == "edit":
+        observer.note_event("edit")
+    elif state.origin == "regenerate":
+        observer.note_event("branch")
     position = {"id": run.request_entry_id}
     parents: dict[str, str] = {}
     # 可信业务身份与日期：request_entry_id 随 Steering 消费更新，日期取该用户节点
@@ -890,116 +928,80 @@ def execute(
             ),
         }
 
-    def message_nodes(leaf_id: str) -> list[dict]:
-        # 本轮模型投影的真实来源节点 + 核验后的待确认提案引用；不再累积整条原始路径。
-        projection = call(service.get_projection(session_id, leaf_id))
-        visible = set(projection.context.source_entry_ids)
-        nodes: list[dict] = []
-        bindings = call(business.list_confirmation_bindings(session_id))
-        displays = call(business.list_display_bindings(session_id))
-        workout_bindings = call(business.list_workout_confirmation_bindings(session_id))
-        workout_displays = call(business.list_workout_display_bindings(session_id))
-        plan_bindings = call(business.list_plan_confirmation_bindings(session_id))
-        plan_displays = call(business.list_plan_display_bindings(session_id))
-        if (bindings.keys() & workout_bindings.keys()
-                or (bindings.keys() | workout_bindings.keys()) & plan_bindings.keys()):
-            raise RuntimeError("确认节点具有多类业务绑定")
-        if (displays.keys() & workout_displays.keys()
-                or (displays.keys() | workout_displays.keys()) & plan_displays.keys()):
-            raise RuntimeError("展示节点具有多类业务绑定")
-        for entry in projection.path:
-            if not isinstance(entry, SessionMessageEntry) or entry.id not in visible:
-                continue
-            message = entry.messages[0]
-            if isinstance(message, UserMessage):
-                # 附件读取引用已在模型投影中表达为用户内容，此处不再重复注入。
-                node = {"entry_id": entry.id, "role": "user"}
-                if entry.confirmation is not None:
-                    node["confirmation"] = entry.confirmation.model_dump()
-                proposal_id = bindings.get(entry.id)
-                if proposal_id is not None:
-                    node["proposal_id"] = proposal_id
-                    node["business_kind"] = "profile"
-                workout_proposal_id = workout_bindings.get(entry.id)
-                if workout_proposal_id is not None:
-                    node["proposal_id"] = workout_proposal_id
-                    node["business_kind"] = "workout"
-                plan_proposal_id = plan_bindings.get(entry.id)
-                if plan_proposal_id is not None:
-                    node["proposal_id"] = plan_proposal_id
-                    node["business_kind"] = "plan"
-                nodes.append(node)
-            elif isinstance(message, AssistantMessage):
-                nodes.append(
-                    {
-                        "entry_id": entry.id,
-                        "role": "assistant",
-                        "tool_call_ids": [
-                            block.id
-                            for block in message.content
-                            if isinstance(block, ToolCall)
-                        ],
-                    }
-                )
-            elif isinstance(message, ToolResultMessage):
-                node = {
-                    "entry_id": entry.id,
-                    "role": "toolResult",
-                    "tool_name": message.tool_name,
-                    "tool_call_id": message.tool_call_id,
-                }
-                proposal_id = displays.get(entry.id)
-                if proposal_id is not None:
-                    node["proposal_id"] = proposal_id
-                    node["display_entry_id"] = entry.id
-                    node["business_kind"] = "profile"
-                workout_proposal_id = workout_displays.get(entry.id)
-                if workout_proposal_id is not None:
-                    node["proposal_id"] = workout_proposal_id
-                    node["display_entry_id"] = entry.id
-                    node["business_kind"] = "workout"
-                plan_proposal_id = plan_displays.get(entry.id)
-                if plan_proposal_id is not None:
-                    node["proposal_id"] = plan_proposal_id
-                    node["display_entry_id"] = entry.id
-                    node["business_kind"] = "plan"
-                nodes.append(node)
-        # 待确认提案引用：只给身份与关联节点，完整内容仍按 proposal_id 受控读取。
-        for reference in call(business.list_pending_references(session_id)):
-            nodes.append({
-                "role": "pendingProposal",
-                "business_kind": reference.business_kind,
-                "proposal_id": reference.proposal_id,
-                "status": reference.status,
-                "request_entry_id": reference.request_entry_id,
-                "source_entry_id": reference.source_entry_id,
-                "display_entry_id": reference.display_entry_id,
-                "confirmation_entry_id": reference.confirmation_entry_id,
-            })
-        return nodes
+    def announce_business_context(entry: BusinessContextEntry) -> None:
+        # 身份通知复用公开白名单：只通知已成功提交的真实节点，业务资料与内部字段保持私有。
+        data = {
+            "type": "custom_message",
+            "entry_id": entry.id,
+            "parent_id": entry.parent_id,
+            "run_id": entry.run_id,
+            "created_at": entry.created_at,
+        }
+        if guard.contains(data):
+            raise CredentialDetectedError()
+        state.publish("custom_message", data)
 
-    def dynamic_system_message() -> SystemMessage:
-        # 临时系统上下文：仅参与模型请求投影，不持久化，每次重建。
-        return SystemMessage(
-            role="system",
-            content="",
-            sections={
-                "business_context": json.dumps(
-                    {
-                        "timezone": BUSINESS_TIMEZONE,
-                        "business_date": business_day["value"],
-                        "request_entry_id": request_entry["id"],
-                        "message_nodes": message_nodes(position["id"]),
-                    },
-                    ensure_ascii=False,
-                    allow_nan=False,
-                )
-            },
-            timestamp=time_ns() // 1_000_000,
+    async def read_request_state() -> tuple[list[Message], BusinessContextData | None]:
+        # 主循环读取：当前有效模型投影与本次模型调用前将追加的资料；只读，不提交、不通知。
+        projection = await service.get_projection(session_id, position["id"])
+        visible = set(projection.context.source_entry_ids)
+        nodes = collect_message_nodes(
+            model_visible_entries(projection.path, visible),
+            BusinessBindings(
+                profile_confirmations=await business.list_confirmation_bindings(session_id),
+                workout_confirmations=await business.list_workout_confirmation_bindings(session_id),
+                plan_confirmations=await business.list_plan_confirmation_bindings(session_id),
+                profile_displays=await business.list_display_bindings(session_id),
+                workout_displays=await business.list_workout_display_bindings(session_id),
+                plan_displays=await business.list_plan_display_bindings(session_id),
+            ),
         )
+        proposals = collect_pending_proposals(
+            await business.list_pending_references(session_id),
+            {entry.id for entry in projection.path},
+        )
+        details = await next_business_context_event(
+            path=projection.path,
+            request=RequestContext(
+                timezone=BUSINESS_TIMEZONE,
+                business_date=business_day["value"],
+                request_entry_id=request_entry["id"],
+            ),
+            nodes=nodes,
+            proposals=proposals,
+            removal_reason=business.removed_proposal_reason,
+        )
+        return projection.context.messages, details
+
+    async def append_business_context() -> BusinessContextEntry | None:
+        # 下一次模型请求前比较真实资料并提交；提交失败或凭据命中时抛错，调用方不得发送身份通知。
+        _, details = await read_request_state()
+        if details is None:
+            return None
+        node = build_business_context_entry(
+            session_id=session_id,
+            id=str(uuid4()),
+            parent_id=position["id"],
+            run_id=run.id,
+            details=details,
+            created_at=time_ns() // 1_000_000,
+        )
+        outcome = await service.append_business_context(node, credentials=secrets)
+        if outcome.credential_detected:
+            raise CredentialDetectedError()
+        return outcome.entry
 
     async def transform_context(messages: list[Message], signal) -> list[Message]:
-        return [*messages, dynamic_system_message()]
+        # 每次模型调用前从真实持久化分支重放完整有效资料序列：必要资料提交成功才通知身份并同步
+        # 真实执行位置，使后续助手节点的 parent_id 指向最新资料节点；同批工具结果与 Steering 消费
+        # 通知均先于本批资料通知。不依赖会遗漏隐藏节点的内存消息列表，每条资料只进入本次请求一次。
+        committed = call(append_business_context())
+        if committed is not None:
+            announce_business_context(committed)
+            position["id"] = committed.id
+            observer.note_event("business_context")
+        projection = call(service.get_projection(session_id, position["id"]))
+        return list(projection.context.messages)
 
     async def save_message(node_id: str, message: Message) -> None:
         parent_id = position["id"]
@@ -1128,6 +1130,18 @@ def execute(
                 "entry_id": event["entry_id"],
                 "parent_id": event["parent_id"],
             })
+        elif kind == "custom_message":
+            # 压缩新基线身份通知：复用资料节点五字段白名单，凭据命中不得公开。
+            data = {
+                "type": "custom_message",
+                "entry_id": event["entry_id"],
+                "parent_id": event["parent_id"],
+                "run_id": event["run_id"],
+                "created_at": event["created_at"],
+            }
+            if guard.contains(data):
+                raise CredentialDetectedError()
+            state.publish(kind, data)
 
     def on_tool_update(tool_call_id: str, tool_name: str, result) -> None:
         # 单工具进度快照：中间态，可被完成事件与保存确认覆盖；凭据在 harness 通知前拦截。
@@ -1139,16 +1153,66 @@ def execute(
         )
 
     def request_messages() -> list[Message]:
-        # 即将发送的完整请求：当前模型投影加每次重建的动态业务系统上下文。
-        projection = call(service.get_projection(session_id, position["id"]))
-        return [*projection.context.messages, dynamic_system_message()]
+        # 即将发送的完整请求：当前有效模型投影加本次模型调用前将追加的资料，与实际发送同口径。
+        messages, details = call(read_request_state())
+        if details is None:
+            return messages
+        return [
+            *messages,
+            business_context_to_llm(
+                build_business_context_message(
+                    details=details, created_at=time_ns() // 1_000_000
+                )
+            ),
+        ]
 
     async def estimate_request() -> int:
-        # 完整计数入口：来源与投影一致性由投影读取保证，动态资料按实际请求计入。
+        # 完整计数入口：来源与投影一致性由投影读取保证，本次将追加的资料与实际发送同口径计入。
         return estimate_context_tokens(request_messages()).tokens
 
+    async def build_compaction_baseline(
+        path: list[SessionEntry], entry: CompactionEntry
+    ) -> BusinessContextEntry:
+        # 压缩新基线：按拟提交检查点形成的压缩后有效投影重新采集可见真实消息来源，
+        # 待确认提案按完整当前分支核验（被摘要的真实来源仍受控保留）；强制完整 Snapshot。
+        prospective = build_effective_context([*path, entry])
+        visible = set(prospective.source_entry_ids)
+        nodes = collect_message_nodes(
+            model_visible_entries([*path, entry], visible),
+            BusinessBindings(
+                profile_confirmations=await business.list_confirmation_bindings(session_id),
+                workout_confirmations=await business.list_workout_confirmation_bindings(session_id),
+                plan_confirmations=await business.list_plan_confirmation_bindings(session_id),
+                profile_displays=await business.list_display_bindings(session_id),
+                workout_displays=await business.list_workout_display_bindings(session_id),
+                plan_displays=await business.list_plan_display_bindings(session_id),
+            ),
+        )
+        proposals = collect_pending_proposals(
+            await business.list_pending_references(session_id),
+            {item.id for item in path},
+        )
+        snapshot = BusinessContextSnapshot(
+            mode="snapshot",
+            request=RequestContext(
+                timezone=BUSINESS_TIMEZONE,
+                business_date=business_day["value"],
+                request_entry_id=request_entry["id"],
+            ),
+            message_nodes=list(nodes.values()),
+            pending_proposals=list(proposals.values()),
+        )
+        return build_business_context_entry(
+            session_id=session_id,
+            id=business_baseline_entry_id(entry.id),
+            parent_id=entry.id,
+            run_id=run.id,
+            details=snapshot,
+            created_at=time_ns() // 1_000_000,
+        )
+
     async def compact(compaction_id: str, signal) -> LoopCompactionResult:
-        # 事务外生成真实摘要与用量，再经第一部分事务入口提交；cancelled 在提交前生效。
+        # 事务外生成真实摘要与用量并重建完整新基线，再经同一事务入口原子提交；cancelled 在提交前生效。
         check_cancelled(signal)
         projection = call(service.get_projection(session_id, position["id"]))
         preparation = prepare_compaction(
@@ -1157,7 +1221,7 @@ def execute(
         tokens_before = estimate_context_tokens(request_messages()).tokens
         result = await generate_compaction_summary(
             preparation, spec, api_key=secrets[0], settings=settings, signal=signal,
-            budget=budget,
+            budget=budget, observation=observer, compaction_id=compaction_id,
         )
         check_cancelled(signal)
         system_state = get_current_system_message(projection.context.messages)
@@ -1181,18 +1245,24 @@ def execute(
             ),
             created_at=time_ns() // 1_000_000,
         )
+        baseline = call(build_compaction_baseline(projection.path, entry))
         outcome = call(service.commit_compaction(
-            entry, prepared_position=entry.parent_id, credentials=secrets
+            entry, baseline, prepared_position=entry.parent_id, credentials=secrets
         ))
         if outcome.credential_detected:
             raise CredentialDetectedError()
         parents[outcome.entry.id] = outcome.entry.parent_id
-        position["id"] = outcome.entry.id
-        refreshed = call(service.get_projection(session_id, outcome.entry.id))
+        parents[outcome.baseline.id] = outcome.entry.id
+        # 压缩提交后标注已知事件：供检查点之后的首次真实调用记录重置原因。
+        observer.note_event("compaction")
+        # 执行位置与刷新投影使用新基线节点；后续助手节点 parent_id、工具与 Steering 追加位置随之一致。
+        position["id"] = outcome.baseline.id
+        refreshed = call(service.get_projection(session_id, outcome.baseline.id))
         return LoopCompactionResult(
             entry_id=outcome.entry.id,
             parent_id=outcome.entry.parent_id,
             messages=refreshed.context.messages,
+            baseline=outcome.baseline,
         )
 
     loop_config = AgentLoopConfig(
@@ -1216,6 +1286,7 @@ def execute(
         before_tool_call=create_before_tool_call(),
         on_tool_update=on_tool_update,
         contains_credentials=guard.contains,
+        observation=observer,
     )
     # 稳定声明注册表：业务工具实例仅用于声明校验，实际执行按批重新绑定。
     context = {
@@ -1722,6 +1793,7 @@ async def launch_run(
     *,
     session_id: str,
     operation_id: str,
+    origin: str,
     accept: Callable[..., Awaitable[OperationOutcome]],
 ):
     service: SessionService = request.app.state.session_service
@@ -1750,6 +1822,7 @@ async def launch_run(
         state.run_id = UUID(run.id)
         state.secrets = secrets
         state.operation_id = operation_id
+        state.origin = origin
         state.request_entry_id = run.request_entry_id
         state.coordinator = coordinator
         coordinator.open(
@@ -1840,7 +1913,8 @@ async def run(payload: RunRequest, request: Request):
         if existing is not None:
             return JSONResponse(send_result(operation_id, existing.run))
         return await launch_run(
-            request, session_id=session_id, operation_id=operation_id, accept=accept
+            request, session_id=session_id, operation_id=operation_id,
+            origin="send", accept=accept,
         )
 
 
@@ -1875,7 +1949,8 @@ async def edit(payload: EditPayload, request: Request):
         if existing is not None:
             return JSONResponse(send_result(operation_id, existing.run))
         return await launch_run(
-            request, session_id=session_id, operation_id=operation_id, accept=accept
+            request, session_id=session_id, operation_id=operation_id,
+            origin="edit", accept=accept,
         )
 
 
@@ -1908,7 +1983,8 @@ async def regenerate(payload: RegeneratePayload, request: Request):
         if existing is not None:
             return JSONResponse(send_result(operation_id, existing.run))
         return await launch_run(
-            request, session_id=session_id, operation_id=operation_id, accept=accept
+            request, session_id=session_id, operation_id=operation_id,
+            origin="regenerate", accept=accept,
         )
 
 
