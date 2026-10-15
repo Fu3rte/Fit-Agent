@@ -85,6 +85,7 @@ import {
 } from "./reactAgent";
 import {
   mergeHistoryRounds,
+  mergeRunTimes,
   operationRound,
   pruneFrom,
   reconcileLedger,
@@ -94,12 +95,14 @@ import {
 type SessionOutcome =
   { state: "created" } | { state: "unknown" | "rejected"; message: string };
 
-/** 服务端运行快照（§11.2、§11.3）：重复受理结果与运行查询共用 */
+/** 服务端运行快照（§11.2、§11.3）：重复受理结果与运行查询共用，重复受理正文不含起止时间 */
 type RunSnapshot = {
   run_id: string;
   request_entry_id: string;
   status: RunStatusWire;
   error_message?: string | null;
+  started_at?: number;
+  finished_at?: number | null;
 };
 
 /** Steering 状态快照（§6.1、§7.1、附件契约 §4）：接收、撤回与操作查询共用同一形状 */
@@ -312,6 +315,16 @@ class SessionRunRecord {
     );
   }
 
+  /** 运行快照身份与起止时间落地（§11.2、Trace 采集方案 §5）：已知测量按 ?? 保留 */
+  private attachRun(roundId: string, run: RunSnapshot): void {
+    this.update(roundId, (round) => ({
+      ...round,
+      run_id: run.run_id,
+      request_entry_id: run.request_entry_id,
+      ...mergeRunTimes(round, run),
+    }));
+  }
+
   /** 运行终态查询（§9.2、§5.3）：running 期间保持占用，终态后重新读取历史并成功合并才释放占用 */
   private watchRun(roundId: string, runId: string): void {
     this.stopWatch();
@@ -329,11 +342,7 @@ class SessionRunRecord {
       void getRun(this.sessionId, runId, signal).then(
         (run) => {
           if (this.removed || signal.aborted || this.watch !== watch) return;
-          this.update(roundId, (round) => ({
-            ...round,
-            run_id: run.run_id,
-            request_entry_id: run.request_entry_id,
-          }));
+          this.attachRun(roundId, run);
           if (run.status === "running") {
             retryLater();
             return;
@@ -685,11 +694,7 @@ class SessionRunRecord {
     operationId: string,
     run: RunSnapshot,
   ): void {
-    this.update(roundId, (round) => ({
-      ...round,
-      run_id: run.run_id,
-      request_entry_id: run.request_entry_id,
-    }));
+    this.attachRun(roundId, run);
     if (run.status === "running") return;
     this.setOperations(forgetOperation(this.sessionId, operationId));
     this.update(roundId, (round) =>

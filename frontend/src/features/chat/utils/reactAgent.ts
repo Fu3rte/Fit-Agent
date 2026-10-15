@@ -145,6 +145,9 @@ export interface ReActRound {
   run_id?: string;
   /** 本次运行依据的用户节点（§8）：由 SSE 响应头或重复受理结果确认 */
   request_entry_id?: string;
+  /** 同一次真实运行的起止时间（UTC 毫秒，§11.2）：缺省表示未知，``finished_at`` 为 null 表示尚未取得结束测量 */
+  started_at?: number;
+  finished_at?: number | null;
   entries: ReActEntry[];
   error?: string;
   status:

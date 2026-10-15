@@ -119,6 +119,24 @@ function ConfirmationResult({ display }: { display: ConfirmationDisplay }) {
   );
 }
 
+/** 运行用时（Trace 采集方案 §5）：起止时间属于同一次真实运行，取业务记录的 UTC 毫秒差按既有约定转秒；
+ *  运行中、起点未知或结束时间为 null/缺省时不渲染，保持原有界面 */
+function RunDuration({ round }: { round: ReActRound }) {
+  if (round.status === "running") return null;
+  if (round.started_at == null || round.finished_at == null) return null;
+  return (
+    <MessageScrollerItem messageId={`${round.id}:duration`}>
+      <Message align="start">
+        <MessageContent>
+          <p className="text-sm text-muted-foreground">
+            {`用时 ${((round.finished_at - round.started_at) / 1000).toFixed(1)} 秒`}
+          </p>
+        </MessageContent>
+      </Message>
+    </MessageScrollerItem>
+  );
+}
+
 function Entry({
   entry,
   roundId,
@@ -558,6 +576,7 @@ export default function ChatTranscript({
                       />
                     </MessageScrollerItem>
                   ))}
+                <RunDuration round={round} />
                 {round.confirmation !== undefined && (
                   <MessageScrollerItem messageId={`${round.id}:confirmation`}>
                     <ConfirmationResult display={round.confirmation} />

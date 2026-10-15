@@ -158,6 +158,8 @@ export function historyToRounds(history: SessionHistoryWire): ReActRound[] {
       id: run.run_id,
       run_id: run.run_id,
       request_entry_id: run.request_entry_id,
+      started_at: run.started_at,
+      finished_at: run.finished_at,
       entries: [],
       status: run.status,
       ...(run.error_message !== null ? { error: run.error_message } : {}),
@@ -483,8 +485,23 @@ function mergeHidden(
 }
 
 /**
+ * 运行起止时间合并（Trace 采集方案 §5）：同一次真实运行内取已知测量，历史为已提交事实；
+ * 结束时间未知的一侧不得清除另一侧已取得的测量。
+ */
+export function mergeRunTimes(
+  existing: Pick<ReActRound, "started_at" | "finished_at">,
+  incoming: Pick<ReActRound, "started_at" | "finished_at">,
+) {
+  return {
+    started_at: incoming.started_at ?? existing.started_at,
+    finished_at: incoming.finished_at ?? existing.finished_at,
+  };
+}
+
+/**
  * 历史刷新并入既有展示（§5.2-6、§5.2-7、§5.3）：按 run_id 关联轮次、按稳定节点身份合并条目；
- * 历史终态优先于旧 running 快照，本页终态与仍在生成的未提交快照不被较早快照覆盖。
+ * 历史终态优先于旧 running 快照，本页终态与仍在生成的未提交快照不被较早快照覆盖；
+ * 同 run_id 的起止时间属同一次真实运行，较早 running 历史与未知账本沿用既有测量。
  */
 export function mergeHistoryRounds(
   current: ReActRound[],
@@ -495,7 +512,9 @@ export function mergeHistoryRounds(
   const local = new Map(current.map((round) => [identity(round), round]));
   const merged = history.map((round) => {
     const existing = local.get(identity(round));
-    if (existing === undefined || existing.status === "unknown") return round;
+    if (existing === undefined) return round;
+    if (existing.status === "unknown")
+      return { ...round, ...mergeRunTimes(existing, round) };
     const entries = mergeEntries(existing, round);
     const base =
       existing.status === "running" &&
@@ -505,6 +524,7 @@ export function mergeHistoryRounds(
         : existing;
     return {
       ...base,
+      ...mergeRunTimes(existing, round),
       entries,
       hidden: mergeHidden(existing.hidden, round.hidden),
       pending: unconfirmedPending(existing.pending, confirmed),
