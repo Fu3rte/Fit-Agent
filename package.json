@@ -3,7 +3,7 @@
     "private": true,
     "scripts": {
         "dev:frontend": "cd frontend && npm run dev",
-        "dev:backend": "cd backend && uv run python -m uvicorn app.interfaces.http:app --reload --host 127.0.0.1 --port 8000",
+        "dev:backend": "cd backend && uv run --env-file .env python -m uvicorn app.interfaces.http:app --reload --host 127.0.0.1 --port 8000",
         "dev": "node scripts/dev.mjs"
     },
     "devDependencies": {
