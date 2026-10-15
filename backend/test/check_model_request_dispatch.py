@@ -184,7 +184,7 @@ def make_hooks(estimates, fail: BaseException | None = None):
     async def estimate_request() -> int:
         return remaining.pop(0)
 
-    async def compact(compaction_id: str, signal) -> LoopCompactionResult:
+    async def compact(compaction_id: str, signal, span) -> LoopCompactionResult:
         state["compactions"].append(compaction_id)
         if fail is not None:
             raise fail

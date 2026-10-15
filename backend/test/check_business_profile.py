@@ -37,6 +37,7 @@ from app.infrastructure.persistence.sqlite.database import (
 from test.check_profile_confirmation import (
     CALCULATE_DATE,
     DECLARED,
+    GET_EXERCISE_DETAILS,
     GET_PROFILE,
     PREPARE,
     SEARCH_EXERCISES,
@@ -69,8 +70,8 @@ WORKOUT_TOOLS = [item.name for item in workout_tool_declarations()]
 PLAN_TOOLS = [item.name for item in plan_tool_declarations()]
 PENDING_PROPOSAL_TOOLS = [item.name for item in pending_proposal_tool_declarations()]
 PLAN_IMPORT_TOOLS = [item.name for item in plan_import_tool_declarations()]
-BUSINESS_TOOLS = {GET_PROFILE, SEARCH_EXERCISES, CALCULATE_DATE, PREPARE, STATUS,
-                  *WORKOUT_TOOLS, *PLAN_TOOLS, *PENDING_PROPOSAL_TOOLS, *PLAN_IMPORT_TOOLS}
+BUSINESS_TOOLS = {GET_PROFILE, SEARCH_EXERCISES, GET_EXERCISE_DETAILS, CALCULATE_DATE, PREPARE,
+                  STATUS, *WORKOUT_TOOLS, *PLAN_TOOLS, *PENDING_PROPOSAL_TOOLS, *PLAN_IMPORT_TOOLS}
 
 
 async def check_catalog(directory: Path) -> dict:
@@ -106,6 +107,7 @@ async def check_declarations() -> dict:
     assert [item.name for item in declarations] == [
         GET_PROFILE,
         SEARCH_EXERCISES,
+        GET_EXERCISE_DETAILS,
         CALCULATE_DATE,
         PREPARE,
         STATUS,
@@ -117,7 +119,7 @@ async def check_declarations() -> dict:
     profile = profile_tool_declarations()
     exercises = exercise_tool_declarations()
     assert {item.name for item in profile} == {GET_PROFILE, PREPARE, STATUS}
-    assert [item.name for item in exercises] == [SEARCH_EXERCISES]
+    assert [item.name for item in exercises] == [SEARCH_EXERCISES, GET_EXERCISE_DETAILS]
     assert {item.name: item for item in profile + exercises + date_tool_declarations()
             + workout_tool_declarations()
             + plan_tool_declarations() + pending_proposal_tool_declarations()
@@ -161,23 +163,38 @@ async def check_read_paths(root: Path) -> dict:
             "content": None,
         }
 
-        searched = await fixture.invoke(
-            SEARCH_EXERCISES, {"name": "卧推", "equipment": "barbell"}, context
+        # 详情读取走真实 Catalog，零费用覆盖完整九字段与批量结构。
+        detailed = await fixture.invoke(
+            GET_EXERCISE_DETAILS, {"ids": ["0001", "0002"]}, context
         )
-        assert searched.is_error is False
-        exercises = json.loads(message_text(searched))
-        assert exercises and all(set(item) == EXERCISE_FIELDS for item in exercises)
+        assert detailed.is_error is False
+        body = json.loads(message_text(detailed))
+        assert set(body) == {"items", "has_more", "remaining_ids"}
+        assert body["items"] and all(set(item) == EXERCISE_FIELDS for item in body["items"])
 
-        # 检索参数校验：空白名称、缺失名称与未定义字段在参数层拒绝。
+        # 检索参数校验：缺失 purpose、空白名称、未定义字段与空对象在参数层拒绝。
         rejected = []
         for arguments in (
-            {"name": "   "},
-            {"name": "卧推", "kind": "push"},
+            {"purpose": "lookup", "name": "   "},
+            {"purpose": "lookup", "name": "卧推", "kind": "push"},
+            {"name": "卧推"},
             {},
         ):
             message = await fixture.invoke(SEARCH_EXERCISES, arguments, context)
             assert message.is_error is True
             rejected.append(message_text(message)[:40])
+
+        # 未知动作 ID 明确报错，不伪造详情；空、重复与超上限在参数层拒绝。
+        unknown = await fixture.invoke(GET_EXERCISE_DETAILS, {"ids": ["9999"]}, context)
+        assert unknown.is_error is True
+        assert envelope(unknown)["code"] == "exercise_not_found"
+        for arguments in (
+            {"ids": []},
+            {"ids": ["0001", "0001"]},
+            {"ids": ["0001", "0002", "0003", "0004", "0005", "0006"]},
+        ):
+            message = await fixture.invoke(GET_EXERCISE_DETAILS, arguments, context)
+            assert message.is_error is True
 
         # 保存与查询的参数格式：非标准 UUID、缺失字段与多余字段均拒绝。
         # 保存由独立确认入口受理：未知快照与错误展示绑定按业务错误拒绝，零写入。
@@ -191,7 +208,7 @@ async def check_read_paths(root: Path) -> dict:
             assert message.is_error is True
         # 参数层拒绝不产生任何画像写入。
         assert (await fixture.business.get_profile()).version is None
-        return {"search_count": len(exercises), "rejected": rejected}
+        return {"detail_count": len(body["items"]), "rejected": rejected}
     finally:
         await fixture.close()
 

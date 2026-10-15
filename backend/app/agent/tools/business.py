@@ -37,7 +37,7 @@ def bind_business_tools(
     plan_registry = {} if plan_prepared is None else plan_prepared
     return {
         "get_profile": profile["get_profile"],
-        **bind_exercise_tools(service),
+        **bind_exercise_tools(service, call),
         **bind_date_tools(context),
         **profile,
         **bind_pending_proposal_tools(service, context, call),

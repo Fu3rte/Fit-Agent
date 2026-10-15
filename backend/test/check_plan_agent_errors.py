@@ -41,7 +41,7 @@ PLAN_CALL = "prepare_plan"
 PLAN_IMPORT = "prepare_plan_import"
 SAVING_TOOLS = {"save_plan", "save_profile_update", "save_workout", "update_workout"}
 READ_ONLY = {"get_profile", "get_current_plan", "list_plans", "search_exercises",
-             "calculate_date", "list_workouts"}
+             "get_exercise_details", "calculate_date", "list_workouts"}
 CAPTURED: list[dict] = []
 COUNTED: set[str] = set()
 ENTERED: list[dict] = []

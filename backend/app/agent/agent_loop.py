@@ -11,6 +11,7 @@ from app.agent.cache_observation import NORMAL_CALL
 from app.agent.compaction import ContextBudgetExceeded, should_compact
 from app.agent.config import AgentLoopConfig, CompactionHooks
 from app.agent.message_context import prepare_message_context
+from app.agent.telemetry import TraceSpan
 from app.agent.tool import AgentTool, FinalizedToolCall, ToolBatchResult, run_tool_batch
 from app.ai.context import get_current_tools
 from app.ai.messages import (
@@ -105,6 +106,7 @@ async def stream_assistant_response(
     node_id: str,
     emit: AgentEventSink,
     stream_fn: StreamFn,
+    parent: TraceSpan,
 ) -> AssistantMessage:
     messages = await prepare_message_context(
         context["messages"],
@@ -126,64 +128,73 @@ async def stream_assistant_response(
             raise ValueError(f"工具声明与执行注册表不一致: {declaration.name}")
     check_cancelled(signal)
     spec = _model_spec(config)
-    options: StreamOptions = {
-        "api_key": config.model.api_key,
-        "signal": signal,
-        "max_tokens": min(DEFAULT_MAX_OUTPUT_TOKENS, spec.max_tokens),
-    }
-    if config.observation is not None:
-        # 逐次真实调用绑定本回合助手节点身份；观测按实际发送的最终投影记录。
-        options["observation"] = config.observation.start_call(
-            NORMAL_CALL, message_id=node_id
-        )
-    llm_context: LlmContext = {"messages": messages}
+    # 共享请求预算的检查与占用先于模型 Span 创建：预算拒绝时不产生虚假模型调用记录。
     if config.request_budget is None:
         raise RuntimeError("正式运行必须装配共享模型请求预算")
     config.request_budget.reserve()
-    response = stream_fn(spec, llm_context, options)
-    index: int | None = None
-    async with aclosing(response):
-        async for event in response:
-            if event["type"] == "start":
-                if index is not None:
-                    raise ValueError("重复的助手消息开始事件")
-                partial = event["partial"]
-                index = len(context["messages"])
-                context["messages"].append(partial)
-                await emit({
-                    "type": "message_start",
-                    "message_id": node_id,
-                    "message": partial.model_copy(deep=True),
-                })
-            elif event["type"] == "done":
-                if index is None:
-                    raise ValueError("助手终止事件缺少开始事件")
-                context["messages"][index] = event["message"]
-            else:
-                if index is None:
-                    raise ValueError("助手增量事件缺少开始事件")
-                partial = event["partial"]
-                context["messages"][index] = partial
-                snapshot = partial.model_copy(deep=True)
-                await emit({
-                    "type": "message_update",
-                    "message_id": node_id,
-                    "message": snapshot,
-                    "assistant_event": {**event, "partial": snapshot},
-                })
+    attributes = {"provider": spec.provider, "model": spec.id, "call_kind": NORMAL_CALL}
+
+    async def model_operation(model_span: TraceSpan) -> AssistantMessage:
+        options: StreamOptions = {
+            "api_key": config.model.api_key,
+            "signal": signal,
+            "max_tokens": min(DEFAULT_MAX_OUTPUT_TOKENS, spec.max_tokens),
+        }
+        if config.observation is not None:
+            # 逐次真实调用绑定本回合助手节点身份；观测按实际发送的最终投影记录,
+            # 并把真实结局与用量补充到本模型 Span。
+            options["observation"] = config.observation.start_call(
+                NORMAL_CALL, message_id=node_id, span=model_span
+            )
+        llm_context: LlmContext = {"messages": messages}
+        response = stream_fn(spec, llm_context, options)
+        index: int | None = None
+        # 模型计时覆盖真实请求与底层响应流关闭：提前关闭、异常与取消同样在此收尾。
+        async with aclosing(response):
+            async for event in response:
+                if event["type"] == "start":
+                    if index is not None:
+                        raise ValueError("重复的助手消息开始事件")
+                    partial = event["partial"]
+                    index = len(context["messages"])
+                    context["messages"].append(partial)
+                    await emit({
+                        "type": "message_start",
+                        "message_id": node_id,
+                        "message": partial.model_copy(deep=True),
+                    })
+                elif event["type"] == "done":
+                    if index is None:
+                        raise ValueError("助手终止事件缺少开始事件")
+                    context["messages"][index] = event["message"]
+                else:
+                    if index is None:
+                        raise ValueError("助手增量事件缺少开始事件")
+                    partial = event["partial"]
+                    context["messages"][index] = partial
+                    snapshot = partial.model_copy(deep=True)
+                    await emit({
+                        "type": "message_update",
+                        "message_id": node_id,
+                        "message": snapshot,
+                        "assistant_event": {**event, "partial": snapshot},
+                    })
         final_message = await response.result()
         if final_message.stop_reason == "pending" or (
             final_message.usage is None and final_message.stop_reason != "aborted"
         ):
             raise ValueError("模型流缺少完整的最终消息")
-        if config.save_message is not None:
-            await config.save_message(node_id, final_message)
-        await emit({
-            "type": "message_end",
-            "message_id": node_id,
-            "message": final_message.model_copy(deep=True),
-        })
         return final_message
+
+    final_message = await parent.start_span("model", attributes, model_operation)
+    if config.save_message is not None:
+        await config.save_message(node_id, final_message)
+    await emit({
+        "type": "message_end",
+        "message_id": node_id,
+        "message": final_message.model_copy(deep=True),
+    })
+    return final_message
 
 
 async def compact_if_needed(
@@ -191,6 +202,7 @@ async def compact_if_needed(
     hooks: CompactionHooks,
     signal: Event | None,
     emit: AgentEventSink,
+    parent: TraceSpan,
 ) -> None:
     # 每次模型调用前的阈值压缩：最多 4 次，每次压缩后重估完整请求。
     # 回到预算内即继续；仍超预算且估算输入没有减少时立即终止；第 4 次后同样复核。
@@ -200,7 +212,7 @@ async def compact_if_needed(
         if not should_compact(tokens, hooks.context_window, hooks.reserve_tokens):
             return
         before = tokens
-        await run_compaction(context, hooks, signal, emit, "threshold")
+        await run_compaction(context, hooks, signal, emit, "threshold", parent)
         tokens = await hooks.estimate_request()
         if not should_compact(tokens, hooks.context_window, hooks.reserve_tokens):
             return
@@ -215,34 +227,41 @@ async def run_compaction(
     signal: Event | None,
     emit: AgentEventSink,
     reason: str,
+    parent: TraceSpan | None = None,
 ) -> None:
     # 阈值压缩与溢出恢复共用同一次提交与阶段事件，只压缩一次。
+    # Compaction Span 包住准备、摘要与检查点提交的整个操作，并作为摘要 model 子 Span 的父对象。
     compaction_id = str(uuid4())
-    await emit({
-        "type": "compaction_start",
-        "compaction_id": compaction_id,
-        "reason": reason,
-    })
-    result = await hooks.compact(compaction_id, signal)
-    if result.entry_id != compaction_id or not result.parent_id:
-        raise ValueError("压缩提交节点身份与阶段事件不一致")
-    context["messages"] = result.messages
-    await emit({
-        "type": "compaction_end",
-        "compaction_id": compaction_id,
-        "entry_id": result.entry_id,
-        "parent_id": result.parent_id,
-    })
-    # 节点对提交成功后先公开 compaction_end，再公开新基线 custom_message，随后才进入下一次模型消息。
-    if result.baseline is not None:
-        baseline = result.baseline
+
+    async def compaction_operation(compaction_span: TraceSpan) -> None:
         await emit({
-            "type": "custom_message",
-            "entry_id": baseline.id,
-            "parent_id": baseline.parent_id,
-            "run_id": baseline.run_id,
-            "created_at": baseline.created_at,
+            "type": "compaction_start",
+            "compaction_id": compaction_id,
+            "reason": reason,
         })
+        result = await hooks.compact(compaction_id, signal, compaction_span)
+        if result.entry_id != compaction_id or not result.parent_id:
+            raise ValueError("压缩提交节点身份与阶段事件不一致")
+        context["messages"] = result.messages
+        await emit({
+            "type": "compaction_end",
+            "compaction_id": compaction_id,
+            "entry_id": result.entry_id,
+            "parent_id": result.parent_id,
+        })
+        # 节点对提交成功后先公开 compaction_end，再公开新基线 custom_message，随后才进入下一次模型消息。
+        if result.baseline is not None:
+            baseline = result.baseline
+            await emit({
+                "type": "custom_message",
+                "entry_id": baseline.id,
+                "parent_id": baseline.parent_id,
+                "run_id": baseline.run_id,
+                "created_at": baseline.created_at,
+            })
+
+    scope = parent if parent is not None else TraceSpan()
+    await scope.start_span("compaction", {"reason": reason}, compaction_operation)
 
 
 async def recover_context_overflow(
@@ -250,11 +269,12 @@ async def recover_context_overflow(
     hooks: CompactionHooks | None,
     signal: Event | None,
     emit: AgentEventSink,
+    parent: TraceSpan | None = None,
 ) -> None:
     # 明确上下文溢出的一次恢复：复用现有切点与摘要调用，只压缩一次并提交检查点。
     if hooks is None:
         raise ContextBudgetExceeded("未配置压缩，无法恢复上下文溢出")
-    await run_compaction(context, hooks, signal, emit, "overflow")
+    await run_compaction(context, hooks, signal, emit, "overflow", parent)
     # 检查点提交后按完整请求复核预算：合法切点只保证保留消息完整，不保证仍满足容量。
     tokens = await hooks.estimate_request()
     if should_compact(tokens, hooks.context_window, hooks.reserve_tokens):
@@ -290,7 +310,10 @@ async def run_loop(
     emit: AgentEventSink,
     stream_fn: StreamFn,
 ) -> None:
-    trace_id = uuid4().hex
+    # 正式运行的内部 Trace 身份由入口提供的根上下文统一提供；独立调用沿用本地身份。
+    trace_id = config.trace_span.trace_id if config.trace_span else uuid4().hex
+    # 显式父对象：正式运行挂在入口根 Span 下，独立调用使用无记录上下文。
+    parent = config.trace_span if config.trace_span is not None else TraceSpan()
     await emit({"type": "trace_start", "trace_id": trace_id})
 
     async def emit_tool_start(call: ToolCall) -> None:
@@ -337,6 +360,8 @@ async def run_loop(
                 "trace_id": trace_id,
                 "turn_id": turn_id,
             })
+            # Turn Span 包住本轮输入处理、模型、工具与本轮收尾；显式传给本轮全部子操作。
+            turn_span = parent.open("turn", {})
             turn_completed = False
             tool_timing: ToolBatchResult | None = None
             try:
@@ -353,10 +378,12 @@ async def run_loop(
                     await config.on_steering_consumed(pending_messages)
                 pending_messages = []
                 if config.compaction is not None and not skip_threshold:
-                    await compact_if_needed(context, config.compaction, signal, emit)
+                    await compact_if_needed(
+                        context, config.compaction, signal, emit, turn_span
+                    )
                 skip_threshold = False
                 message = await stream_assistant_response(
-                    context, config, signal, message_id, emit, stream_fn
+                    context, config, signal, message_id, emit, stream_fn, turn_span
                 )
                 model_calls += 1
                 seen = {
@@ -375,7 +402,7 @@ async def run_loop(
                     recovery_used = True
                     skip_threshold = True
                     await recover_context_overflow(
-                        context, config.compaction, signal, emit
+                        context, config.compaction, signal, emit, turn_span
                     )
                     if config.observation is not None:
                         config.observation.note_event("overflow_recovery")
@@ -434,6 +461,7 @@ async def run_loop(
                     on_tool_finalized=emit_tool_finalized,
                     on_tool_update=config.on_tool_update,
                     contains_credentials=config.contains_credentials,
+                    telemetry_span=turn_span,
                 )
                 tool_timing = batch
                 for tool_result in batch.messages:
@@ -457,24 +485,30 @@ async def run_loop(
                 check_cancelled(signal)
                 turn_completed = True
             finally:
-                await emit({
-                    "type": "turn_end",
-                    "trace_id": trace_id,
-                    "turn_id": turn_id,
-                    "status": (
-                        "cancelled" if isinstance(exception(), (CancelledError, TaskCancelledError))
-                        else "completed" if turn_completed else "failed"
-                    ),
-                    "tool_prepare_started_at": (
-                        tool_timing.prepare_started_at if tool_timing is not None else None
-                    ),
-                    "tool_first_result_at": (
-                        tool_timing.first_result_at if tool_timing is not None else None
-                    ),
-                    "tool_finalized_at": (
-                        tool_timing.finalized_at if tool_timing is not None else None
-                    ),
-                })
+                # 真实业务结局同时驱动公开事件与 Turn Span 状态；所有子操作已收尾后才结算。
+                turn_status = (
+                    "cancelled" if isinstance(exception(), (CancelledError, TaskCancelledError))
+                    else "completed" if turn_completed else "failed"
+                )
+                turn_span.set_status(turn_status)
+                try:
+                    await emit({
+                        "type": "turn_end",
+                        "trace_id": trace_id,
+                        "turn_id": turn_id,
+                        "status": turn_status,
+                        "tool_prepare_started_at": (
+                            tool_timing.prepare_started_at if tool_timing is not None else None
+                        ),
+                        "tool_first_result_at": (
+                            tool_timing.first_result_at if tool_timing is not None else None
+                        ),
+                        "tool_finalized_at": (
+                            tool_timing.finalized_at if tool_timing is not None else None
+                        ),
+                    })
+                finally:
+                    turn_span.settle(exception())
             check_cancelled(signal)
             get_steering = (
                 config.get_steering_messages_or_close

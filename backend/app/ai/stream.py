@@ -1,4 +1,6 @@
+import asyncio
 from collections.abc import AsyncGenerator, AsyncIterator
+from concurrent.futures import CancelledError as FutureCancelledError
 from contextlib import aclosing
 from threading import Event
 
@@ -111,6 +113,13 @@ class AssistantResponse:
             raise RuntimeError("模型流缺少终止事件")
 
 
+def _cancelled(error: BaseException, signal: Event | None) -> bool:
+    # 取消依据实际取消异常与协作信号判断：普通异常与提前关闭不属于取消。
+    if isinstance(error, (asyncio.CancelledError, FutureCancelledError)):
+        return True
+    return signal is not None and signal.is_set()
+
+
 async def _observed(
     source: AsyncGenerator[AssistantStreamEvent, None],
     observation: CallObservation | None,
@@ -120,10 +129,21 @@ async def _observed(
     # 使已发送请求保留可核实状态，缺失的用量保持缺失。
     # 转发层持有底层流的关闭责任：消费者提前退出时同样关闭底层生成器，观测结局只写一次。
     async with aclosing(source):
+        first_text_seen = False
         try:
             async for event in source:
+                if not first_text_seen and observation is not None and (
+                    event["type"] == "text_delta" and event["delta"]
+                ):
+                    # 首个非空正文增量：按模型自身起点计时，只记录一次。
+                    observation.record_first_text()
+                    first_text_seen = True
                 yield event
-        finally:
+        except BaseException as error:
+            if observation is not None and not observation.finished:
+                observation.fail(_cancelled(error, signal))
+            raise
+        else:
             if observation is not None and not observation.finished:
                 observation.fail(signal is not None and signal.is_set())
 

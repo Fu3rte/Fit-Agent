@@ -57,6 +57,7 @@ SYSTEM = SystemMessage(role="system", content="系统提示词", tools_added=[],
 
 GET_PROFILE = "get_profile"
 SEARCH_EXERCISES = "search_exercises"
+GET_EXERCISE_DETAILS = "get_exercise_details"
 CALCULATE_DATE = "calculate_date"
 PREPARE = "prepare_profile_update"
 SAVE = "save_profile_update"
@@ -457,12 +458,14 @@ async def check_first_build(root: Path) -> dict:
         assert set(tools) == {
             GET_PROFILE,
             SEARCH_EXERCISES,
+            GET_EXERCISE_DETAILS,
             CALCULATE_DATE,
             PREPARE,
             STATUS,
             "get_workout", "list_workouts", "prepare_workout", "get_workout_save_status",
             "get_current_plan", "get_plan", "list_plans", "prepare_plan", "get_plan_save_status",
-            "get_pending_proposal", "prepare_plan_import", "prepare_plan_adjustment",
+            "get_pending_proposal", "cancel_pending_proposal",
+            "prepare_plan_import", "prepare_plan_adjustment",
         }
         assert {name: tool.definition() for name, tool in tools.items()} == DECLARED
         assert set(DECLARED[PREPARE].parameters["properties"]) == {
@@ -1112,13 +1115,15 @@ async def check_tool_envelopes(root: Path) -> dict:
         assert blank.is_error is True
         assert len(blank.content) == 1
 
-        # 成功协议：目录检索与画像读取保持完整结果。
-        searched = await fixture.invoke(
-            SEARCH_EXERCISES, {"name": "卧推", "equipment": "barbell"}, context
+        # 成功协议：按 ID 详情读取返回完整目录九字段（真实 Catalog，不触发检索网络）。
+        detailed = await fixture.invoke(
+            GET_EXERCISE_DETAILS, {"ids": ["0001"]}, context
         )
-        assert searched.is_error is False
-        exercises = json.loads(message_text(searched))
-        assert exercises and set(exercises[0]) == {
+        assert detailed.is_error is False
+        details = json.loads(message_text(detailed))
+        assert set(details) == {"items", "has_more", "remaining_ids"}
+        assert len(details["items"]) == 1
+        assert set(details["items"][0]) == {
             "id",
             "name",
             "body_part",
@@ -1128,7 +1133,7 @@ async def check_tool_envelopes(root: Path) -> dict:
             "secondary_muscles",
             "load_convention",
             "steps",
-        }, exercises[0]
+        }, details["items"][0]
         profile = await fixture.invoke(GET_PROFILE, {}, context)
         assert profile.is_error is False
         assert profile.role == "toolResult"
@@ -1266,12 +1271,14 @@ def check() -> None:
     assert set(DECLARED) == {
         GET_PROFILE,
         SEARCH_EXERCISES,
+        GET_EXERCISE_DETAILS,
         CALCULATE_DATE,
         PREPARE,
         STATUS,
         "get_workout", "list_workouts", "prepare_workout", "get_workout_save_status",
         "get_current_plan", "get_plan", "list_plans", "prepare_plan", "get_plan_save_status",
-        "get_pending_proposal", "prepare_plan_import", "prepare_plan_adjustment",
+        "get_pending_proposal", "cancel_pending_proposal",
+        "prepare_plan_import", "prepare_plan_adjustment",
     }
     evidence: dict = {}
     with TemporaryDirectory(dir=EVIDENCE, ignore_cleanup_errors=True) as directory:

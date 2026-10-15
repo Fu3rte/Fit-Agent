@@ -5,6 +5,7 @@ from threading import Event
 from app.agent.budget import RequestBudget
 from app.agent.cache_observation import CacheObserver
 from app.agent.message_context import ConvertToLlm, TransformContext, convert_to_llm
+from app.agent.telemetry import TraceSpan
 from app.agent.tool import (
     AfterToolCall,
     AgentTool,
@@ -32,8 +33,9 @@ class LoopCompactionResult:
 @dataclass
 class CompactionHooks:
     # 每次模型调用前由装配层提供：当前完整请求计数与一次真实压缩提交。
+    # compact 接收当前 Compaction Span 作为摘要 model 子 Span 的显式父对象。
     estimate_request: Callable[[], Awaitable[int]]
-    compact: Callable[[str, Event | None], Awaitable[LoopCompactionResult]]
+    compact: Callable[[str, Event | None, TraceSpan], Awaitable[LoopCompactionResult]]
     context_window: int
     reserve_tokens: int
 
@@ -63,3 +65,5 @@ class AgentLoopConfig:
     contains_credentials: CredentialCheck | None = None
     # 逐模型调用缓存观测：普通调用与摘要调用在最终投影处上报；未装配时不做观测。
     observation: CacheObserver | None = None
+    # 根上下文：正式运行由入口提供，Agent 循环据此统一内部 Trace 身份；未装配时按无记录上下文处理。
+    trace_span: TraceSpan | None = None

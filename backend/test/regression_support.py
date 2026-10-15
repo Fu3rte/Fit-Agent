@@ -106,6 +106,15 @@ def patch_default_database(name: str) -> Path:
     return path
 
 
+def patch_trace_database(name: str) -> Path:
+    # 观测库默认路径隔离到测试专用目录：生产数据目录与既有自检快照保持零改动。
+    from app.agent import telemetry
+
+    path = temporary_root(name) / f"trace-{uuid4().hex}.db"
+    telemetry.trace_database_path = lambda: path
+    return path
+
+
 def client(base_url: str, timeout: float = 180) -> httpx.Client:
     return httpx.Client(
         base_url=base_url,

@@ -1,12 +1,14 @@
 import argparse
 import json
 from collections.abc import Callable, Iterable, Sequence
+from contextlib import suppress
 from hashlib import sha256
 from pathlib import Path
 from time import time_ns
 from urllib.parse import urlsplit, urlunsplit
 from uuid import uuid4
 
+from app.agent.telemetry import TraceSpan
 from app.ai.messages import Model, Usage
 from app.ai.types import ModelSpec
 
@@ -27,6 +29,16 @@ RESET_CALL = "reset"
 RESET_EVENTS = frozenset(
     {"compaction", "model_switch", "edit", "branch", "overflow_recovery"}
 )
+
+# 真实调用结局到模型 Span 终结状态与 stop_reason 的映射：stop_reason 仅取五种合法值。
+_CACHE_STATUS_TO_SPAN: dict[str, tuple[str, str | None]] = {
+    "stop": ("completed", "stop"),
+    "length": ("completed", "length"),
+    "toolUse": ("completed", "toolUse"),
+    "error": ("failed", "error"),
+    "aborted": ("cancelled", "aborted"),
+    "failed": ("failed", None),
+}
 
 
 def observation_directory() -> Path:
@@ -120,6 +132,7 @@ class CallObservationHandle:
         compaction_id: str | None,
         call_index: int,
         events: list[str],
+        span: TraceSpan | None = None,
     ) -> None:
         self._owner = owner
         self._call_kind = call_kind
@@ -128,12 +141,18 @@ class CallObservationHandle:
         self._compaction_id = compaction_id
         self._call_index = call_index
         self._events = events
+        self._span = span
         self._record: ModelCallObservation | None = None
         self._finished = False
 
     @property
     def finished(self) -> bool:
         return self._finished
+
+    def record_first_text(self) -> None:
+        # 首个非空正文增量：复用同一模型 Span 的首次写入语义。
+        if self._span is not None:
+            self._span.record_first_text()
 
     def observe(self, request: dict, model: ModelSpec) -> None:
         if self._record is not None:
@@ -217,7 +236,28 @@ class CallObservationHandle:
                 "output_tokens": int(usage.output),
             })
         self._record = record.model_copy(update={"status": status})
-        self._owner.persist(self._record)
+        try:
+            self._owner.persist(self._record)
+        finally:
+            # 持久化属纯观测操作：失败后仍向模型 Span 补充真实状态与用量。
+            self._report_span(usage, status)
+
+    def _report_span(self, usage: Usage | None, status: str) -> None:
+        # 向对应模型 Span 补充真实结局与用量：只推送属性白名单允许的字段，未知值保持省略。
+        span = self._span
+        if span is None:
+            return
+        span_status, stop_reason = _CACHE_STATUS_TO_SPAN.get(status, ("failed", None))
+        attributes: dict[str, object] = {}
+        if stop_reason is not None:
+            attributes["stop_reason"] = stop_reason
+        if usage is not None:
+            attributes["input_tokens"] = int(usage.input)
+            attributes["output_tokens"] = int(usage.output)
+            attributes["cache_read_tokens"] = int(usage.cache_read)
+            attributes["cache_write_tokens"] = int(usage.cache_write)
+        span.set_attributes(attributes)
+        span.set_status(span_status)
 
 
 class CacheObserver:
@@ -244,22 +284,24 @@ class CacheObserver:
         return self._directory / f"{self.session_id}.jsonl"
 
     def _load_chains(self) -> dict[str, dict]:
+        # 读取与解析属纯观测操作：文件缺失、读取或解析故障时按无历史比较链继续。
         chains: dict[str, dict] = {}
-        path = self._path()
-        if not path.exists():
-            return chains
-        for record in _read_records(path):
-            if record.session_id != self.session_id:
-                continue
-            self._call_index = max(self._call_index, record.call_index)
-            chains[_chain_key(record.session_id, _purpose(record.call_kind))] = {
-                "system_hash": record.system_hash,
-                "tools_hash": record.tools_hash,
-                "provider": record.provider,
-                "model": record.model,
-                "message_fingerprints": record.message_fingerprints,
-                "observation_id": record.observation_id,
-            }
+        with suppress(Exception):
+            path = self._path()
+            if not path.exists():
+                return chains
+            for record in _read_records(path):
+                if record.session_id != self.session_id:
+                    continue
+                self._call_index = max(self._call_index, record.call_index)
+                chains[_chain_key(record.session_id, _purpose(record.call_kind))] = {
+                    "system_hash": record.system_hash,
+                    "tools_hash": record.tools_hash,
+                    "provider": record.provider,
+                    "model": record.model,
+                    "message_fingerprints": record.message_fingerprints,
+                    "observation_id": record.observation_id,
+                }
         return chains
 
     def record_chain(
@@ -290,6 +332,7 @@ class CacheObserver:
         *,
         message_id: str | None = None,
         compaction_id: str | None = None,
+        span: TraceSpan | None = None,
     ) -> CallObservationHandle:
         if call_kind not in (NORMAL_CALL, HISTORY_SUMMARY_CALL, TURN_PREFIX_SUMMARY_CALL):
             raise ValueError(f"未知调用用途: {call_kind}")
@@ -304,19 +347,22 @@ class CacheObserver:
             compaction_id=compaction_id,
             call_index=self._call_index,
             events=events,
+            span=span,
         )
 
     def persist(self, observation: ModelCallObservation) -> None:
-        payload = observation.model_dump()
-        if self._contains is not None and self._contains(payload):
-            # 写入边界：命中凭据或敏感信息时阻止落盘。
-            return
-        path = self._path()
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("a", encoding="utf-8") as handle:
-            handle.write(
-                json.dumps(payload, ensure_ascii=False, allow_nan=False) + "\n"
-            )
+        # 写入属纯观测操作：目录创建、序列化与写入的普通故障被隔离。
+        # 命中凭据或敏感信息时阻止落盘；检查本身失败同样按拒绝处理，保持白名单边界。
+        with suppress(Exception):
+            payload = observation.model_dump()
+            if self._contains is not None and self._contains(payload):
+                return
+            path = self._path()
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with path.open("a", encoding="utf-8") as handle:
+                handle.write(
+                    json.dumps(payload, ensure_ascii=False, allow_nan=False) + "\n"
+                )
 
 
 def _read_records(path: Path) -> list[ModelCallObservation]:

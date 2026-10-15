@@ -26,13 +26,13 @@ from test.regression_support import temporary_root
 EVIDENCE = temporary_root("agent-save-boundary")
 # 方案 §7.7：模型可用注册表不提供这四项保存工具。
 SAVE_TOOLS = ("save_profile_update", "save_plan", "save_workout", "update_workout")
-# 准备、业务查询与原结果状态查询继续可用。
+# 准备、提案取消、业务查询与原结果状态查询继续可用。
 QUERY_AND_PREPARE = (
     "get_profile", "prepare_profile_update", "get_profile_update_status",
     "get_workout", "list_workouts", "prepare_workout", "get_workout_save_status",
     "get_current_plan", "get_plan", "list_plans", "prepare_plan", "get_plan_save_status",
-    "get_pending_proposal", "prepare_plan_import", "prepare_plan_adjustment",
-    "search_exercises", "calculate_date",
+    "get_pending_proposal", "cancel_pending_proposal", "prepare_plan_import", "prepare_plan_adjustment",
+    "search_exercises", "get_exercise_details", "calculate_date",
 )
 DECLARED = {item.name: item for item in business_tool_declarations()}
 PROFILE = {

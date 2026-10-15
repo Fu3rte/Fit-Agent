@@ -465,7 +465,7 @@ async def scenario_budget_recheck() -> None:
         position = {"id": "u2"}
         committed: list[str] = []
 
-        async def compact(compaction_id, signal):
+        async def compact(compaction_id, signal, span):
             projection = await service.get_projection(SID, position["id"])
             preparation = C.prepare_compaction(
                 projection.path, spec.context_window, spec.max_tokens, settings

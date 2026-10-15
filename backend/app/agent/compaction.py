@@ -13,6 +13,7 @@ from app.agent.cache_observation import (
 )
 from app.agent.compaction_summary import CompactionSummaryMessage
 from app.agent.message_context import business_context_to_llm, convert_to_llm
+from app.agent.telemetry import TraceSpan
 from app.ai.messages import (
     AssistantMessage,
     ImageContent,
@@ -743,27 +744,38 @@ async def _call_summary(
     turn_prefix: bool = False,
     observation: CacheObserver | None = None,
     compaction_id: str | None = None,
+    parent: TraceSpan | None = None,
 ) -> CompactionSummaryResult:
     check_cancelled(signal)
     prompt = _summary_prompt(
         messages, previous_summary=previous_summary, turn_prefix=turn_prefix
     )
-    options: StreamOptions = {
-        "api_key": api_key,
-        "signal": signal,
-        "max_tokens": _summary_max_tokens(settings.reserve_tokens, model.max_tokens, ratio),
-    }
-    if observation is not None:
-        # 每个实际摘要请求各记录一次，标明历史摘要或任务前缀摘要并关联真实压缩身份。
-        kind = TURN_PREFIX_SUMMARY_CALL if turn_prefix else HISTORY_SUMMARY_CALL
-        options["observation"] = observation.start_call(
-            kind, compaction_id=compaction_id
-        )
-    _check_summary_budget(prompt, model, options["max_tokens"], label)
+    max_tokens = _summary_max_tokens(settings.reserve_tokens, model.max_tokens, ratio)
+    # 预算校验与输出额度在请求发出前确定：拒绝时不产生模型子 Span。
+    _check_summary_budget(prompt, model, max_tokens, label)
     if budget is None:
         raise ValueError(f"{label}缺少共享请求预算，无法计数")
+    # 共享请求预算的检查与占用先于模型子 Span 创建：预算拒绝时不产生虚假模型调用记录。
     budget.reserve()
-    message = await complete(model, _build_summary_context(prompt), options)
+    kind = TURN_PREFIX_SUMMARY_CALL if turn_prefix else HISTORY_SUMMARY_CALL
+    attributes = {"provider": model.provider, "model": model.id, "call_kind": kind}
+
+    async def summary_operation(summary_span: TraceSpan) -> AssistantMessage:
+        options: StreamOptions = {
+            "api_key": api_key,
+            "signal": signal,
+            "max_tokens": max_tokens,
+        }
+        if observation is not None:
+            # 每个实际摘要请求各记录一次，标明历史摘要或任务前缀摘要并关联真实压缩身份,
+            # 真实结局与用量同时补充到本模型子 Span。
+            options["observation"] = observation.start_call(
+                kind, compaction_id=compaction_id, span=summary_span
+            )
+        return await complete(model, _build_summary_context(prompt), options)
+
+    scope = parent if parent is not None else TraceSpan()
+    message = await scope.start_span("model", attributes, summary_operation)
     check_cancelled(signal)
     return _validated_summary(message, label)
 
@@ -799,8 +811,10 @@ async def generate_compaction_summary(
     budget: RequestBudget | None = None,
     observation: CacheObserver | None = None,
     compaction_id: str | None = None,
+    parent: TraceSpan | None = None,
 ) -> CompactionSummaryResult:
     # 独立摘要请求：只有摘要系统提示词与序列化历史，不注册任何业务工具。
+    # parent 为当前 Compaction Span：历史摘要与任务前缀摘要分别在其下建立 model 子 Span。
     if not api_key:
         raise ValueError("api_key 不能为空")
     if preparation.is_split_turn and preparation.turn_prefix_messages:
@@ -817,6 +831,7 @@ async def generate_compaction_summary(
                 budget=budget,
                 observation=observation,
                 compaction_id=compaction_id,
+                parent=parent,
             )
             if preparation.messages_to_summarize
             else None
@@ -834,6 +849,7 @@ async def generate_compaction_summary(
             turn_prefix=True,
             observation=observation,
             compaction_id=compaction_id,
+            parent=parent,
         )
         history_text = (
             history.summary if history is not None else preparation.previous_summary or "无先前历史。"
@@ -859,4 +875,5 @@ async def generate_compaction_summary(
         budget=budget,
         observation=observation,
         compaction_id=compaction_id,
+        parent=parent,
     )

@@ -1,0 +1,5136 @@
+{
+  "version": "2026-10-14.3",
+  "catalog": {
+    "path": "backend/dataset/actions.agent.json",
+    "sha256": "4860919c855e343130a1b13a53e4abcc32ca9f8cecf4c0ffbc55412fb51870ee",
+    "count": 1324
+  },
+  "encoding_rule_version": "retrieval-text-2026-10-14.2",
+  "label_status": "approved",
+  "grade_scale": {
+    "3": "高度相关：指名动作或核心符合意图",
+    "2": "相关：同类动作或合理替代变式",
+    "1": "弱相关：同部位但动作模式或器械差异明显",
+    "0": "不相关"
+  },
+  "split_rule": "按 intent 与 family 分组整体划入 dev 或 holdout；同一 family 的表达变体不跨集，holdout 不参与别名维护与调参。",
+  "baseline_rule": "基线把查询原文 query 作为 name 子串传入 Catalog.search，并把 filters 的四项作为精确筛选；不做别名展开、翻译、分词或画像过滤。人工名称改写仅记录在 baseline_name 供单独报告，不进入主对照。",
+  "queries": [
+    {
+      "id": "q-standard-001",
+      "query": "杠铃卧推",
+      "intent": "standard_name",
+      "purpose": "search",
+      "filters": {
+        "equipment": null,
+        "body_part": null,
+        "target": null,
+        "muscle_group": null
+      },
+      "environment": null,
+      "declared_equipment": [],
+      "temporary_restrictions": [],
+      "saved_profile_restrictions": {
+        "unavailable_equipment": [],
+        "forbidden_exercise_ids": []
+      },
+      "labels": [
+        {
+          "id": "0025",
+          "grade": 3
+        },
+        {
+          "id": "0047",
+          "grade": 2
+        },
+        {
+          "id": "0289",
+          "grade": 2
+        }
+      ],
+      "expect_empty": false,
+      "label_status": "approved",
+      "split": "dev",
+      "family": "bench-press",
+      "baseline_name": "杠铃卧推",
+      "notes": null
+    },
+    {
+      "id": "q-standard-002",
+      "query": "哑铃卧推",
+      "intent": "standard_name",
+      "purpose": "search",
+      "filters": {
+        "equipment": null,
+        "body_part": null,
+        "target": null,
+        "muscle_group": null
+      },
+      "environment": null,
+      "declared_equipment": [],
+      "temporary_restrictions": [],
+      "saved_profile_restrictions": {
+        "unavailable_equipment": [],
+        "forbidden_exercise_ids": []
+      },
+      "labels": [
+        {
+          "id": "0289",
+          "grade": 3
+        },
+        {
+          "id": "0314",
+          "grade": 2
+        },
+        {
+          "id": "0025",
+          "grade": 2
+        }
+      ],
+      "expect_empty": false,
+      "label_status": "approved",
+      "split": "dev",
+      "family": "bench-press",
+      "baseline_name": "哑铃卧推",
+      "notes": null
+    },
+    {
+      "id": "q-standard-003",
+      "query": "杠铃俯身划船",
+      "intent": "standard_name",
+      "purpose": "search",
+      "filters": {
+        "equipment": null,
+        "body_part": null,
+        "target": null,
+        "muscle_group": null
+      },
+      "environment": null,
+      "declared_equipment": [],
+      "temporary_restrictions": [],
+      "saved_profile_restrictions": {
+        "unavailable_equipment": [],
+        "forbidden_exercise_ids": []
+      },
+      "labels": [
+        {
+          "id": "0027",
+          "grade": 3
+        },
+        {
+          "id": "0118",
+          "grade": 2
+        },
+        {
+          "id": "0064",
+          "grade": 2
+        }
+      ],
+      "expect_empty": false,
+      "label_status": "approved",
+      "split": "dev",
+      "family": "row",
+      "baseline_name": "杠铃俯身划船",
+      "notes": null
+    },
+    {
+      "id": "q-standard-004",
+      "query": "哑铃俯身划船",
+      "intent": "standard_name",
+      "purpose": "search",
+      "filters": {
+        "equipment": null,
+        "body_part": null,
+        "target": null,
+        "muscle_group": null
+      },
+      "environment": null,
+      "declared_equipment": [],
+      "temporary_restrictions": [],
+      "saved_profile_restrictions": {
+        "unavailable_equipment": [],
+        "forbidden_exercise_ids": []
+      },
+      "labels": [
+        {
+          "id": "0293",
+          "grade": 3
+        },
+        {
+          "id": "0292",
+          "grade": 2
+        },
+        {
+          "id": "0327",
+          "grade": 2
+        }
+      ],
+      "expect_empty": false,
+      "label_status": "approved",
+      "split": "dev",
+      "family": "row",
+      "baseline_name": "哑铃俯身划船",
+      "notes": null
+    },
+    {
+      "id": "q-standard-005",
+      "query": "绳索坐姿划船",
+      "intent": "standard_name",
+      "purpose": "search",
+      "filters": {
+        "equipment": null,
+        "body_part": null,
+        "target": null,
+        "muscle_group": null
+      },
+      "environment": null,
+      "declared_equipment": [],
+      "temporary_restrictions": [],
+      "saved_profile_restrictions": {
+        "unavailable_equipment": [],
+        "forbidden_exercise_ids": []
+      },
+      "labels": [
+        {
+          "id": "0861",
+          "grade": 3
+        },
+        {
+          "id": "0180",
+          "grade": 2
+        },
+        {
+          "id": "0218",
+          "grade": 2
+        }
+      ],
+      "expect_empty": false,
+      "label_status": "approved",
+      "split": "dev",
+      "family": "row",
+      "baseline_name": "绳索坐姿划船",
+      "notes": null
+    },
+    {
+      "id": "q-standard-006",
+      "query": "俯卧撑",
+      "intent": "standard_name",
+      "purpose": "search",
+      "filters": {
+        "equipment": null,
+        "body_part": null,
+        "target": null,
+        "muscle_group": null
+      },
+      "environment": null,
+      "declared_equipment": [],
+      "temporary_restrictions": [],
+      "saved_profile_restrictions": {
+        "unavailable_equipment": [],
+        "forbidden_exercise_ids": []
+      },
+      "labels": [
+        {
+          "id": "0662",
+          "grade": 3
+        },
+        {
+          "id": "0258",
+          "grade": 2
+        },
+        {
+          "id": "0279",
+          "grade": 2
+        }
+      ],
+      "expect_empty": false,
+      "label_status": "approved",
+      "split": "dev",
+      "family": "push-up",
+      "baseline_name": "俯卧撑",
+      "notes": null
+    },
+    {
+      "id": "q-standard-007",
+      "query": "引体向上",
+      "intent": "standard_name",
+      "purpose": "search",
+      "filters": {
+        "equipment": null,
+        "body_part": null,
+        "target": null,
+        "muscle_group": null
+      },
+      "environment": null,
+      "declared_equipment": [],
+      "temporary_restrictions": [],
+      "saved_profile_restrictions": {
+        "unavailable_equipment": [],
+        "forbidden_exercise_ids": []
+      },
+      "labels": [
+        {
+          "id": "0652",
+          "grade": 3
+        },
+        {
+          "id": "0017",
+          "grade": 2
+        },
+        {
+          "id": "3293",
+          "grade": 2
+        }
+      ],
+      "expect_empty": false,
+      "label_status": "approved",
+      "split": "dev",
+      "family": "pull-up",
+      "baseline_name": "引体向上",
+      "notes": null
+    },
+    {
+      "id": "q-standard-008",
+      "query": "杠铃弯举",
+      "intent": "standard_name",
+      "purpose": "search",
+      "filters": {
+        "equipment": null,
+        "body_part": null,
+        "target": null,
+        "muscle_group": null
+      },
+      "environment": null,
+      "declared_equipment": [],
+      "temporary_restrictions": [],
+      "saved_profile_restrictions": {
+        "unavailable_equipment": [],
+        "forbidden_exercise_ids": []
+      },
+      "labels": [
+        {
+          "id": "0031",
+          "grade": 3
+        },
+        {
+          "id": "0868",
+          "grade": 2
+        },
+        {
+          "id": "0023",
+          "grade": 2
+        }
+      ],
+      "expect_empty": false,
+      "label_status": "approved",
+      "split": "dev",
+      "family": "curl",
+      "baseline_name": "杠铃弯举",
+      "notes": null
+    },
+    {
+      "id": "q-standard-009",
+      "query": "哑铃侧平举",
+      "intent": "standard_name",
+      "purpose": "search",
+      "filters": {
+        "equipment": null,
+        "body_part": null,
+        "target": null,
+        "muscle_group": null
+      },
+      "environment": null,
+      "declared_equipment": [],
+      "temporary_restrictions": [],
+      "saved_profile_restrictions": {
+        "unavailable_equipment": [],
+        "forbidden_exercise_ids": []
+      },
+      "labels": [
+        {
+          "id": "0334",
+          "grade": 3
+        },
+        {
+          "id": "0355",
+          "grade": 2
+        },
+        {
+          "id": "0396",
+          "grade": 2
+        }
+      ],
+      "expect_empty": false,
+      "label_status": "approved",
+      "split": "dev",
+      "family": "lateral-raise",
+      "baseline_name": "哑铃侧平举",
+      "notes": null
+    },
+    {
+      "id": "q-standard-010",
+      "query": "杠铃臀桥",
+      "intent": "standard_name",
+      "purpose": "search",
+      "filters": {
+        "equipment": null,
+        "body_part": null,
+        "target": null,
+        "muscle_group": null
+      },
+      "environment": null,
+      "declared_equipment": [],
+      "temporary_restrictions": [],
+      "saved_profile_restrictions": {
+        "unavailable_equipment": [],
+        "forbidden_exercise_ids": []
+      },
+      "labels": [
+        {
+          "id": "1409",
+          "grade": 3
+        },
+        {
+          "id": "3562",
+          "grade": 2
+        },
+        {
+          "id": "1408",
+          "grade": 2
+        }
+      ],
+      "expect_empty": false,
+      "label_status": "approved",
+      "split": "dev",
+      "family": "glute-bridge",
+      "baseline_name": "杠铃臀桥",
+      "notes": null
+    },
+    {
+      "id": "q-standard-011",
+      "query": "杠铃硬拉",
+      "intent": "standard_name",
+      "purpose": "search",
+      "filters": {
+        "equipment": null,
+        "body_part": null,
+        "target": null,
+        "muscle_group": null
+      },
+      "environment": null,
+      "declared_equipment": [],
+      "temporary_restrictions": [],
+      "saved_profile_restrictions": {
+        "unavailable_equipment": [],
+        "forbidden_exercise_ids": []
+      },
+      "labels": [
+        {
+          "id": "0032",
+          "grade": 3
+        },
+        {
+          "id": "0085",
+          "grade": 2
+        },
+        {
+          "id": "0116",
+          "grade": 2
+        }
+      ],
+      "expect_empty": false,
+      "label_status": "approved",
+      "split": "holdout",
+      "family": "deadlift",
+      "baseline_name": "杠铃硬拉",
+      "notes": null
+    },
+    {
+      "id": "q-standard-012",
+      "query": "杠铃罗马尼亚硬拉",
+      "intent": "standard_name",
+      "purpose": "search",
+      "filters": {
+        "equipment": null,
+        "body_part": null,
+        "target": null,
+        "muscle_group": null
+      },
+      "environment": null,
+      "declared_equipment": [],
+      "temporary_restrictions": [],
+      "saved_profile_restrictions": {
+        "unavailable_equipment": [],
+        "forbidden_exercise_ids": []
+      },
+      "labels": [
+        {
+          "id": "0085",
+          "grade": 3
+        },
+        {
+          "id": "1459",
+          "grade": 3
+        },
+        {
+          "id": "0032",
+          "grade": 2
+        }
+      ],
+      "expect_empty": false,
+      "label_status": "approved",
+      "split": "holdout",
+      "family": "deadlift",
+      "baseline_name": "杠铃罗马尼亚硬拉",
+      "notes": null
+    },
+    {
+      "id": "q-standard-013",
+      "query": "杠铃耸肩",
+      "intent": "standard_name",
+      "purpose": "search",
+      "filters": {
+        "equipment": null,
+        "body_part": null,
+        "target": null,
+        "muscle_group": null
+      },
+      "environment": null,
+      "declared_equipment": [],
+      "temporary_restrictions": [],
+      "saved_profile_restrictions": {
+        "unavailable_equipment": [],
+        "forbidden_exercise_ids": []
+      },
+      "labels": [
+        {
+          "id": "0095",
+          "grade": 3
+        },
+        {
+          "id": "0406",
+          "grade": 2
+        }
+      ],
+      "expect_empty": false,
+      "label_status": "approved",
+      "split": "holdout",
+      "family": "shrug",
+      "baseline_name": "杠铃耸肩",
+      "notes": null
+    },
+    {
+      "id": "q-standard-014",
+      "query": "哑铃耸肩",
+      "intent": "standard_name",
+      "purpose": "search",
+      "filters": {
+        "equipment": null,
+        "body_part": null,
+        "target": null,
+        "muscle_group": null
+      },
+      "environment": null,
+      "declared_equipment": [],
+      "temporary_restrictions": [],
+      "saved_profile_restrictions": {
+        "unavailable_equipment": [],
+        "forbidden_exercise_ids": []
+      },
+      "labels": [
+        {
+          "id": "0406",
+          "grade": 3
+        },
+        {
+          "id": "0095",
+          "grade": 2
+        }
+      ],
+      "expect_empty": false,
+      "label_status": "approved",
+      "split": "holdout",
+      "family": "shrug",
+      "baseline_name": "哑铃耸肩",
+      "notes": null
+    },
+    {
+      "id": "q-standard-015",
+      "query": "地面卷腹",
+      "intent": "standard_name",
+      "purpose": "search",
+      "filters": {
+        "equipment": null,
+        "body_part": null,
+        "target": null,
+        "muscle_group": null
+      },
+      "environment": null,
+      "declared_equipment": [],
+      "temporary_restrictions": [],
+      "saved_profile_restrictions": {
+        "unavailable_equipment": [],
+        "forbidden_exercise_ids": []
+      },
+      "labels": [
+        {
+          "id": "0274",
+          "grade": 3
+        },
+        {
+          "id": "0277",
+          "grade": 2
+        },
+        {
+          "id": "0262",
+          "grade": 2
+        }
+      ],
+      "expect_empty": false,
+      "label_status": "approved",
+      "split": "holdout",
+      "family": "crunch",
+      "baseline_name": "地面卷腹",
+      "notes": null
+    },
+    {
+      "id": "q-standard-016",
+      "query": "器械腿屈伸",
+      "intent": "standard_name",
+      "purpose": "search",
+      "filters": {
+        "equipment": null,
+        "body_part": null,
+        "target": null,
+        "muscle_group": null
+      },
+      "environment": null,
+      "declared_equipment": [],
+      "temporary_restrictions": [],
+      "saved_profile_restrictions": {
+        "unavailable_equipment": [],
+        "forbidden_exercise_ids": []
+      },
+      "labels": [
+        {
+          "id": "0585",
+          "grade": 3
+        },
+        {
+          "id": "3007",
+          "grade": 2
+        }
+      ],
+      "expect_empty": false,
+      "label_status": "approved",
+      "split": "holdout",
+      "family": "leg-press",
+      "baseline_name": "器械腿屈伸",
+      "notes": null
+    },
+    {
+      "id": "q-standard-017",
+      "query": "器械俯卧腿弯举",
+      "intent": "standard_name",
+      "purpose": "search",
+      "filters": {
+        "equipment": null,
+        "body_part": null,
+        "target": null,
+        "muscle_group": null
+      },
+      "environment": null,
+      "declared_equipment": [],
+      "temporary_restrictions": [],
+      "saved_profile_restrictions": {
+        "unavailable_equipment": [],
+        "forbidden_exercise_ids": []
+      },
+      "labels": [
+        {
+          "id": "0586",
+          "grade": 3
+        },
+        {
+          "id": "3195",
+          "grade": 2
+        },
+        {
+          "id": "0582",
+          "grade": 2
+        }
+      ],
+      "expect_empty": false,
+      "label_status": "approved",
+      "split": "holdout",
+      "family": "leg-press",
+      "baseline_name": "器械俯卧腿弯举",
+      "notes": null
+    },
+    {
+      "id": "q-standard-018",
+      "query": "腿举机45度腿举",
+      "intent": "standard_name",
+      "purpose": "search",
+      "filters": {
+        "equipment": null,
+        "body_part": null,
+        "target": null,
+        "muscle_group": null
+      },
+      "environment": null,
+      "declared_equipment": [],
+      "temporary_restrictions": [],
+      "saved_profile_restrictions": {
+        "unavailable_equipment": [],
+        "forbidden_exercise_ids": []
+      },
+      "labels": [
+        {
+          "id": "0739",
+          "grade": 3
+        },
+        {
+          "id": "1464",
+          "grade": 3
+        },
+        {
+          "id": "0740",
+          "grade": 2
+        },
+        {
+          "id": "1425",
+          "grade": 2
+        }
+      ],
+      "expect_empty": false,
+      "label_status": "approved",
+      "split": "holdout",
+      "family": "leg-press",
+      "baseline_name": "腿举机45度腿举",
+      "notes": null
+    },
+    {
+      "id": "q-standard-019",
+      "query": "波比跳",
+      "intent": "standard_name",
+      "purpose": "search",
+      "filters": {
+        "equipment": null,
+        "body_part": null,
+        "target": null,
+        "muscle_group": null
+      },
+      "environment": null,
+      "declared_equipment": [],
+      "temporary_restrictions": [],
+      "saved_profile_restrictions": {
+        "unavailable_equipment": [],
+        "forbidden_exercise_ids": []
+      },
+      "labels": [
+        {
+          "id": "1160",
+          "grade": 3
+        },
+        {
+          "id": "0501",
+          "grade": 2
+        },
+        {
+          "id": "1201",
+          "grade": 2
+        }
+      ],
+      "expect_empty": false,
+      "label_status": "approved",
+      "split": "holdout",
+      "family": "cardio",
+      "baseline_name": "波比跳",
+      "notes": null
+    },
+    {
+      "id": "q-standard-020",
+      "query": "哑铃深蹲",
+      "intent": "standard_name",
+      "purpose": "search",
+      "filters": {
+        "equipment": null,
+        "body_part": null,
+        "target": null,
+        "muscle_group": null
+      },
+      "environment": null,
+      "declared_equipment": [],
+      "temporary_restrictions": [],
+      "saved_profile_restrictions": {
+        "unavailable_equipment": [],
+        "forbidden_exercise_ids": []
+      },
+      "labels": [
+        {
+          "id": "0413",
+          "grade": 3
+        },
+        {
+          "id": "0411",
+          "grade": 2
+        },
+        {
+          "id": "1760",
+          "grade": 2
+        }
+      ],
+      "expect_empty": false,
+      "label_status": "approved",
+      "split": "holdout",
+      "family": "squat",
+      "baseline_name": "哑铃深蹲",
+      "notes": null
+    },
+    {
+      "id": "q-alias-001",
+      "query": "卧推",
+      "intent": "alias",
+      "purpose": "search",
+      "filters": {
+        "equipment": null,
+        "body_part": null,
+        "target": null,
+        "muscle_group": null
+      },
+      "environment": null,
+      "declared_equipment": [],
+      "temporary_restrictions": [],
+      "saved_profile_restrictions": {
+        "unavailable_equipment": [],
+        "forbidden_exercise_ids": []
+      },
+      "labels": [
+        {
+          "id": "0025",
+          "grade": 3
+        },
+        {
+          "id": "0289",
+          "grade": 3
+        },
+        {
+          "id": "0047",
+          "grade": 2
+        },
+        {
+          "id": "0314",
+          "grade": 2
+        },
+        {
+          "id": "1254",
+          "grade": 1
+        }
+      ],
+      "expect_empty": false,
+      "label_status": "approved",
+      "split": "dev",
+      "family": "bench-press",
+      "baseline_name": "卧推",
+      "notes": "泛指卧推家族"
+    },
+    {
+      "id": "q-alias-002",
+      "query": "划船",
+      "intent": "alias",
+      "purpose": "search",
+      "filters": {
+        "equipment": null,
+        "body_part": null,
+        "target": null,
+        "muscle_group": null
+      },
+      "environment": null,
+      "declared_equipment": [],
+      "temporary_restrictions": [],
+      "saved_profile_restrictions": {
+        "unavailable_equipment": [],
+        "forbidden_exercise_ids": []
+      },
+      "labels": [
+        {
+          "id": "0027",
+          "grade": 3
+        },
+        {
+          "id": "0293",
+          "grade": 3
+        },
+        {
+          "id": "0861",
+          "grade": 3
+        },
+        {
+          "id": "0198",
+          "grade": 2
+        },
+        {
+          "id": "3166",
+          "grade": 2
+        }
+      ],
+      "expect_empty": false,
+      "label_status": "approved",
+      "split": "dev",
+      "family": "row",
+      "baseline_name": "划船",
+      "notes": "含下拉类弱相关"
+    },
+    {
+      "id": "q-alias-003",
+      "query": "弯举",
+      "intent": "alias",
+      "purpose": "search",
+      "filters": {
+        "equipment": null,
+        "body_part": null,
+        "target": null,
+        "muscle_group": null
+      },
+      "environment": null,
+      "declared_equipment": [],
+      "temporary_restrictions": [],
+      "saved_profile_restrictions": {
+        "unavailable_equipment": [],
+        "forbidden_exercise_ids": []
+      },
+      "labels": [
+        {
+          "id": "0031",
+          "grade": 3
+        },
+        {
+          "id": "0868",
+          "grade": 3
+        },
+        {
+          "id": "0294",
+          "grade": 3
+        },
+        {
+          "id": "0023",
+          "grade": 2
+        },
+        {
+          "id": "0313",
+          "grade": 2
+        },
+        {
+          "id": "1633",
+          "grade": 2
+        }
+      ],
+      "expect_empty": false,
+      "label_status": "approved",
+      "split": "dev",
+      "family": "curl",
+      "baseline_name": "弯举",
+      "notes": null
+    },
+    {
+      "id": "q-alias-004",
+      "query": "侧平举",
+      "intent": "alias",
+      "purpose": "search",
+      "filters": {
+        "equipment": null,
+        "body_part": null,
+        "target": null,
+        "muscle_group": null
+      },
+      "environment": null,
+      "declared_equipment": [],
+      "temporary_restrictions": [],
+      "saved_profile_restrictions": {
+        "unavailable_equipment": [],
+        "forbidden_exercise_ids": []
+      },
+      "labels": [
+        {
+          "id": "0334",
+          "grade": 3
+        },
+        {
+          "id": "0178",
+          "grade": 3
+        },
+        {
+          "id": "0192",
+          "grade": 2
+        },
+        {
+          "id": "0311",
+          "grade": 2
+        }
+      ],
+      "expect_empty": false,
+      "label_status": "approved",
+      "split": "dev",
+      "family": "lateral-raise",
+      "baseline_name": "侧平举",
+      "notes": null
+    },
+    {
+      "id": "q-alias-005",
+      "query": "引体",
+      "intent": "alias",
+      "purpose": "search",
+      "filters": {
+        "equipment": null,
+        "body_part": null,
+        "target": null,
+        "muscle_group": null
+      },
+      "environment": null,
+      "declared_equipment": [],
+      "temporary_restrictions": [],
+      "saved_profile_restrictions": {
+        "unavailable_equipment": [],
+        "forbidden_exercise_ids": []
+      },
+      "labels": [
+        {
+          "id": "0652",
+          "grade": 3
+        },
+        {
+          "id": "0017",
+          "grade": 2
+        },
+        {
+          "id": "3293",
+          "grade": 2
+        }
+      ],
+      "expect_empty": false,
+      "label_status": "approved",
+      "split": "dev",
+      "family": "pull-up",
+      "baseline_name": "引体",
+      "notes": null
+    },
+    {
+      "id": "q-alias-006",
+      "query": "俯卧撑",
+      "intent": "alias",
+      "purpose": "search",
+      "filters": {
+        "equipment": null,
+        "body_part": null,
+        "target": null,
+        "muscle_group": null
+      },
+      "environment": null,
+      "declared_equipment": [],
+      "temporary_restrictions": [],
+      "saved_profile_restrictions": {
+        "unavailable_equipment": [],
+        "forbidden_exercise_ids": []
+      },
+      "labels": [
+        {
+          "id": "0662",
+          "grade": 3
+        },
+        {
+          "id": "0258",
+          "grade": 2
+        },
+        {
+          "id": "0283",
+          "grade": 2
+        },
+        {
+          "id": "2398",
+          "grade": 2
+        }
+      ],
+      "expect_empty": false,
+      "label_status": "approved",
+      "split": "dev",
+      "family": "push-up",
+      "baseline_name": "俯卧撑",
+      "notes": null
+    },
+    {
+      "id": "q-alias-007",
+      "query": "臀桥",
+      "intent": "alias",
+      "purpose": "search",
+      "filters": {
+        "equipment": null,
+        "body_part": null,
+        "target": null,
+        "muscle_group": null
+      },
+      "environment": null,
+      "declared_equipment": [],
+      "temporary_restrictions": [],
+      "saved_profile_restrictions": {
+        "unavailable_equipment": [],
+        "forbidden_exercise_ids": []
+      },
+      "labels": [
+        {
+          "id": "1409",
+          "grade": 3
+        },
+        {
+          "id": "3523",
+          "grade": 2
+        },
+        {
+          "id": "3561",
+          "grade": 2
+        },
+        {
+          "id": "3013",
+          "grade": 2
+        }
+      ],
+      "expect_empty": false,
+      "label_status": "approved",
+      "split": "dev",
+      "family": "glute-bridge",
+      "baseline_name": "臀桥",
+      "notes": null
+    },
+    {
+      "id": "q-alias-008",
+      "query": "高位下拉",
+      "intent": "alias",
+      "purpose": "search",
+      "filters": {
+        "equipment": null,
+        "body_part": null,
+        "target": null,
+        "muscle_group": null
+      },
+      "environment": null,
+      "declared_equipment": [],
+      "temporary_restrictions": [],
+      "saved_profile_restrictions": {
+        "unavailable_equipment": [],
+        "forbidden_exercise_ids": []
+      },
+      "labels": [
+        {
+          "id": "0198",
+          "grade": 3
+        },
+        {
+          "id": "2330",
+          "grade": 3
+        },
+        {
+          "id": "0818",
+          "grade": 2
+        },
+        {
+          "id": "0673",
+          "grade": 2
+        }
+      ],
+      "expect_empty": false,
+      "label_status": "approved",
+      "split": "dev",
+      "family": "row",
+      "baseline_name": "高位下拉",
+      "notes": "俗称，目录多用绳索下拉命名"
+    },
+    {
+      "id": "q-alias-009",
+      "query": "硬拉",
+      "intent": "alias",
+      "purpose": "search",
+      "filters": {
+        "equipment": null,
+        "body_part": null,
+        "target": null,
+        "muscle_group": null
+      },
+      "environment": null,
+      "declared_equipment": [],
+      "temporary_restrictions": [],
+      "saved_profile_restrictions": {
+        "unavailable_equipment": [],
+        "forbidden_exercise_ids": []
+      },
+      "labels": [
+        {
+          "id": "0032",
+          "grade": 3
+        },
+        {
+          "id": "0300",
+          "grade": 3
+        },
+        {
+          "id": "0085",
+          "grade": 2
+        },
+        {
+          "id": "0116",
+          "grade": 2
+        },
+        {
+          "id": "0074",
+          "grade": 2
+        }
+      ],
+      "expect_empty": false,
+      "label_status": "approved",
+      "split": "holdout",
+      "family": "deadlift",
+      "baseline_name": "硬拉",
+      "notes": null
+    },
+    {
+      "id": "q-alias-010",
+      "query": "深蹲",
+      "intent": "alias",
+      "purpose": "search",
+      "filters": {
+        "equipment": null,
+        "body_part": null,
+        "target": null,
+        "muscle_group": null
+      },
+      "environment": null,
+      "declared_equipment": [],
+      "temporary_restrictions": [],
+      "saved_profile_restrictions": {
+        "unavailable_equipment": [],
+        "forbidden_exercise_ids": []
+      },
+      "labels": [
+        {
+          "id": "0413",
+          "grade": 3
+        },
+        {
+          "id": "0102",
+          "grade": 2
+        },
+        {
+          "id": "0124",
+          "grade": 2
+        },
+        {
+          "id": "1004",
+          "grade": 2
+        },
+        {
+          "id": "0514",
+          "grade": 2
+        }
+      ],
+      "expect_empty": false,
+      "label_status": "approved",
+      "split": "holdout",
+      "family": "squat",
+      "baseline_name": "深蹲",
+      "notes": null
+    },
+    {
+      "id": "q-alias-011",
+      "query": "耸肩",
+      "intent": "alias",
+      "purpose": "search",
+      "filters": {
+        "equipment": null,
+        "body_part": null,
+        "target": null,
+        "muscle_group": null
+      },
+      "environment": null,
+      "declared_equipment": [],
+      "temporary_restrictions": [],
+      "saved_profile_restrictions": {
+        "unavailable_equipment": [],
+        "forbidden_exercise_ids": []
+      },
+      "labels": [
+        {
+          "id": "0095",
+          "grade": 3
+        },
+        {
+          "id": "0406",
+          "grade": 3
+        },
+        {
+          "id": "1018",
+          "grade": 2
+        }
+      ],
+      "expect_empty": false,
+      "label_status": "approved",
+      "split": "holdout",
+      "family": "shrug",
+      "baseline_name": "耸肩",
+      "notes": null
+    },
+    {
+      "id": "q-alias-012",
+      "query": "提踵",
+      "intent": "alias",
+      "purpose": "search",
+      "filters": {
+        "equipment": null,
+        "body_part": null,
+        "target": null,
+        "muscle_group": null
+      },
+      "environment": null,
+      "declared_equipment": [],
+      "temporary_restrictions": [],
+      "saved_profile_restrictions": {
+        "unavailable_equipment": [],
+        "forbidden_exercise_ids": []
+      },
+      "labels": [
+        {
+          "id": "1373",
+          "grade": 3
+        },
+        {
+          "id": "1372",
+          "grade": 2
+        },
+        {
+          "id": "0999",
+          "grade": 2
+        },
+        {
+          "id": "0088",
+          "grade": 2
+        }
+      ],
+      "expect_empty": false,
+      "label_status": "approved",
+      "split": "holdout",
+      "family": "calf-raise",
+      "baseline_name": "提踵",
+      "notes": null
+    },
+    {
+      "id": "q-alias-013",
+      "query": "卷腹",
+      "intent": "alias",
+      "purpose": "search",
+      "filters": {
+        "equipment": null,
+        "body_part": null,
+        "target": null,
+        "muscle_group": null
+      },
+      "environment": null,
+      "declared_equipment": [],
+      "temporary_restrictions": [],
+      "saved_profile_restrictions": {
+        "unavailable_equipment": [],
+        "forbidden_exercise_ids": []
+      },
+      "labels": [
+        {
+          "id": "0274",
+          "grade": 3
+        },
+        {
+          "id": "0262",
+          "grade": 3
+        },
+        {
+          "id": "0635",
+          "grade": 2
+        },
+        {
+          "id": "2429",
+          "grade": 2
+        }
+      ],
+      "expect_empty": false,
+      "label_status": "approved",
+      "split": "holdout",
+      "family": "crunch",
+      "baseline_name": "卷腹",
+      "notes": null
+    },
+    {
+      "id": "q-alias-014",
+      "query": "推举",
+      "intent": "alias",
+      "purpose": "search",
+      "filters": {
+        "equipment": null,
+        "body_part": null,
+        "target": null,
+        "muscle_group": null
+      },
+      "environment": null,
+      "declared_equipment": [],
+      "temporary_restrictions": [],
+      "saved_profile_restrictions": {
+        "unavailable_equipment": [],
+        "forbidden_exercise_ids": []
+      },
+      "labels": [
+        {
+          "id": "0086",
+          "grade": 3
+        },
+        {
+          "id": "0091",
+          "grade": 3
+        },
+        {
+          "id": "0105",
+          "grade": 2
+        },
+        {
+          "id": "0087",
+          "grade": 2
+        }
+      ],
+      "expect_empty": false,
+      "label_status": "approved",
+      "split": "holdout",
+      "family": "overhead-press",
+      "baseline_name": "推举",
+      "notes": null
+    },
+    {
+      "id": "q-alias-015",
+      "query": "飞鸟",
+      "intent": "alias",
+      "purpose": "search",
+      "filters": {
+        "equipment": null,
+        "body_part": null,
+        "target": null,
+        "muscle_group": null
+      },
+      "environment": null,
+      "declared_equipment": [],
+      "temporary_restrictions": [],
+      "saved_profile_restrictions": {
+        "unavailable_equipment": [],
+        "forbidden_exercise_ids": []
+      },
+      "labels": [
+        {
+          "id": "0308",
+          "grade": 3
+        },
+        {
+          "id": "0319",
+          "grade": 3
+        },
+        {
+          "id": "0171",
+          "grade": 3
+        },
+        {
+          "id": "1277",
+          "grade": 2
+        }
+      ],
+      "expect_empty": false,
+      "label_status": "approved",
+      "split": "holdout",
+      "family": "fly",
+      "baseline_name": "飞鸟",
+      "notes": null
+    },
+    {
+      "id": "q-alias-016",
+      "query": "三头下压",
+      "intent": "alias",
+      "purpose": "search",
+      "filters": {
+        "equipment": null,
+        "body_part": null,
+        "target": null,
+        "muscle_group": null
+      },
+      "environment": null,
+      "declared_equipment": [],
+      "temporary_restrictions": [],
+      "saved_profile_restrictions": {
+        "unavailable_equipment": [],
+        "forbidden_exercise_ids": []
+      },
+      "labels": [
+        {
+          "id": "0201",
+          "grade": 3
+        },
+        {
+          "id": "0200",
+          "grade": 3
+        },
+        {
+          "id": "1723",
+          "grade": 2
+        },
+        {
+          "id": "0172",
+          "grade": 2
+        }
+      ],
+      "expect_empty": false,
+      "label_status": "approved",
+      "split": "holdout",
+      "family": "triceps-pushdown",
+      "baseline_name": "三头下压",
+      "notes": null
+    },
+    {
+      "id": "q-alias-017",
+      "query": "腿举",
+      "intent": "alias",
+      "purpose": "search",
+      "filters": {
+        "equipment": null,
+        "body_part": null,
+        "target": null,
+        "muscle_group": null
+      },
+      "environment": null,
+      "declared_equipment": [],
+      "temporary_restrictions": [],
+      "saved_profile_restrictions": {
+        "unavailable_equipment": [],
+        "forbidden_exercise_ids": []
+      },
+      "labels": [
+        {
+          "id": "0739",
+          "grade": 3
+        },
+        {
+          "id": "0740",
+          "grade": 2
+        },
+        {
+          "id": "1425",
+          "grade": 2
+        },
+        {
+          "id": "2287",
+          "grade": 2
+        }
+      ],
+      "expect_empty": false,
+      "label_status": "approved",
+      "split": "holdout",
+      "family": "leg-press",
+      "baseline_name": "腿举",
+      "notes": null
+    },
+    {
+      "id": "q-alias-018",
+      "query": "平板支撑",
+      "intent": "alias",
+      "purpose": "search",
+      "filters": {
+        "equipment": null,
+        "body_part": null,
+        "target": null,
+        "muscle_group": null
+      },
+      "environment": null,
+      "declared_equipment": [],
+      "temporary_restrictions": [],
+      "saved_profile_restrictions": {
+        "unavailable_equipment": [],
+        "forbidden_exercise_ids": []
+      },
+      "labels": [
+        {
+          "id": "3665",
+          "grade": 3
+        },
+        {
+          "id": "2135",
+          "grade": 3
+        },
+        {
+          "id": "3239",
+          "grade": 2
+        },
+        {
+          "id": "3544",
+          "grade": 2
+        }
+      ],
+      "expect_empty": false,
+      "label_status": "approved",
+      "split": "holdout",
+      "family": "plank",
+      "baseline_name": "平板支撑",
+      "notes": null
+    },
+    {
+      "id": "q-alias-019",
+      "query": "二头弯举",
+      "intent": "alias",
+      "purpose": "search",
+      "filters": {
+        "equipment": null,
+        "body_part": null,
+        "target": null,
+        "muscle_group": null
+      },
+      "environment": null,
+      "declared_equipment": [],
+      "temporary_restrictions": [],
+      "saved_profile_restrictions": {
+        "unavailable_equipment": [],
+        "forbidden_exercise_ids": []
+      },
+      "labels": [
+        {
+          "id": "0031",
+          "grade": 3
+        },
+        {
+          "id": "0023",
+          "grade": 3
+        },
+        {
+          "id": "0868",
+          "grade": 2
+        }
+      ],
+      "expect_empty": false,
+      "label_status": "approved",
+      "split": "dev",
+      "family": "curl",
+      "baseline_name": "二头弯举",
+      "notes": null
+    },
+    {
+      "id": "q-alias-020",
+      "query": "划船机",
+      "intent": "alias",
+      "purpose": "search",
+      "filters": {
+        "equipment": null,
+        "body_part": null,
+        "target": null,
+        "muscle_group": null
+      },
+      "environment": null,
+      "declared_equipment": [],
+      "temporary_restrictions": [],
+      "saved_profile_restrictions": {
+        "unavailable_equipment": [],
+        "forbidden_exercise_ids": []
+      },
+      "labels": [
+        {
+          "id": "0861",
+          "grade": 3
+        },
+        {
+          "id": "0180",
+          "grade": 2
+        },
+        {
+          "id": "0218",
+          "grade": 2
+        }
+      ],
+      "expect_empty": false,
+      "label_status": "approved",
+      "split": "dev",
+      "family": "row",
+      "baseline_name": "划船机",
+      "notes": "口语把坐姿划船当成划船机"
+    },
+    {
+      "id": "q-alias-021",
+      "query": "罗马尼亚硬拉",
+      "intent": "alias",
+      "purpose": "search",
+      "filters": {
+        "equipment": null,
+        "body_part": null,
+        "target": null,
+        "muscle_group": null
+      },
+      "environment": null,
+      "declared_equipment": [],
+      "temporary_restrictions": [],
+      "saved_profile_restrictions": {
+        "unavailable_equipment": [],
+        "forbidden_exercise_ids": []
+      },
+      "labels": [
+        {
+          "id": "0085",
+          "grade": 3
+        },
+        {
+          "id": "1459",
+          "grade": 3
+        }
+      ],
+      "expect_empty": false,
+      "label_status": "approved",
+      "split": "holdout",
+      "family": "deadlift",
+      "baseline_name": "罗马尼亚硬拉",
+      "notes": null
+    },
+    {
+      "id": "q-alias-022",
+      "query": "单臂划船",
+      "intent": "alias",
+      "purpose": "search",
+      "filters": {
+        "equipment": null,
+        "body_part": null,
+        "target": null,
+        "muscle_group": null
+      },
+      "environment": null,
+      "declared_equipment": [],
+      "temporary_restrictions": [],
+      "saved_profile_restrictions": {
+        "unavailable_equipment": [],
+        "forbidden_exercise_ids": []
+      },
+      "labels": [
+        {
+          "id": "0292",
+          "grade": 3
+        },
+        {
+          "id": "0064",
+          "grade": 2
+        },
+        {
+          "id": "0193",
+          "grade": 2
+        },
+        {
+          "id": "3156",
+          "grade": 2
+        }
+      ],
+      "expect_empty": false,
+      "label_status": "approved",
+      "split": "dev",
+      "family": "row",
+      "baseline_name": "单臂划船",
+      "notes": null
+    },
+    {
+      "id": "q-alias-023",
+      "query": "跪姿俯卧撑",
+      "intent": "alias",
+      "purpose": "search",
+      "filters": {
+        "equipment": null,
+        "body_part": null,
+        "target": null,
+        "muscle_group": null
+      },
+      "environment": null,
+      "declared_equipment": [],
+      "temporary_restrictions": [],
+      "saved_profile_restrictions": {
+        "unavailable_equipment": [],
+        "forbidden_exercise_ids": []
+      },
+      "labels": [
+        {
+          "id": "2398",
+          "grade": 3
+        },
+        {
+          "id": "0662",
+          "grade": 2
+        }
+      ],
+      "expect_empty": false,
+      "label_status": "approved",
+      "split": "dev",
+      "family": "push-up",
+      "baseline_name": "跪姿俯卧撑",
+      "notes": null
+    },
+    {
+      "id": "q-alias-024",
+      "query": "提拉",
+      "intent": "alias",
+      "purpose": "search",
+      "filters": {
+        "equipment": null,
+        "body_part": null,
+        "target": null,
+        "muscle_group": null
+      },
+      "environment": null,
+      "declared_equipment": [],
+      "temporary_restrictions": [],
+      "saved_profile_restrictions": {
+        "unavailable_equipment": [],
+        "forbidden_exercise_ids": []
+      },
+      "labels": [
+        {
+          "id": "0120",
+          "grade": 3
+        },
+        {
+          "id": "0119",
+          "grade": 2
+        },
+        {
+          "id": "0121",
+          "grade": 2
+        },
+        {
+          "id": "0123",
+          "grade": 2
+        }
+      ],
+      "expect_empty": false,
+      "label_status": "approved",
+      "split": "holdout",
+      "family": "overhead-press",
+      "baseline_name": "提拉",
+      "notes": "直立划船俗称"
+    },
+    {
+      "id": "q-alias-025",
+      "query": "农夫走",
+      "intent": "alias",
+      "purpose": "search",
+      "filters": {
+        "equipment": null,
+        "body_part": null,
+        "target": null,
+        "muscle_group": null
+      },
+      "environment": null,
+      "declared_equipment": [],
+      "temporary_restrictions": [],
+      "saved_profile_restrictions": {
+        "unavailable_equipment": [],
+        "forbidden_exercise_ids": []
+      },
+      "labels": [
+        {
+          "id": "2133",
+          "grade": 3
+        }
+      ],
+      "expect_empty": false,
+      "label_status": "approved",
+      "split": "holdout",
+      "family": "farmers-walk",
+      "baseline_name": "农夫走",
+      "notes": "农夫走对应目录 2133 农夫行走（farmers walk，dumbbell，双手持哑铃行走），发布语料含别名「农夫走」"
+    },
+    {
+      "id": "q-english-001",
+      "query": "barbell bench press",
+      "intent": "english",
+      "purpose": "search",
+      "filters": {
+        "equipment": null,
+        "body_part": null,
+        "target": null,
+        "muscle_group": null
+      },
+      "environment": null,
+      "declared_equipment": [],
+      "temporary_restrictions": [],
+      "saved_profile_restrictions": {
+        "unavailable_equipment": [],
+        "forbidden_exercise_ids": []
+      },
+      "labels": [
+        {
+          "id": "0025",
+          "grade": 3
+        },
+        {
+          "id": "0289",
+          "grade": 2
+        }
+      ],
+      "expect_empty": false,
+      "label_status": "approved",
+      "split": "dev",
+      "family": "bench-press",
+      "baseline_name": "barbell bench press",
+      "notes": null
+    },
+    {
+      "id": "q-english-002",
+      "query": "dumbbell bench press",
+      "intent": "english",
+      "purpose": "search",
+      "filters": {
+        "equipment": null,
+        "body_part": null,
+        "target": null,
+        "muscle_group": null
+      },
+      "environment": null,
+      "declared_equipment": [],
+      "temporary_restrictions": [],
+      "saved_profile_restrictions": {
+        "unavailable_equipment": [],
+        "forbidden_exercise_ids": []
+      },
+      "labels": [
+        {
+          "id": "0289",
+          "grade": 3
+        },
+        {
+          "id": "0025",
+          "grade": 2
+        }
+      ],
+      "expect_empty": false,
+      "label_status": "approved",
+      "split": "dev",
+      "family": "bench-press",
+      "baseline_name": "dumbbell bench press",
+      "notes": null
+    },
+    {
+      "id": "q-english-003",
+      "query": "push-up",
+      "intent": "english",
+      "purpose": "search",
+      "filters": {
+        "equipment": null,
+        "body_part": null,
+        "target": null,
+        "muscle_group": null
+      },
+      "environment": null,
+      "declared_equipment": [],
+      "temporary_restrictions": [],
+      "saved_profile_restrictions": {
+        "unavailable_equipment": [],
+        "forbidden_exercise_ids": []
+      },
+      "labels": [
+        {
+          "id": "0662",
+          "grade": 3
+        },
+        {
+          "id": "0258",
+          "grade": 2
+        },
+        {
+          "id": "0279",
+          "grade": 2
+        }
+      ],
+      "expect_empty": false,
+      "label_status": "approved",
+      "split": "dev",
+      "family": "push-up",
+      "baseline_name": "push-up",
+      "notes": null
+    },
+    {
+      "id": "q-english-004",
+      "query": "pull-up",
+      "intent": "english",
+      "purpose": "search",
+      "filters": {
+        "equipment": null,
+        "body_part": null,
+        "target": null,
+        "muscle_group": null
+      },
+      "environment": null,
+      "declared_equipment": [],
+      "temporary_restrictions": [],
+      "saved_profile_restrictions": {
+        "unavailable_equipment": [],
+        "forbidden_exercise_ids": []
+      },
+      "labels": [
+        {
+          "id": "0652",
+          "grade": 3
+        },
+        {
+          "id": "0017",
+          "grade": 2
+        },
+        {
+          "id": "3293",
+          "grade": 2
+        }
+      ],
+      "expect_empty": false,
+      "label_status": "approved",
+      "split": "dev",
+      "family": "pull-up",
+      "baseline_name": "pull-up",
+      "notes": null
+    },
+    {
+      "id": "q-english-005",
+      "query": "barbell bent over row",
+      "intent": "english",
+      "purpose": "search",
+      "filters": {
+        "equipment": null,
+        "body_part": null,
+        "target": null,
+        "muscle_group": null
+      },
+      "environment": null,
+      "declared_equipment": [],
+      "temporary_restrictions": [],
+      "saved_profile_restrictions": {
+        "unavailable_equipment": [],
+        "forbidden_exercise_ids": []
+      },
+      "labels": [
+        {
+          "id": "0027",
+          "grade": 3
+        },
+        {
+          "id": "0118",
+          "grade": 2
+        }
+      ],
+      "expect_empty": false,
+      "label_status": "approved",
+      "split": "dev",
+      "family": "row",
+      "baseline_name": "barbell bent over row",
+      "notes": null
+    },
+    {
+      "id": "q-english-006",
+      "query": "cable seated row",
+      "intent": "english",
+      "purpose": "search",
+      "filters": {
+        "equipment": null,
+        "body_part": null,
+        "target": null,
+        "muscle_group": null
+      },
+      "environment": null,
+      "declared_equipment": [],
+      "temporary_restrictions": [],
+      "saved_profile_restrictions": {
+        "unavailable_equipment": [],
+        "forbidden_exercise_ids": []
+      },
+      "labels": [
+        {
+          "id": "0861",
+          "grade": 3
+        },
+        {
+          "id": "0180",
+          "grade": 2
+        }
+      ],
+      "expect_empty": false,
+      "label_status": "approved",
+      "split": "dev",
+      "family": "row",
+      "baseline_name": "cable seated row",
+      "notes": null
+    },
+    {
+      "id": "q-english-007",
+      "query": "barbell curl",
+      "intent": "english",
+      "purpose": "search",
+      "filters": {
+        "equipment": null,
+        "body_part": null,
+        "target": null,
+        "muscle_group": null
+      },
+      "environment": null,
+      "declared_equipment": [],
+      "temporary_restrictions": [],
+      "saved_profile_restrictions": {
+        "unavailable_equipment": [],
+        "forbidden_exercise_ids": []
+      },
+      "labels": [
+        {
+          "id": "0031",
+          "grade": 3
+        },
+        {
+          "id": "0868",
+          "grade": 2
+        }
+      ],
+      "expect_empty": false,
+      "label_status": "approved",
+      "split": "dev",
+      "family": "curl",
+      "baseline_name": "barbell curl",
+      "notes": null
+    },
+    {
+      "id": "q-english-008",
+      "query": "dumbbell lateral raise",
+      "intent": "english",
+      "purpose": "search",
+      "filters": {
+        "equipment": null,
+        "body_part": null,
+        "target": null,
+        "muscle_group": null
+      },
+      "environment": null,
+      "declared_equipment": [],
+      "temporary_restrictions": [],
+      "saved_profile_restrictions": {
+        "unavailable_equipment": [],
+        "forbidden_exercise_ids": []
+      },
+      "labels": [
+        {
+          "id": "0334",
+          "grade": 3
+        },
+        {
+          "id": "0355",
+          "grade": 2
+        }
+      ],
+      "expect_empty": false,
+      "label_status": "approved",
+      "split": "dev",
+      "family": "lateral-raise",
+      "baseline_name": "dumbbell lateral raise",
+      "notes": null
+    },
+    {
+      "id": "q-english-009",
+      "query": "glute bridge",
+      "intent": "english",
+      "purpose": "search",
+      "filters": {
+        "equipment": null,
+        "body_part": null,
+        "target": null,
+        "muscle_group": null
+      },
+      "environment": null,
+      "declared_equipment": [],
+      "temporary_restrictions": [],
+      "saved_profile_restrictions": {
+        "unavailable_equipment": [],
+        "forbidden_exercise_ids": []
+      },
+      "labels": [
+        {
+          "id": "1409",
+          "grade": 3
+        },
+        {
+          "id": "3523",
+          "grade": 2
+        },
+        {
+          "id": "3561",
+          "grade": 2
+        }
+      ],
+      "expect_empty": false,
+      "label_status": "approved",
+      "split": "dev",
+      "family": "glute-bridge",
+      "baseline_name": "glute bridge",
+      "notes": null
+    },
+    {
+      "id": "q-english-010",
+      "query": "barbell deadlift",
+      "intent": "english",
+      "purpose": "search",
+      "filters": {
+        "equipment": null,
+        "body_part": null,
+        "target": null,
+        "muscle_group": null
+      },
+      "environment": null,
+      "declared_equipment": [],
+      "temporary_restrictions": [],
+      "saved_profile_restrictions": {
+        "unavailable_equipment": [],
+        "forbidden_exercise_ids": []
+      },
+      "labels": [
+        {
+          "id": "0032",
+          "grade": 3
+        },
+        {
+          "id": "0085",
+          "grade": 2
+        }
+      ],
+      "expect_empty": false,
+      "label_status": "approved",
+      "split": "holdout",
+      "family": "deadlift",
+      "baseline_name": "barbell deadlift",
+      "notes": null
+    },
+    {
+      "id": "q-english-011",
+      "query": "romanian deadlift",
+      "intent": "english",
+      "purpose": "search",
+      "filters": {
+        "equipment": null,
+        "body_part": null,
+        "target": null,
+        "muscle_group": null
+      },
+      "environment": null,
+      "declared_equipment": [],
+      "temporary_restrictions": [],
+      "saved_profile_restrictions": {
+        "unavailable_equipment": [],
+        "forbidden_exercise_ids": []
+      },
+      "labels": [
+        {
+          "id": "0085",
+          "grade": 3
+        },
+        {
+          "id": "1459",
+          "grade": 3
+        }
+      ],
+      "expect_empty": false,
+      "label_status": "approved",
+      "split": "holdout",
+      "family": "deadlift",
+      "baseline_name": "romanian deadlift",
+      "notes": null
+    },
+    {
+      "id": "q-english-012",
+      "query": "barbell shrug",
+      "intent": "english",
+      "purpose": "search",
+      "filters": {
+        "equipment": null,
+        "body_part": null,
+        "target": null,
+        "muscle_group": null
+      },
+      "environment": null,
+      "declared_equipment": [],
+      "temporary_restrictions": [],
+      "saved_profile_restrictions": {
+        "unavailable_equipment": [],
+        "forbidden_exercise_ids": []
+      },
+      "labels": [
+        {
+          "id": "0095",
+          "grade": 3
+        },
+        {
+          "id": "0406",
+          "grade": 2
+        }
+      ],
+      "expect_empty": false,
+      "label_status": "approved",
+      "split": "holdout",
+      "family": "shrug",
+      "baseline_name": "barbell shrug",
+      "notes": null
+    },
+    {
+      "id": "q-english-013",
+      "query": "burpee",
+      "intent": "english",
+      "purpose": "search",
+      "filters": {
+        "equipment": null,
+        "body_part": null,
+        "target": null,
+        "muscle_group": null
+      },
+      "environment": null,
+      "declared_equipment": [],
+      "temporary_restrictions": [],
+      "saved_profile_restrictions": {
+        "unavailable_equipment": [],
+        "forbidden_exercise_ids": []
+      },
+      "labels": [
+        {
+          "id": "1160",
+          "grade": 3
+        },
+        {
+          "id": "0501",
+          "grade": 2
+        },
+        {
+          "id": "1201",
+          "grade": 2
+        }
+      ],
+      "expect_empty": false,
+      "label_status": "approved",
+      "split": "holdout",
+      "family": "cardio",
+      "baseline_name": "burpee",
+      "notes": null
+    },
+    {
+      "id": "q-english-014",
+      "query": "lever leg extension",
+      "intent": "english",
+      "purpose": "search",
+      "filters": {
+        "equipment": null,
+        "body_part": null,
+        "target": null,
+        "muscle_group": null
+      },
+      "environment": null,
+      "declared_equipment": [],
+      "temporary_restrictions": [],
+      "saved_profile_restrictions": {
+        "unavailable_equipment": [],
+        "forbidden_exercise_ids": []
+      },
+      "labels": [
+        {
+          "id": "0585",
+          "grade": 3
+        },
+        {
+          "id": "3007",
+          "grade": 2
+        }
+      ],
+      "expect_empty": false,
+      "label_status": "approved",
+      "split": "holdout",
+      "family": "leg-press",
+      "baseline_name": "lever leg extension",
+      "notes": null
+    },
+    {
+      "id": "q-english-015",
+      "query": "dumbbell squat",
+      "intent": "english",
+      "purpose": "search",
+      "filters": {
+        "equipment": null,
+        "body_part": null,
+        "target": null,
+        "muscle_group": null
+      },
+      "environment": null,
+      "declared_equipment": [],
+      "temporary_restrictions": [],
+      "saved_profile_restrictions": {
+        "unavailable_equipment": [],
+        "forbidden_exercise_ids": []
+      },
+      "labels": [
+        {
+          "id": "0413",
+          "grade": 3
+        },
+        {
+          "id": "0411",
+          "grade": 2
+        }
+      ],
+      "expect_empty": false,
+      "label_status": "approved",
+      "split": "holdout",
+      "family": "squat",
+      "baseline_name": "dumbbell squat",
+      "notes": null
+    },
+    {
+      "id": "q-mixed-001",
+      "query": "dumbbell 卧推",
+      "intent": "mixed",
+      "purpose": "search",
+      "filters": {
+        "equipment": null,
+        "body_part": null,
+        "target": null,
+        "muscle_group": null
+      },
+      "environment": null,
+      "declared_equipment": [],
+      "temporary_restrictions": [],
+      "saved_profile_restrictions": {
+        "unavailable_equipment": [],
+        "forbidden_exercise_ids": []
+      },
+      "labels": [
+        {
+          "id": "0289",
+          "grade": 3
+        },
+        {
+          "id": "0314",
+          "grade": 2
+        }
+      ],
+      "expect_empty": false,
+      "label_status": "approved",
+      "split": "dev",
+      "family": "bench-press",
+      "baseline_name": "dumbbell 卧推",
+      "notes": null
+    },
+    {
+      "id": "q-mixed-002",
+      "query": "cable 划船",
+      "intent": "mixed",
+      "purpose": "search",
+      "filters": {
+        "equipment": null,
+        "body_part": null,
+        "target": null,
+        "muscle_group": null
+      },
+      "environment": null,
+      "declared_equipment": [],
+      "temporary_restrictions": [],
+      "saved_profile_restrictions": {
+        "unavailable_equipment": [],
+        "forbidden_exercise_ids": []
+      },
+      "labels": [
+        {
+          "id": "0861",
+          "grade": 3
+        },
+        {
+          "id": "0180",
+          "grade": 2
+        },
+        {
+          "id": "0218",
+          "grade": 2
+        }
+      ],
+      "expect_empty": false,
+      "label_status": "approved",
+      "split": "dev",
+      "family": "row",
+      "baseline_name": "cable 划船",
+      "notes": null
+    },
+    {
+      "id": "q-mixed-003",
+      "query": "哑铃 bench press",
+      "intent": "mixed",
+      "purpose": "search",
+      "filters": {
+        "equipment": null,
+        "body_part": null,
+        "target": null,
+        "muscle_group": null
+      },
+      "environment": null,
+      "declared_equipment": [],
+      "temporary_restrictions": [],
+      "saved_profile_restrictions": {
+        "unavailable_equipment": [],
+        "forbidden_exercise_ids": []
+      },
+      "labels": [
+        {
+          "id": "0289",
+          "grade": 3
+        }
+      ],
+      "expect_empty": false,
+      "label_status": "approved",
+      "split": "dev",
+      "family": "bench-press",
+      "baseline_name": "哑铃 bench press",
+      "notes": null
+    },
+    {
+      "id": "q-mixed-004",
+      "query": "band 划船",
+      "intent": "mixed",
+      "purpose": "search",
+      "filters": {
+        "equipment": null,
+        "body_part": null,
+        "target": null,
+        "muscle_group": null
+      },
+      "environment": null,
+      "declared_equipment": [],
+      "temporary_restrictions": [],
+      "saved_profile_restrictions": {
+        "unavailable_equipment": [],
+        "forbidden_exercise_ids": []
+      },
+      "labels": [
+        {
+          "id": "0988",
+          "grade": 3
+        },
+        {
+          "id": "0990",
+          "grade": 2
+        },
+        {
+          "id": "3166",
+          "grade": 1
+        }
+      ],
+      "expect_empty": false,
+      "label_status": "approved",
+      "split": "dev",
+      "family": "row",
+      "baseline_name": "band 划船",
+      "notes": null
+    },
+    {
+      "id": "q-mixed-005",
+      "query": "kettlebell 深蹲",
+      "intent": "mixed",
+      "purpose": "search",
+      "filters": {
+        "equipment": null,
+        "body_part": null,
+        "target": null,
+        "muscle_group": null
+      },
+      "environment": null,
+      "declared_equipment": [],
+      "temporary_restrictions": [],
+      "saved_profile_restrictions": {
+        "unavailable_equipment": [],
+        "forbidden_exercise_ids": []
+      },
+      "labels": [
+        {
+          "id": "0534",
+          "grade": 3
+        },
+        {
+          "id": "0544",
+          "grade": 2
+        }
+      ],
+      "expect_empty": false,
+      "label_status": "approved",
+      "split": "holdout",
+      "family": "squat",
+      "baseline_name": "kettlebell 深蹲",
+      "notes": null
+    },
+    {
+      "id": "q-mixed-006",
+      "query": "smith 卧推",
+      "intent": "mixed",
+      "purpose": "search",
+      "filters": {
+        "equipment": null,
+        "body_part": null,
+        "target": null,
+        "muscle_group": null
+      },
+      "environment": null,
+      "declared_equipment": [],
+      "temporary_restrictions": [],
+      "saved_profile_restrictions": {
+        "unavailable_equipment": [],
+        "forbidden_exercise_ids": []
+      },
+      "labels": [
+        {
+          "id": "0748",
+          "grade": 3
+        },
+        {
+          "id": "0025",
+          "grade": 2
+        },
+        {
+          "id": "0289",
+          "grade": 1
+        }
+      ],
+      "expect_empty": false,
+      "label_status": "approved",
+      "split": "dev",
+      "family": "bench-press",
+      "baseline_name": "smith 卧推",
+      "notes": "0748 史密斯机卧推为直接对应动作；0025 杠铃卧推为接近替代，0289 哑铃卧推为弱相关"
+    },
+    {
+      "id": "q-mixed-007",
+      "query": "EZ bar 弯举",
+      "intent": "mixed",
+      "purpose": "search",
+      "filters": {
+        "equipment": null,
+        "body_part": null,
+        "target": null,
+        "muscle_group": null
+      },
+      "environment": null,
+      "declared_equipment": [],
+      "temporary_restrictions": [],
+      "saved_profile_restrictions": {
+        "unavailable_equipment": [],
+        "forbidden_exercise_ids": []
+      },
+      "labels": [
+        {
+          "id": "0447",
+          "grade": 3
+        },
+        {
+          "id": "0031",
+          "grade": 2
+        },
+        {
+          "id": "0868",
+          "grade": 2
+        }
+      ],
+      "expect_empty": false,
+      "label_status": "approved",
+      "split": "dev",
+      "family": "curl",
+      "baseline_name": "EZ bar 弯举",
+      "notes": "0447 EZ杠铃弯举为直接对应动作；0031 杠铃弯举、0868 绳索弯举为替代变式"
+    },
+    {
+      "id": "q-mixed-008",
+      "query": "trap bar 硬拉",
+      "intent": "mixed",
+      "purpose": "search",
+      "filters": {
+        "equipment": null,
+        "body_part": null,
+        "target": null,
+        "muscle_group": null
+      },
+      "environment": null,
+      "declared_equipment": [],
+      "temporary_restrictions": [],
+      "saved_profile_restrictions": {
+        "unavailable_equipment": [],
+        "forbidden_exercise_ids": []
+      },
+      "labels": [
+        {
+          "id": "0811",
+          "grade": 3
+        },
+        {
+          "id": "0032",
+          "grade": 2
+        },
+        {
+          "id": "0085",
+          "grade": 1
+        }
+      ],
+      "expect_empty": false,
+      "label_status": "approved",
+      "split": "holdout",
+      "family": "deadlift",
+      "baseline_name": "trap bar 硬拉",
+      "notes": "0811 六角杠铃硬拉为直接对应动作；0032 杠铃硬拉为接近替代，0085 杠铃罗马尼亚硬拉为弱相关"
+    },
+    {
+      "id": "q-mixed-009",
+      "query": "squat 蹲腿",
+      "intent": "mixed",
+      "purpose": "search",
+      "filters": {
+        "equipment": null,
+        "body_part": null,
+        "target": null,
+        "muscle_group": null
+      },
+      "environment": null,
+      "declared_equipment": [],
+      "temporary_restrictions": [],
+      "saved_profile_restrictions": {
+        "unavailable_equipment": [],
+        "forbidden_exercise_ids": []
+      },
+      "labels": [
+        {
+          "id": "0413",
+          "grade": 2
+        },
+        {
+          "id": "0102",
+          "grade": 2
+        }
+      ],
+      "expect_empty": false,
+      "label_status": "approved",
+      "split": "holdout",
+      "family": "squat",
+      "baseline_name": "squat 蹲腿",
+      "notes": null
+    },
+    {
+      "id": "q-mixed-010",
+      "query": "lat pulldown 下拉",
+      "intent": "mixed",
+      "purpose": "search",
+      "filters": {
+        "equipment": null,
+        "body_part": null,
+        "target": null,
+        "muscle_group": null
+      },
+      "environment": null,
+      "declared_equipment": [],
+      "temporary_restrictions": [],
+      "saved_profile_restrictions": {
+        "unavailable_equipment": [],
+        "forbidden_exercise_ids": []
+      },
+      "labels": [
+        {
+          "id": "0198",
+          "grade": 3
+        },
+        {
+          "id": "2330",
+          "grade": 2
+        }
+      ],
+      "expect_empty": false,
+      "label_status": "approved",
+      "split": "dev",
+      "family": "row",
+      "baseline_name": "lat pulldown 下拉",
+      "notes": null
+    },
+    {
+      "id": "q-desc-001",
+      "query": "躺着用杠铃把重量推起来练胸",
+      "intent": "description",
+      "purpose": "search",
+      "filters": {
+        "equipment": null,
+        "body_part": null,
+        "target": null,
+        "muscle_group": null
+      },
+      "environment": null,
+      "declared_equipment": [],
+      "temporary_restrictions": [],
+      "saved_profile_restrictions": {
+        "unavailable_equipment": [],
+        "forbidden_exercise_ids": []
+      },
+      "labels": [
+        {
+          "id": "0025",
+          "grade": 3
+        },
+        {
+          "id": "0047",
+          "grade": 2
+        },
+        {
+          "id": "0289",
+          "grade": 2
+        }
+      ],
+      "expect_empty": false,
+      "label_status": "approved",
+      "split": "dev",
+      "family": "bench-press",
+      "baseline_name": "卧推",
+      "notes": null
+    },
+    {
+      "id": "q-desc-002",
+      "query": "挂在单杠上把身体拉起来",
+      "intent": "description",
+      "purpose": "search",
+      "filters": {
+        "equipment": null,
+        "body_part": null,
+        "target": null,
+        "muscle_group": null
+      },
+      "environment": null,
+      "declared_equipment": [],
+      "temporary_restrictions": [],
+      "saved_profile_restrictions": {
+        "unavailable_equipment": [],
+        "forbidden_exercise_ids": []
+      },
+      "labels": [
+        {
+          "id": "0652",
+          "grade": 3
+        },
+        {
+          "id": "0017",
+          "grade": 2
+        }
+      ],
+      "expect_empty": false,
+      "label_status": "approved",
+      "split": "dev",
+      "family": "pull-up",
+      "baseline_name": "引体",
+      "notes": null
+    },
+    {
+      "id": "q-desc-003",
+      "query": "趴着用手把身体撑起来再放下去",
+      "intent": "description",
+      "purpose": "search",
+      "filters": {
+        "equipment": null,
+        "body_part": null,
+        "target": null,
+        "muscle_group": null
+      },
+      "environment": null,
+      "declared_equipment": [],
+      "temporary_restrictions": [],
+      "saved_profile_restrictions": {
+        "unavailable_equipment": [],
+        "forbidden_exercise_ids": []
+      },
+      "labels": [
+        {
+          "id": "0662",
+          "grade": 3
+        },
+        {
+          "id": "0279",
+          "grade": 2
+        },
+        {
+          "id": "0258",
+          "grade": 2
+        }
+      ],
+      "expect_empty": false,
+      "label_status": "approved",
+      "split": "dev",
+      "family": "push-up",
+      "baseline_name": "俯卧撑",
+      "notes": null
+    },
+    {
+      "id": "q-desc-004",
+      "query": "从地上把杠铃拉起来",
+      "intent": "description",
+      "purpose": "search",
+      "filters": {
+        "equipment": null,
+        "body_part": null,
+        "target": null,
+        "muscle_group": null
+      },
+      "environment": null,
+      "declared_equipment": [],
+      "temporary_restrictions": [],
+      "saved_profile_restrictions": {
+        "unavailable_equipment": [],
+        "forbidden_exercise_ids": []
+      },
+      "labels": [
+        {
+          "id": "0032",
+          "grade": 3
+        },
+        {
+          "id": "0085",
+          "grade": 2
+        },
+        {
+          "id": "0116",
+          "grade": 2
+        }
+      ],
+      "expect_empty": false,
+      "label_status": "approved",
+      "split": "holdout",
+      "family": "deadlift",
+      "baseline_name": "硬拉",
+      "notes": null
+    },
+    {
+      "id": "q-desc-005",
+      "query": "坐着拉住把手把肩胛骨往后收",
+      "intent": "description",
+      "purpose": "search",
+      "filters": {
+        "equipment": null,
+        "body_part": null,
+        "target": null,
+        "muscle_group": null
+      },
+      "environment": null,
+      "declared_equipment": [],
+      "temporary_restrictions": [],
+      "saved_profile_restrictions": {
+        "unavailable_equipment": [],
+        "forbidden_exercise_ids": []
+      },
+      "labels": [
+        {
+          "id": "0861",
+          "grade": 3
+        },
+        {
+          "id": "0180",
+          "grade": 2
+        },
+        {
+          "id": "0218",
+          "grade": 2
+        }
+      ],
+      "expect_empty": false,
+      "label_status": "approved",
+      "split": "dev",
+      "family": "row",
+      "baseline_name": "划船",
+      "notes": null
+    },
+    {
+      "id": "q-desc-006",
+      "query": "站着把哑铃从身体两侧抬到肩高",
+      "intent": "description",
+      "purpose": "search",
+      "filters": {
+        "equipment": null,
+        "body_part": null,
+        "target": null,
+        "muscle_group": null
+      },
+      "environment": null,
+      "declared_equipment": [],
+      "temporary_restrictions": [],
+      "saved_profile_restrictions": {
+        "unavailable_equipment": [],
+        "forbidden_exercise_ids": []
+      },
+      "labels": [
+        {
+          "id": "0334",
+          "grade": 3
+        },
+        {
+          "id": "0178",
+          "grade": 2
+        },
+        {
+          "id": "0396",
+          "grade": 2
+        }
+      ],
+      "expect_empty": false,
+      "label_status": "approved",
+      "split": "dev",
+      "family": "lateral-raise",
+      "baseline_name": "侧平举",
+      "notes": null
+    },
+    {
+      "id": "q-desc-007",
+      "query": "髋部主导、膝盖微屈把杠铃贴腿放下",
+      "intent": "description",
+      "purpose": "search",
+      "filters": {
+        "equipment": null,
+        "body_part": null,
+        "target": null,
+        "muscle_group": null
+      },
+      "environment": null,
+      "declared_equipment": [],
+      "temporary_restrictions": [],
+      "saved_profile_restrictions": {
+        "unavailable_equipment": [],
+        "forbidden_exercise_ids": []
+      },
+      "labels": [
+        {
+          "id": "0085",
+          "grade": 3
+        },
+        {
+          "id": "1459",
+          "grade": 3
+        },
+        {
+          "id": "0032",
+          "grade": 2
+        }
+      ],
+      "expect_empty": false,
+      "label_status": "approved",
+      "split": "holdout",
+      "family": "deadlift",
+      "baseline_name": "硬拉",
+      "notes": null
+    },
+    {
+      "id": "q-desc-008",
+      "query": "大腿前侧发力的蹬腿器械",
+      "intent": "description",
+      "purpose": "search",
+      "filters": {
+        "equipment": null,
+        "body_part": null,
+        "target": null,
+        "muscle_group": null
+      },
+      "environment": null,
+      "declared_equipment": [],
+      "temporary_restrictions": [],
+      "saved_profile_restrictions": {
+        "unavailable_equipment": [],
+        "forbidden_exercise_ids": []
+      },
+      "labels": [
+        {
+          "id": "0739",
+          "grade": 3
+        },
+        {
+          "id": "0585",
+          "grade": 3
+        },
+        {
+          "id": "1425",
+          "grade": 2
+        }
+      ],
+      "expect_empty": false,
+      "label_status": "approved",
+      "split": "holdout",
+      "family": "leg-press",
+      "baseline_name": "腿举",
+      "notes": null
+    },
+    {
+      "id": "q-desc-009",
+      "query": "躺在地上把上半身卷离地面练腹肌",
+      "intent": "description",
+      "purpose": "search",
+      "filters": {
+        "equipment": null,
+        "body_part": null,
+        "target": null,
+        "muscle_group": null
+      },
+      "environment": null,
+      "declared_equipment": [],
+      "temporary_restrictions": [],
+      "saved_profile_restrictions": {
+        "unavailable_equipment": [],
+        "forbidden_exercise_ids": []
+      },
+      "labels": [
+        {
+          "id": "0274",
+          "grade": 3
+        },
+        {
+          "id": "0262",
+          "grade": 2
+        },
+        {
+          "id": "0277",
+          "grade": 2
+        }
+      ],
+      "expect_empty": false,
+      "label_status": "approved",
+      "split": "holdout",
+      "family": "crunch",
+      "baseline_name": "卷腹",
+      "notes": null
+    },
+    {
+      "id": "q-desc-010",
+      "query": "脚跟抬起踮脚尖练小腿",
+      "intent": "description",
+      "purpose": "search",
+      "filters": {
+        "equipment": null,
+        "body_part": null,
+        "target": null,
+        "muscle_group": null
+      },
+      "environment": null,
+      "declared_equipment": [],
+      "temporary_restrictions": [],
+      "saved_profile_restrictions": {
+        "unavailable_equipment": [],
+        "forbidden_exercise_ids": []
+      },
+      "labels": [
+        {
+          "id": "1373",
+          "grade": 3
+        },
+        {
+          "id": "1372",
+          "grade": 2
+        },
+        {
+          "id": "0999",
+          "grade": 2
+        }
+      ],
+      "expect_empty": false,
+      "label_status": "approved",
+      "split": "holdout",
+      "family": "calf-raise",
+      "baseline_name": "提踵",
+      "notes": null
+    },
+    {
+      "id": "q-desc-011",
+      "query": "把肩膀往耳朵方向抬起来",
+      "intent": "description",
+      "purpose": "search",
+      "filters": {
+        "equipment": null,
+        "body_part": null,
+        "target": null,
+        "muscle_group": null
+      },
+      "environment": null,
+      "declared_equipment": [],
+      "temporary_restrictions": [],
+      "saved_profile_restrictions": {
+        "unavailable_equipment": [],
+        "forbidden_exercise_ids": []
+      },
+      "labels": [
+        {
+          "id": "0095",
+          "grade": 3
+        },
+        {
+          "id": "0406",
+          "grade": 3
+        }
+      ],
+      "expect_empty": false,
+      "label_status": "approved",
+      "split": "holdout",
+      "family": "shrug",
+      "baseline_name": "耸肩",
+      "notes": null
+    },
+    {
+      "id": "q-desc-012",
+      "query": "原地跳起再趴下撑起来的有氧动作",
+      "intent": "description",
+      "purpose": "search",
+      "filters": {
+        "equipment": null,
+        "body_part": null,
+        "target": null,
+        "muscle_group": null
+      },
+      "environment": null,
+      "declared_equipment": [],
+      "temporary_restrictions": [],
+      "saved_profile_restrictions": {
+        "unavailable_equipment": [],
+        "forbidden_exercise_ids": []
+      },
+      "labels": [
+        {
+          "id": "1160",
+          "grade": 3
+        },
+        {
+          "id": "0501",
+          "grade": 2
+        },
+        {
+          "id": "1201",
+          "grade": 2
+        }
+      ],
+      "expect_empty": false,
+      "label_status": "approved",
+      "split": "holdout",
+      "family": "cardio",
+      "baseline_name": "波比",
+      "notes": null
+    },
+    {
+      "id": "q-cond-001",
+      "query": "家里有哑铃，想练背",
+      "intent": "conditional",
+      "purpose": "search",
+      "filters": {
+        "equipment": null,
+        "body_part": "back",
+        "target": null,
+        "muscle_group": null
+      },
+      "environment": "居家",
+      "declared_equipment": [
+        "dumbbell"
+      ],
+      "temporary_restrictions": [],
+      "saved_profile_restrictions": {
+        "unavailable_equipment": [],
+        "forbidden_exercise_ids": []
+      },
+      "labels": [
+        {
+          "id": "0293",
+          "grade": 3
+        },
+        {
+          "id": "0292",
+          "grade": 3
+        },
+        {
+          "id": "0327",
+          "grade": 2
+        },
+        {
+          "id": "1328",
+          "grade": 2
+        },
+        {
+          "id": "0406",
+          "grade": 2
+        },
+        {
+          "id": "0652",
+          "grade": 2
+        },
+        {
+          "id": "3158",
+          "grade": 2
+        },
+        {
+          "id": "3166",
+          "grade": 2
+        },
+        {
+          "id": "3168",
+          "grade": 2
+        },
+        {
+          "id": "3019",
+          "grade": 1
+        }
+      ],
+      "expect_empty": false,
+      "label_status": "approved",
+      "split": "dev",
+      "family": "row",
+      "baseline_name": "背",
+      "notes": "允许 body weight 与 dumbbell 中符合限制的背部候选"
+    },
+    {
+      "id": "q-cond-002",
+      "query": "家里没哑铃了，换个练背的动作",
+      "intent": "conditional",
+      "purpose": "search",
+      "filters": {
+        "equipment": null,
+        "body_part": "back",
+        "target": null,
+        "muscle_group": null
+      },
+      "environment": "居家",
+      "declared_equipment": [],
+      "temporary_restrictions": [],
+      "saved_profile_restrictions": {
+        "unavailable_equipment": [
+          "dumbbell"
+        ],
+        "forbidden_exercise_ids": []
+      },
+      "labels": [
+        {
+          "id": "0652",
+          "grade": 3
+        },
+        {
+          "id": "3158",
+          "grade": 2
+        },
+        {
+          "id": "3162",
+          "grade": 2
+        },
+        {
+          "id": "3166",
+          "grade": 2
+        },
+        {
+          "id": "3168",
+          "grade": 2
+        },
+        {
+          "id": "3019",
+          "grade": 2
+        },
+        {
+          "id": "3293",
+          "grade": 2
+        },
+        {
+          "id": "3165",
+          "grade": 2
+        }
+      ],
+      "expect_empty": false,
+      "label_status": "approved",
+      "split": "dev",
+      "family": "row",
+      "baseline_name": "背",
+      "notes": "临时排除 dumbbell，仅徒手背部候选"
+    },
+    {
+      "id": "q-cond-003",
+      "query": "只用哑铃练胸",
+      "intent": "conditional",
+      "purpose": "search",
+      "filters": {
+        "equipment": "dumbbell",
+        "body_part": "chest",
+        "target": null,
+        "muscle_group": null
+      },
+      "environment": "居家",
+      "declared_equipment": [
+        "dumbbell"
+      ],
+      "temporary_restrictions": [],
+      "saved_profile_restrictions": {
+        "unavailable_equipment": [],
+        "forbidden_exercise_ids": []
+      },
+      "labels": [
+        {
+          "id": "0289",
+          "grade": 3
+        },
+        {
+          "id": "0314",
+          "grade": 3
+        },
+        {
+          "id": "0301",
+          "grade": 2
+        },
+        {
+          "id": "0302",
+          "grade": 2
+        },
+        {
+          "id": "0319",
+          "grade": 2
+        }
+      ],
+      "expect_empty": false,
+      "label_status": "approved",
+      "split": "dev",
+      "family": "bench-press",
+      "baseline_name": "卧推",
+      "notes": "“只用哑铃”作为独立器械筛选"
+    },
+    {
+      "id": "q-cond-004",
+      "query": "健身房，想练肩",
+      "intent": "conditional",
+      "purpose": "search",
+      "filters": {
+        "equipment": null,
+        "body_part": "shoulders",
+        "target": null,
+        "muscle_group": null
+      },
+      "environment": "健身房",
+      "declared_equipment": [],
+      "temporary_restrictions": [],
+      "saved_profile_restrictions": {
+        "unavailable_equipment": [],
+        "forbidden_exercise_ids": []
+      },
+      "labels": [
+        {
+          "id": "0334",
+          "grade": 3
+        },
+        {
+          "id": "0355",
+          "grade": 2
+        },
+        {
+          "id": "0396",
+          "grade": 2
+        },
+        {
+          "id": "0086",
+          "grade": 2
+        },
+        {
+          "id": "0087",
+          "grade": 2
+        }
+      ],
+      "expect_empty": false,
+      "label_status": "approved",
+      "split": "dev",
+      "family": "lateral-raise",
+      "baseline_name": "肩",
+      "notes": null
+    },
+    {
+      "id": "q-cond-005",
+      "query": "居家徒手练腿",
+      "intent": "conditional",
+      "purpose": "search",
+      "filters": {
+        "equipment": "body weight",
+        "body_part": "upper legs",
+        "target": null,
+        "muscle_group": null
+      },
+      "environment": "居家",
+      "declared_equipment": [],
+      "temporary_restrictions": [],
+      "saved_profile_restrictions": {
+        "unavailable_equipment": [],
+        "forbidden_exercise_ids": []
+      },
+      "labels": [
+        {
+          "id": "0514",
+          "grade": 2
+        },
+        {
+          "id": "3769",
+          "grade": 2
+        },
+        {
+          "id": "3470",
+          "grade": 2
+        },
+        {
+          "id": "3523",
+          "grade": 2
+        },
+        {
+          "id": "3645",
+          "grade": 2
+        },
+        {
+          "id": "0496",
+          "grade": 2
+        },
+        {
+          "id": "0697",
+          "grade": 2
+        }
+      ],
+      "expect_empty": false,
+      "label_status": "approved",
+      "split": "holdout",
+      "family": "squat",
+      "baseline_name": "深蹲",
+      "notes": null
+    },
+    {
+      "id": "q-cond-006",
+      "query": "伤后想练后链，避开高负荷硬拉",
+      "intent": "conditional",
+      "purpose": "search",
+      "filters": {
+        "equipment": null,
+        "body_part": null,
+        "target": null,
+        "muscle_group": null
+      },
+      "environment": null,
+      "declared_equipment": [],
+      "temporary_restrictions": [
+        "避免高负荷硬拉"
+      ],
+      "saved_profile_restrictions": {
+        "unavailable_equipment": [],
+        "forbidden_exercise_ids": []
+      },
+      "labels": [
+        {
+          "id": "1409",
+          "grade": 2
+        },
+        {
+          "id": "0085",
+          "grade": 2
+        },
+        {
+          "id": "1459",
+          "grade": 2
+        },
+        {
+          "id": "3523",
+          "grade": 2
+        },
+        {
+          "id": "0586",
+          "grade": 2
+        }
+      ],
+      "expect_empty": false,
+      "label_status": "approved",
+      "split": "holdout",
+      "family": "deadlift",
+      "baseline_name": "臀桥",
+      "notes": null
+    },
+    {
+      "id": "q-cond-007",
+      "query": "想要练背的徒手动作",
+      "intent": "conditional",
+      "purpose": "search",
+      "filters": {
+        "equipment": "body weight",
+        "body_part": "back",
+        "target": null,
+        "muscle_group": null
+      },
+      "environment": null,
+      "declared_equipment": [],
+      "temporary_restrictions": [],
+      "saved_profile_restrictions": {
+        "unavailable_equipment": [],
+        "forbidden_exercise_ids": []
+      },
+      "labels": [
+        {
+          "id": "0652",
+          "grade": 3
+        },
+        {
+          "id": "3293",
+          "grade": 2
+        },
+        {
+          "id": "3158",
+          "grade": 2
+        },
+        {
+          "id": "3166",
+          "grade": 2
+        },
+        {
+          "id": "3019",
+          "grade": 2
+        }
+      ],
+      "expect_empty": false,
+      "label_status": "approved",
+      "split": "dev",
+      "family": "pull-up",
+      "baseline_name": "背",
+      "notes": null
+    },
+    {
+      "id": "q-cond-008",
+      "query": "有杠铃，练胸的中等难度动作",
+      "intent": "conditional",
+      "purpose": "search",
+      "filters": {
+        "equipment": null,
+        "body_part": "chest",
+        "target": null,
+        "muscle_group": null
+      },
+      "environment": null,
+      "declared_equipment": [
+        "barbell"
+      ],
+      "temporary_restrictions": [],
+      "saved_profile_restrictions": {
+        "unavailable_equipment": [],
+        "forbidden_exercise_ids": []
+      },
+      "labels": [
+        {
+          "id": "0025",
+          "grade": 3
+        },
+        {
+          "id": "0047",
+          "grade": 2
+        },
+        {
+          "id": "0033",
+          "grade": 2
+        }
+      ],
+      "expect_empty": false,
+      "label_status": "approved",
+      "split": "dev",
+      "family": "bench-press",
+      "baseline_name": "卧推",
+      "notes": "「有杠铃」为可用声明，不作器械精确筛选；环境未知时默认目录器械可用，标注以杠铃练胸动作为核心"
+    },
+    {
+      "id": "q-cond-009",
+      "query": "家里有弹力带，练背",
+      "intent": "conditional",
+      "purpose": "search",
+      "filters": {
+        "equipment": null,
+        "body_part": "back",
+        "target": null,
+        "muscle_group": null
+      },
+      "environment": "居家",
+      "declared_equipment": [
+        "band"
+      ],
+      "temporary_restrictions": [],
+      "saved_profile_restrictions": {
+        "unavailable_equipment": [],
+        "forbidden_exercise_ids": []
+      },
+      "labels": [
+        {
+          "id": "0988",
+          "grade": 3
+        },
+        {
+          "id": "0990",
+          "grade": 2
+        },
+        {
+          "id": "0974",
+          "grade": 2
+        },
+        {
+          "id": "0652",
+          "grade": 2
+        },
+        {
+          "id": "3158",
+          "grade": 2
+        },
+        {
+          "id": "3166",
+          "grade": 2
+        },
+        {
+          "id": "3168",
+          "grade": 2
+        },
+        {
+          "id": "3019",
+          "grade": 1
+        }
+      ],
+      "expect_empty": false,
+      "label_status": "approved",
+      "split": "dev",
+      "family": "row",
+      "baseline_name": "划船",
+      "notes": "居家默认徒手可用，「有弹力带」为可用声明，不作器械精确筛选；允许 body weight 与 band 中符合限制的背部候选"
+    },
+    {
+      "id": "q-cond-010",
+      "query": "有哑铃，练二头肌",
+      "intent": "conditional",
+      "purpose": "search",
+      "filters": {
+        "equipment": null,
+        "body_part": null,
+        "target": "biceps",
+        "muscle_group": null
+      },
+      "environment": null,
+      "declared_equipment": [
+        "dumbbell"
+      ],
+      "temporary_restrictions": [],
+      "saved_profile_restrictions": {
+        "unavailable_equipment": [],
+        "forbidden_exercise_ids": []
+      },
+      "labels": [
+        {
+          "id": "0294",
+          "grade": 3
+        },
+        {
+          "id": "0313",
+          "grade": 3
+        },
+        {
+          "id": "0297",
+          "grade": 2
+        },
+        {
+          "id": "0285",
+          "grade": 2
+        },
+        {
+          "id": "0315",
+          "grade": 2
+        }
+      ],
+      "expect_empty": false,
+      "label_status": "approved",
+      "split": "dev",
+      "family": "curl",
+      "baseline_name": "弯举",
+      "notes": "明确有哑铃时优先返回哑铃弯举家族"
+    },
+    {
+      "id": "q-cond-011",
+      "query": "户外没有器械，练核心",
+      "intent": "conditional",
+      "purpose": "search",
+      "filters": {
+        "equipment": "body weight",
+        "body_part": "waist",
+        "target": null,
+        "muscle_group": null
+      },
+      "environment": "户外",
+      "declared_equipment": [],
+      "temporary_restrictions": [],
+      "saved_profile_restrictions": {
+        "unavailable_equipment": [],
+        "forbidden_exercise_ids": []
+      },
+      "labels": [
+        {
+          "id": "0274",
+          "grade": 3
+        },
+        {
+          "id": "0262",
+          "grade": 2
+        },
+        {
+          "id": "0464",
+          "grade": 2
+        },
+        {
+          "id": "0635",
+          "grade": 2
+        }
+      ],
+      "expect_empty": false,
+      "label_status": "approved",
+      "split": "holdout",
+      "family": "crunch",
+      "baseline_name": "卷腹",
+      "notes": null
+    },
+    {
+      "id": "q-cond-012",
+      "query": "有壶铃，练腿",
+      "intent": "conditional",
+      "purpose": "search",
+      "filters": {
+        "equipment": null,
+        "body_part": "upper legs",
+        "target": null,
+        "muscle_group": null
+      },
+      "environment": null,
+      "declared_equipment": [
+        "kettlebell"
+      ],
+      "temporary_restrictions": [],
+      "saved_profile_restrictions": {
+        "unavailable_equipment": [],
+        "forbidden_exercise_ids": []
+      },
+      "labels": [
+        {
+          "id": "0534",
+          "grade": 3
+        },
+        {
+          "id": "0544",
+          "grade": 2
+        },
+        {
+          "id": "0536",
+          "grade": 2
+        }
+      ],
+      "expect_empty": false,
+      "label_status": "approved",
+      "split": "holdout",
+      "family": "squat",
+      "baseline_name": "深蹲",
+      "notes": "「有壶铃」为可用声明，不作器械精确筛选；环境未知时默认目录器械可用，标注以壶铃练腿动作为核心"
+    },
+    {
+      "id": "q-cond-013",
+      "query": "健身房，用器械练腿",
+      "intent": "conditional",
+      "purpose": "search",
+      "filters": {
+        "equipment": null,
+        "body_part": "upper legs",
+        "target": null,
+        "muscle_group": null
+      },
+      "environment": "健身房",
+      "declared_equipment": [],
+      "temporary_restrictions": [],
+      "saved_profile_restrictions": {
+        "unavailable_equipment": [],
+        "forbidden_exercise_ids": []
+      },
+      "labels": [
+        {
+          "id": "0585",
+          "grade": 3
+        },
+        {
+          "id": "0586",
+          "grade": 3
+        },
+        {
+          "id": "0739",
+          "grade": 3
+        },
+        {
+          "id": "3007",
+          "grade": 2
+        }
+      ],
+      "expect_empty": false,
+      "label_status": "approved",
+      "split": "holdout",
+      "family": "leg-press",
+      "baseline_name": "腿举",
+      "notes": "「用器械」泛指健身房器械，未指定单类，硬筛选留空；0739 腿举机为 sled machine，3007 为 resistance band"
+    },
+    {
+      "id": "q-cond-014",
+      "query": "家里有哑铃，想练肩",
+      "intent": "conditional",
+      "purpose": "search",
+      "filters": {
+        "equipment": null,
+        "body_part": "shoulders",
+        "target": null,
+        "muscle_group": null
+      },
+      "environment": "居家",
+      "declared_equipment": [
+        "dumbbell"
+      ],
+      "temporary_restrictions": [],
+      "saved_profile_restrictions": {
+        "unavailable_equipment": [],
+        "forbidden_exercise_ids": []
+      },
+      "labels": [
+        {
+          "id": "0334",
+          "grade": 3
+        },
+        {
+          "id": "0355",
+          "grade": 2
+        },
+        {
+          "id": "0396",
+          "grade": 2
+        },
+        {
+          "id": "0311",
+          "grade": 2
+        }
+      ],
+      "expect_empty": false,
+      "label_status": "approved",
+      "split": "dev",
+      "family": "lateral-raise",
+      "baseline_name": "肩",
+      "notes": null
+    },
+    {
+      "id": "q-cond-015",
+      "query": "没有单杠，怎么练背",
+      "intent": "conditional",
+      "purpose": "search",
+      "filters": {
+        "equipment": "body weight",
+        "body_part": "back",
+        "target": null,
+        "muscle_group": null
+      },
+      "environment": "居家",
+      "declared_equipment": [],
+      "temporary_restrictions": [
+        "没有单杠"
+      ],
+      "saved_profile_restrictions": {
+        "unavailable_equipment": [],
+        "forbidden_exercise_ids": []
+      },
+      "labels": [
+        {
+          "id": "3166",
+          "grade": 3
+        },
+        {
+          "id": "3158",
+          "grade": 2
+        },
+        {
+          "id": "3168",
+          "grade": 2
+        }
+      ],
+      "expect_empty": false,
+      "label_status": "approved",
+      "split": "dev",
+      "family": "row",
+      "baseline_name": "划船",
+      "notes": null
+    },
+    {
+      "id": "q-cond-016",
+      "query": "用哑铃做弯举",
+      "intent": "conditional",
+      "purpose": "search",
+      "filters": {
+        "equipment": null,
+        "body_part": null,
+        "target": "biceps",
+        "muscle_group": null
+      },
+      "environment": null,
+      "declared_equipment": [
+        "dumbbell"
+      ],
+      "temporary_restrictions": [],
+      "saved_profile_restrictions": {
+        "unavailable_equipment": [],
+        "forbidden_exercise_ids": []
+      },
+      "labels": [
+        {
+          "id": "0294",
+          "grade": 3
+        },
+        {
+          "id": "0313",
+          "grade": 3
+        },
+        {
+          "id": "0297",
+          "grade": 2
+        },
+        {
+          "id": "0023",
+          "grade": 1
+        }
+      ],
+      "expect_empty": false,
+      "label_status": "approved",
+      "split": "dev",
+      "family": "curl",
+      "baseline_name": "弯举",
+      "notes": "“用哑铃”为可用声明，不等于只用哑铃"
+    },
+    {
+      "id": "q-multi-001",
+      "query": "划船",
+      "intent": "multi_alias",
+      "purpose": "search",
+      "filters": {
+        "equipment": null,
+        "body_part": null,
+        "target": null,
+        "muscle_group": null
+      },
+      "environment": null,
+      "declared_equipment": [],
+      "temporary_restrictions": [],
+      "saved_profile_restrictions": {
+        "unavailable_equipment": [],
+        "forbidden_exercise_ids": []
+      },
+      "labels": [
+        {
+          "id": "0027",
+          "grade": 3
+        },
+        {
+          "id": "0293",
+          "grade": 3
+        },
+        {
+          "id": "0861",
+          "grade": 3
+        },
+        {
+          "id": "0292",
+          "grade": 2
+        },
+        {
+          "id": "0049",
+          "grade": 2
+        },
+        {
+          "id": "3017",
+          "grade": 2
+        }
+      ],
+      "expect_empty": false,
+      "label_status": "approved",
+      "split": "dev",
+      "family": "row",
+      "baseline_name": "划船",
+      "notes": "一词对应多个划船变式"
+    },
+    {
+      "id": "q-multi-002",
+      "query": "推举",
+      "intent": "multi_alias",
+      "purpose": "search",
+      "filters": {
+        "equipment": null,
+        "body_part": null,
+        "target": null,
+        "muscle_group": null
+      },
+      "environment": null,
+      "declared_equipment": [],
+      "temporary_restrictions": [],
+      "saved_profile_restrictions": {
+        "unavailable_equipment": [],
+        "forbidden_exercise_ids": []
+      },
+      "labels": [
+        {
+          "id": "0086",
+          "grade": 3
+        },
+        {
+          "id": "0091",
+          "grade": 3
+        },
+        {
+          "id": "0105",
+          "grade": 2
+        },
+        {
+          "id": "0087",
+          "grade": 2
+        }
+      ],
+      "expect_empty": false,
+      "label_status": "approved",
+      "split": "holdout",
+      "family": "overhead-press",
+      "baseline_name": "推举",
+      "notes": "军事推举家族"
+    },
+    {
+      "id": "q-multi-003",
+      "query": "硬拉",
+      "intent": "multi_alias",
+      "purpose": "search",
+      "filters": {
+        "equipment": null,
+        "body_part": null,
+        "target": null,
+        "muscle_group": null
+      },
+      "environment": null,
+      "declared_equipment": [],
+      "temporary_restrictions": [],
+      "saved_profile_restrictions": {
+        "unavailable_equipment": [],
+        "forbidden_exercise_ids": []
+      },
+      "labels": [
+        {
+          "id": "0032",
+          "grade": 3
+        },
+        {
+          "id": "0300",
+          "grade": 3
+        },
+        {
+          "id": "0085",
+          "grade": 2
+        },
+        {
+          "id": "0117",
+          "grade": 2
+        },
+        {
+          "id": "0074",
+          "grade": 2
+        }
+      ],
+      "expect_empty": false,
+      "label_status": "approved",
+      "split": "holdout",
+      "family": "deadlift",
+      "baseline_name": "硬拉",
+      "notes": null
+    },
+    {
+      "id": "q-multi-004",
+      "query": "弯举",
+      "intent": "multi_alias",
+      "purpose": "search",
+      "filters": {
+        "equipment": null,
+        "body_part": null,
+        "target": null,
+        "muscle_group": null
+      },
+      "environment": null,
+      "declared_equipment": [],
+      "temporary_restrictions": [],
+      "saved_profile_restrictions": {
+        "unavailable_equipment": [],
+        "forbidden_exercise_ids": []
+      },
+      "labels": [
+        {
+          "id": "0031",
+          "grade": 3
+        },
+        {
+          "id": "0868",
+          "grade": 3
+        },
+        {
+          "id": "0023",
+          "grade": 2
+        },
+        {
+          "id": "0080",
+          "grade": 2
+        }
+      ],
+      "expect_empty": false,
+      "label_status": "approved",
+      "split": "dev",
+      "family": "curl",
+      "baseline_name": "弯举",
+      "notes": null
+    },
+    {
+      "id": "q-multi-005",
+      "query": "深蹲",
+      "intent": "multi_alias",
+      "purpose": "search",
+      "filters": {
+        "equipment": null,
+        "body_part": null,
+        "target": null,
+        "muscle_group": null
+      },
+      "environment": null,
+      "declared_equipment": [],
+      "temporary_restrictions": [],
+      "saved_profile_restrictions": {
+        "unavailable_equipment": [],
+        "forbidden_exercise_ids": []
+      },
+      "labels": [
+        {
+          "id": "0413",
+          "grade": 3
+        },
+        {
+          "id": "0102",
+          "grade": 2
+        },
+        {
+          "id": "0124",
+          "grade": 2
+        },
+        {
+          "id": "1004",
+          "grade": 2
+        }
+      ],
+      "expect_empty": false,
+      "label_status": "approved",
+      "split": "holdout",
+      "family": "squat",
+      "baseline_name": "深蹲",
+      "notes": null
+    },
+    {
+      "id": "q-multi-006",
+      "query": "飞鸟",
+      "intent": "multi_alias",
+      "purpose": "search",
+      "filters": {
+        "equipment": null,
+        "body_part": null,
+        "target": null,
+        "muscle_group": null
+      },
+      "environment": null,
+      "declared_equipment": [],
+      "temporary_restrictions": [],
+      "saved_profile_restrictions": {
+        "unavailable_equipment": [],
+        "forbidden_exercise_ids": []
+      },
+      "labels": [
+        {
+          "id": "0308",
+          "grade": 3
+        },
+        {
+          "id": "0319",
+          "grade": 3
+        },
+        {
+          "id": "0302",
+          "grade": 2
+        },
+        {
+          "id": "0171",
+          "grade": 2
+        }
+      ],
+      "expect_empty": false,
+      "label_status": "approved",
+      "split": "holdout",
+      "family": "fly",
+      "baseline_name": "飞鸟",
+      "notes": null
+    },
+    {
+      "id": "q-multi-007",
+      "query": "侧平举",
+      "intent": "multi_alias",
+      "purpose": "search",
+      "filters": {
+        "equipment": null,
+        "body_part": null,
+        "target": null,
+        "muscle_group": null
+      },
+      "environment": null,
+      "declared_equipment": [],
+      "temporary_restrictions": [],
+      "saved_profile_restrictions": {
+        "unavailable_equipment": [],
+        "forbidden_exercise_ids": []
+      },
+      "labels": [
+        {
+          "id": "0334",
+          "grade": 3
+        },
+        {
+          "id": "0178",
+          "grade": 3
+        },
+        {
+          "id": "0355",
+          "grade": 2
+        },
+        {
+          "id": "0192",
+          "grade": 2
+        }
+      ],
+      "expect_empty": false,
+      "label_status": "approved",
+      "split": "dev",
+      "family": "lateral-raise",
+      "baseline_name": "侧平举",
+      "notes": null
+    },
+    {
+      "id": "q-multi-008",
+      "query": "提踵",
+      "intent": "multi_alias",
+      "purpose": "search",
+      "filters": {
+        "equipment": null,
+        "body_part": null,
+        "target": null,
+        "muscle_group": null
+      },
+      "environment": null,
+      "declared_equipment": [],
+      "temporary_restrictions": [],
+      "saved_profile_restrictions": {
+        "unavailable_equipment": [],
+        "forbidden_exercise_ids": []
+      },
+      "labels": [
+        {
+          "id": "1373",
+          "grade": 3
+        },
+        {
+          "id": "1372",
+          "grade": 2
+        },
+        {
+          "id": "0999",
+          "grade": 2
+        },
+        {
+          "id": "0088",
+          "grade": 2
+        }
+      ],
+      "expect_empty": false,
+      "label_status": "approved",
+      "split": "holdout",
+      "family": "calf-raise",
+      "baseline_name": "提踵",
+      "notes": null
+    },
+    {
+      "id": "q-forbidden-001",
+      "query": "除了硬拉，练一下后链",
+      "intent": "forbidden",
+      "purpose": "search",
+      "filters": {
+        "equipment": null,
+        "body_part": null,
+        "target": null,
+        "muscle_group": null
+      },
+      "environment": null,
+      "declared_equipment": [],
+      "temporary_restrictions": [],
+      "saved_profile_restrictions": {
+        "unavailable_equipment": [],
+        "forbidden_exercise_ids": [
+          "0032",
+          "0085",
+          "1459"
+        ]
+      },
+      "labels": [
+        {
+          "id": "1409",
+          "grade": 2
+        },
+        {
+          "id": "3523",
+          "grade": 2
+        },
+        {
+          "id": "0586",
+          "grade": 2
+        },
+        {
+          "id": "3013",
+          "grade": 2
+        }
+      ],
+      "expect_empty": false,
+      "label_status": "approved",
+      "split": "holdout",
+      "family": "deadlift",
+      "baseline_name": "后链",
+      "notes": null
+    },
+    {
+      "id": "q-forbidden-002",
+      "query": "不要深蹲，练腿",
+      "intent": "forbidden",
+      "purpose": "search",
+      "filters": {
+        "equipment": null,
+        "body_part": null,
+        "target": null,
+        "muscle_group": null
+      },
+      "environment": null,
+      "declared_equipment": [],
+      "temporary_restrictions": [],
+      "saved_profile_restrictions": {
+        "unavailable_equipment": [],
+        "forbidden_exercise_ids": [
+          "0413",
+          "0102",
+          "0124"
+        ]
+      },
+      "labels": [
+        {
+          "id": "0585",
+          "grade": 3
+        },
+        {
+          "id": "0586",
+          "grade": 3
+        },
+        {
+          "id": "0739",
+          "grade": 3
+        },
+        {
+          "id": "3523",
+          "grade": 2
+        }
+      ],
+      "expect_empty": false,
+      "label_status": "approved",
+      "split": "holdout",
+      "family": "squat",
+      "baseline_name": "腿",
+      "notes": null
+    },
+    {
+      "id": "q-forbidden-003",
+      "query": "避开卧推，练胸",
+      "intent": "forbidden",
+      "purpose": "search",
+      "filters": {
+        "equipment": null,
+        "body_part": null,
+        "target": null,
+        "muscle_group": null
+      },
+      "environment": null,
+      "declared_equipment": [],
+      "temporary_restrictions": [],
+      "saved_profile_restrictions": {
+        "unavailable_equipment": [],
+        "forbidden_exercise_ids": [
+          "0025",
+          "0047"
+        ]
+      },
+      "labels": [
+        {
+          "id": "0308",
+          "grade": 3
+        },
+        {
+          "id": "0319",
+          "grade": 3
+        },
+        {
+          "id": "0289",
+          "grade": 2
+        },
+        {
+          "id": "0662",
+          "grade": 2
+        }
+      ],
+      "expect_empty": false,
+      "label_status": "approved",
+      "split": "dev",
+      "family": "bench-press",
+      "baseline_name": "胸",
+      "notes": null
+    },
+    {
+      "id": "q-forbidden-004",
+      "query": "不做引体向上，练背",
+      "intent": "forbidden",
+      "purpose": "search",
+      "filters": {
+        "equipment": null,
+        "body_part": null,
+        "target": null,
+        "muscle_group": null
+      },
+      "environment": null,
+      "declared_equipment": [],
+      "temporary_restrictions": [],
+      "saved_profile_restrictions": {
+        "unavailable_equipment": [],
+        "forbidden_exercise_ids": [
+          "0652"
+        ]
+      },
+      "labels": [
+        {
+          "id": "0861",
+          "grade": 3
+        },
+        {
+          "id": "0293",
+          "grade": 3
+        },
+        {
+          "id": "3158",
+          "grade": 2
+        },
+        {
+          "id": "3166",
+          "grade": 2
+        }
+      ],
+      "expect_empty": false,
+      "label_status": "approved",
+      "split": "dev",
+      "family": "row",
+      "baseline_name": "背",
+      "notes": null
+    },
+    {
+      "id": "q-forbidden-005",
+      "query": "不做卷腹，练核心",
+      "intent": "forbidden",
+      "purpose": "search",
+      "filters": {
+        "equipment": null,
+        "body_part": null,
+        "target": null,
+        "muscle_group": null
+      },
+      "environment": null,
+      "declared_equipment": [],
+      "temporary_restrictions": [],
+      "saved_profile_restrictions": {
+        "unavailable_equipment": [],
+        "forbidden_exercise_ids": [
+          "0274",
+          "0262"
+        ]
+      },
+      "labels": [
+        {
+          "id": "2135",
+          "grade": 3
+        },
+        {
+          "id": "3665",
+          "grade": 3
+        },
+        {
+          "id": "3544",
+          "grade": 2
+        },
+        {
+          "id": "0464",
+          "grade": 2
+        }
+      ],
+      "expect_empty": false,
+      "label_status": "approved",
+      "split": "holdout",
+      "family": "crunch",
+      "baseline_name": "核心",
+      "notes": null
+    },
+    {
+      "id": "q-forbidden-006",
+      "query": "不做耸肩，练斜方肌",
+      "intent": "forbidden",
+      "purpose": "search",
+      "filters": {
+        "equipment": null,
+        "body_part": null,
+        "target": null,
+        "muscle_group": null
+      },
+      "environment": null,
+      "declared_equipment": [],
+      "temporary_restrictions": [],
+      "saved_profile_restrictions": {
+        "unavailable_equipment": [],
+        "forbidden_exercise_ids": [
+          "0406"
+        ]
+      },
+      "labels": [
+        {
+          "id": "0120",
+          "grade": 3
+        },
+        {
+          "id": "0123",
+          "grade": 2
+        },
+        {
+          "id": "0119",
+          "grade": 2
+        },
+        {
+          "id": "0095",
+          "grade": 1
+        }
+      ],
+      "expect_empty": false,
+      "label_status": "approved",
+      "split": "holdout",
+      "family": "shrug",
+      "baseline_name": "斜方",
+      "notes": null
+    },
+    {
+      "id": "q-forbidden-007",
+      "query": "不做腿举，练腿",
+      "intent": "forbidden",
+      "purpose": "search",
+      "filters": {
+        "equipment": null,
+        "body_part": null,
+        "target": null,
+        "muscle_group": null
+      },
+      "environment": null,
+      "declared_equipment": [],
+      "temporary_restrictions": [],
+      "saved_profile_restrictions": {
+        "unavailable_equipment": [],
+        "forbidden_exercise_ids": [
+          "0739",
+          "1464"
+        ]
+      },
+      "labels": [
+        {
+          "id": "0585",
+          "grade": 3
+        },
+        {
+          "id": "0586",
+          "grade": 3
+        },
+        {
+          "id": "0413",
+          "grade": 2
+        },
+        {
+          "id": "1760",
+          "grade": 2
+        }
+      ],
+      "expect_empty": false,
+      "label_status": "approved",
+      "split": "holdout",
+      "family": "leg-press",
+      "baseline_name": "腿",
+      "notes": null
+    },
+    {
+      "id": "q-forbidden-008",
+      "query": "不做波比跳，做有氧",
+      "intent": "forbidden",
+      "purpose": "search",
+      "filters": {
+        "equipment": null,
+        "body_part": null,
+        "target": null,
+        "muscle_group": null
+      },
+      "environment": null,
+      "declared_equipment": [],
+      "temporary_restrictions": [],
+      "saved_profile_restrictions": {
+        "unavailable_equipment": [],
+        "forbidden_exercise_ids": [
+          "1160",
+          "1201"
+        ]
+      },
+      "labels": [
+        {
+          "id": "2612",
+          "grade": 3
+        },
+        {
+          "id": "0685",
+          "grade": 3
+        },
+        {
+          "id": "0684",
+          "grade": 2
+        },
+        {
+          "id": "2141",
+          "grade": 2
+        }
+      ],
+      "expect_empty": false,
+      "label_status": "approved",
+      "split": "holdout",
+      "family": "cardio",
+      "baseline_name": "有氧",
+      "notes": null
+    },
+    {
+      "id": "q-noanswer-001",
+      "query": "帮我找个游泳训练",
+      "intent": "description",
+      "purpose": "search",
+      "filters": {
+        "equipment": null,
+        "body_part": null,
+        "target": null,
+        "muscle_group": null
+      },
+      "environment": null,
+      "declared_equipment": [],
+      "temporary_restrictions": [],
+      "saved_profile_restrictions": {
+        "unavailable_equipment": [],
+        "forbidden_exercise_ids": []
+      },
+      "labels": [
+        {
+          "id": "3433",
+          "grade": 1
+        }
+      ],
+      "expect_empty": false,
+      "label_status": "approved",
+      "split": "holdout",
+      "family": "swim",
+      "baseline_name": "游泳",
+      "notes": "目录含 3433 游泳打腿（swimmer kicks），构成弱相关；无真实水中游泳训练"
+    },
+    {
+      "id": "q-noanswer-002",
+      "query": "有没有瑜伽下犬式",
+      "intent": "no_answer",
+      "purpose": "search",
+      "filters": {
+        "equipment": null,
+        "body_part": null,
+        "target": null,
+        "muscle_group": null
+      },
+      "environment": null,
+      "declared_equipment": [],
+      "temporary_restrictions": [],
+      "saved_profile_restrictions": {
+        "unavailable_equipment": [],
+        "forbidden_exercise_ids": []
+      },
+      "labels": [],
+      "expect_empty": true,
+      "label_status": "approved",
+      "split": "holdout",
+      "family": "no-answer",
+      "baseline_name": "瑜伽",
+      "notes": null
+    },
+    {
+      "id": "q-noanswer-003",
+      "query": "我想做拳击沙袋训练",
+      "intent": "no_answer",
+      "purpose": "search",
+      "filters": {
+        "equipment": null,
+        "body_part": null,
+        "target": null,
+        "muscle_group": null
+      },
+      "environment": null,
+      "declared_equipment": [],
+      "temporary_restrictions": [],
+      "saved_profile_restrictions": {
+        "unavailable_equipment": [],
+        "forbidden_exercise_ids": []
+      },
+      "labels": [],
+      "expect_empty": true,
+      "label_status": "approved",
+      "split": "holdout",
+      "family": "no-answer",
+      "baseline_name": "拳击",
+      "notes": null
+    },
+    {
+      "id": "q-noanswer-004",
+      "query": "有没有攀岩训练动作",
+      "intent": "no_answer",
+      "purpose": "search",
+      "filters": {
+        "equipment": null,
+        "body_part": null,
+        "target": null,
+        "muscle_group": null
+      },
+      "environment": null,
+      "declared_equipment": [],
+      "temporary_restrictions": [],
+      "saved_profile_restrictions": {
+        "unavailable_equipment": [],
+        "forbidden_exercise_ids": []
+      },
+      "labels": [],
+      "expect_empty": true,
+      "label_status": "approved",
+      "split": "holdout",
+      "family": "no-answer",
+      "baseline_name": "攀岩",
+      "notes": null
+    },
+    {
+      "id": "q-noanswer-005",
+      "query": "用划船机做有氧",
+      "intent": "no_answer",
+      "purpose": "search",
+      "filters": {
+        "equipment": null,
+        "body_part": null,
+        "target": null,
+        "muscle_group": null
+      },
+      "environment": null,
+      "declared_equipment": [],
+      "temporary_restrictions": [],
+      "saved_profile_restrictions": {
+        "unavailable_equipment": [],
+        "forbidden_exercise_ids": []
+      },
+      "labels": [],
+      "expect_empty": true,
+      "label_status": "approved",
+      "split": "holdout",
+      "family": "no-answer",
+      "baseline_name": "划船机",
+      "notes": null
+    },
+    {
+      "id": "q-noanswer-006",
+      "query": "有没有TRX悬挂划船",
+      "intent": "alias",
+      "purpose": "search",
+      "filters": {
+        "equipment": null,
+        "body_part": null,
+        "target": null,
+        "muscle_group": null
+      },
+      "environment": null,
+      "declared_equipment": [],
+      "temporary_restrictions": [],
+      "saved_profile_restrictions": {
+        "unavailable_equipment": [],
+        "forbidden_exercise_ids": []
+      },
+      "labels": [
+        {
+          "id": "0808",
+          "grade": 3
+        }
+      ],
+      "expect_empty": false,
+      "label_status": "approved",
+      "split": "holdout",
+      "family": "suspended-row",
+      "baseline_name": "TRX",
+      "notes": "TRX 为悬挂训练带品牌名，目录 0808 悬吊划船（suspended row）即该动作，发布语料含别名「悬挂划船」"
+    },
+    {
+      "id": "q-noanswer-007",
+      "query": "找个桑巴舞蹈训练",
+      "intent": "no_answer",
+      "purpose": "search",
+      "filters": {
+        "equipment": null,
+        "body_part": null,
+        "target": null,
+        "muscle_group": null
+      },
+      "environment": null,
+      "declared_equipment": [],
+      "temporary_restrictions": [],
+      "saved_profile_restrictions": {
+        "unavailable_equipment": [],
+        "forbidden_exercise_ids": []
+      },
+      "labels": [],
+      "expect_empty": true,
+      "label_status": "approved",
+      "split": "holdout",
+      "family": "no-answer",
+      "baseline_name": "舞蹈",
+      "notes": null
+    },
+    {
+      "id": "q-noanswer-008",
+      "query": "有没有倒立走训练",
+      "intent": "no_answer",
+      "purpose": "search",
+      "filters": {
+        "equipment": null,
+        "body_part": null,
+        "target": null,
+        "muscle_group": null
+      },
+      "environment": null,
+      "declared_equipment": [],
+      "temporary_restrictions": [],
+      "saved_profile_restrictions": {
+        "unavailable_equipment": [],
+        "forbidden_exercise_ids": []
+      },
+      "labels": [],
+      "expect_empty": true,
+      "label_status": "approved",
+      "split": "holdout",
+      "family": "no-answer",
+      "baseline_name": "倒立走",
+      "notes": null
+    },
+    {
+      "id": "q-exact-001",
+      "query": "杠铃卧推",
+      "intent": "exact_restricted",
+      "purpose": "search",
+      "filters": {
+        "equipment": "dumbbell",
+        "body_part": null,
+        "target": null,
+        "muscle_group": null
+      },
+      "environment": null,
+      "declared_equipment": [],
+      "temporary_restrictions": [],
+      "saved_profile_restrictions": {
+        "unavailable_equipment": [],
+        "forbidden_exercise_ids": []
+      },
+      "labels": [],
+      "expect_empty": true,
+      "label_status": "approved",
+      "split": "dev",
+      "family": "bench-press",
+      "baseline_name": "杠铃卧推",
+      "notes": "指名杠铃卧推但器械限定哑铃，名称与器械冲突，无合规候选"
+    },
+    {
+      "id": "q-exact-002",
+      "query": "杠铃硬拉",
+      "intent": "exact_restricted",
+      "purpose": "search",
+      "filters": {
+        "equipment": "body weight",
+        "body_part": null,
+        "target": null,
+        "muscle_group": null
+      },
+      "environment": null,
+      "declared_equipment": [],
+      "temporary_restrictions": [],
+      "saved_profile_restrictions": {
+        "unavailable_equipment": [],
+        "forbidden_exercise_ids": []
+      },
+      "labels": [],
+      "expect_empty": true,
+      "label_status": "approved",
+      "split": "holdout",
+      "family": "deadlift",
+      "baseline_name": "杠铃硬拉",
+      "notes": "指名杠铃硬拉但器械限定徒手，无合规候选"
+    },
+    {
+      "id": "q-exact-003",
+      "query": "引体向上",
+      "intent": "exact_restricted",
+      "purpose": "search",
+      "filters": {
+        "equipment": null,
+        "body_part": null,
+        "target": null,
+        "muscle_group": null
+      },
+      "environment": null,
+      "declared_equipment": [],
+      "temporary_restrictions": [],
+      "saved_profile_restrictions": {
+        "unavailable_equipment": [
+          "body weight"
+        ],
+        "forbidden_exercise_ids": []
+      },
+      "labels": [
+        {
+          "id": "0017",
+          "grade": 3
+        },
+        {
+          "id": "0970",
+          "grade": 3
+        },
+        {
+          "id": "0015",
+          "grade": 2
+        },
+        {
+          "id": "0572",
+          "grade": 2
+        },
+        {
+          "id": "1431",
+          "grade": 2
+        },
+        {
+          "id": "1432",
+          "grade": 2
+        },
+        {
+          "id": "0841",
+          "grade": 1
+        }
+      ],
+      "expect_empty": false,
+      "label_status": "approved",
+      "split": "dev",
+      "family": "pull-up",
+      "baseline_name": "引体向上",
+      "notes": "画像仅排除徒手（body weight）；辅助与负重变式的器械未被排除，仍有合理候选，预期返回非空"
+    },
+    {
+      "id": "q-exact-004",
+      "query": "器械腿屈伸",
+      "intent": "exact_restricted",
+      "purpose": "search",
+      "filters": {
+        "equipment": "dumbbell",
+        "body_part": null,
+        "target": null,
+        "muscle_group": null
+      },
+      "environment": null,
+      "declared_equipment": [],
+      "temporary_restrictions": [],
+      "saved_profile_restrictions": {
+        "unavailable_equipment": [],
+        "forbidden_exercise_ids": []
+      },
+      "labels": [],
+      "expect_empty": true,
+      "label_status": "approved",
+      "split": "holdout",
+      "family": "leg-press",
+      "baseline_name": "器械腿屈伸",
+      "notes": "指名器械腿屈伸但器械限定哑铃，无合规候选"
+    },
+    {
+      "id": "q-exact-005",
+      "query": "跳绳",
+      "intent": "exact_restricted",
+      "purpose": "search",
+      "filters": {
+        "equipment": "rope",
+        "body_part": null,
+        "target": null,
+        "muscle_group": null
+      },
+      "environment": null,
+      "declared_equipment": [],
+      "temporary_restrictions": [],
+      "saved_profile_restrictions": {
+        "unavailable_equipment": [],
+        "forbidden_exercise_ids": []
+      },
+      "labels": [
+        {
+          "id": "2612",
+          "grade": 3
+        }
+      ],
+      "expect_empty": false,
+      "label_status": "approved",
+      "split": "holdout",
+      "family": "cardio",
+      "baseline_name": "跳绳",
+      "notes": "跳绳器械为 rope，筛选与动作实际器械一致"
+    },
+    {
+      "id": "q-exact-006",
+      "query": "杠铃耸肩",
+      "intent": "exact_restricted",
+      "purpose": "search",
+      "filters": {
+        "equipment": null,
+        "body_part": null,
+        "target": null,
+        "muscle_group": null
+      },
+      "environment": null,
+      "declared_equipment": [],
+      "temporary_restrictions": [
+        "不用杠铃"
+      ],
+      "saved_profile_restrictions": {
+        "unavailable_equipment": [],
+        "forbidden_exercise_ids": []
+      },
+      "labels": [],
+      "expect_empty": true,
+      "label_status": "approved",
+      "split": "holdout",
+      "family": "shrug",
+      "baseline_name": "杠铃耸肩",
+      "notes": "指名杠铃耸肩但本次任务排除杠铃，无合规候选"
+    }
+  ]
+}

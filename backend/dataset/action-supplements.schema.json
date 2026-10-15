@@ -1,0 +1,80 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "action-supplements.schema.json",
+  "title": "Action Retrieval Supplements",
+  "description": "backend/dataset/action-supplements.candidates.json 的结构约束。每个条目关联真实目录 ID，保存英文名称与别名的来源、审阅状态；别名允许一对多，同一别名文本可出现在多个条目。",
+  "type": "object",
+  "required": ["version", "catalog", "upstream", "encoding_rule_version", "review_status", "entries"],
+  "additionalProperties": false,
+  "properties": {
+    "version": {"type": "string", "minLength": 1},
+    "catalog": {"$ref": "#/$defs/catalog"},
+    "upstream": {"$ref": "#/$defs/upstream"},
+    "encoding_rule_version": {"type": "string", "minLength": 1},
+    "review_status": {"$ref": "#/$defs/review_status"},
+    "entries": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/entry"}
+    }
+  },
+  "$defs": {
+    "catalog": {
+      "type": "object",
+      "required": ["path", "sha256", "count"],
+      "additionalProperties": false,
+      "properties": {
+        "path": {"type": "string", "minLength": 1},
+        "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "count": {"type": "integer", "minimum": 1}
+      }
+    },
+    "upstream": {
+      "type": "object",
+      "required": ["repo", "commit", "path", "license", "name_field"],
+      "additionalProperties": false,
+      "properties": {
+        "repo": {"type": "string", "pattern": "^[^/]+/[^/]+$"},
+        "commit": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+        "path": {"type": "string", "minLength": 1},
+        "license": {"type": "string", "minLength": 1},
+        "name_field": {"type": "string", "minLength": 1}
+      }
+    },
+    "review_status": {"enum": ["candidate", "approved", "rejected"]},
+    "provenance": {
+      "type": "object",
+      "required": ["text", "source", "review_status", "note"],
+      "additionalProperties": false,
+      "properties": {
+        "text": {"type": "string", "minLength": 1},
+        "source": {"type": "string", "minLength": 1},
+        "review_status": {"$ref": "#/$defs/review_status"},
+        "note": {"type": ["string", "null"]}
+      }
+    },
+    "alias": {
+      "type": "object",
+      "required": ["text", "lang", "family", "source", "review_status", "note"],
+      "additionalProperties": false,
+      "properties": {
+        "text": {"type": "string", "minLength": 1},
+        "lang": {"enum": ["zh", "en", "mixed"]},
+        "family": {"type": ["string", "null"]},
+        "source": {"type": "string", "minLength": 1},
+        "review_status": {"$ref": "#/$defs/review_status"},
+        "note": {"type": ["string", "null"]}
+      }
+    },
+    "entry": {
+      "type": "object",
+      "required": ["id", "english_name", "aliases", "note"],
+      "additionalProperties": false,
+      "properties": {
+        "id": {"type": "string", "pattern": "^[0-9]{4}$"},
+        "english_name": {"$ref": "#/$defs/provenance"},
+        "aliases": {"type": "array", "items": {"$ref": "#/$defs/alias"}},
+        "note": {"type": ["string", "null"]}
+      }
+    }
+  }
+}

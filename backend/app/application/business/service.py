@@ -8,10 +8,24 @@ from uuid import uuid4
 
 from pydantic import ValidationError
 
-from app.ai.messages import AssistantMessage, TextContent, ToolCall, ToolResultMessage
+from app.ai.messages import (
+    AssistantMessage,
+    TextContent,
+    ToolCall,
+    ToolResultMessage,
+    text_projection,
+)
 from app.ai.types import check_cancelled
+from app.application.business import retrieval_text
 from app.application.business.catalog import Catalog
 from app.application.business.coordination import ReplacementCoordinator
+from app.application.business.retrieval_conditions import evaluate_search_conditions
+from app.application.business.retrieval_response import (
+    SEARCH_LIMIT,
+    build_details_result,
+    build_search_result,
+)
+from app.application.business.retrieval_runtime import ActionRetrievalRuntime
 from app.application.session.service import SessionService
 from app.domain.business.errors import (
     BusinessError,
@@ -33,6 +47,7 @@ from app.domain.business.errors import (
     ProfileUpdateProcessing,
     ProfileVersionConflict,
     ProposalAlreadySaved,
+    ProposalCancellationInvalid,
     WorkoutAccessDenied,
     WorkoutConfirmationInvalid,
     WorkoutNotFound,
@@ -44,9 +59,13 @@ from app.domain.business.errors import (
 from app.domain.business.models import (
     BusinessContext,
     BusinessFieldError,
-    CatalogExercise,
+    CatalogSearchArguments,
     CurrentPlan,
+    ExerciseDetailResult,
+    ExerciseDetailsArguments,
+    ExerciseSearchResult,
     PendingProposalArguments,
+    PendingProposalCancellation,
     PlanAdjustmentArguments,
     PlanAdjustmentProposal,
     PlanContent,
@@ -133,11 +152,15 @@ class BusinessService:
         catalog: Catalog,
         sessions: SessionService,
         replacements: ReplacementCoordinator,
+        retrieval: ActionRetrievalRuntime | None = None,
     ) -> None:
         self._repository = repository
         self._catalog = catalog
         self._sessions = sessions
         self._replacements = replacements
+        # 未显式注入时使用惰性空的检索运行时：缺省配置或 Milvus 不可用只影响检索请求。
+        self._retrieval = retrieval if retrieval is not None else ActionRetrievalRuntime()
+        self._mappings = retrieval_text.load_mappings()
 
     # 页面接口与工具共用的读取。
 
@@ -148,22 +171,30 @@ class BusinessService:
                 return ProfileResponse(version=None, content=None)
             return ProfileResponse(version=profile.version, content=profile.content)
 
-    def search_exercises(
+    async def search_exercises(
         self,
-        name: str,
-        *,
-        equipment: str | None = None,
-        body_part: str | None = None,
-        target: str | None = None,
-        muscle_group: str | None = None,
-    ) -> list[CatalogExercise]:
-        return self._catalog.search(
-            name,
-            equipment=equipment,
-            body_part=body_part,
-            target=target,
-            muscle_group=muscle_group,
+        arguments: CatalogSearchArguments,
+        signal: Event | None = None,
+    ) -> ExerciseSearchResult:
+        # 先以短事务读取真实画像并立即释放，不持有事务等待 Embedding 或 Milvus 网络调用。
+        check_cancelled(signal)
+        profile = (await self.get_profile()).content
+        check_cancelled(signal)
+        evaluated = evaluate_search_conditions(
+            arguments, profile, self._catalog, self._mappings
         )
+        candidates = await self._retrieval.search(
+            arguments.name,
+            conditions=evaluated.conditions,
+            limit=SEARCH_LIMIT + 1,
+            signal=signal,
+        )
+        return build_search_result(candidates, evaluated)
+
+    def exercise_details(
+        self, arguments: ExerciseDetailsArguments
+    ) -> ExerciseDetailResult:
+        return build_details_result(arguments.ids, self._catalog)
 
     def exercise_equipment(self) -> dict[str, str]:
         return {exercise.id: exercise.equipment for exercise in self._catalog.all()}
@@ -1321,6 +1352,52 @@ class BusinessService:
             if arguments.business_kind == "plan":
                 return await self._pending_plan(context, entries, arguments.proposal_id)
             return await self._pending_workout(context, entries, arguments.proposal_id)
+
+    async def cancel_pending_proposal(
+        self, context: BusinessContext, arguments: PendingProposalArguments,
+        signal: Event | None = None,
+    ) -> PendingProposalCancellation:
+        check_cancelled(signal)
+        # 同一事务复用读取校验并使指定快照失效，确认受理与保存共用数据库事务锁。
+        async with self._repository.transaction():
+            proposal = await self.get_pending_proposal(context, arguments, signal)
+            branch = await self._require_branch(context.session_id)
+            entries = self._entries(branch)
+            request = entries.get(context.request_entry_id)
+            source = entries.get(context.source_entry_id)
+            if (
+                request is None or request.messages[0].role != "user"
+                or request.confirmation is not None
+                or not text_projection(request.messages[0].content).strip()
+                or source is None or not isinstance(source.messages[0], AssistantMessage)
+            ):
+                raise ProposalCancellationInvalid()
+            order = {entry.id: index for index, entry in enumerate(branch)}
+            if not (
+                order[proposal.display_entry_id] < order[request.id] < order[source.id]
+            ) or not any(
+                isinstance(block, ToolCall) and block.name == "cancel_pending_proposal"
+                and block.arguments == arguments.model_dump()
+                for block in source.messages[0].content
+            ):
+                raise ProposalCancellationInvalid()
+            setter, processing = {
+                "profile": (self._repository.set_snapshot_status, ProfileUpdateProcessing),
+                "plan": (self._repository.set_plan_snapshot_status, PlanSaveProcessing),
+                "workout": (self._repository.set_workout_snapshot_status, WorkoutSaveProcessing),
+            }[arguments.business_kind]
+            if any(
+                operation.business_kind == arguments.business_kind
+                and operation.proposal_id == arguments.proposal_id
+                for operation in await self._repository.list_processing_confirmation_operations()
+            ):
+                raise processing()
+            check_cancelled(signal)
+            await setter(arguments.proposal_id, "invalidated")
+            check_cancelled(signal)
+            return PendingProposalCancellation(
+                business_kind=arguments.business_kind, proposal_id=arguments.proposal_id,
+            )
 
     async def _pending_profile(
         self, context: BusinessContext, entries: dict[str, SessionMessageEntry], proposal_id: str,

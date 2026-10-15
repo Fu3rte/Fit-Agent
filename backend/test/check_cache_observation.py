@@ -643,7 +643,7 @@ def test_recovery_retry_recorded_separately() -> None:
         async def estimate_request() -> int:
             return 0
 
-        async def compact(compaction_id: str, signal) -> LoopCompactionResult:
+        async def compact(compaction_id: str, signal, span) -> LoopCompactionResult:
             compactions.append(compaction_id)
             return LoopCompactionResult(entry_id=compaction_id, parent_id="parent", messages=[])
 
@@ -887,11 +887,13 @@ def test_early_close_cancel_and_error_release_source() -> None:
         return session, handle
 
     outcomes = {}
+    # 取消按真实控制流结算为 aborted；提前关闭与普通异常仍为 failed。
+    expected_status = {"early_close": "failed", "error": "failed", "cancel": "aborted"}
     for name, scenario in (("early_close", scenario_close), ("error", scenario_error), ("cancel", scenario_cancel)):
         session, handle = asyncio.run(scenario())
         records = session_records(session)
         # 结局只写一次：提前关闭后再 aclose 不产生第二条记录。
-        assert len(records) == 1 and records[0].status == "failed"
+        assert len(records) == 1 and records[0].status == expected_status[name]
         assert handle.finished
         outcomes[name] = {"records": len(records), "status": records[0].status}
     RESULTS["release"] = outcomes

@@ -569,11 +569,17 @@ class CatalogExercise(BusinessModel):
     steps: CatalogSteps
 
 
-# 待确认提案受控读取：复用三类业务的快照内容与准备依据字段。
+# 待确认提案受控读取与取消：复用三类业务的身份、快照及准备依据。
 
 class PendingProposalArguments(BusinessModel):
     business_kind: Literal["profile", "plan", "workout"]
     proposal_id: str = Field(pattern=STANDARD_UUID)
+
+
+class PendingProposalCancellation(BusinessModel):
+    business_kind: Literal["profile", "plan", "workout"]
+    proposal_id: str = Field(pattern=STANDARD_UUID)
+    status: Literal["invalidated"] = "invalidated"
 
 
 class ProfilePendingProposal(BusinessModel):
@@ -678,3 +684,70 @@ class SaveConfirmationOperation(BusinessModel):
             if not isinstance(self.result, expected):
                 raise ValueError("保存结果类型与业务类型不一致。")
         return self
+
+
+# 动作检索工具参数与业务响应：purpose 区分事实核实与生成/替换，任务条件不写入长期画像。
+
+SearchPurpose: TypeAlias = Literal["lookup", "generation", "replacement"]
+
+
+def _nonblank_text(value: str | None) -> str | None:
+    if value is not None and not value.strip():
+        raise ValueError("必须包含非空白内容")
+    return value
+
+
+def _unique_nonblank(value: list[str] | None) -> list[str] | None:
+    if value is None:
+        return value
+    if any(not item.strip() for item in value):
+        raise ValueError("元素必须为非空白字符串")
+    if len(set(value)) != len(value):
+        raise ValueError("不能包含重复项")
+    return value
+
+
+class CatalogSearchArguments(BusinessModel):
+    purpose: SearchPurpose
+    name: str
+    equipment: str | None = None
+    body_part: str | None = None
+    target: str | None = None
+    muscle_group: str | None = None
+    task_environment: str | None = None
+    available_equipment: list[str] | None = None
+    unavailable_equipment: list[str] | None = None
+    excluded_ids: list[str] | None = None
+
+    _validate_text = field_validator(
+        "name", "equipment", "body_part", "target", "muscle_group", "task_environment"
+    )(_nonblank_text)
+    _validate_lists = field_validator(
+        "available_equipment", "unavailable_equipment", "excluded_ids"
+    )(_unique_nonblank)
+
+
+class ExerciseDetailsArguments(BusinessModel):
+    ids: list[str] = Field(min_length=1, max_length=5)
+
+    _validate_ids = field_validator("ids")(_unique_nonblank)
+
+
+class ExerciseMatch(BusinessModel):
+    id: str
+    name: str
+    equipment: str
+    target: str
+    matches: list[str]
+
+
+class ExerciseSearchResult(BusinessModel):
+    items: list[ExerciseMatch]
+    has_more: bool
+    remaining_ids: list[str]
+
+
+class ExerciseDetailResult(BusinessModel):
+    items: list[CatalogExercise]
+    has_more: bool
+    remaining_ids: list[str]

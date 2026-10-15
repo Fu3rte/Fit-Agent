@@ -8,7 +8,7 @@ from concurrent.futures import CancelledError, ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from queue import Queue
 from threading import Event, Lock
-from time import time_ns
+from time import perf_counter, time_ns
 from traceback import walk_tb
 from typing import Annotated, Literal
 from uuid import UUID, uuid4
@@ -51,6 +51,7 @@ from app.agent.events import AgentEvent
 from app.agent.message_context import business_context_to_llm
 from app.agent.permissions import create_before_tool_call
 from app.agent.prompts import SYSTEM_PROMPT
+from app.agent.telemetry import RunTrace, TraceSpan, connect_trace_store
 from app.agent.tool import CredentialDetectedError
 from app.agent.tools.business import (
     bind_business_tools,
@@ -76,6 +77,7 @@ from app.ai.types import check_cancelled
 from app.application.business.catalog import Catalog
 from app.application.business.confirmation import ConfirmationService
 from app.application.business.coordination import ReplacementCoordinator
+from app.application.business.retrieval_runtime import ActionRetrievalRuntime
 from app.application.business.service import (
     BUSINESS_TIMEZONE,
     BusinessService,
@@ -380,6 +382,12 @@ class RunState:
 runs: dict[UUID, RunState] = {}
 
 
+def retrieval_secret() -> str | None:
+    # 检索密钥凭据保护：直接读环境变量，不触发检索配置校验、不打印，未配置时为空。
+    value = os.environ.get("DASHSCOPE_API_KEY")
+    return value if value and value.strip() else None
+
+
 def active_secrets(session_id: str | None = None) -> tuple[str, ...]:
     # 合并当前保存的凭据与在途运行快照：清除或更换 Key 后，仍在使用的凭据继续参与检查。
     current = saved_api_key()
@@ -391,7 +399,7 @@ def active_secrets(session_id: str | None = None) -> tuple[str, ...]:
         if session_id is None or str(state.session_id) == str(session_id)
         for secret in state.secrets
     ]
-    return tuple(secret for secret in (current, *held) if secret)
+    return tuple(secret for secret in (current, retrieval_secret(), *held) if secret)
 
 
 @asynccontextmanager
@@ -402,7 +410,9 @@ async def lifespan(app: FastAPI):
     business_repository = SqliteBusinessRepository(database)
     catalog = Catalog.load()
     replacements = ReplacementCoordinator()
-    business = BusinessService(business_repository, catalog, service, replacements)
+    # 检索资源按需初始化：此处仅创建持有者，缺省配置或 Milvus 不可用只影响后续检索请求。
+    retrieval = ActionRetrievalRuntime()
+    business = BusinessService(business_repository, catalog, service, replacements, retrieval)
     service.attach_snapshots(business)
     confirmations = ConfirmationService(business_repository, service, business)
     # 中断的保存在事务未提交时已随数据库回滚；恢复完成前不接收任何保存请求。
@@ -413,14 +423,18 @@ async def lifespan(app: FastAPI):
     await confirmations.recover_interrupted()
     async with business_repository.transaction():
         await business_repository.replace_exercises(catalog.all())
+    # 观测连接在主事件循环获取：开库故障隔离为 None，业务服务沿用既有生命周期。
+    trace_store = await connect_trace_store()
     loop = asyncio.get_running_loop()
     executor = ThreadPoolExecutor(max_workers=1)
+    app.state.trace_store = trace_store
     app.state.session_service = service
     app.state.steering = SteeringCoordinator(service)
     app.state.business = business
     app.state.confirmations = confirmations
     app.state.database = database
     app.state.replacements = replacements
+    app.state.retrieval = retrieval
     app.state.loop = loop
     app.state.executor = executor
     app.state.coordination = set()
@@ -444,6 +458,10 @@ async def lifespan(app: FastAPI):
                 break
             await asyncio.gather(*tasks, return_exceptions=True)
         await loop.run_in_executor(None, executor.shutdown, True)
+        # 运行与取消收尾排空后再在所属循环关闭检索客户端；随后关闭观测与业务库。
+        await retrieval.close()
+        if trace_store is not None:
+            await trace_store.close()
         await database.close()
 
 
@@ -599,6 +617,11 @@ def public_content(message: AssistantMessage, secrets: CredentialFilter, truncat
                 "arguments": block.arguments,
             })
     return content
+
+
+def public_text_visible(content: list[dict]) -> bool:
+    # 首正文判定以公开投影为准：原始正文非空但公开 text 为空时不构成可见正文。
+    return any(block["type"] == "text" and block["text"] for block in content)
 
 
 def public_tool_execution_end(event: dict) -> dict:
@@ -874,6 +897,7 @@ def execute(
     loop,
     model,
     secrets: tuple[str, ...],
+    root: TraceSpan,
 ) -> str:
     coordinator = state.coordinator
     guard = CredentialFilter(secrets)
@@ -1090,6 +1114,9 @@ def execute(
                 data["entry_id"] = event["message_id"]
                 data["parent_id"] = parents.get(event["message_id"])
                 data["stop_reason"] = message.stop_reason
+            if public_text_visible(data["content"]):
+                # 首个公开非空正文进入队列边界：按受理起点记录一次，事件内容与顺序不变。
+                root.record_first_text()
             state.publish(kind, data)
         elif kind == "tool_start":
             data = {
@@ -1211,7 +1238,7 @@ def execute(
             created_at=time_ns() // 1_000_000,
         )
 
-    async def compact(compaction_id: str, signal) -> LoopCompactionResult:
+    async def compact(compaction_id: str, signal, span) -> LoopCompactionResult:
         # 事务外生成真实摘要与用量并重建完整新基线，再经同一事务入口原子提交；cancelled 在提交前生效。
         check_cancelled(signal)
         projection = call(service.get_projection(session_id, position["id"]))
@@ -1219,9 +1246,10 @@ def execute(
             projection.path, spec.context_window, spec.max_tokens, settings
         )
         tokens_before = estimate_context_tokens(request_messages()).tokens
+        # 摘要 model 子 Span 挂在当前 Compaction 下，与检查点提交同属一次压缩操作。
         result = await generate_compaction_summary(
             preparation, spec, api_key=secrets[0], settings=settings, signal=signal,
-            budget=budget, observation=observer, compaction_id=compaction_id,
+            budget=budget, observation=observer, compaction_id=compaction_id, parent=span,
         )
         check_cancelled(signal)
         system_state = get_current_system_message(projection.context.messages)
@@ -1287,6 +1315,7 @@ def execute(
         on_tool_update=on_tool_update,
         contains_credentials=guard.contains,
         observation=observer,
+        trace_span=root,
     )
     # 稳定声明注册表：业务工具实例仅用于声明校验，实际执行按批重新绑定。
     context = {
@@ -1355,26 +1384,31 @@ async def coordinate(
     coordinator: SteeringCoordinator,
     executor: ThreadPoolExecutor,
     loop,
+    trace: RunTrace,
+    store,
 ) -> None:
     # 主事件循环持有的独立收尾任务：始终拥有已受理运行的终态所有权。
+    # 根 callback 覆盖业务执行与终态提交；提交完成后依次结算根、写入 Trace、发布终态。
     failure: BaseException | None = None
     stop_reason: str | None = None
-    try:
-        # 模型请求使用摘要感知投影；原始路径继续供业务校验与公开历史使用。
-        projection = await service.get_projection(session_id, run.request_entry_id)
-        branch = projection.context.messages
-        future = executor.submit(
-            execute, run, session_id, branch, tools, state, service, business,
-            loop, model, secrets,
-        )
-        stop_reason = await asyncio.wrap_future(future)
-    except BaseException as error:
-        failure = error
 
-    cancelled = isinstance(failure, CancelledError) or state.cancel.is_set()
-    status, code, message = terminal_decision(failure, cancelled)
+    async def settle(root: TraceSpan):
+        nonlocal failure, stop_reason
+        try:
+            # 模型请求使用摘要感知投影；原始路径继续供业务校验与公开历史使用。
+            projection = await service.get_projection(session_id, run.request_entry_id)
+            branch = projection.context.messages
+            future = executor.submit(
+                execute, run, session_id, branch, tools, state, service, business,
+                loop, model, secrets, root,
+            )
+            stop_reason = await asyncio.wrap_future(future)
+        except BaseException as error:
+            failure = error
 
-    try:
+        cancelled = isinstance(failure, CancelledError) or state.cancel.is_set()
+        status, code, message = terminal_decision(failure, cancelled)
+
         current = await service.get_run(session_id, run.id)
         if current.status in TERMINAL_RUN_STATUSES:
             # 已有终态保持原值，仍执行收尾以关闭接收入口并丢弃剩余输入。
@@ -1390,11 +1424,20 @@ async def coordinate(
             error_code=code,
             error_message=message,
         )
+        # 业务终态提交成功后才显式设置根状态；读取或提交失败时根按自动失败结算。
+        root_status = {"completed": "completed", "cancelled": "cancelled"}.get(status, "failed")
+        root.set_status(root_status, code)
+        return outcome
+
+    try:
+        outcome = await trace.start_span("agent_run", {}, settle)
     except BaseException:
-        # 收尾读取或终态提交失败：结束当前 SSE，不发布已持久化终态确认，
+        # 收尾读取或终态提交失败：根已记为 failed，尝试保存诊断，不发布已持久化终态确认，
         # 保留数据库真实状态及尚未完成收尾的运行占用。
         state.closed_without_terminal = True
+        await trace.finish(store)
         raise
+    await trace.finish(store)
     publish_terminal(state, outcome.run, stop_reason)
     retire(state)
 
@@ -1724,11 +1767,16 @@ async def create_confirmation(session_id: PathUUID, payload: SaveConfirmationWir
         proposal_id=str(payload.proposal_id),
         display_entry_id=str(payload.display_entry_id),
     )
+    # 观测依赖显式传入：使用主事件循环已有 TraceStore 与现有凭据检查，不新增逐请求观测连接。
+    trace_store = request.app.state.trace_store
+    contains = CredentialFilter(active_secrets(session)).contains
 
     async def execute_new():
         # 后台执行：受理即登记处理中操作并直接调用业务保存；客户端断连不打断收尾，active 恰好释放一次。
         try:
-            return await confirmations.confirm(session, req)
+            return await confirmations.confirm(
+                session, req, trace_store=trace_store, contains=contains
+            )
         finally:
             active.release()
 
@@ -1739,7 +1787,12 @@ async def create_confirmation(session_id: PathUUID, payload: SaveConfirmationWir
         except ConfirmationNotFound:
             registered = None
         if registered is not None:
-            return _confirmation_post_response(await confirmations.confirm(session, req))
+            # 复用路径不新增记录器或根 Span：同键操作沿用原结果，观测边界保持不变。
+            return _confirmation_post_response(
+                await confirmations.confirm(
+                    session, req, trace_store=trace_store, contains=contains
+                )
+            )
         if not request.app.state.accepting_runs:
             reject(409, "run_busy", "服务正在关闭，暂不接受新确认。")
         if not active.acquire(blocking=False):
@@ -1811,13 +1864,23 @@ async def launch_run(
         disconnected = await request.is_disconnected()
         await service.get_session(session_id)
         model = load_model_config()
-        secrets = (model.api_key,)
+        # 运行凭据快照覆盖模型密钥与检索密钥；两者均参与消息、Trace 与结果的凭据检查。
+        secrets = tuple(secret for secret in (model.api_key, retrieval_secret()) if secret)
         tools = create_file_tools(session_id)
         outcome = await accept(service, tools, secrets)
         if not outcome.created:
             active.release()
             return JSONResponse(send_result(operation_id, outcome.run))
         run = outcome.run
+        # 新运行受理成功：捕获受理起点并复用真实业务身份，建立唯一记录器与 agent_run 根 Span。
+        trace = RunTrace(
+            session_id=session_id,
+            operation_id=operation_id,
+            run_id=run.id,
+            contains=CredentialFilter(secrets).contains,
+            accepted_at=time_ns() // 1_000_000,
+            accepted_perf=perf_counter(),
+        )
         state = RunState(UUID(session_id))
         state.run_id = UUID(run.id)
         state.secrets = secrets
@@ -1831,7 +1894,7 @@ async def launch_run(
         task = loop.create_task(coordinate(
             run, state, session_id, tools, model, secrets,
             service, request.app.state.business, coordinator,
-            request.app.state.executor, loop,
+            request.app.state.executor, loop, trace, request.app.state.trace_store,
         ))
         # 运行登记与独立收尾任务登记同关闭快照互斥，确保已受理运行必被等待。
         state.task = task

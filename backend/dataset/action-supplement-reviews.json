@@ -1,0 +1,38 @@
+{
+  "version": "2026-10-14.2",
+  "candidate_file": "backend/dataset/action-supplements.candidates.json",
+  "published_file": "backend/dataset/action-supplements.published.json",
+  "reviewer": "本会话用户",
+  "reviewed_at": 1791940096,
+  "status": "approved",
+  "published_sha256": "490ad940211ed9b7340f985031c43eef7ba08e396d02df2f14b831da05375904",
+  "checklist": [
+    "英文名称与目录动作变式、器械及中英文步骤一致，未把通用动作名分配给不匹配的变式",
+    "别名确为用户可能使用的表面形式（俗称、缩写、英文、中英混合），不是动作描述或使用场景",
+    "一对多别名保留宽握、窄握、单臂、跪姿、坐姿、站姿及器械差异，未把不同变式合并为一条",
+    "别名未机械重复名称、英文名称或步骤制造词频权重",
+    "所属 family 分组与 dev/holdout 拆分无表达变体泄漏",
+    "字段中文映射的所有 canonical 值与目录枚举一致"
+  ],
+  "decisions": [
+    {
+      "scope": "backend/dataset/action-supplements.candidates.json",
+      "coverage": "全部 1324 条动作条目（英文名称 1324、中文俗称 2127）",
+      "content_sha256": "6eda310a4aea0e4468992eb5b76065f7d8966c6b2c4716f6f2163f007fa04c34",
+      "conclusion": "approved",
+      "reviewer": "本会话用户",
+      "reviewed_at": 1791940096,
+      "note": "审阅人于本会话确认整份候选语料通过；reviewed_at 为确认时刻，非逐条时间。content_sha256 绑定被批准的文件内容。"
+    },
+    {
+      "scope": "backend/dataset/action-retrieval-queries.json",
+      "coverage": "全部 128 条查询与 405 条候选相关性标注",
+      "content_sha256": "8260d967a5c7a17e36f792e3d5a003cee41454f8ef09fdf7df4caeb55b835458",
+      "conclusion": "approved",
+      "reviewer": "本会话用户",
+      "reviewed_at": 1791944832,
+      "note": "审阅人确认查询、标注等级与 dev/holdout 拆分通过；1791944832 轮按审阅人反馈修正 q-exact-003 与 q-cond-008/009/012 的筛选语义与标注后重新绑定哈希。content_sha256 绑定被批准的文件内容。"
+    }
+  ],
+  "notes": "英文名称源自 MIT 许可上游数据并逐条对齐，俗称由 subagent 生成后经本会话用户审阅通过；发布语料由候选语料按通过结论生成。"
+}

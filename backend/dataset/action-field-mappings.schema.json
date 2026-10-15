@@ -1,0 +1,61 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "action-field-mappings.schema.json",
+  "title": "Action Field Mappings",
+  "description": "backend/dataset/action-field-mappings.json 的结构约束。canonical 值由目录枚举，中文映射用于统一检索文本与查询规范化。",
+  "type": "object",
+  "required": ["version", "catalog", "source_note", "review_status", "fields"],
+  "additionalProperties": false,
+  "properties": {
+    "version": {"type": "string", "minLength": 1},
+    "catalog": {"$ref": "#/$defs/catalog"},
+    "source_note": {"type": "string", "minLength": 1},
+    "review_status": {"$ref": "#/$defs/review_status"},
+    "synonym_groups": {
+      "type": "array",
+      "items": {
+        "type": "array",
+        "minItems": 2,
+        "items": {"type": "string", "minLength": 1}
+      }
+    },
+    "fields": {
+      "type": "object",
+      "required": ["equipment", "body_part", "target", "muscle_group"],
+      "additionalProperties": false,
+      "properties": {
+        "equipment": {"$ref": "#/$defs/value_map"},
+        "body_part": {"$ref": "#/$defs/value_map"},
+        "target": {"$ref": "#/$defs/value_map"},
+        "muscle_group": {"$ref": "#/$defs/value_map"}
+      }
+    }
+  },
+  "$defs": {
+    "catalog": {
+      "type": "object",
+      "required": ["path", "sha256", "count"],
+      "additionalProperties": false,
+      "properties": {
+        "path": {"type": "string", "minLength": 1},
+        "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "count": {"type": "integer", "minimum": 1}
+      }
+    },
+    "review_status": {"enum": ["candidate", "approved", "rejected"]},
+    "value_map": {
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": {"$ref": "#/$defs/value_entry"}
+    },
+    "value_entry": {
+      "type": "object",
+      "required": ["zh", "terms"],
+      "additionalProperties": false,
+      "properties": {
+        "zh": {"type": "string", "minLength": 1},
+        "terms": {"type": "array", "items": {"type": "string", "minLength": 1}}
+      }
+    }
+  }
+}

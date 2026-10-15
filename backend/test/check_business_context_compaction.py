@@ -520,7 +520,7 @@ async def scenario_notification_order(root: Path) -> dict:
         async def emit(event):
             events.append((event["type"], dict(event)))
 
-        async def compact(compaction_id, signal):
+        async def compact(compaction_id, signal, span):
             projection = await service.get_projection(session_id, position["id"])
             preparation = C.prepare_compaction(projection.path, 128000, 16384, SPEC)
             system_state = get_current_system_message(projection.context.messages)

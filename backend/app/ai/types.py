@@ -31,6 +31,8 @@ class CallObservation(Protocol):
 
     def fail(self, aborted: bool) -> None: ...
 
+    def record_first_text(self) -> None: ...
+
 
 class LlmContext(TypedDict):
     messages: list[Message]

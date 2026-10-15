@@ -44,6 +44,12 @@ class ProposalAlreadySaved(BusinessError):
     message = "该提案已保存，无法作为待确认内容读取。请查询原保存操作状态。"
 
 
+class ProposalCancellationInvalid(BusinessError):
+    code = "proposal_cancellation_invalid"
+    http_status = 409
+    message = "取消请求的用户节点、工具调用或展示时序不合法。"
+
+
 # 画像自然语言确认与保存契约 §9 的七项业务错误码。
 
 class ProfileProposalNotFound(BusinessError):
@@ -219,6 +225,32 @@ class ConfirmationSessionNotFound(BusinessError):
     code = "session_not_found"
     http_status = 404
     message = "当前会话不存在。"
+
+
+# 动作检索工具的错误码：字段/器械/ID 求值失败、任务限制冲突与详情读取失败。
+
+class InvalidSearchCondition(BusinessError):
+    code = "invalid_search_condition"
+    http_status = 422
+    message = "检索条件无法映射到动作目录。"
+
+
+class EquipmentRestrictionConflict(BusinessError):
+    code = "equipment_restriction_conflict"
+    http_status = 409
+    message = "本次可用器械声明与已保存或临时不可用限制冲突，需要澄清并确认画像更新。"
+
+
+class ExerciseNotFound(BusinessError):
+    code = "exercise_not_found"
+    http_status = 404
+    message = "动作 ID 不存在于动作目录。"
+
+
+class ExerciseDetailsTooLarge(BusinessError):
+    code = "exercise_details_too_large"
+    http_status = 422
+    message = "单条完整动作详情超出响应预算。"
 
 
 # 确认账本记录的失败操作只保留 code/message/errors，HTTP 状态沿用各业务错误自身定义。

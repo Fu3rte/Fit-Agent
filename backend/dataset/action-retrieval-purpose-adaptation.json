@@ -1,0 +1,3201 @@
+{
+ "version": "t8-proposal-2026-10-15.1",
+ "status": "approved",
+ "approved_by": "主会话",
+ "approved_at": "2026-10-15",
+ "approved_mapping": {"lookup": 85, "generation": 42, "replacement": 1, "total": 128},
+ "deferred_query_ids": ["q-cond-002", "q-cond-006", "q-cond-015"],
+ "deferred_reason": "临时限制「没有单杠」「避免高负荷硬拉」缺少已批准目录动作映射，q-cond-002 通道未决；按主会话决定该三条在质量执行中单列为未执行，其余 125 条按批准映射继续。",
+ "owner": "T8",
+ "queries_file": "backend/dataset/action-retrieval-queries.json",
+ "queries_sha256": "8260d967a5c7a17e36f792e3d5a003cee41454f8ef09fdf7df4caeb55b835458",
+ "online_purposes": [
+  "lookup",
+  "generation",
+  "replacement"
+ ],
+ "rule": "金标 purpose 统一为 search；本表按查询 ID 逐条给出线上用途适配，不修改查询、标签或批准账本。",
+ "class_rules": [
+  {
+   "intent": "standard_name",
+   "purpose": "lookup",
+   "basis": "查询给出目录标准名称，按动作事实核实执行（契约 §4.1 lookup）"
+  },
+  {
+   "intent": "alias",
+   "purpose": "lookup",
+   "basis": "查询给出已审阅俗称，按动作事实核实执行（契约 §4.1 lookup）"
+  },
+  {
+   "intent": "english",
+   "purpose": "lookup",
+   "basis": "查询给出英文名称，按动作事实核实执行（契约 §4.1 lookup）"
+  },
+  {
+   "intent": "mixed",
+   "purpose": "lookup",
+   "basis": "中英混合表达，按动作事实核实执行（契约 §4.1 lookup）"
+  },
+  {
+   "intent": "multi_alias",
+   "purpose": "lookup",
+   "basis": "一词多变式的俗称核实，保留歧义变式（契约 §3.1）"
+  },
+  {
+   "intent": "exact_restricted",
+   "purpose": "lookup",
+   "basis": "指名动作与限制冲突场景，允许核实受限动作（契约 §4.1）"
+  },
+  {
+   "intent": "description",
+   "purpose": "generation",
+   "basis": "口语描述需求，按建议生成执行（契约 §4.2 硬条件生效）"
+  },
+  {
+   "intent": "conditional",
+   "purpose": "generation",
+   "basis": "带环境与器械条件的建议（契约 §4.2）"
+  },
+  {
+   "intent": "forbidden",
+   "purpose": "generation",
+   "basis": "已保存禁用动作参与候选排除的建议（契约 §4.2）"
+  },
+  {
+   "intent": "no_answer",
+   "purpose": "generation",
+   "basis": "无合理候选场景，依赖硬条件与门槛产生合法空结果（契约 §5.1）"
+  }
+ ],
+ "open_questions": [
+  "指名表达类（standard_name/alias/english/mixed/multi_alias）提案为 lookup：这些查询只给出动作名称或俗称，未表达推荐意图；若主会话判定应按建议用途执行，需改为 generation 并相应调整硬条件口径。",
+  "no_answer/description 提案为 generation：无答案场景依赖硬约束与门槛共同保证合法空结果，若改 lookup 则画像与环境默认不参与。",
+  "q-exact-003 的 7 条标注动作全部为辅助/弹力带/负重等变式，lookup 与 generation 两种用途下均不被画像的徒手排除所丢弃；该条用途选择不改变指标口径。",
+  "逐条一致性核验结果：全部 128 条查询中，没有任何已标注相关动作会在 lookup 或 generation 的有效条件下被过滤掉；用途选择只改变无答案场景与未标注候选的过滤范围。",
+  "临时限制文本 没有单杠 与 避免高负荷硬拉 缺少已批准的目录动作映射，需确认后才能在质量执行中生效。",
+  "q-cond-002 的 notes 描述为临时排除哑铃，结构化字段记录在已保存画像限制；两者对 generation 结果等价，但对 lookup 不等价，需确认执行口径。"
+ ],
+ "label_compatibility": {
+  "queries_with_labels_dropped_if_generation": [],
+  "queries_with_labels_dropped_if_lookup": [],
+  "expect_empty_query_ids": [
+   "q-exact-001",
+   "q-exact-002",
+   "q-exact-004",
+   "q-exact-006",
+   "q-noanswer-002",
+   "q-noanswer-003",
+   "q-noanswer-004",
+   "q-noanswer-005",
+   "q-noanswer-007",
+   "q-noanswer-008"
+  ],
+  "expect_empty_with_labels": []
+ },
+ "rows": [
+  {
+   "id": "q-standard-001",
+   "intent": "standard_name",
+   "split": "dev",
+   "family": "bench-press",
+   "query": "杠铃卧推",
+   "purpose": "lookup",
+   "basis": "金标 intent 类别映射：standard_name",
+   "temporary_mapping": {},
+   "expect_empty": false,
+   "label_count": 3,
+   "consistency": {
+    "labels_dropped_if_generation": [],
+    "labels_dropped_if_lookup": [],
+    "labels_surviving_proposed": [
+     "0025",
+     "0047",
+     "0289"
+    ],
+    "proposed_purpose_yields_empty_candidate_set": false,
+    "expect_empty_with_labels": false
+   },
+   "open_questions": []
+  },
+  {
+   "id": "q-standard-002",
+   "intent": "standard_name",
+   "split": "dev",
+   "family": "bench-press",
+   "query": "哑铃卧推",
+   "purpose": "lookup",
+   "basis": "金标 intent 类别映射：standard_name",
+   "temporary_mapping": {},
+   "expect_empty": false,
+   "label_count": 3,
+   "consistency": {
+    "labels_dropped_if_generation": [],
+    "labels_dropped_if_lookup": [],
+    "labels_surviving_proposed": [
+     "0289",
+     "0314",
+     "0025"
+    ],
+    "proposed_purpose_yields_empty_candidate_set": false,
+    "expect_empty_with_labels": false
+   },
+   "open_questions": []
+  },
+  {
+   "id": "q-standard-003",
+   "intent": "standard_name",
+   "split": "dev",
+   "family": "row",
+   "query": "杠铃俯身划船",
+   "purpose": "lookup",
+   "basis": "金标 intent 类别映射：standard_name",
+   "temporary_mapping": {},
+   "expect_empty": false,
+   "label_count": 3,
+   "consistency": {
+    "labels_dropped_if_generation": [],
+    "labels_dropped_if_lookup": [],
+    "labels_surviving_proposed": [
+     "0027",
+     "0118",
+     "0064"
+    ],
+    "proposed_purpose_yields_empty_candidate_set": false,
+    "expect_empty_with_labels": false
+   },
+   "open_questions": []
+  },
+  {
+   "id": "q-standard-004",
+   "intent": "standard_name",
+   "split": "dev",
+   "family": "row",
+   "query": "哑铃俯身划船",
+   "purpose": "lookup",
+   "basis": "金标 intent 类别映射：standard_name",
+   "temporary_mapping": {},
+   "expect_empty": false,
+   "label_count": 3,
+   "consistency": {
+    "labels_dropped_if_generation": [],
+    "labels_dropped_if_lookup": [],
+    "labels_surviving_proposed": [
+     "0293",
+     "0292",
+     "0327"
+    ],
+    "proposed_purpose_yields_empty_candidate_set": false,
+    "expect_empty_with_labels": false
+   },
+   "open_questions": []
+  },
+  {
+   "id": "q-standard-005",
+   "intent": "standard_name",
+   "split": "dev",
+   "family": "row",
+   "query": "绳索坐姿划船",
+   "purpose": "lookup",
+   "basis": "金标 intent 类别映射：standard_name",
+   "temporary_mapping": {},
+   "expect_empty": false,
+   "label_count": 3,
+   "consistency": {
+    "labels_dropped_if_generation": [],
+    "labels_dropped_if_lookup": [],
+    "labels_surviving_proposed": [
+     "0861",
+     "0180",
+     "0218"
+    ],
+    "proposed_purpose_yields_empty_candidate_set": false,
+    "expect_empty_with_labels": false
+   },
+   "open_questions": []
+  },
+  {
+   "id": "q-standard-006",
+   "intent": "standard_name",
+   "split": "dev",
+   "family": "push-up",
+   "query": "俯卧撑",
+   "purpose": "lookup",
+   "basis": "金标 intent 类别映射：standard_name",
+   "temporary_mapping": {},
+   "expect_empty": false,
+   "label_count": 3,
+   "consistency": {
+    "labels_dropped_if_generation": [],
+    "labels_dropped_if_lookup": [],
+    "labels_surviving_proposed": [
+     "0662",
+     "0258",
+     "0279"
+    ],
+    "proposed_purpose_yields_empty_candidate_set": false,
+    "expect_empty_with_labels": false
+   },
+   "open_questions": []
+  },
+  {
+   "id": "q-standard-007",
+   "intent": "standard_name",
+   "split": "dev",
+   "family": "pull-up",
+   "query": "引体向上",
+   "purpose": "lookup",
+   "basis": "金标 intent 类别映射：standard_name",
+   "temporary_mapping": {},
+   "expect_empty": false,
+   "label_count": 3,
+   "consistency": {
+    "labels_dropped_if_generation": [],
+    "labels_dropped_if_lookup": [],
+    "labels_surviving_proposed": [
+     "0652",
+     "0017",
+     "3293"
+    ],
+    "proposed_purpose_yields_empty_candidate_set": false,
+    "expect_empty_with_labels": false
+   },
+   "open_questions": []
+  },
+  {
+   "id": "q-standard-008",
+   "intent": "standard_name",
+   "split": "dev",
+   "family": "curl",
+   "query": "杠铃弯举",
+   "purpose": "lookup",
+   "basis": "金标 intent 类别映射：standard_name",
+   "temporary_mapping": {},
+   "expect_empty": false,
+   "label_count": 3,
+   "consistency": {
+    "labels_dropped_if_generation": [],
+    "labels_dropped_if_lookup": [],
+    "labels_surviving_proposed": [
+     "0031",
+     "0868",
+     "0023"
+    ],
+    "proposed_purpose_yields_empty_candidate_set": false,
+    "expect_empty_with_labels": false
+   },
+   "open_questions": []
+  },
+  {
+   "id": "q-standard-009",
+   "intent": "standard_name",
+   "split": "dev",
+   "family": "lateral-raise",
+   "query": "哑铃侧平举",
+   "purpose": "lookup",
+   "basis": "金标 intent 类别映射：standard_name",
+   "temporary_mapping": {},
+   "expect_empty": false,
+   "label_count": 3,
+   "consistency": {
+    "labels_dropped_if_generation": [],
+    "labels_dropped_if_lookup": [],
+    "labels_surviving_proposed": [
+     "0334",
+     "0355",
+     "0396"
+    ],
+    "proposed_purpose_yields_empty_candidate_set": false,
+    "expect_empty_with_labels": false
+   },
+   "open_questions": []
+  },
+  {
+   "id": "q-standard-010",
+   "intent": "standard_name",
+   "split": "dev",
+   "family": "glute-bridge",
+   "query": "杠铃臀桥",
+   "purpose": "lookup",
+   "basis": "金标 intent 类别映射：standard_name",
+   "temporary_mapping": {},
+   "expect_empty": false,
+   "label_count": 3,
+   "consistency": {
+    "labels_dropped_if_generation": [],
+    "labels_dropped_if_lookup": [],
+    "labels_surviving_proposed": [
+     "1409",
+     "3562",
+     "1408"
+    ],
+    "proposed_purpose_yields_empty_candidate_set": false,
+    "expect_empty_with_labels": false
+   },
+   "open_questions": []
+  },
+  {
+   "id": "q-standard-011",
+   "intent": "standard_name",
+   "split": "holdout",
+   "family": "deadlift",
+   "query": "杠铃硬拉",
+   "purpose": "lookup",
+   "basis": "金标 intent 类别映射：standard_name",
+   "temporary_mapping": {},
+   "expect_empty": false,
+   "label_count": 3,
+   "consistency": {
+    "labels_dropped_if_generation": [],
+    "labels_dropped_if_lookup": [],
+    "labels_surviving_proposed": [
+     "0032",
+     "0085",
+     "0116"
+    ],
+    "proposed_purpose_yields_empty_candidate_set": false,
+    "expect_empty_with_labels": false
+   },
+   "open_questions": []
+  },
+  {
+   "id": "q-standard-012",
+   "intent": "standard_name",
+   "split": "holdout",
+   "family": "deadlift",
+   "query": "杠铃罗马尼亚硬拉",
+   "purpose": "lookup",
+   "basis": "金标 intent 类别映射：standard_name",
+   "temporary_mapping": {},
+   "expect_empty": false,
+   "label_count": 3,
+   "consistency": {
+    "labels_dropped_if_generation": [],
+    "labels_dropped_if_lookup": [],
+    "labels_surviving_proposed": [
+     "0085",
+     "1459",
+     "0032"
+    ],
+    "proposed_purpose_yields_empty_candidate_set": false,
+    "expect_empty_with_labels": false
+   },
+   "open_questions": []
+  },
+  {
+   "id": "q-standard-013",
+   "intent": "standard_name",
+   "split": "holdout",
+   "family": "shrug",
+   "query": "杠铃耸肩",
+   "purpose": "lookup",
+   "basis": "金标 intent 类别映射：standard_name",
+   "temporary_mapping": {},
+   "expect_empty": false,
+   "label_count": 2,
+   "consistency": {
+    "labels_dropped_if_generation": [],
+    "labels_dropped_if_lookup": [],
+    "labels_surviving_proposed": [
+     "0095",
+     "0406"
+    ],
+    "proposed_purpose_yields_empty_candidate_set": false,
+    "expect_empty_with_labels": false
+   },
+   "open_questions": []
+  },
+  {
+   "id": "q-standard-014",
+   "intent": "standard_name",
+   "split": "holdout",
+   "family": "shrug",
+   "query": "哑铃耸肩",
+   "purpose": "lookup",
+   "basis": "金标 intent 类别映射：standard_name",
+   "temporary_mapping": {},
+   "expect_empty": false,
+   "label_count": 2,
+   "consistency": {
+    "labels_dropped_if_generation": [],
+    "labels_dropped_if_lookup": [],
+    "labels_surviving_proposed": [
+     "0406",
+     "0095"
+    ],
+    "proposed_purpose_yields_empty_candidate_set": false,
+    "expect_empty_with_labels": false
+   },
+   "open_questions": []
+  },
+  {
+   "id": "q-standard-015",
+   "intent": "standard_name",
+   "split": "holdout",
+   "family": "crunch",
+   "query": "地面卷腹",
+   "purpose": "lookup",
+   "basis": "金标 intent 类别映射：standard_name",
+   "temporary_mapping": {},
+   "expect_empty": false,
+   "label_count": 3,
+   "consistency": {
+    "labels_dropped_if_generation": [],
+    "labels_dropped_if_lookup": [],
+    "labels_surviving_proposed": [
+     "0274",
+     "0277",
+     "0262"
+    ],
+    "proposed_purpose_yields_empty_candidate_set": false,
+    "expect_empty_with_labels": false
+   },
+   "open_questions": []
+  },
+  {
+   "id": "q-standard-016",
+   "intent": "standard_name",
+   "split": "holdout",
+   "family": "leg-press",
+   "query": "器械腿屈伸",
+   "purpose": "lookup",
+   "basis": "金标 intent 类别映射：standard_name",
+   "temporary_mapping": {},
+   "expect_empty": false,
+   "label_count": 2,
+   "consistency": {
+    "labels_dropped_if_generation": [],
+    "labels_dropped_if_lookup": [],
+    "labels_surviving_proposed": [
+     "0585",
+     "3007"
+    ],
+    "proposed_purpose_yields_empty_candidate_set": false,
+    "expect_empty_with_labels": false
+   },
+   "open_questions": []
+  },
+  {
+   "id": "q-standard-017",
+   "intent": "standard_name",
+   "split": "holdout",
+   "family": "leg-press",
+   "query": "器械俯卧腿弯举",
+   "purpose": "lookup",
+   "basis": "金标 intent 类别映射：standard_name",
+   "temporary_mapping": {},
+   "expect_empty": false,
+   "label_count": 3,
+   "consistency": {
+    "labels_dropped_if_generation": [],
+    "labels_dropped_if_lookup": [],
+    "labels_surviving_proposed": [
+     "0586",
+     "3195",
+     "0582"
+    ],
+    "proposed_purpose_yields_empty_candidate_set": false,
+    "expect_empty_with_labels": false
+   },
+   "open_questions": []
+  },
+  {
+   "id": "q-standard-018",
+   "intent": "standard_name",
+   "split": "holdout",
+   "family": "leg-press",
+   "query": "腿举机45度腿举",
+   "purpose": "lookup",
+   "basis": "金标 intent 类别映射：standard_name",
+   "temporary_mapping": {},
+   "expect_empty": false,
+   "label_count": 4,
+   "consistency": {
+    "labels_dropped_if_generation": [],
+    "labels_dropped_if_lookup": [],
+    "labels_surviving_proposed": [
+     "0739",
+     "1464",
+     "0740",
+     "1425"
+    ],
+    "proposed_purpose_yields_empty_candidate_set": false,
+    "expect_empty_with_labels": false
+   },
+   "open_questions": []
+  },
+  {
+   "id": "q-standard-019",
+   "intent": "standard_name",
+   "split": "holdout",
+   "family": "cardio",
+   "query": "波比跳",
+   "purpose": "lookup",
+   "basis": "金标 intent 类别映射：standard_name",
+   "temporary_mapping": {},
+   "expect_empty": false,
+   "label_count": 3,
+   "consistency": {
+    "labels_dropped_if_generation": [],
+    "labels_dropped_if_lookup": [],
+    "labels_surviving_proposed": [
+     "1160",
+     "0501",
+     "1201"
+    ],
+    "proposed_purpose_yields_empty_candidate_set": false,
+    "expect_empty_with_labels": false
+   },
+   "open_questions": []
+  },
+  {
+   "id": "q-standard-020",
+   "intent": "standard_name",
+   "split": "holdout",
+   "family": "squat",
+   "query": "哑铃深蹲",
+   "purpose": "lookup",
+   "basis": "金标 intent 类别映射：standard_name",
+   "temporary_mapping": {},
+   "expect_empty": false,
+   "label_count": 3,
+   "consistency": {
+    "labels_dropped_if_generation": [],
+    "labels_dropped_if_lookup": [],
+    "labels_surviving_proposed": [
+     "0413",
+     "0411",
+     "1760"
+    ],
+    "proposed_purpose_yields_empty_candidate_set": false,
+    "expect_empty_with_labels": false
+   },
+   "open_questions": []
+  },
+  {
+   "id": "q-alias-001",
+   "intent": "alias",
+   "split": "dev",
+   "family": "bench-press",
+   "query": "卧推",
+   "purpose": "lookup",
+   "basis": "金标 intent 类别映射：alias",
+   "temporary_mapping": {},
+   "expect_empty": false,
+   "label_count": 5,
+   "consistency": {
+    "labels_dropped_if_generation": [],
+    "labels_dropped_if_lookup": [],
+    "labels_surviving_proposed": [
+     "0025",
+     "0289",
+     "0047",
+     "0314",
+     "1254"
+    ],
+    "proposed_purpose_yields_empty_candidate_set": false,
+    "expect_empty_with_labels": false
+   },
+   "open_questions": []
+  },
+  {
+   "id": "q-alias-002",
+   "intent": "alias",
+   "split": "dev",
+   "family": "row",
+   "query": "划船",
+   "purpose": "lookup",
+   "basis": "金标 intent 类别映射：alias",
+   "temporary_mapping": {},
+   "expect_empty": false,
+   "label_count": 5,
+   "consistency": {
+    "labels_dropped_if_generation": [],
+    "labels_dropped_if_lookup": [],
+    "labels_surviving_proposed": [
+     "0027",
+     "0293",
+     "0861",
+     "0198",
+     "3166"
+    ],
+    "proposed_purpose_yields_empty_candidate_set": false,
+    "expect_empty_with_labels": false
+   },
+   "open_questions": []
+  },
+  {
+   "id": "q-alias-003",
+   "intent": "alias",
+   "split": "dev",
+   "family": "curl",
+   "query": "弯举",
+   "purpose": "lookup",
+   "basis": "金标 intent 类别映射：alias",
+   "temporary_mapping": {},
+   "expect_empty": false,
+   "label_count": 6,
+   "consistency": {
+    "labels_dropped_if_generation": [],
+    "labels_dropped_if_lookup": [],
+    "labels_surviving_proposed": [
+     "0031",
+     "0868",
+     "0294",
+     "0023",
+     "0313",
+     "1633"
+    ],
+    "proposed_purpose_yields_empty_candidate_set": false,
+    "expect_empty_with_labels": false
+   },
+   "open_questions": []
+  },
+  {
+   "id": "q-alias-004",
+   "intent": "alias",
+   "split": "dev",
+   "family": "lateral-raise",
+   "query": "侧平举",
+   "purpose": "lookup",
+   "basis": "金标 intent 类别映射：alias",
+   "temporary_mapping": {},
+   "expect_empty": false,
+   "label_count": 4,
+   "consistency": {
+    "labels_dropped_if_generation": [],
+    "labels_dropped_if_lookup": [],
+    "labels_surviving_proposed": [
+     "0334",
+     "0178",
+     "0192",
+     "0311"
+    ],
+    "proposed_purpose_yields_empty_candidate_set": false,
+    "expect_empty_with_labels": false
+   },
+   "open_questions": []
+  },
+  {
+   "id": "q-alias-005",
+   "intent": "alias",
+   "split": "dev",
+   "family": "pull-up",
+   "query": "引体",
+   "purpose": "lookup",
+   "basis": "金标 intent 类别映射：alias",
+   "temporary_mapping": {},
+   "expect_empty": false,
+   "label_count": 3,
+   "consistency": {
+    "labels_dropped_if_generation": [],
+    "labels_dropped_if_lookup": [],
+    "labels_surviving_proposed": [
+     "0652",
+     "0017",
+     "3293"
+    ],
+    "proposed_purpose_yields_empty_candidate_set": false,
+    "expect_empty_with_labels": false
+   },
+   "open_questions": []
+  },
+  {
+   "id": "q-alias-006",
+   "intent": "alias",
+   "split": "dev",
+   "family": "push-up",
+   "query": "俯卧撑",
+   "purpose": "lookup",
+   "basis": "金标 intent 类别映射：alias",
+   "temporary_mapping": {},
+   "expect_empty": false,
+   "label_count": 4,
+   "consistency": {
+    "labels_dropped_if_generation": [],
+    "labels_dropped_if_lookup": [],
+    "labels_surviving_proposed": [
+     "0662",
+     "0258",
+     "0283",
+     "2398"
+    ],
+    "proposed_purpose_yields_empty_candidate_set": false,
+    "expect_empty_with_labels": false
+   },
+   "open_questions": []
+  },
+  {
+   "id": "q-alias-007",
+   "intent": "alias",
+   "split": "dev",
+   "family": "glute-bridge",
+   "query": "臀桥",
+   "purpose": "lookup",
+   "basis": "金标 intent 类别映射：alias",
+   "temporary_mapping": {},
+   "expect_empty": false,
+   "label_count": 4,
+   "consistency": {
+    "labels_dropped_if_generation": [],
+    "labels_dropped_if_lookup": [],
+    "labels_surviving_proposed": [
+     "1409",
+     "3523",
+     "3561",
+     "3013"
+    ],
+    "proposed_purpose_yields_empty_candidate_set": false,
+    "expect_empty_with_labels": false
+   },
+   "open_questions": []
+  },
+  {
+   "id": "q-alias-008",
+   "intent": "alias",
+   "split": "dev",
+   "family": "row",
+   "query": "高位下拉",
+   "purpose": "lookup",
+   "basis": "金标 intent 类别映射：alias",
+   "temporary_mapping": {},
+   "expect_empty": false,
+   "label_count": 4,
+   "consistency": {
+    "labels_dropped_if_generation": [],
+    "labels_dropped_if_lookup": [],
+    "labels_surviving_proposed": [
+     "0198",
+     "2330",
+     "0818",
+     "0673"
+    ],
+    "proposed_purpose_yields_empty_candidate_set": false,
+    "expect_empty_with_labels": false
+   },
+   "open_questions": []
+  },
+  {
+   "id": "q-alias-009",
+   "intent": "alias",
+   "split": "holdout",
+   "family": "deadlift",
+   "query": "硬拉",
+   "purpose": "lookup",
+   "basis": "金标 intent 类别映射：alias",
+   "temporary_mapping": {},
+   "expect_empty": false,
+   "label_count": 5,
+   "consistency": {
+    "labels_dropped_if_generation": [],
+    "labels_dropped_if_lookup": [],
+    "labels_surviving_proposed": [
+     "0032",
+     "0300",
+     "0085",
+     "0116",
+     "0074"
+    ],
+    "proposed_purpose_yields_empty_candidate_set": false,
+    "expect_empty_with_labels": false
+   },
+   "open_questions": []
+  },
+  {
+   "id": "q-alias-010",
+   "intent": "alias",
+   "split": "holdout",
+   "family": "squat",
+   "query": "深蹲",
+   "purpose": "lookup",
+   "basis": "金标 intent 类别映射：alias",
+   "temporary_mapping": {},
+   "expect_empty": false,
+   "label_count": 5,
+   "consistency": {
+    "labels_dropped_if_generation": [],
+    "labels_dropped_if_lookup": [],
+    "labels_surviving_proposed": [
+     "0413",
+     "0102",
+     "0124",
+     "1004",
+     "0514"
+    ],
+    "proposed_purpose_yields_empty_candidate_set": false,
+    "expect_empty_with_labels": false
+   },
+   "open_questions": []
+  },
+  {
+   "id": "q-alias-011",
+   "intent": "alias",
+   "split": "holdout",
+   "family": "shrug",
+   "query": "耸肩",
+   "purpose": "lookup",
+   "basis": "金标 intent 类别映射：alias",
+   "temporary_mapping": {},
+   "expect_empty": false,
+   "label_count": 3,
+   "consistency": {
+    "labels_dropped_if_generation": [],
+    "labels_dropped_if_lookup": [],
+    "labels_surviving_proposed": [
+     "0095",
+     "0406",
+     "1018"
+    ],
+    "proposed_purpose_yields_empty_candidate_set": false,
+    "expect_empty_with_labels": false
+   },
+   "open_questions": []
+  },
+  {
+   "id": "q-alias-012",
+   "intent": "alias",
+   "split": "holdout",
+   "family": "calf-raise",
+   "query": "提踵",
+   "purpose": "lookup",
+   "basis": "金标 intent 类别映射：alias",
+   "temporary_mapping": {},
+   "expect_empty": false,
+   "label_count": 4,
+   "consistency": {
+    "labels_dropped_if_generation": [],
+    "labels_dropped_if_lookup": [],
+    "labels_surviving_proposed": [
+     "1373",
+     "1372",
+     "0999",
+     "0088"
+    ],
+    "proposed_purpose_yields_empty_candidate_set": false,
+    "expect_empty_with_labels": false
+   },
+   "open_questions": []
+  },
+  {
+   "id": "q-alias-013",
+   "intent": "alias",
+   "split": "holdout",
+   "family": "crunch",
+   "query": "卷腹",
+   "purpose": "lookup",
+   "basis": "金标 intent 类别映射：alias",
+   "temporary_mapping": {},
+   "expect_empty": false,
+   "label_count": 4,
+   "consistency": {
+    "labels_dropped_if_generation": [],
+    "labels_dropped_if_lookup": [],
+    "labels_surviving_proposed": [
+     "0274",
+     "0262",
+     "0635",
+     "2429"
+    ],
+    "proposed_purpose_yields_empty_candidate_set": false,
+    "expect_empty_with_labels": false
+   },
+   "open_questions": []
+  },
+  {
+   "id": "q-alias-014",
+   "intent": "alias",
+   "split": "holdout",
+   "family": "overhead-press",
+   "query": "推举",
+   "purpose": "lookup",
+   "basis": "金标 intent 类别映射：alias",
+   "temporary_mapping": {},
+   "expect_empty": false,
+   "label_count": 4,
+   "consistency": {
+    "labels_dropped_if_generation": [],
+    "labels_dropped_if_lookup": [],
+    "labels_surviving_proposed": [
+     "0086",
+     "0091",
+     "0105",
+     "0087"
+    ],
+    "proposed_purpose_yields_empty_candidate_set": false,
+    "expect_empty_with_labels": false
+   },
+   "open_questions": []
+  },
+  {
+   "id": "q-alias-015",
+   "intent": "alias",
+   "split": "holdout",
+   "family": "fly",
+   "query": "飞鸟",
+   "purpose": "lookup",
+   "basis": "金标 intent 类别映射：alias",
+   "temporary_mapping": {},
+   "expect_empty": false,
+   "label_count": 4,
+   "consistency": {
+    "labels_dropped_if_generation": [],
+    "labels_dropped_if_lookup": [],
+    "labels_surviving_proposed": [
+     "0308",
+     "0319",
+     "0171",
+     "1277"
+    ],
+    "proposed_purpose_yields_empty_candidate_set": false,
+    "expect_empty_with_labels": false
+   },
+   "open_questions": []
+  },
+  {
+   "id": "q-alias-016",
+   "intent": "alias",
+   "split": "holdout",
+   "family": "triceps-pushdown",
+   "query": "三头下压",
+   "purpose": "lookup",
+   "basis": "金标 intent 类别映射：alias",
+   "temporary_mapping": {},
+   "expect_empty": false,
+   "label_count": 4,
+   "consistency": {
+    "labels_dropped_if_generation": [],
+    "labels_dropped_if_lookup": [],
+    "labels_surviving_proposed": [
+     "0201",
+     "0200",
+     "1723",
+     "0172"
+    ],
+    "proposed_purpose_yields_empty_candidate_set": false,
+    "expect_empty_with_labels": false
+   },
+   "open_questions": []
+  },
+  {
+   "id": "q-alias-017",
+   "intent": "alias",
+   "split": "holdout",
+   "family": "leg-press",
+   "query": "腿举",
+   "purpose": "lookup",
+   "basis": "金标 intent 类别映射：alias",
+   "temporary_mapping": {},
+   "expect_empty": false,
+   "label_count": 4,
+   "consistency": {
+    "labels_dropped_if_generation": [],
+    "labels_dropped_if_lookup": [],
+    "labels_surviving_proposed": [
+     "0739",
+     "0740",
+     "1425",
+     "2287"
+    ],
+    "proposed_purpose_yields_empty_candidate_set": false,
+    "expect_empty_with_labels": false
+   },
+   "open_questions": []
+  },
+  {
+   "id": "q-alias-018",
+   "intent": "alias",
+   "split": "holdout",
+   "family": "plank",
+   "query": "平板支撑",
+   "purpose": "lookup",
+   "basis": "金标 intent 类别映射：alias",
+   "temporary_mapping": {},
+   "expect_empty": false,
+   "label_count": 4,
+   "consistency": {
+    "labels_dropped_if_generation": [],
+    "labels_dropped_if_lookup": [],
+    "labels_surviving_proposed": [
+     "3665",
+     "2135",
+     "3239",
+     "3544"
+    ],
+    "proposed_purpose_yields_empty_candidate_set": false,
+    "expect_empty_with_labels": false
+   },
+   "open_questions": []
+  },
+  {
+   "id": "q-alias-019",
+   "intent": "alias",
+   "split": "dev",
+   "family": "curl",
+   "query": "二头弯举",
+   "purpose": "lookup",
+   "basis": "金标 intent 类别映射：alias",
+   "temporary_mapping": {},
+   "expect_empty": false,
+   "label_count": 3,
+   "consistency": {
+    "labels_dropped_if_generation": [],
+    "labels_dropped_if_lookup": [],
+    "labels_surviving_proposed": [
+     "0031",
+     "0023",
+     "0868"
+    ],
+    "proposed_purpose_yields_empty_candidate_set": false,
+    "expect_empty_with_labels": false
+   },
+   "open_questions": []
+  },
+  {
+   "id": "q-alias-020",
+   "intent": "alias",
+   "split": "dev",
+   "family": "row",
+   "query": "划船机",
+   "purpose": "lookup",
+   "basis": "金标 intent 类别映射：alias",
+   "temporary_mapping": {},
+   "expect_empty": false,
+   "label_count": 3,
+   "consistency": {
+    "labels_dropped_if_generation": [],
+    "labels_dropped_if_lookup": [],
+    "labels_surviving_proposed": [
+     "0861",
+     "0180",
+     "0218"
+    ],
+    "proposed_purpose_yields_empty_candidate_set": false,
+    "expect_empty_with_labels": false
+   },
+   "open_questions": []
+  },
+  {
+   "id": "q-alias-021",
+   "intent": "alias",
+   "split": "holdout",
+   "family": "deadlift",
+   "query": "罗马尼亚硬拉",
+   "purpose": "lookup",
+   "basis": "金标 intent 类别映射：alias",
+   "temporary_mapping": {},
+   "expect_empty": false,
+   "label_count": 2,
+   "consistency": {
+    "labels_dropped_if_generation": [],
+    "labels_dropped_if_lookup": [],
+    "labels_surviving_proposed": [
+     "0085",
+     "1459"
+    ],
+    "proposed_purpose_yields_empty_candidate_set": false,
+    "expect_empty_with_labels": false
+   },
+   "open_questions": []
+  },
+  {
+   "id": "q-alias-022",
+   "intent": "alias",
+   "split": "dev",
+   "family": "row",
+   "query": "单臂划船",
+   "purpose": "lookup",
+   "basis": "金标 intent 类别映射：alias",
+   "temporary_mapping": {},
+   "expect_empty": false,
+   "label_count": 4,
+   "consistency": {
+    "labels_dropped_if_generation": [],
+    "labels_dropped_if_lookup": [],
+    "labels_surviving_proposed": [
+     "0292",
+     "0064",
+     "0193",
+     "3156"
+    ],
+    "proposed_purpose_yields_empty_candidate_set": false,
+    "expect_empty_with_labels": false
+   },
+   "open_questions": []
+  },
+  {
+   "id": "q-alias-023",
+   "intent": "alias",
+   "split": "dev",
+   "family": "push-up",
+   "query": "跪姿俯卧撑",
+   "purpose": "lookup",
+   "basis": "金标 intent 类别映射：alias",
+   "temporary_mapping": {},
+   "expect_empty": false,
+   "label_count": 2,
+   "consistency": {
+    "labels_dropped_if_generation": [],
+    "labels_dropped_if_lookup": [],
+    "labels_surviving_proposed": [
+     "2398",
+     "0662"
+    ],
+    "proposed_purpose_yields_empty_candidate_set": false,
+    "expect_empty_with_labels": false
+   },
+   "open_questions": []
+  },
+  {
+   "id": "q-alias-024",
+   "intent": "alias",
+   "split": "holdout",
+   "family": "overhead-press",
+   "query": "提拉",
+   "purpose": "lookup",
+   "basis": "金标 intent 类别映射：alias",
+   "temporary_mapping": {},
+   "expect_empty": false,
+   "label_count": 4,
+   "consistency": {
+    "labels_dropped_if_generation": [],
+    "labels_dropped_if_lookup": [],
+    "labels_surviving_proposed": [
+     "0120",
+     "0119",
+     "0121",
+     "0123"
+    ],
+    "proposed_purpose_yields_empty_candidate_set": false,
+    "expect_empty_with_labels": false
+   },
+   "open_questions": []
+  },
+  {
+   "id": "q-alias-025",
+   "intent": "alias",
+   "split": "holdout",
+   "family": "farmers-walk",
+   "query": "农夫走",
+   "purpose": "lookup",
+   "basis": "金标 intent 类别映射：alias",
+   "temporary_mapping": {},
+   "expect_empty": false,
+   "label_count": 1,
+   "consistency": {
+    "labels_dropped_if_generation": [],
+    "labels_dropped_if_lookup": [],
+    "labels_surviving_proposed": [
+     "2133"
+    ],
+    "proposed_purpose_yields_empty_candidate_set": false,
+    "expect_empty_with_labels": false
+   },
+   "open_questions": []
+  },
+  {
+   "id": "q-english-001",
+   "intent": "english",
+   "split": "dev",
+   "family": "bench-press",
+   "query": "barbell bench press",
+   "purpose": "lookup",
+   "basis": "金标 intent 类别映射：english",
+   "temporary_mapping": {},
+   "expect_empty": false,
+   "label_count": 2,
+   "consistency": {
+    "labels_dropped_if_generation": [],
+    "labels_dropped_if_lookup": [],
+    "labels_surviving_proposed": [
+     "0025",
+     "0289"
+    ],
+    "proposed_purpose_yields_empty_candidate_set": false,
+    "expect_empty_with_labels": false
+   },
+   "open_questions": []
+  },
+  {
+   "id": "q-english-002",
+   "intent": "english",
+   "split": "dev",
+   "family": "bench-press",
+   "query": "dumbbell bench press",
+   "purpose": "lookup",
+   "basis": "金标 intent 类别映射：english",
+   "temporary_mapping": {},
+   "expect_empty": false,
+   "label_count": 2,
+   "consistency": {
+    "labels_dropped_if_generation": [],
+    "labels_dropped_if_lookup": [],
+    "labels_surviving_proposed": [
+     "0289",
+     "0025"
+    ],
+    "proposed_purpose_yields_empty_candidate_set": false,
+    "expect_empty_with_labels": false
+   },
+   "open_questions": []
+  },
+  {
+   "id": "q-english-003",
+   "intent": "english",
+   "split": "dev",
+   "family": "push-up",
+   "query": "push-up",
+   "purpose": "lookup",
+   "basis": "金标 intent 类别映射：english",
+   "temporary_mapping": {},
+   "expect_empty": false,
+   "label_count": 3,
+   "consistency": {
+    "labels_dropped_if_generation": [],
+    "labels_dropped_if_lookup": [],
+    "labels_surviving_proposed": [
+     "0662",
+     "0258",
+     "0279"
+    ],
+    "proposed_purpose_yields_empty_candidate_set": false,
+    "expect_empty_with_labels": false
+   },
+   "open_questions": []
+  },
+  {
+   "id": "q-english-004",
+   "intent": "english",
+   "split": "dev",
+   "family": "pull-up",
+   "query": "pull-up",
+   "purpose": "lookup",
+   "basis": "金标 intent 类别映射：english",
+   "temporary_mapping": {},
+   "expect_empty": false,
+   "label_count": 3,
+   "consistency": {
+    "labels_dropped_if_generation": [],
+    "labels_dropped_if_lookup": [],
+    "labels_surviving_proposed": [
+     "0652",
+     "0017",
+     "3293"
+    ],
+    "proposed_purpose_yields_empty_candidate_set": false,
+    "expect_empty_with_labels": false
+   },
+   "open_questions": []
+  },
+  {
+   "id": "q-english-005",
+   "intent": "english",
+   "split": "dev",
+   "family": "row",
+   "query": "barbell bent over row",
+   "purpose": "lookup",
+   "basis": "金标 intent 类别映射：english",
+   "temporary_mapping": {},
+   "expect_empty": false,
+   "label_count": 2,
+   "consistency": {
+    "labels_dropped_if_generation": [],
+    "labels_dropped_if_lookup": [],
+    "labels_surviving_proposed": [
+     "0027",
+     "0118"
+    ],
+    "proposed_purpose_yields_empty_candidate_set": false,
+    "expect_empty_with_labels": false
+   },
+   "open_questions": []
+  },
+  {
+   "id": "q-english-006",
+   "intent": "english",
+   "split": "dev",
+   "family": "row",
+   "query": "cable seated row",
+   "purpose": "lookup",
+   "basis": "金标 intent 类别映射：english",
+   "temporary_mapping": {},
+   "expect_empty": false,
+   "label_count": 2,
+   "consistency": {
+    "labels_dropped_if_generation": [],
+    "labels_dropped_if_lookup": [],
+    "labels_surviving_proposed": [
+     "0861",
+     "0180"
+    ],
+    "proposed_purpose_yields_empty_candidate_set": false,
+    "expect_empty_with_labels": false
+   },
+   "open_questions": []
+  },
+  {
+   "id": "q-english-007",
+   "intent": "english",
+   "split": "dev",
+   "family": "curl",
+   "query": "barbell curl",
+   "purpose": "lookup",
+   "basis": "金标 intent 类别映射：english",
+   "temporary_mapping": {},
+   "expect_empty": false,
+   "label_count": 2,
+   "consistency": {
+    "labels_dropped_if_generation": [],
+    "labels_dropped_if_lookup": [],
+    "labels_surviving_proposed": [
+     "0031",
+     "0868"
+    ],
+    "proposed_purpose_yields_empty_candidate_set": false,
+    "expect_empty_with_labels": false
+   },
+   "open_questions": []
+  },
+  {
+   "id": "q-english-008",
+   "intent": "english",
+   "split": "dev",
+   "family": "lateral-raise",
+   "query": "dumbbell lateral raise",
+   "purpose": "lookup",
+   "basis": "金标 intent 类别映射：english",
+   "temporary_mapping": {},
+   "expect_empty": false,
+   "label_count": 2,
+   "consistency": {
+    "labels_dropped_if_generation": [],
+    "labels_dropped_if_lookup": [],
+    "labels_surviving_proposed": [
+     "0334",
+     "0355"
+    ],
+    "proposed_purpose_yields_empty_candidate_set": false,
+    "expect_empty_with_labels": false
+   },
+   "open_questions": []
+  },
+  {
+   "id": "q-english-009",
+   "intent": "english",
+   "split": "dev",
+   "family": "glute-bridge",
+   "query": "glute bridge",
+   "purpose": "lookup",
+   "basis": "金标 intent 类别映射：english",
+   "temporary_mapping": {},
+   "expect_empty": false,
+   "label_count": 3,
+   "consistency": {
+    "labels_dropped_if_generation": [],
+    "labels_dropped_if_lookup": [],
+    "labels_surviving_proposed": [
+     "1409",
+     "3523",
+     "3561"
+    ],
+    "proposed_purpose_yields_empty_candidate_set": false,
+    "expect_empty_with_labels": false
+   },
+   "open_questions": []
+  },
+  {
+   "id": "q-english-010",
+   "intent": "english",
+   "split": "holdout",
+   "family": "deadlift",
+   "query": "barbell deadlift",
+   "purpose": "lookup",
+   "basis": "金标 intent 类别映射：english",
+   "temporary_mapping": {},
+   "expect_empty": false,
+   "label_count": 2,
+   "consistency": {
+    "labels_dropped_if_generation": [],
+    "labels_dropped_if_lookup": [],
+    "labels_surviving_proposed": [
+     "0032",
+     "0085"
+    ],
+    "proposed_purpose_yields_empty_candidate_set": false,
+    "expect_empty_with_labels": false
+   },
+   "open_questions": []
+  },
+  {
+   "id": "q-english-011",
+   "intent": "english",
+   "split": "holdout",
+   "family": "deadlift",
+   "query": "romanian deadlift",
+   "purpose": "lookup",
+   "basis": "金标 intent 类别映射：english",
+   "temporary_mapping": {},
+   "expect_empty": false,
+   "label_count": 2,
+   "consistency": {
+    "labels_dropped_if_generation": [],
+    "labels_dropped_if_lookup": [],
+    "labels_surviving_proposed": [
+     "0085",
+     "1459"
+    ],
+    "proposed_purpose_yields_empty_candidate_set": false,
+    "expect_empty_with_labels": false
+   },
+   "open_questions": []
+  },
+  {
+   "id": "q-english-012",
+   "intent": "english",
+   "split": "holdout",
+   "family": "shrug",
+   "query": "barbell shrug",
+   "purpose": "lookup",
+   "basis": "金标 intent 类别映射：english",
+   "temporary_mapping": {},
+   "expect_empty": false,
+   "label_count": 2,
+   "consistency": {
+    "labels_dropped_if_generation": [],
+    "labels_dropped_if_lookup": [],
+    "labels_surviving_proposed": [
+     "0095",
+     "0406"
+    ],
+    "proposed_purpose_yields_empty_candidate_set": false,
+    "expect_empty_with_labels": false
+   },
+   "open_questions": []
+  },
+  {
+   "id": "q-english-013",
+   "intent": "english",
+   "split": "holdout",
+   "family": "cardio",
+   "query": "burpee",
+   "purpose": "lookup",
+   "basis": "金标 intent 类别映射：english",
+   "temporary_mapping": {},
+   "expect_empty": false,
+   "label_count": 3,
+   "consistency": {
+    "labels_dropped_if_generation": [],
+    "labels_dropped_if_lookup": [],
+    "labels_surviving_proposed": [
+     "1160",
+     "0501",
+     "1201"
+    ],
+    "proposed_purpose_yields_empty_candidate_set": false,
+    "expect_empty_with_labels": false
+   },
+   "open_questions": []
+  },
+  {
+   "id": "q-english-014",
+   "intent": "english",
+   "split": "holdout",
+   "family": "leg-press",
+   "query": "lever leg extension",
+   "purpose": "lookup",
+   "basis": "金标 intent 类别映射：english",
+   "temporary_mapping": {},
+   "expect_empty": false,
+   "label_count": 2,
+   "consistency": {
+    "labels_dropped_if_generation": [],
+    "labels_dropped_if_lookup": [],
+    "labels_surviving_proposed": [
+     "0585",
+     "3007"
+    ],
+    "proposed_purpose_yields_empty_candidate_set": false,
+    "expect_empty_with_labels": false
+   },
+   "open_questions": []
+  },
+  {
+   "id": "q-english-015",
+   "intent": "english",
+   "split": "holdout",
+   "family": "squat",
+   "query": "dumbbell squat",
+   "purpose": "lookup",
+   "basis": "金标 intent 类别映射：english",
+   "temporary_mapping": {},
+   "expect_empty": false,
+   "label_count": 2,
+   "consistency": {
+    "labels_dropped_if_generation": [],
+    "labels_dropped_if_lookup": [],
+    "labels_surviving_proposed": [
+     "0413",
+     "0411"
+    ],
+    "proposed_purpose_yields_empty_candidate_set": false,
+    "expect_empty_with_labels": false
+   },
+   "open_questions": []
+  },
+  {
+   "id": "q-mixed-001",
+   "intent": "mixed",
+   "split": "dev",
+   "family": "bench-press",
+   "query": "dumbbell 卧推",
+   "purpose": "lookup",
+   "basis": "金标 intent 类别映射：mixed",
+   "temporary_mapping": {},
+   "expect_empty": false,
+   "label_count": 2,
+   "consistency": {
+    "labels_dropped_if_generation": [],
+    "labels_dropped_if_lookup": [],
+    "labels_surviving_proposed": [
+     "0289",
+     "0314"
+    ],
+    "proposed_purpose_yields_empty_candidate_set": false,
+    "expect_empty_with_labels": false
+   },
+   "open_questions": []
+  },
+  {
+   "id": "q-mixed-002",
+   "intent": "mixed",
+   "split": "dev",
+   "family": "row",
+   "query": "cable 划船",
+   "purpose": "lookup",
+   "basis": "金标 intent 类别映射：mixed",
+   "temporary_mapping": {},
+   "expect_empty": false,
+   "label_count": 3,
+   "consistency": {
+    "labels_dropped_if_generation": [],
+    "labels_dropped_if_lookup": [],
+    "labels_surviving_proposed": [
+     "0861",
+     "0180",
+     "0218"
+    ],
+    "proposed_purpose_yields_empty_candidate_set": false,
+    "expect_empty_with_labels": false
+   },
+   "open_questions": []
+  },
+  {
+   "id": "q-mixed-003",
+   "intent": "mixed",
+   "split": "dev",
+   "family": "bench-press",
+   "query": "哑铃 bench press",
+   "purpose": "lookup",
+   "basis": "金标 intent 类别映射：mixed",
+   "temporary_mapping": {},
+   "expect_empty": false,
+   "label_count": 1,
+   "consistency": {
+    "labels_dropped_if_generation": [],
+    "labels_dropped_if_lookup": [],
+    "labels_surviving_proposed": [
+     "0289"
+    ],
+    "proposed_purpose_yields_empty_candidate_set": false,
+    "expect_empty_with_labels": false
+   },
+   "open_questions": []
+  },
+  {
+   "id": "q-mixed-004",
+   "intent": "mixed",
+   "split": "dev",
+   "family": "row",
+   "query": "band 划船",
+   "purpose": "lookup",
+   "basis": "金标 intent 类别映射：mixed",
+   "temporary_mapping": {},
+   "expect_empty": false,
+   "label_count": 3,
+   "consistency": {
+    "labels_dropped_if_generation": [],
+    "labels_dropped_if_lookup": [],
+    "labels_surviving_proposed": [
+     "0988",
+     "0990",
+     "3166"
+    ],
+    "proposed_purpose_yields_empty_candidate_set": false,
+    "expect_empty_with_labels": false
+   },
+   "open_questions": []
+  },
+  {
+   "id": "q-mixed-005",
+   "intent": "mixed",
+   "split": "holdout",
+   "family": "squat",
+   "query": "kettlebell 深蹲",
+   "purpose": "lookup",
+   "basis": "金标 intent 类别映射：mixed",
+   "temporary_mapping": {},
+   "expect_empty": false,
+   "label_count": 2,
+   "consistency": {
+    "labels_dropped_if_generation": [],
+    "labels_dropped_if_lookup": [],
+    "labels_surviving_proposed": [
+     "0534",
+     "0544"
+    ],
+    "proposed_purpose_yields_empty_candidate_set": false,
+    "expect_empty_with_labels": false
+   },
+   "open_questions": []
+  },
+  {
+   "id": "q-mixed-006",
+   "intent": "mixed",
+   "split": "dev",
+   "family": "bench-press",
+   "query": "smith 卧推",
+   "purpose": "lookup",
+   "basis": "金标 intent 类别映射：mixed",
+   "temporary_mapping": {},
+   "expect_empty": false,
+   "label_count": 3,
+   "consistency": {
+    "labels_dropped_if_generation": [],
+    "labels_dropped_if_lookup": [],
+    "labels_surviving_proposed": [
+     "0748",
+     "0025",
+     "0289"
+    ],
+    "proposed_purpose_yields_empty_candidate_set": false,
+    "expect_empty_with_labels": false
+   },
+   "open_questions": []
+  },
+  {
+   "id": "q-mixed-007",
+   "intent": "mixed",
+   "split": "dev",
+   "family": "curl",
+   "query": "EZ bar 弯举",
+   "purpose": "lookup",
+   "basis": "金标 intent 类别映射：mixed",
+   "temporary_mapping": {},
+   "expect_empty": false,
+   "label_count": 3,
+   "consistency": {
+    "labels_dropped_if_generation": [],
+    "labels_dropped_if_lookup": [],
+    "labels_surviving_proposed": [
+     "0447",
+     "0031",
+     "0868"
+    ],
+    "proposed_purpose_yields_empty_candidate_set": false,
+    "expect_empty_with_labels": false
+   },
+   "open_questions": []
+  },
+  {
+   "id": "q-mixed-008",
+   "intent": "mixed",
+   "split": "holdout",
+   "family": "deadlift",
+   "query": "trap bar 硬拉",
+   "purpose": "lookup",
+   "basis": "金标 intent 类别映射：mixed",
+   "temporary_mapping": {},
+   "expect_empty": false,
+   "label_count": 3,
+   "consistency": {
+    "labels_dropped_if_generation": [],
+    "labels_dropped_if_lookup": [],
+    "labels_surviving_proposed": [
+     "0811",
+     "0032",
+     "0085"
+    ],
+    "proposed_purpose_yields_empty_candidate_set": false,
+    "expect_empty_with_labels": false
+   },
+   "open_questions": []
+  },
+  {
+   "id": "q-mixed-009",
+   "intent": "mixed",
+   "split": "holdout",
+   "family": "squat",
+   "query": "squat 蹲腿",
+   "purpose": "lookup",
+   "basis": "金标 intent 类别映射：mixed",
+   "temporary_mapping": {},
+   "expect_empty": false,
+   "label_count": 2,
+   "consistency": {
+    "labels_dropped_if_generation": [],
+    "labels_dropped_if_lookup": [],
+    "labels_surviving_proposed": [
+     "0413",
+     "0102"
+    ],
+    "proposed_purpose_yields_empty_candidate_set": false,
+    "expect_empty_with_labels": false
+   },
+   "open_questions": []
+  },
+  {
+   "id": "q-mixed-010",
+   "intent": "mixed",
+   "split": "dev",
+   "family": "row",
+   "query": "lat pulldown 下拉",
+   "purpose": "lookup",
+   "basis": "金标 intent 类别映射：mixed",
+   "temporary_mapping": {},
+   "expect_empty": false,
+   "label_count": 2,
+   "consistency": {
+    "labels_dropped_if_generation": [],
+    "labels_dropped_if_lookup": [],
+    "labels_surviving_proposed": [
+     "0198",
+     "2330"
+    ],
+    "proposed_purpose_yields_empty_candidate_set": false,
+    "expect_empty_with_labels": false
+   },
+   "open_questions": []
+  },
+  {
+   "id": "q-desc-001",
+   "intent": "description",
+   "split": "dev",
+   "family": "bench-press",
+   "query": "躺着用杠铃把重量推起来练胸",
+   "purpose": "generation",
+   "basis": "金标 intent 类别映射：description",
+   "temporary_mapping": {},
+   "expect_empty": false,
+   "label_count": 3,
+   "consistency": {
+    "labels_dropped_if_generation": [],
+    "labels_dropped_if_lookup": [],
+    "labels_surviving_proposed": [
+     "0025",
+     "0047",
+     "0289"
+    ],
+    "proposed_purpose_yields_empty_candidate_set": false,
+    "expect_empty_with_labels": false
+   },
+   "open_questions": []
+  },
+  {
+   "id": "q-desc-002",
+   "intent": "description",
+   "split": "dev",
+   "family": "pull-up",
+   "query": "挂在单杠上把身体拉起来",
+   "purpose": "generation",
+   "basis": "金标 intent 类别映射：description",
+   "temporary_mapping": {},
+   "expect_empty": false,
+   "label_count": 2,
+   "consistency": {
+    "labels_dropped_if_generation": [],
+    "labels_dropped_if_lookup": [],
+    "labels_surviving_proposed": [
+     "0652",
+     "0017"
+    ],
+    "proposed_purpose_yields_empty_candidate_set": false,
+    "expect_empty_with_labels": false
+   },
+   "open_questions": []
+  },
+  {
+   "id": "q-desc-003",
+   "intent": "description",
+   "split": "dev",
+   "family": "push-up",
+   "query": "趴着用手把身体撑起来再放下去",
+   "purpose": "generation",
+   "basis": "金标 intent 类别映射：description",
+   "temporary_mapping": {},
+   "expect_empty": false,
+   "label_count": 3,
+   "consistency": {
+    "labels_dropped_if_generation": [],
+    "labels_dropped_if_lookup": [],
+    "labels_surviving_proposed": [
+     "0662",
+     "0279",
+     "0258"
+    ],
+    "proposed_purpose_yields_empty_candidate_set": false,
+    "expect_empty_with_labels": false
+   },
+   "open_questions": []
+  },
+  {
+   "id": "q-desc-004",
+   "intent": "description",
+   "split": "holdout",
+   "family": "deadlift",
+   "query": "从地上把杠铃拉起来",
+   "purpose": "generation",
+   "basis": "金标 intent 类别映射：description",
+   "temporary_mapping": {},
+   "expect_empty": false,
+   "label_count": 3,
+   "consistency": {
+    "labels_dropped_if_generation": [],
+    "labels_dropped_if_lookup": [],
+    "labels_surviving_proposed": [
+     "0032",
+     "0085",
+     "0116"
+    ],
+    "proposed_purpose_yields_empty_candidate_set": false,
+    "expect_empty_with_labels": false
+   },
+   "open_questions": []
+  },
+  {
+   "id": "q-desc-005",
+   "intent": "description",
+   "split": "dev",
+   "family": "row",
+   "query": "坐着拉住把手把肩胛骨往后收",
+   "purpose": "generation",
+   "basis": "金标 intent 类别映射：description",
+   "temporary_mapping": {},
+   "expect_empty": false,
+   "label_count": 3,
+   "consistency": {
+    "labels_dropped_if_generation": [],
+    "labels_dropped_if_lookup": [],
+    "labels_surviving_proposed": [
+     "0861",
+     "0180",
+     "0218"
+    ],
+    "proposed_purpose_yields_empty_candidate_set": false,
+    "expect_empty_with_labels": false
+   },
+   "open_questions": []
+  },
+  {
+   "id": "q-desc-006",
+   "intent": "description",
+   "split": "dev",
+   "family": "lateral-raise",
+   "query": "站着把哑铃从身体两侧抬到肩高",
+   "purpose": "generation",
+   "basis": "金标 intent 类别映射：description",
+   "temporary_mapping": {},
+   "expect_empty": false,
+   "label_count": 3,
+   "consistency": {
+    "labels_dropped_if_generation": [],
+    "labels_dropped_if_lookup": [],
+    "labels_surviving_proposed": [
+     "0334",
+     "0178",
+     "0396"
+    ],
+    "proposed_purpose_yields_empty_candidate_set": false,
+    "expect_empty_with_labels": false
+   },
+   "open_questions": []
+  },
+  {
+   "id": "q-desc-007",
+   "intent": "description",
+   "split": "holdout",
+   "family": "deadlift",
+   "query": "髋部主导、膝盖微屈把杠铃贴腿放下",
+   "purpose": "generation",
+   "basis": "金标 intent 类别映射：description",
+   "temporary_mapping": {},
+   "expect_empty": false,
+   "label_count": 3,
+   "consistency": {
+    "labels_dropped_if_generation": [],
+    "labels_dropped_if_lookup": [],
+    "labels_surviving_proposed": [
+     "0085",
+     "1459",
+     "0032"
+    ],
+    "proposed_purpose_yields_empty_candidate_set": false,
+    "expect_empty_with_labels": false
+   },
+   "open_questions": []
+  },
+  {
+   "id": "q-desc-008",
+   "intent": "description",
+   "split": "holdout",
+   "family": "leg-press",
+   "query": "大腿前侧发力的蹬腿器械",
+   "purpose": "generation",
+   "basis": "金标 intent 类别映射：description",
+   "temporary_mapping": {},
+   "expect_empty": false,
+   "label_count": 3,
+   "consistency": {
+    "labels_dropped_if_generation": [],
+    "labels_dropped_if_lookup": [],
+    "labels_surviving_proposed": [
+     "0739",
+     "0585",
+     "1425"
+    ],
+    "proposed_purpose_yields_empty_candidate_set": false,
+    "expect_empty_with_labels": false
+   },
+   "open_questions": []
+  },
+  {
+   "id": "q-desc-009",
+   "intent": "description",
+   "split": "holdout",
+   "family": "crunch",
+   "query": "躺在地上把上半身卷离地面练腹肌",
+   "purpose": "generation",
+   "basis": "金标 intent 类别映射：description",
+   "temporary_mapping": {},
+   "expect_empty": false,
+   "label_count": 3,
+   "consistency": {
+    "labels_dropped_if_generation": [],
+    "labels_dropped_if_lookup": [],
+    "labels_surviving_proposed": [
+     "0274",
+     "0262",
+     "0277"
+    ],
+    "proposed_purpose_yields_empty_candidate_set": false,
+    "expect_empty_with_labels": false
+   },
+   "open_questions": []
+  },
+  {
+   "id": "q-desc-010",
+   "intent": "description",
+   "split": "holdout",
+   "family": "calf-raise",
+   "query": "脚跟抬起踮脚尖练小腿",
+   "purpose": "generation",
+   "basis": "金标 intent 类别映射：description",
+   "temporary_mapping": {},
+   "expect_empty": false,
+   "label_count": 3,
+   "consistency": {
+    "labels_dropped_if_generation": [],
+    "labels_dropped_if_lookup": [],
+    "labels_surviving_proposed": [
+     "1373",
+     "1372",
+     "0999"
+    ],
+    "proposed_purpose_yields_empty_candidate_set": false,
+    "expect_empty_with_labels": false
+   },
+   "open_questions": []
+  },
+  {
+   "id": "q-desc-011",
+   "intent": "description",
+   "split": "holdout",
+   "family": "shrug",
+   "query": "把肩膀往耳朵方向抬起来",
+   "purpose": "generation",
+   "basis": "金标 intent 类别映射：description",
+   "temporary_mapping": {},
+   "expect_empty": false,
+   "label_count": 2,
+   "consistency": {
+    "labels_dropped_if_generation": [],
+    "labels_dropped_if_lookup": [],
+    "labels_surviving_proposed": [
+     "0095",
+     "0406"
+    ],
+    "proposed_purpose_yields_empty_candidate_set": false,
+    "expect_empty_with_labels": false
+   },
+   "open_questions": []
+  },
+  {
+   "id": "q-desc-012",
+   "intent": "description",
+   "split": "holdout",
+   "family": "cardio",
+   "query": "原地跳起再趴下撑起来的有氧动作",
+   "purpose": "generation",
+   "basis": "金标 intent 类别映射：description",
+   "temporary_mapping": {},
+   "expect_empty": false,
+   "label_count": 3,
+   "consistency": {
+    "labels_dropped_if_generation": [],
+    "labels_dropped_if_lookup": [],
+    "labels_surviving_proposed": [
+     "1160",
+     "0501",
+     "1201"
+    ],
+    "proposed_purpose_yields_empty_candidate_set": false,
+    "expect_empty_with_labels": false
+   },
+   "open_questions": []
+  },
+  {
+   "id": "q-cond-001",
+   "intent": "conditional",
+   "split": "dev",
+   "family": "row",
+   "query": "家里有哑铃，想练背",
+   "purpose": "generation",
+   "basis": "金标 intent 类别映射：conditional",
+   "temporary_mapping": {},
+   "expect_empty": false,
+   "label_count": 10,
+   "consistency": {
+    "labels_dropped_if_generation": [],
+    "labels_dropped_if_lookup": [],
+    "labels_surviving_proposed": [
+     "0293",
+     "0292",
+     "0327",
+     "1328",
+     "0406",
+     "0652",
+     "3158",
+     "3166",
+     "3168",
+     "3019"
+    ],
+    "proposed_purpose_yields_empty_candidate_set": false,
+    "expect_empty_with_labels": false
+   },
+   "open_questions": []
+  },
+  {
+   "id": "q-cond-002",
+   "intent": "conditional",
+   "split": "dev",
+   "family": "row",
+   "query": "家里没哑铃了，换个练背的动作",
+   "purpose": "replacement",
+   "basis": "查询文本明确出现替换表述，按契约 §4.1 走 replacement",
+   "temporary_mapping": {},
+   "expect_empty": false,
+   "label_count": 8,
+   "consistency": {
+    "labels_dropped_if_generation": [],
+    "labels_dropped_if_lookup": [],
+    "labels_surviving_proposed": [
+     "0652",
+     "3158",
+     "3162",
+     "3166",
+     "3168",
+     "3019",
+     "3293",
+     "3165"
+    ],
+    "proposed_purpose_yields_empty_candidate_set": false,
+    "expect_empty_with_labels": false
+   },
+   "open_questions": []
+  },
+  {
+   "id": "q-cond-003",
+   "intent": "conditional",
+   "split": "dev",
+   "family": "bench-press",
+   "query": "只用哑铃练胸",
+   "purpose": "generation",
+   "basis": "金标 intent 类别映射：conditional",
+   "temporary_mapping": {},
+   "expect_empty": false,
+   "label_count": 5,
+   "consistency": {
+    "labels_dropped_if_generation": [],
+    "labels_dropped_if_lookup": [],
+    "labels_surviving_proposed": [
+     "0289",
+     "0314",
+     "0301",
+     "0302",
+     "0319"
+    ],
+    "proposed_purpose_yields_empty_candidate_set": false,
+    "expect_empty_with_labels": false
+   },
+   "open_questions": []
+  },
+  {
+   "id": "q-cond-004",
+   "intent": "conditional",
+   "split": "dev",
+   "family": "lateral-raise",
+   "query": "健身房，想练肩",
+   "purpose": "generation",
+   "basis": "金标 intent 类别映射：conditional",
+   "temporary_mapping": {},
+   "expect_empty": false,
+   "label_count": 5,
+   "consistency": {
+    "labels_dropped_if_generation": [],
+    "labels_dropped_if_lookup": [],
+    "labels_surviving_proposed": [
+     "0334",
+     "0355",
+     "0396",
+     "0086",
+     "0087"
+    ],
+    "proposed_purpose_yields_empty_candidate_set": false,
+    "expect_empty_with_labels": false
+   },
+   "open_questions": []
+  },
+  {
+   "id": "q-cond-005",
+   "intent": "conditional",
+   "split": "holdout",
+   "family": "squat",
+   "query": "居家徒手练腿",
+   "purpose": "generation",
+   "basis": "金标 intent 类别映射：conditional",
+   "temporary_mapping": {},
+   "expect_empty": false,
+   "label_count": 7,
+   "consistency": {
+    "labels_dropped_if_generation": [],
+    "labels_dropped_if_lookup": [],
+    "labels_surviving_proposed": [
+     "0514",
+     "3769",
+     "3470",
+     "3523",
+     "3645",
+     "0496",
+     "0697"
+    ],
+    "proposed_purpose_yields_empty_candidate_set": false,
+    "expect_empty_with_labels": false
+   },
+   "open_questions": []
+  },
+  {
+   "id": "q-cond-006",
+   "intent": "conditional",
+   "split": "holdout",
+   "family": "deadlift",
+   "query": "伤后想练后链，避开高负荷硬拉",
+   "purpose": "generation",
+   "basis": "金标 intent 类别映射：conditional",
+   "temporary_mapping": {
+    "unavailable_equipment": [],
+    "excluded_ids": []
+   },
+   "expect_empty": false,
+   "label_count": 5,
+   "consistency": {
+    "labels_dropped_if_generation": [],
+    "labels_dropped_if_lookup": [],
+    "labels_surviving_proposed": [
+     "1409",
+     "0085",
+     "1459",
+     "3523",
+     "0586"
+    ],
+    "proposed_purpose_yields_empty_candidate_set": false,
+    "expect_empty_with_labels": false
+   },
+   "open_questions": [
+    {
+     "temporary_restriction": "避免高负荷硬拉",
+     "question": "高负荷硬拉对应哪些目录动作 ID 未有已批准映射；需要确认排除清单，本轮不猜测。"
+    }
+   ]
+  },
+  {
+   "id": "q-cond-007",
+   "intent": "conditional",
+   "split": "dev",
+   "family": "pull-up",
+   "query": "想要练背的徒手动作",
+   "purpose": "generation",
+   "basis": "金标 intent 类别映射：conditional",
+   "temporary_mapping": {},
+   "expect_empty": false,
+   "label_count": 5,
+   "consistency": {
+    "labels_dropped_if_generation": [],
+    "labels_dropped_if_lookup": [],
+    "labels_surviving_proposed": [
+     "0652",
+     "3293",
+     "3158",
+     "3166",
+     "3019"
+    ],
+    "proposed_purpose_yields_empty_candidate_set": false,
+    "expect_empty_with_labels": false
+   },
+   "open_questions": []
+  },
+  {
+   "id": "q-cond-008",
+   "intent": "conditional",
+   "split": "dev",
+   "family": "bench-press",
+   "query": "有杠铃，练胸的中等难度动作",
+   "purpose": "generation",
+   "basis": "金标 intent 类别映射：conditional",
+   "temporary_mapping": {},
+   "expect_empty": false,
+   "label_count": 3,
+   "consistency": {
+    "labels_dropped_if_generation": [],
+    "labels_dropped_if_lookup": [],
+    "labels_surviving_proposed": [
+     "0025",
+     "0047",
+     "0033"
+    ],
+    "proposed_purpose_yields_empty_candidate_set": false,
+    "expect_empty_with_labels": false
+   },
+   "open_questions": []
+  },
+  {
+   "id": "q-cond-009",
+   "intent": "conditional",
+   "split": "dev",
+   "family": "row",
+   "query": "家里有弹力带，练背",
+   "purpose": "generation",
+   "basis": "金标 intent 类别映射：conditional",
+   "temporary_mapping": {},
+   "expect_empty": false,
+   "label_count": 8,
+   "consistency": {
+    "labels_dropped_if_generation": [],
+    "labels_dropped_if_lookup": [],
+    "labels_surviving_proposed": [
+     "0988",
+     "0990",
+     "0974",
+     "0652",
+     "3158",
+     "3166",
+     "3168",
+     "3019"
+    ],
+    "proposed_purpose_yields_empty_candidate_set": false,
+    "expect_empty_with_labels": false
+   },
+   "open_questions": []
+  },
+  {
+   "id": "q-cond-010",
+   "intent": "conditional",
+   "split": "dev",
+   "family": "curl",
+   "query": "有哑铃，练二头肌",
+   "purpose": "generation",
+   "basis": "金标 intent 类别映射：conditional",
+   "temporary_mapping": {},
+   "expect_empty": false,
+   "label_count": 5,
+   "consistency": {
+    "labels_dropped_if_generation": [],
+    "labels_dropped_if_lookup": [],
+    "labels_surviving_proposed": [
+     "0294",
+     "0313",
+     "0297",
+     "0285",
+     "0315"
+    ],
+    "proposed_purpose_yields_empty_candidate_set": false,
+    "expect_empty_with_labels": false
+   },
+   "open_questions": []
+  },
+  {
+   "id": "q-cond-011",
+   "intent": "conditional",
+   "split": "holdout",
+   "family": "crunch",
+   "query": "户外没有器械，练核心",
+   "purpose": "generation",
+   "basis": "金标 intent 类别映射：conditional",
+   "temporary_mapping": {},
+   "expect_empty": false,
+   "label_count": 4,
+   "consistency": {
+    "labels_dropped_if_generation": [],
+    "labels_dropped_if_lookup": [],
+    "labels_surviving_proposed": [
+     "0274",
+     "0262",
+     "0464",
+     "0635"
+    ],
+    "proposed_purpose_yields_empty_candidate_set": false,
+    "expect_empty_with_labels": false
+   },
+   "open_questions": []
+  },
+  {
+   "id": "q-cond-012",
+   "intent": "conditional",
+   "split": "holdout",
+   "family": "squat",
+   "query": "有壶铃，练腿",
+   "purpose": "generation",
+   "basis": "金标 intent 类别映射：conditional",
+   "temporary_mapping": {},
+   "expect_empty": false,
+   "label_count": 3,
+   "consistency": {
+    "labels_dropped_if_generation": [],
+    "labels_dropped_if_lookup": [],
+    "labels_surviving_proposed": [
+     "0534",
+     "0544",
+     "0536"
+    ],
+    "proposed_purpose_yields_empty_candidate_set": false,
+    "expect_empty_with_labels": false
+   },
+   "open_questions": []
+  },
+  {
+   "id": "q-cond-013",
+   "intent": "conditional",
+   "split": "holdout",
+   "family": "leg-press",
+   "query": "健身房，用器械练腿",
+   "purpose": "generation",
+   "basis": "金标 intent 类别映射：conditional",
+   "temporary_mapping": {},
+   "expect_empty": false,
+   "label_count": 4,
+   "consistency": {
+    "labels_dropped_if_generation": [],
+    "labels_dropped_if_lookup": [],
+    "labels_surviving_proposed": [
+     "0585",
+     "0586",
+     "0739",
+     "3007"
+    ],
+    "proposed_purpose_yields_empty_candidate_set": false,
+    "expect_empty_with_labels": false
+   },
+   "open_questions": []
+  },
+  {
+   "id": "q-cond-014",
+   "intent": "conditional",
+   "split": "dev",
+   "family": "lateral-raise",
+   "query": "家里有哑铃，想练肩",
+   "purpose": "generation",
+   "basis": "金标 intent 类别映射：conditional",
+   "temporary_mapping": {},
+   "expect_empty": false,
+   "label_count": 4,
+   "consistency": {
+    "labels_dropped_if_generation": [],
+    "labels_dropped_if_lookup": [],
+    "labels_surviving_proposed": [
+     "0334",
+     "0355",
+     "0396",
+     "0311"
+    ],
+    "proposed_purpose_yields_empty_candidate_set": false,
+    "expect_empty_with_labels": false
+   },
+   "open_questions": []
+  },
+  {
+   "id": "q-cond-015",
+   "intent": "conditional",
+   "split": "dev",
+   "family": "row",
+   "query": "没有单杠，怎么练背",
+   "purpose": "generation",
+   "basis": "金标 intent 类别映射：conditional",
+   "temporary_mapping": {
+    "unavailable_equipment": [],
+    "excluded_ids": []
+   },
+   "expect_empty": false,
+   "label_count": 3,
+   "consistency": {
+    "labels_dropped_if_generation": [],
+    "labels_dropped_if_lookup": [],
+    "labels_surviving_proposed": [
+     "3166",
+     "3158",
+     "3168"
+    ],
+    "proposed_purpose_yields_empty_candidate_set": false,
+    "expect_empty_with_labels": false
+   },
+   "open_questions": [
+    {
+     "temporary_restriction": "没有单杠",
+     "question": "目录器械枚举无单杠项，依赖单杠的动作在目录里记为 body weight；本轮不推断，需要确认是按动作 ID 清单排除还是仅按现有显式筛选执行。"
+    }
+   ]
+  },
+  {
+   "id": "q-cond-016",
+   "intent": "conditional",
+   "split": "dev",
+   "family": "curl",
+   "query": "用哑铃做弯举",
+   "purpose": "generation",
+   "basis": "金标 intent 类别映射：conditional",
+   "temporary_mapping": {},
+   "expect_empty": false,
+   "label_count": 4,
+   "consistency": {
+    "labels_dropped_if_generation": [],
+    "labels_dropped_if_lookup": [],
+    "labels_surviving_proposed": [
+     "0294",
+     "0313",
+     "0297",
+     "0023"
+    ],
+    "proposed_purpose_yields_empty_candidate_set": false,
+    "expect_empty_with_labels": false
+   },
+   "open_questions": []
+  },
+  {
+   "id": "q-multi-001",
+   "intent": "multi_alias",
+   "split": "dev",
+   "family": "row",
+   "query": "划船",
+   "purpose": "lookup",
+   "basis": "金标 intent 类别映射：multi_alias",
+   "temporary_mapping": {},
+   "expect_empty": false,
+   "label_count": 6,
+   "consistency": {
+    "labels_dropped_if_generation": [],
+    "labels_dropped_if_lookup": [],
+    "labels_surviving_proposed": [
+     "0027",
+     "0293",
+     "0861",
+     "0292",
+     "0049",
+     "3017"
+    ],
+    "proposed_purpose_yields_empty_candidate_set": false,
+    "expect_empty_with_labels": false
+   },
+   "open_questions": []
+  },
+  {
+   "id": "q-multi-002",
+   "intent": "multi_alias",
+   "split": "holdout",
+   "family": "overhead-press",
+   "query": "推举",
+   "purpose": "lookup",
+   "basis": "金标 intent 类别映射：multi_alias",
+   "temporary_mapping": {},
+   "expect_empty": false,
+   "label_count": 4,
+   "consistency": {
+    "labels_dropped_if_generation": [],
+    "labels_dropped_if_lookup": [],
+    "labels_surviving_proposed": [
+     "0086",
+     "0091",
+     "0105",
+     "0087"
+    ],
+    "proposed_purpose_yields_empty_candidate_set": false,
+    "expect_empty_with_labels": false
+   },
+   "open_questions": []
+  },
+  {
+   "id": "q-multi-003",
+   "intent": "multi_alias",
+   "split": "holdout",
+   "family": "deadlift",
+   "query": "硬拉",
+   "purpose": "lookup",
+   "basis": "金标 intent 类别映射：multi_alias",
+   "temporary_mapping": {},
+   "expect_empty": false,
+   "label_count": 5,
+   "consistency": {
+    "labels_dropped_if_generation": [],
+    "labels_dropped_if_lookup": [],
+    "labels_surviving_proposed": [
+     "0032",
+     "0300",
+     "0085",
+     "0117",
+     "0074"
+    ],
+    "proposed_purpose_yields_empty_candidate_set": false,
+    "expect_empty_with_labels": false
+   },
+   "open_questions": []
+  },
+  {
+   "id": "q-multi-004",
+   "intent": "multi_alias",
+   "split": "dev",
+   "family": "curl",
+   "query": "弯举",
+   "purpose": "lookup",
+   "basis": "金标 intent 类别映射：multi_alias",
+   "temporary_mapping": {},
+   "expect_empty": false,
+   "label_count": 4,
+   "consistency": {
+    "labels_dropped_if_generation": [],
+    "labels_dropped_if_lookup": [],
+    "labels_surviving_proposed": [
+     "0031",
+     "0868",
+     "0023",
+     "0080"
+    ],
+    "proposed_purpose_yields_empty_candidate_set": false,
+    "expect_empty_with_labels": false
+   },
+   "open_questions": []
+  },
+  {
+   "id": "q-multi-005",
+   "intent": "multi_alias",
+   "split": "holdout",
+   "family": "squat",
+   "query": "深蹲",
+   "purpose": "lookup",
+   "basis": "金标 intent 类别映射：multi_alias",
+   "temporary_mapping": {},
+   "expect_empty": false,
+   "label_count": 4,
+   "consistency": {
+    "labels_dropped_if_generation": [],
+    "labels_dropped_if_lookup": [],
+    "labels_surviving_proposed": [
+     "0413",
+     "0102",
+     "0124",
+     "1004"
+    ],
+    "proposed_purpose_yields_empty_candidate_set": false,
+    "expect_empty_with_labels": false
+   },
+   "open_questions": []
+  },
+  {
+   "id": "q-multi-006",
+   "intent": "multi_alias",
+   "split": "holdout",
+   "family": "fly",
+   "query": "飞鸟",
+   "purpose": "lookup",
+   "basis": "金标 intent 类别映射：multi_alias",
+   "temporary_mapping": {},
+   "expect_empty": false,
+   "label_count": 4,
+   "consistency": {
+    "labels_dropped_if_generation": [],
+    "labels_dropped_if_lookup": [],
+    "labels_surviving_proposed": [
+     "0308",
+     "0319",
+     "0302",
+     "0171"
+    ],
+    "proposed_purpose_yields_empty_candidate_set": false,
+    "expect_empty_with_labels": false
+   },
+   "open_questions": []
+  },
+  {
+   "id": "q-multi-007",
+   "intent": "multi_alias",
+   "split": "dev",
+   "family": "lateral-raise",
+   "query": "侧平举",
+   "purpose": "lookup",
+   "basis": "金标 intent 类别映射：multi_alias",
+   "temporary_mapping": {},
+   "expect_empty": false,
+   "label_count": 4,
+   "consistency": {
+    "labels_dropped_if_generation": [],
+    "labels_dropped_if_lookup": [],
+    "labels_surviving_proposed": [
+     "0334",
+     "0178",
+     "0355",
+     "0192"
+    ],
+    "proposed_purpose_yields_empty_candidate_set": false,
+    "expect_empty_with_labels": false
+   },
+   "open_questions": []
+  },
+  {
+   "id": "q-multi-008",
+   "intent": "multi_alias",
+   "split": "holdout",
+   "family": "calf-raise",
+   "query": "提踵",
+   "purpose": "lookup",
+   "basis": "金标 intent 类别映射：multi_alias",
+   "temporary_mapping": {},
+   "expect_empty": false,
+   "label_count": 4,
+   "consistency": {
+    "labels_dropped_if_generation": [],
+    "labels_dropped_if_lookup": [],
+    "labels_surviving_proposed": [
+     "1373",
+     "1372",
+     "0999",
+     "0088"
+    ],
+    "proposed_purpose_yields_empty_candidate_set": false,
+    "expect_empty_with_labels": false
+   },
+   "open_questions": []
+  },
+  {
+   "id": "q-forbidden-001",
+   "intent": "forbidden",
+   "split": "holdout",
+   "family": "deadlift",
+   "query": "除了硬拉，练一下后链",
+   "purpose": "generation",
+   "basis": "已保存禁用动作清单参与候选排除，契约 §4.2 长期限制生效",
+   "temporary_mapping": {},
+   "expect_empty": false,
+   "label_count": 4,
+   "consistency": {
+    "labels_dropped_if_generation": [],
+    "labels_dropped_if_lookup": [],
+    "labels_surviving_proposed": [
+     "1409",
+     "3523",
+     "0586",
+     "3013"
+    ],
+    "proposed_purpose_yields_empty_candidate_set": false,
+    "expect_empty_with_labels": false
+   },
+   "open_questions": []
+  },
+  {
+   "id": "q-forbidden-002",
+   "intent": "forbidden",
+   "split": "holdout",
+   "family": "squat",
+   "query": "不要深蹲，练腿",
+   "purpose": "generation",
+   "basis": "已保存禁用动作清单参与候选排除，契约 §4.2 长期限制生效",
+   "temporary_mapping": {},
+   "expect_empty": false,
+   "label_count": 4,
+   "consistency": {
+    "labels_dropped_if_generation": [],
+    "labels_dropped_if_lookup": [],
+    "labels_surviving_proposed": [
+     "0585",
+     "0586",
+     "0739",
+     "3523"
+    ],
+    "proposed_purpose_yields_empty_candidate_set": false,
+    "expect_empty_with_labels": false
+   },
+   "open_questions": []
+  },
+  {
+   "id": "q-forbidden-003",
+   "intent": "forbidden",
+   "split": "dev",
+   "family": "bench-press",
+   "query": "避开卧推，练胸",
+   "purpose": "generation",
+   "basis": "已保存禁用动作清单参与候选排除，契约 §4.2 长期限制生效",
+   "temporary_mapping": {},
+   "expect_empty": false,
+   "label_count": 4,
+   "consistency": {
+    "labels_dropped_if_generation": [],
+    "labels_dropped_if_lookup": [],
+    "labels_surviving_proposed": [
+     "0308",
+     "0319",
+     "0289",
+     "0662"
+    ],
+    "proposed_purpose_yields_empty_candidate_set": false,
+    "expect_empty_with_labels": false
+   },
+   "open_questions": []
+  },
+  {
+   "id": "q-forbidden-004",
+   "intent": "forbidden",
+   "split": "dev",
+   "family": "row",
+   "query": "不做引体向上，练背",
+   "purpose": "generation",
+   "basis": "已保存禁用动作清单参与候选排除，契约 §4.2 长期限制生效",
+   "temporary_mapping": {},
+   "expect_empty": false,
+   "label_count": 4,
+   "consistency": {
+    "labels_dropped_if_generation": [],
+    "labels_dropped_if_lookup": [],
+    "labels_surviving_proposed": [
+     "0861",
+     "0293",
+     "3158",
+     "3166"
+    ],
+    "proposed_purpose_yields_empty_candidate_set": false,
+    "expect_empty_with_labels": false
+   },
+   "open_questions": []
+  },
+  {
+   "id": "q-forbidden-005",
+   "intent": "forbidden",
+   "split": "holdout",
+   "family": "crunch",
+   "query": "不做卷腹，练核心",
+   "purpose": "generation",
+   "basis": "已保存禁用动作清单参与候选排除，契约 §4.2 长期限制生效",
+   "temporary_mapping": {},
+   "expect_empty": false,
+   "label_count": 4,
+   "consistency": {
+    "labels_dropped_if_generation": [],
+    "labels_dropped_if_lookup": [],
+    "labels_surviving_proposed": [
+     "2135",
+     "3665",
+     "3544",
+     "0464"
+    ],
+    "proposed_purpose_yields_empty_candidate_set": false,
+    "expect_empty_with_labels": false
+   },
+   "open_questions": []
+  },
+  {
+   "id": "q-forbidden-006",
+   "intent": "forbidden",
+   "split": "holdout",
+   "family": "shrug",
+   "query": "不做耸肩，练斜方肌",
+   "purpose": "generation",
+   "basis": "已保存禁用动作清单参与候选排除，契约 §4.2 长期限制生效",
+   "temporary_mapping": {},
+   "expect_empty": false,
+   "label_count": 4,
+   "consistency": {
+    "labels_dropped_if_generation": [],
+    "labels_dropped_if_lookup": [],
+    "labels_surviving_proposed": [
+     "0120",
+     "0123",
+     "0119",
+     "0095"
+    ],
+    "proposed_purpose_yields_empty_candidate_set": false,
+    "expect_empty_with_labels": false
+   },
+   "open_questions": []
+  },
+  {
+   "id": "q-forbidden-007",
+   "intent": "forbidden",
+   "split": "holdout",
+   "family": "leg-press",
+   "query": "不做腿举，练腿",
+   "purpose": "generation",
+   "basis": "已保存禁用动作清单参与候选排除，契约 §4.2 长期限制生效",
+   "temporary_mapping": {},
+   "expect_empty": false,
+   "label_count": 4,
+   "consistency": {
+    "labels_dropped_if_generation": [],
+    "labels_dropped_if_lookup": [],
+    "labels_surviving_proposed": [
+     "0585",
+     "0586",
+     "0413",
+     "1760"
+    ],
+    "proposed_purpose_yields_empty_candidate_set": false,
+    "expect_empty_with_labels": false
+   },
+   "open_questions": []
+  },
+  {
+   "id": "q-forbidden-008",
+   "intent": "forbidden",
+   "split": "holdout",
+   "family": "cardio",
+   "query": "不做波比跳，做有氧",
+   "purpose": "generation",
+   "basis": "已保存禁用动作清单参与候选排除，契约 §4.2 长期限制生效",
+   "temporary_mapping": {},
+   "expect_empty": false,
+   "label_count": 4,
+   "consistency": {
+    "labels_dropped_if_generation": [],
+    "labels_dropped_if_lookup": [],
+    "labels_surviving_proposed": [
+     "2612",
+     "0685",
+     "0684",
+     "2141"
+    ],
+    "proposed_purpose_yields_empty_candidate_set": false,
+    "expect_empty_with_labels": false
+   },
+   "open_questions": []
+  },
+  {
+   "id": "q-noanswer-001",
+   "intent": "description",
+   "split": "holdout",
+   "family": "swim",
+   "query": "帮我找个游泳训练",
+   "purpose": "generation",
+   "basis": "金标 intent 类别映射：description",
+   "temporary_mapping": {},
+   "expect_empty": false,
+   "label_count": 1,
+   "consistency": {
+    "labels_dropped_if_generation": [],
+    "labels_dropped_if_lookup": [],
+    "labels_surviving_proposed": [
+     "3433"
+    ],
+    "proposed_purpose_yields_empty_candidate_set": false,
+    "expect_empty_with_labels": false
+   },
+   "open_questions": []
+  },
+  {
+   "id": "q-noanswer-002",
+   "intent": "no_answer",
+   "split": "holdout",
+   "family": "no-answer",
+   "query": "有没有瑜伽下犬式",
+   "purpose": "generation",
+   "basis": "金标 intent 类别映射：no_answer",
+   "temporary_mapping": {},
+   "expect_empty": true,
+   "label_count": 0,
+   "consistency": {
+    "labels_dropped_if_generation": [],
+    "labels_dropped_if_lookup": [],
+    "labels_surviving_proposed": [],
+    "proposed_purpose_yields_empty_candidate_set": false,
+    "expect_empty_with_labels": false
+   },
+   "open_questions": []
+  },
+  {
+   "id": "q-noanswer-003",
+   "intent": "no_answer",
+   "split": "holdout",
+   "family": "no-answer",
+   "query": "我想做拳击沙袋训练",
+   "purpose": "generation",
+   "basis": "金标 intent 类别映射：no_answer",
+   "temporary_mapping": {},
+   "expect_empty": true,
+   "label_count": 0,
+   "consistency": {
+    "labels_dropped_if_generation": [],
+    "labels_dropped_if_lookup": [],
+    "labels_surviving_proposed": [],
+    "proposed_purpose_yields_empty_candidate_set": false,
+    "expect_empty_with_labels": false
+   },
+   "open_questions": []
+  },
+  {
+   "id": "q-noanswer-004",
+   "intent": "no_answer",
+   "split": "holdout",
+   "family": "no-answer",
+   "query": "有没有攀岩训练动作",
+   "purpose": "generation",
+   "basis": "金标 intent 类别映射：no_answer",
+   "temporary_mapping": {},
+   "expect_empty": true,
+   "label_count": 0,
+   "consistency": {
+    "labels_dropped_if_generation": [],
+    "labels_dropped_if_lookup": [],
+    "labels_surviving_proposed": [],
+    "proposed_purpose_yields_empty_candidate_set": false,
+    "expect_empty_with_labels": false
+   },
+   "open_questions": []
+  },
+  {
+   "id": "q-noanswer-005",
+   "intent": "no_answer",
+   "split": "holdout",
+   "family": "no-answer",
+   "query": "用划船机做有氧",
+   "purpose": "generation",
+   "basis": "金标 intent 类别映射：no_answer",
+   "temporary_mapping": {},
+   "expect_empty": true,
+   "label_count": 0,
+   "consistency": {
+    "labels_dropped_if_generation": [],
+    "labels_dropped_if_lookup": [],
+    "labels_surviving_proposed": [],
+    "proposed_purpose_yields_empty_candidate_set": false,
+    "expect_empty_with_labels": false
+   },
+   "open_questions": []
+  },
+  {
+   "id": "q-noanswer-006",
+   "intent": "alias",
+   "split": "holdout",
+   "family": "suspended-row",
+   "query": "有没有TRX悬挂划船",
+   "purpose": "lookup",
+   "basis": "金标 intent 类别映射：alias",
+   "temporary_mapping": {},
+   "expect_empty": false,
+   "label_count": 1,
+   "consistency": {
+    "labels_dropped_if_generation": [],
+    "labels_dropped_if_lookup": [],
+    "labels_surviving_proposed": [
+     "0808"
+    ],
+    "proposed_purpose_yields_empty_candidate_set": false,
+    "expect_empty_with_labels": false
+   },
+   "open_questions": []
+  },
+  {
+   "id": "q-noanswer-007",
+   "intent": "no_answer",
+   "split": "holdout",
+   "family": "no-answer",
+   "query": "找个桑巴舞蹈训练",
+   "purpose": "generation",
+   "basis": "金标 intent 类别映射：no_answer",
+   "temporary_mapping": {},
+   "expect_empty": true,
+   "label_count": 0,
+   "consistency": {
+    "labels_dropped_if_generation": [],
+    "labels_dropped_if_lookup": [],
+    "labels_surviving_proposed": [],
+    "proposed_purpose_yields_empty_candidate_set": false,
+    "expect_empty_with_labels": false
+   },
+   "open_questions": []
+  },
+  {
+   "id": "q-noanswer-008",
+   "intent": "no_answer",
+   "split": "holdout",
+   "family": "no-answer",
+   "query": "有没有倒立走训练",
+   "purpose": "generation",
+   "basis": "金标 intent 类别映射：no_answer",
+   "temporary_mapping": {},
+   "expect_empty": true,
+   "label_count": 0,
+   "consistency": {
+    "labels_dropped_if_generation": [],
+    "labels_dropped_if_lookup": [],
+    "labels_surviving_proposed": [],
+    "proposed_purpose_yields_empty_candidate_set": false,
+    "expect_empty_with_labels": false
+   },
+   "open_questions": []
+  },
+  {
+   "id": "q-exact-001",
+   "intent": "exact_restricted",
+   "split": "dev",
+   "family": "bench-press",
+   "query": "杠铃卧推",
+   "purpose": "lookup",
+   "basis": "指名动作事实核实，契约 §4.1 允许返回画像受限动作",
+   "temporary_mapping": {},
+   "expect_empty": true,
+   "label_count": 0,
+   "consistency": {
+    "labels_dropped_if_generation": [],
+    "labels_dropped_if_lookup": [],
+    "labels_surviving_proposed": [],
+    "proposed_purpose_yields_empty_candidate_set": false,
+    "expect_empty_with_labels": false
+   },
+   "open_questions": []
+  },
+  {
+   "id": "q-exact-002",
+   "intent": "exact_restricted",
+   "split": "holdout",
+   "family": "deadlift",
+   "query": "杠铃硬拉",
+   "purpose": "lookup",
+   "basis": "指名动作事实核实，契约 §4.1 允许返回画像受限动作",
+   "temporary_mapping": {},
+   "expect_empty": true,
+   "label_count": 0,
+   "consistency": {
+    "labels_dropped_if_generation": [],
+    "labels_dropped_if_lookup": [],
+    "labels_surviving_proposed": [],
+    "proposed_purpose_yields_empty_candidate_set": false,
+    "expect_empty_with_labels": false
+   },
+   "open_questions": []
+  },
+  {
+   "id": "q-exact-003",
+   "intent": "exact_restricted",
+   "split": "dev",
+   "family": "pull-up",
+   "query": "引体向上",
+   "purpose": "lookup",
+   "basis": "指名动作事实核实，契约 §4.1 允许返回画像受限动作",
+   "temporary_mapping": {},
+   "expect_empty": false,
+   "label_count": 7,
+   "consistency": {
+    "labels_dropped_if_generation": [],
+    "labels_dropped_if_lookup": [],
+    "labels_surviving_proposed": [
+     "0017",
+     "0970",
+     "0015",
+     "0572",
+     "1431",
+     "1432",
+     "0841"
+    ],
+    "proposed_purpose_yields_empty_candidate_set": false,
+    "expect_empty_with_labels": false
+   },
+   "open_questions": []
+  },
+  {
+   "id": "q-exact-004",
+   "intent": "exact_restricted",
+   "split": "holdout",
+   "family": "leg-press",
+   "query": "器械腿屈伸",
+   "purpose": "lookup",
+   "basis": "指名动作事实核实，契约 §4.1 允许返回画像受限动作",
+   "temporary_mapping": {},
+   "expect_empty": true,
+   "label_count": 0,
+   "consistency": {
+    "labels_dropped_if_generation": [],
+    "labels_dropped_if_lookup": [],
+    "labels_surviving_proposed": [],
+    "proposed_purpose_yields_empty_candidate_set": false,
+    "expect_empty_with_labels": false
+   },
+   "open_questions": []
+  },
+  {
+   "id": "q-exact-005",
+   "intent": "exact_restricted",
+   "split": "holdout",
+   "family": "cardio",
+   "query": "跳绳",
+   "purpose": "lookup",
+   "basis": "指名动作事实核实，契约 §4.1 允许返回画像受限动作",
+   "temporary_mapping": {},
+   "expect_empty": false,
+   "label_count": 1,
+   "consistency": {
+    "labels_dropped_if_generation": [],
+    "labels_dropped_if_lookup": [],
+    "labels_surviving_proposed": [
+     "2612"
+    ],
+    "proposed_purpose_yields_empty_candidate_set": false,
+    "expect_empty_with_labels": false
+   },
+   "open_questions": []
+  },
+  {
+   "id": "q-exact-006",
+   "intent": "exact_restricted",
+   "split": "holdout",
+   "family": "shrug",
+   "query": "杠铃耸肩",
+   "purpose": "lookup",
+   "basis": "指名动作 + 本次临时排除杠铃：lookup 仍应用本次临时限制与显式筛选（契约 §4.1）",
+   "temporary_mapping": {
+    "unavailable_equipment": [
+     "barbell"
+    ],
+    "excluded_ids": []
+   },
+   "expect_empty": true,
+   "label_count": 0,
+   "consistency": {
+    "labels_dropped_if_generation": [],
+    "labels_dropped_if_lookup": [],
+    "labels_surviving_proposed": [],
+    "proposed_purpose_yields_empty_candidate_set": false,
+    "expect_empty_with_labels": false
+   },
+   "open_questions": []
+  }
+ ]
+}

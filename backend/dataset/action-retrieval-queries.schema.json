@@ -1,0 +1,116 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "action-retrieval-queries.schema.json",
+  "title": "Action Retrieval Evaluation Queries",
+  "description": "backend/dataset/action-retrieval-queries.json 的结构约束。每条查询带稳定 ID、意图、显式筛选、环境与器械声明、临时与画像限制、候选相关性标注与开发/留出集拆分。",
+  "type": "object",
+  "required": ["version", "catalog", "encoding_rule_version", "label_status", "grade_scale", "split_rule", "baseline_rule", "queries"],
+  "additionalProperties": false,
+  "properties": {
+    "version": {"type": "string", "minLength": 1},
+    "catalog": {"$ref": "#/$defs/catalog"},
+    "encoding_rule_version": {"type": "string", "minLength": 1},
+    "label_status": {"$ref": "#/$defs/review_status"},
+    "grade_scale": {
+      "type": "object",
+      "required": ["0", "1", "2", "3"],
+      "additionalProperties": false,
+      "properties": {
+        "0": {"type": "string", "minLength": 1},
+        "1": {"type": "string", "minLength": 1},
+        "2": {"type": "string", "minLength": 1},
+        "3": {"type": "string", "minLength": 1}
+      }
+    },
+    "split_rule": {"type": "string", "minLength": 1},
+    "baseline_rule": {"type": "string", "minLength": 1},
+    "queries": {
+      "type": "array",
+      "minItems": 120,
+      "items": {"$ref": "#/$defs/query"}
+    }
+  },
+  "$defs": {
+    "catalog": {
+      "type": "object",
+      "required": ["path", "sha256", "count"],
+      "additionalProperties": false,
+      "properties": {
+        "path": {"type": "string", "minLength": 1},
+        "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "count": {"type": "integer", "minimum": 1}
+      }
+    },
+    "review_status": {"enum": ["candidate", "approved", "rejected"]},
+    "intent": {
+      "enum": [
+        "standard_name",
+        "alias",
+        "english",
+        "mixed",
+        "description",
+        "conditional",
+        "multi_alias",
+        "forbidden",
+        "no_answer",
+        "exact_restricted"
+      ]
+    },
+    "purpose": {"enum": ["search", "verify", "recommend", "replace"]},
+    "filters": {
+      "type": "object",
+      "required": ["equipment", "body_part", "target", "muscle_group"],
+      "additionalProperties": false,
+      "properties": {
+        "equipment": {"type": ["string", "null"]},
+        "body_part": {"type": ["string", "null"]},
+        "target": {"type": ["string", "null"]},
+        "muscle_group": {"type": ["string", "null"]}
+      }
+    },
+    "label": {
+      "type": "object",
+      "required": ["id", "grade"],
+      "additionalProperties": false,
+      "properties": {
+        "id": {"type": "string", "pattern": "^[0-9]{4}$"},
+        "grade": {"type": "integer", "minimum": 1, "maximum": 3}
+      }
+    },
+    "query": {
+      "type": "object",
+      "required": [
+        "id", "query", "intent", "purpose", "filters", "environment",
+        "declared_equipment", "temporary_restrictions", "saved_profile_restrictions",
+        "labels", "expect_empty", "label_status", "split", "family", "baseline_name", "notes"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "id": {"type": "string", "pattern": "^q-[a-z_]+-[0-9]{3}$"},
+        "query": {"type": "string", "minLength": 1},
+        "intent": {"$ref": "#/$defs/intent"},
+        "purpose": {"$ref": "#/$defs/purpose"},
+        "filters": {"$ref": "#/$defs/filters"},
+        "environment": {"type": ["string", "null"]},
+        "declared_equipment": {"type": "array", "items": {"type": "string", "minLength": 1}},
+        "temporary_restrictions": {"type": "array", "items": {"type": "string", "minLength": 1}},
+        "saved_profile_restrictions": {
+          "type": "object",
+          "required": ["unavailable_equipment", "forbidden_exercise_ids"],
+          "additionalProperties": false,
+          "properties": {
+            "unavailable_equipment": {"type": "array", "items": {"type": "string", "minLength": 1}},
+            "forbidden_exercise_ids": {"type": "array", "items": {"type": "string", "pattern": "^[0-9]{4}$"}}
+          }
+        },
+        "labels": {"type": "array", "items": {"$ref": "#/$defs/label"}},
+        "expect_empty": {"type": "boolean"},
+        "label_status": {"$ref": "#/$defs/review_status"},
+        "split": {"enum": ["dev", "holdout"]},
+        "family": {"type": "string", "minLength": 1},
+        "baseline_name": {"type": "string", "minLength": 1},
+        "notes": {"type": ["string", "null"]}
+      }
+    }
+  }
+}

@@ -1,8 +1,11 @@
 import json
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from threading import Event
+from time import perf_counter
 
+from app.agent.telemetry import RunTrace, TraceSpan, TraceStore
 from app.ai.types import check_cancelled
 from app.application.business.service import (
     BUSINESS_TIMEZONE,
@@ -105,6 +108,8 @@ class ConfirmationService:
 
     async def confirm(
         self, session_id: str, request: SaveConfirmationRequest, signal: Event | None = None,
+        *, trace_store: TraceStore | None = None,
+        contains: Callable[[object], bool] | None = None,
     ) -> SaveConfirmationOperation:
         check_cancelled(signal)
         operation, accepted = await self._accept(session_id, request, _now_ms())
@@ -112,7 +117,9 @@ class ConfirmationService:
             # 同键复用（含处理中、已保存、已失败）与已保存快照重复确认：返回原操作对象，
             # 本次请求不是执行负责人，不得启动保存、改写状态或覆盖原执行结果。
             return operation
-        return await self._execute(operation, request, signal)
+        return await self._execute(
+            operation, request, signal, trace_store=trace_store, contains=contains
+        )
 
     async def get(self, session_id: str, operation_id: str) -> SaveConfirmationOperation:
         async with self._repository.transaction():
@@ -247,9 +254,48 @@ class ConfirmationService:
             await self._check_authorization(request.business_kind, context, snapshot, request)
             return operation, True
 
-    # 保存执行：业务写入与确认操作成功终态在同一提交事务内落地。
+    # 已受理执行负责人边界：建立一次独立确认根 Trace，覆盖受理后的校验、保存与结果确定。
+    # 业务终态提交后结算根、尝试整批写入，随后返回原确认响应；纯观测故障沿用既有隔离。
 
     async def _execute(
+        self, operation: SaveConfirmationOperation, request: SaveConfirmationRequest,
+        signal: Event | None, *, trace_store: TraceStore | None = None,
+        contains: Callable[[object], bool] | None = None,
+    ) -> SaveConfirmationOperation:
+        if trace_store is None:
+            # 未提供观测依赖：沿用无记录语义，独立调用与测试路径行为不变。
+            return await self._run_save(operation, request, signal)
+        # 根身份取实际受理操作：session_id 与 operation_id 来自已受理操作，run_id 为空。
+        # 受理起点在受理事务返回之后，根只覆盖已受理后的执行段。
+        trace = RunTrace(
+            session_id=operation.session_id,
+            operation_id=operation.operation_id,
+            run_id=None,
+            contains=contains,
+            accepted_at=time.time_ns() // 1_000_000,
+            accepted_perf=perf_counter(),
+        )
+
+        async def settle(root: TraceSpan) -> SaveConfirmationOperation:
+            result = await self._run_save(operation, request, signal)
+            if result.status == "saved":
+                root.set_status("completed")
+            else:
+                # 已受理保存失败以真实结局显式记 failed；错误码只用既有受控代码。
+                root.set_status("failed", None if result.error is None else result.error.code)
+            return result
+
+        try:
+            return await trace.start_span(
+                "confirmation", {"business_kind": operation.business_kind}, settle
+            )
+        finally:
+            # 成功、失败、取消与断连收尾都尝试写入并释放记录器；写入属后续开销边界。
+            await trace.finish(trace_store)
+
+    # 保存执行：业务写入与确认操作成功终态在同一提交事务内落地。
+
+    async def _run_save(
         self, operation: SaveConfirmationOperation, request: SaveConfirmationRequest,
         signal: Event | None,
     ) -> SaveConfirmationOperation:
