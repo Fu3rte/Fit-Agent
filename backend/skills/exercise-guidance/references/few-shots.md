@@ -40,7 +40,7 @@
 **Tool Result**：`search_exercises` 以 `{"query": "颈后推举"}` 返回 `exercises=[]`；换 `{"query": "推举"}` 命中
 5 条，名称与器械形式最接近的是 `barbell-seated-overhead-press`（`barbell_includes_bar_total`）与
 `seated-dumbbell-shoulder-press`（`dumbbell_per_hand`），两条都是 `reps_weight`。「膝盖不太舒服」未
-命中急性红旗词表，本次请求正常到达 `general`。
+命中急性红旗词表，本次请求照常进入动作解释。
 
 **期望行为**：
 

@@ -1,7 +1,7 @@
 # 计划编排（workout-planning reference）
 
-本文件是模型指令，只写 [planning-rules.md](planning-rules.md) 之外的编排口径。与
-`app/domain/plans/schema.py`／`rules.py` 冲突时一律以源码为准；本文件不新增数值阈值。
+本文件是模型指令，只写 [planning-rules.md](planning-rules.md) 之外的编排口径。与 `domain.plans` 的
+确定性规则冲突时一律以确定性代码为准；本文件不新增数值阈值。
 
 ## 频率与训练日
 
@@ -17,7 +17,9 @@
 
 ## 训练变量
 
-每个动作写清：职责、组数、次数区间、选重方式、休息、动作标准与替代。
+每个动作写清：职责、组数、次数区间、选重方式、休息、动作标准与替代。这六项各自改动哪个训练变量、
+代价是什么，依据 [training-variables.md](../../training-theory/references/training-variables.md) 的六个
+变量口径说明。
 
 - 组数与次数区间是可被后续训练记录推翻的起点，不引用固定次数表。
 - 增肌目标下，约 10 组/肌群/周可作为证据锚点之一，不作为人人必须达到的固定下限。

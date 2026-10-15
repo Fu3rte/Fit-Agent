@@ -9,13 +9,21 @@ description: 用户用自然语言报告一次训练时加载；约束 prepare_w
 `prepare_workout_record`、`RecordsService` 与确认端点持有；本 Skill 只约束“描述 → 结构化事实 →
 确认摘要”这一段的写法。
 
+Fit-Agent 是单一 Agent，没有按意图分发的多个角色：本 Skill 随会话装载，只贡献知识层指令，不取得写入权限。
+
 ## 职责
 
-- `intent = natural_language_record`：把用户这次训练描述的**原文**交给 `prepare_workout_record`，由该 Tool 内部
+- 用户用自然语言报告一次训练时，把这次描述的**原文**交给 `prepare_workout_record`，由该 Tool 内部
   完成提取（业务自然日 ＋ 逐组事实）与校验；模型不自行提取，也不代替用户补事实。
 - 校验通过后按待确认载荷写面向用户的确认摘要；摘要只描述载荷里已有的事实。
-- 字段、值域与确认载荷见 [logging-contract.md](references/logging-contract.md)，样例见
-  [few-shots.md](references/few-shots.md)。
+
+## 知识入口
+
+- [logging-contract.md](references/logging-contract.md)：字段、值域与确认载荷。
+- [few-shots.md](references/few-shots.md)：行为样例。
+- [performance-factors.md](../training-theory/references/performance-factors.md)：记录为什么是长期证据，
+  单次波动与趋势怎么分开看。
+- [user-facing-language.md](../training-theory/references/user-facing-language.md)：面向用户的用词规约。
 
 ## 可用 Tool
 
@@ -44,8 +52,3 @@ description: 用户用自然语言报告一次训练时加载；约束 prepare_w
   显式选择「额外训练」，多个时必须让用户选择某个日程或标记为额外训练。
 - 完整展示后，用户点击具体快照的确认按钮，由独立确认 HTTP 调用现有业务服务写入；普通聊天文字不产生授权，确认过程不调用模型。请求与幂等遵循 [结构化保存确认方案](../../../tmp/optimization/structured-save-confirmation.md)。
 - 不计算 PB、趋势、完成率、训练容量与估算 1RM；不判定计划是否达成；不生成或调整计划；不做医疗判断。
-
-## 装载
-
-`GENERAL_SKILL_NAMES` 固定矩阵里的一项（第四位），随 General 分支确定性装载。本 Skill 只贡献知识层
-指令，不取得 Tool 与写入权限，也不进入计划子图与评审流程。

@@ -1,7 +1,7 @@
 # 计划规则（workout-planning reference）
 
-本文件只写 `SKILL.md` 之外的判断口径。与 `app/domain/plans` 的 `schema.py`／`rules.py` 冲突时一律以源码
-为准。
+本文件只写 [SKILL.md](../SKILL.md) 之外的判断口径。与 `domain.plans` 的确定性规则冲突时一律以确定性
+代码为准。
 
 ## 1. 事实优先级
 
@@ -28,7 +28,7 @@
 
 ## 3. 有效工作组与负荷来源
 
-`starting_load` 由代码算得，本 Skill 只需按同一口径解释它：
+`starting_load` 由确定性代码算得，本 Skill 只需按同一口径解释它：
 
 - 有效工作组＝`set_type='work'` 且满足该记录口径要求的度量：负重动作需 `weight_kg` 与 `reps >= 1` 同现，
   纯自重动作需 `reps >= 1`，计时动作需 `duration_seconds > 0`。

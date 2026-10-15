@@ -6,9 +6,8 @@ description: 每次评审待确认的七天 PlanDraft 时固定加载；确定�
 # plan-evaluation：计划评审 Skill
 
 本 Skill 仅提供**模型指令**。三维度的门槛分层、`passed` 的合取、`snapshot_mismatch`
-阻断与一次修订流程都由确定性代码持有（`app/application/agent/plan_nodes.py`、
-`app/domain/plans/schema.py`、`app/domain/plans/rules.py`）；本 Skill 只约束「独立读事实 → 三维度判定
-→ 理由」这一段的写法。
+阻断与一次修订流程都由确定性代码持有（`app/domain/plans/schema.py` 与
+`app/domain/plans/rules.py`）；本 Skill 只约束「独立读事实 → 三维度判定 → 理由」这一段的写法。
 
 ## 职责
 
@@ -20,8 +19,8 @@ description: 每次评审待确认的七天 PlanDraft 时固定加载；确定�
 
 ## 何时加载
 
-本 Skill 是 Evaluator 的固定 Skill：`generate_plan` 与 `adjust_plan` 两条计划路径每次评审候选
-`PlanDraft` 时都随评审请求加载。确定性校验未通过的候选不会进入评审，本 Skill 也不补做确定性校验。
+评审待确认的七天计划草稿时加载：计划流程每次拿出候选 `PlanDraft` 请求评审时都加载本 Skill。
+确定性校验未通过的候选不会进入评审，本 Skill 也不补做确定性校验。
 
 ## 可用 Tool
 
@@ -34,7 +33,7 @@ description: 每次评审待确认的七天 PlanDraft 时固定加载；确定�
 | `read_active_plan` | 当前 active 计划与渐进决策：调整候选是否只改该改的部分 |
 | `read_training_calendar` | 计划日程与实际训练：七天窗口内是否撞车 |
 
-六个工具与 Planner 同集、调用轨迹独立：本次评审读到的 revision 就是 `EvaluationResult.evidence`。
+六个工具与计划生成环节同集、调用轨迹独立：本次评审读到的 revision 就是 `EvaluationResult.evidence`。
 
 ## 三个维度
 
@@ -53,11 +52,14 @@ description: 每次评审待确认的七天 PlanDraft 时固定加载；确定�
   计划反推。
 - 候选读取的 revision 与本次评审读到的 revision 是否一致由 `snapshot_mismatch_failures` 裁决，不一致
   即 `snapshot_mismatch` 阻断失败；本 Skill 不做这项核对，也不消解不一致。
-- 不重算任何业务事实：PB、趋势、训练容量、完成率与估算 1RM 都不由本 Skill 计算。
+- 不重算任何业务事实：PB、趋势都不由本 Skill 计算；也不把 RIR／RPE 写成处方刻度，不输出估算 1RM、
+  训练容量、完成率；解释概念时按 training-theory 的口径：处方变量范围见
+  [training-variables.md](../training-theory/references/training-variables.md)，用词见
+  [user-facing-language.md](../training-theory/references/user-facing-language.md)。
 
 ## 禁止事项
 
-- 不改写候选计划、不产出新的计划版本；唯一一次修订由计划子图交回 Planner 执行。
+- 不改写候选计划、不产出新的计划版本；唯一一次修订由计划流程交回计划生成环节执行。
 - 不激活、不归档、不写库：完整展示后由用户点击快照确认按钮，独立确认 HTTP 调用业务保存服务，普通聊天不产生授权。契约见 [结构化保存确认方案](../../../tmp/optimization/structured-save-confirmation.md)。
 - 不做医疗判断与安全分流；急性风险在进入计划流程前已由 `safety_scan` 分流。
 - 不引入新的数值阈值：间隔天数、组数锚点、次数区间、完成率门槛一律不设。

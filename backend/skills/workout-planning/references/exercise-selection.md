@@ -1,7 +1,7 @@
 # 动作选择（workout-planning reference）
 
 本文件是模型指令，补 [planning-rules.md](planning-rules.md) §2 之外的检索与选择细节。选择顺序的唯一
-出处是 `planning-rules.md` §2，本文件不重复；与 `app/domain/plans/rules.py` 冲突时以源码为准。
+出处是 `planning-rules.md` §2，本文件不重复；与 `domain.plans` 的确定性规则冲突时以确定性代码为准。
 
 ## 检索覆盖
 

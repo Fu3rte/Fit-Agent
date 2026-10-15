@@ -5,15 +5,16 @@ description: 生成七天训练计划草稿：用户请求新建训练计划时�
 
 # workout-planning：训练计划生成 Skill
 
-本 Skill 是给 Planner 的模型指令。计划是否成立由代码判定：`PlanDraft` Schema 承担结构，`validate_plan`
-承担目录、负荷来源与禁用检查，`evaluator_agent` 承担模型 Rubric。本 Skill 不定义第二套输出结构、
-不重算业务数值、不替这三层下结论。
+本 Skill 是**模型指令**，提供生成七天计划草稿的口径。计划是否成立由确定性代码判定：`PlanDraft` 的结构
+由 `domain.plans` 的 Schema 承担，目录、负荷来源与禁用检查由确定性校验承担，模型层面的 Rubric 由确定性
+评审承担。本 Skill 不定义第二套输出结构、不重算业务数值、不替这三层下结论。
+
+Fit-Agent 是单一 Agent，没有按意图分发的多个角色：生成计划、解释调整、记录与复盘共用同一套口径。
 
 ## 何时加载
 
-`safety_scan` 未命中且 `router_node` 判定 `intent = generate_plan` 时加载。画像未建档、或
-`weekly_frequency` 不是 `known` 时，流程在 Planner 之前就已经失败，本 Skill 不会被执行；调整已有
-active 计划走 `plan-adjustment`。
+用户请求新建训练计划时加载。画像未建档、或 `weekly_frequency` 不是 `known` 时，流程在进入本 Skill 之前
+就已经失败，本 Skill 不会被执行；调整已有 active 计划走 `plan-adjustment`。
 
 ## 输入事实
 
@@ -45,8 +46,11 @@ active 计划走 `plan-adjustment`。
 
 - [planning-rules.md](references/planning-rules.md)：事实优先级、动作选择与有效工作组口径。
 - [goal-content.md](references/goal-content.md)：增肌／增力／减脂三值各自的计划内容要求与目标缺失口径。
-- [training-principles.md](references/training-principles.md)：编排计划的定性原则、安全边界与未知处理。
+- [training-principles.md](references/training-principles.md)：编排计划的定性原则、安全边界、用词与回答结构。
 - [program-design.md](references/program-design.md)：频率与训练日、训练变量口径。
 - [trainee-classification.md](references/trainee-classification.md)：`current_level` 的 P0—L3 判定口径。
 - [exercise-selection.md](references/exercise-selection.md)：检索覆盖、P0—L3 起点、传统硬拉准入与替代规则。
 - [few-shots.md](references/few-shots.md)：已有负荷、待校准与目录无匹配示例。
+- [training-variables.md](../training-theory/references/training-variables.md)：六个训练变量与常见安排结构。
+- [methodology.md](../training-theory/references/methodology.md)：六步推理与三层分离。
+- [user-facing-language.md](../training-theory/references/user-facing-language.md)：用词规约与回答结构。

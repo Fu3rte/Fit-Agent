@@ -50,4 +50,4 @@
 
 ## Revision 不一致
 
-Planner 与 Evaluator 的同一事实域 revision 不一致时，确定性代码产生 `snapshot_mismatch`。三个 Rubric 维度无法解除该阻断。
+出候选时读取的与本次评审读到的同一事实域 revision 不一致时，确定性代码产生 `snapshot_mismatch`。三个 Rubric 维度无法解除该阻断。

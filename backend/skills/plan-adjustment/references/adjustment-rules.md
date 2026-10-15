@@ -3,9 +3,8 @@
 本文件随 `plan-adjustment` 正文一起加载，给出生成调整候选时**必须遵守**的规则，以及这些规则在
 Fit-Agent 里的确定实现位置。
 
-权威顺序：已合入源码 > 本文件。本文件只复述 `app/domain/plans/rules.py`、
-`app/domain/plans/schema.py`、`app/application/agent/prompts.py`、
-`app/application/agent/plan_nodes.py` 已经实现的口径，不新增业务口径；与源码冲突时以源码为准。
+权威顺序：已合入源码 > 本文件。本文件只复述 `app/domain/plans/rules.py` 与
+`app/domain/plans/schema.py` 的确定性规则已经实现的口径，不新增业务口径；与源码冲突时以源码为准。
 
 ## 1. 基线与保留
 
@@ -63,7 +62,10 @@ Fit-Agent 里的确定实现位置。
 
 ## 4. 一次只改一个主要变量
 
-同一次调整里，一个动作只允许改变重量、次数区间、组数中的一个主要变量：
+同一次调整里，一个动作只允许改变重量、次数区间、组数中的一个主要变量。理由是可归因：同时改多个变量
+就无法判断是哪一项起了作用，等于没做对照；对照方法与观察次数见
+[diagnosis-and-experiment.md](../../training-theory/references/diagnosis-and-experiment.md)
+（「一次只改一件事」）：
 
 - 负荷变化由 §2 与 §3 唯一确定，模型没有裁量空间。
 - 因此需要改变次数区间或组数时，负荷保持 `keep` 值，改动只体现用户本次明确要求的那一项。
@@ -71,6 +73,11 @@ Fit-Agent 里的确定实现位置。
 - 一个动作的判定不牵连同一天或同一计划的其他动作：每个动作各按自己的 `progression_decisions` 条目。
 
 ## 5. 停训回归
+
+依据见 [performance-factors.md](../../training-theory/references/performance-factors.md)（「停练之后」）：
+停练时间不超过此前训练时长时，已获得的收益大体维持；复训时回升比初次练更快。但「一次能连续做很多次」
+这类表现与力量回升的速度不同，不能按力量的恢复速度推断它，所以回归期先减量、不动重量——把组数降下来，
+重量维持渐进决策给出的值，等实际训练记录再决定加不加。
 
 停训天数只看 `payload.facts` 里 `read_progress` 的 `days_since_last_workout`：达到 21 天即进入回归期，
 `status == "no_data"` 或天数不足时不适用本节。天数由工具确定，不自行按日期推算。
@@ -103,7 +110,7 @@ Fit-Agent 里的确定实现位置。
 
 ## 7. 一次修订与用户确认
 
-- 一次修订：结构校验或评估未通过时，把失败理由交回同一个 Planner 逐项修正一次；二次不通过即本次不
+- 一次修订：结构校验或评审未通过时，把失败理由交回计划生成环节逐项修正一次；二次不通过即本次不
   产生可激活计划。
 - 确认前不生效：候选通过后进入待确认状态，用户确认之前不得向用户宣称计划已生效；用户拒绝则原
   active 不变。
@@ -115,4 +122,7 @@ Fit-Agent 里的确定实现位置。
 - 不做医疗判断与安全分流；急性关键词由 `safety_scan` 决定。
 - 不写复盘记录、不维护训练日志、不改写用户已记录的训练事实：训练记录全程只读。
 - 不输出第二套数据结构，不以 Markdown 计划表代替结构化候选。
-- 不引入 RIR／RPE、估算 1RM、训练容量、完成率等字段或结论。
+- 不把 RIR／RPE 写成处方刻度，不输出估算 1RM、训练容量、完成率；解释概念时按 training-theory 的
+  口径：处方变量范围见
+  [training-variables.md](../../training-theory/references/training-variables.md)，用词见
+  [user-facing-language.md](../../training-theory/references/user-facing-language.md)。

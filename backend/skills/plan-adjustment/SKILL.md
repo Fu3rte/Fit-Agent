@@ -1,6 +1,6 @@
 ---
 name: plan-adjustment
-description: 在当前 active 七天计划之上做有依据的局部调整：用户请求修改已有训练计划（intent=adjust_plan）时加载，以本次 read_active_plan 返回的 active_plan 与 progression_decisions 为基线，保留未被证据推翻的训练日、动作、组数、次数区间与解释，外加负重只取渐进决策的 increase／keep／regress／needs_calibration 结果，产出待用户确认的新版本 PlanDraft。不用于首次生成计划、打卡记录、日程与进展解释、一般问答。
+description: 在当前 active 七天计划之上做有依据的局部调整：用户请求修改已有训练计划时加载，以本次 read_active_plan 返回的 active_plan 与 progression_decisions 为基线，保留未被证据推翻的训练日、动作、组数、次数区间与解释，外加负重只取渐进决策的 increase／keep／regress／needs_calibration 结果，产出待用户确认的新版本 PlanDraft。不用于首次生成计划、打卡记录、日程与进展解释、一般问答。
 ---
 
 # plan-adjustment：计划调整 Skill
@@ -17,12 +17,12 @@ description: 在当前 active 七天计划之上做有依据的局部调整：�
 
 ## 何时加载
 
-只在 `intent = adjust_plan` 且已有 active 计划时加载；首次生成计划走 `workout-planning`，急性关键词在
-路由前由 `safety_scan` 分流，本 Skill 不做安全判定。
+用户请求修改已有训练计划、且已有 active 计划时加载；首次生成计划走 `workout-planning`。急性关键词在
+进入计划流程前由 `safety_scan` 分流，本 Skill 不做安全判定。
 
 ## 事实边界
 
-出候选前必须经 `planning_tools` 真实读到 `adjust_plan` 的全部必需事实：`read_user_profile`、
+出候选前必须经 `planning_tools` 真实读到本次调整的全部必需事实：`read_user_profile`、
 `read_active_plan`、`read_training_calendar`、`read_training_history`、`read_progress`、
 `search_exercises`；缺任一项即 `MissingPlanFacts`，候选不得交给评审。
 

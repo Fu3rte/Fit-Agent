@@ -5,7 +5,7 @@
 
 ## 1. 目录证据：`search_exercises` 的严格输出
 
-General 分支能读动作目录的 Tool 只有 `search_exercises`。模型参数为 `query`、`muscle_groups`、
+本 Skill 可用的目录检索工具是 `search_exercises`。模型参数为 `query`、`muscle_groups`、
 `equipment`、`movement_patterns`、`limit`，至少提供一个检索条件。返回对象包含 `exercises` 与
 `returned`；每条动作包含以下字段：
 
@@ -77,6 +77,10 @@ General 分支能读动作目录的 Tool 只有 `search_exercises`。模型参�
   Tool 返回的肌群与模式可作目录事实，替代关系的结论仍标注为一般建议。
 - 一致性与可重复完成的动作优先于复杂技术动作；讲解技术要点时给出可观察的判断（能否稳定重复、
   是否需要额外稳定条件），标注为主观反馈层面。
+- 动作模式的差别、器械稳定性与疲劳代价、活动范围这些解释口径的依据在
+  [training-variables.md](../../training-theory/references/training-variables.md)：说明某个做法改了哪个
+  变量与它的代价，措辞照 [user-facing-language.md](../../training-theory/references/user-facing-language.md)
+  的规约。
 
 ## 6. 五条能力边界
 
@@ -85,11 +89,12 @@ General 分支能读动作目录的 Tool 只有 `search_exercises`。模型参�
 2. **疼痛与伤病**：未命中红旗的疼痛、不适与伤病描述只给一般执行要点与教育信息，并明确建议咨询
    专业医疗人员；诊断、个体化医疗结论、康复方案与进阶时程都停止在这里。用户转述「医生已允许恢复
    训练」时按用户提供的事实复述，医疗判断留在专业人员处。
-3. **禁用动作**：禁用动作只存在于画像中已保存的稳定 `exercise_id` 事实里；画像类只读 Tool 在本
-   Intent 白名单之外，本 Skill 掌握不到禁用清单：按伤病名称推导禁用动作一律停止。
+3. **禁用动作**：禁用动作只存在于画像中已保存的稳定 `exercise_id` 事实里；本 Skill 不读取画像，因此
+   掌握不到禁用清单：按伤病名称推导禁用动作一律停止。
 4. **不出处方与统计**：不生成或修改计划、不决定训练日与组次、不给个体重量（属于 `generate_plan`
    与 `adjust_plan`）；不计算 PB、趋势、月历状态与任何统计数值，只解释 Tool 已经给出的结果。
 5. **零写入与不扩边界**：不写训练数据、不承诺保存任何内容（训练记录由快照绑定按钮与独立确认 HTTP
-   写入，普通聊天文字不产生授权）；不引入 RIR／RPE、训练容量、估算 1RM、完成率、长周期与百分比减量、营养与体脂；不新增
-   动作目录数据、不修改 `search_exercises` 的参数与返回结构。
+   写入，普通聊天文字不产生授权）；不把 RIR／RPE 写成处方刻度，不输出训练容量、估算 1RM、完成率、长周期
+   与百分比减量、营养与体脂；解释概念时按 training-theory 的口径；不新增动作目录数据、不修改
+   `search_exercises` 的参数与返回结构。
 
