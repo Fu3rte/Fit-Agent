@@ -155,4 +155,51 @@ const failedRound = applyReActEvent(preparedRound(), event("tool_result", {
 assert.equal(failedRound.entries.at(-1).profile, undefined, "失败结果不展示画像");
 assert.equal(failedRound.entries.at(-1).status, "failed", "失败结果按失败展示");
 
-console.log("PASS: 画像快照完整对象展示、实时与历史一致、失败与协议异常不形成展示");
+/** 5. 实时结果与历史恢复完整保留不可用器械的三种状态（null／空数组／非空数组），
+ *  两端解析同一 payload，渲染输入保持原值（§11.9）。 */
+for (const equipment of [null, [], ["barbell"], ["barbell", "dumbbell"]]) {
+  const variant = { ...payload, unavailable_equipment: equipment };
+  const variantArguments = { profile_id: 1, base_profile_version: 2, payload: variant };
+  const variantContent = JSON.stringify({
+    proposal_id: proposalId,
+    profile_id: 1,
+    base_profile_version: 2,
+    payload: variant,
+  });
+  const liveVariant = applyReActEvent(
+    roundWithTool(prepareCall, "prepare_profile_update", variantArguments),
+    event("tool_result", {
+      tool_call_id: prepareCall,
+      content: variantContent,
+      is_error: false,
+      entry_id: prepareNode,
+      parent_id: assistantId,
+    }),
+  );
+  assert.deepEqual(
+    liveVariant.entries.at(-1).profile.payload.unavailable_equipment,
+    equipment,
+    `实时结果保留不可用器械 ${JSON.stringify(equipment)}`,
+  );
+  const restoredVariant = historyToRounds({
+    session: { session_id: sessionId, title: "会话", active_leaf_id: prepareNode, created_at: 1, updated_at: 2 },
+    entries: [
+      { type: "message", entry_id: userEntry, parent_id: null, run_id: null, created_at: 1, message: { role: "user", text: "整理画像。", timestamp: 1, attachments: [] } },
+      { type: "message", entry_id: assistantId, parent_id: userEntry, run_id: runId, created_at: 2, message: { role: "assistant", content: [callBlock(prepareCall, "prepare_profile_update", variantArguments)], stop_reason: "toolUse", timestamp: 2 } },
+      { type: "message", entry_id: prepareNode, parent_id: assistantId, run_id: runId, created_at: 3, message: { role: "toolResult", tool_call_id: prepareCall, tool_name: "prepare_profile_update", content: variantContent, is_error: false, timestamp: 3 } },
+    ],
+    runs: [{ session_id: sessionId, run_id: runId, request_entry_id: userEntry, last_entry_id: prepareNode, status: "completed", started_at: 1, finished_at: 4, error_code: null, error_message: null }],
+    steering: [],
+    confirmations: [],
+    pending_proposals: [],
+  });
+  assert.deepEqual(
+    restoredVariant[0].entries.at(-1).profile.payload.unavailable_equipment,
+    equipment,
+    `历史恢复保留不可用器械 ${JSON.stringify(equipment)}`,
+  );
+}
+
+console.log(
+  "PASS: 画像快照完整对象展示、实时与历史一致、不可用器械三种状态保留、失败与协议异常不形成展示",
+);

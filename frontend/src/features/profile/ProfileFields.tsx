@@ -13,11 +13,12 @@ const TEXT_FIELDS = [
 ] as const;
 
 const LIST_FIELDS = [
+  { key: "unavailable_equipment", label: "不可用器械", unknown: "未知" },
   { key: "forbidden_exercise_ids", label: "禁用动作", unknown: "未知" },
 ] as const;
 
 /**
- * 画像展示：文本字段与禁用动作列表；不可用器械仅在数据与 wire 中保留，画像部分不展示（§11.9）。
+ * 画像展示：文本字段、不可用器械与禁用动作列表（§11.9）。
  * null 保持未知语义，限制列表的 null 与 [] 分别展示；个人画像页与对话中的画像展示共用同一口径。
  */
 export default function ProfileFields({
