@@ -171,15 +171,17 @@ export default function ChatComposer({
                   <Square aria-hidden className="h-4 w-4" />
                 </Button>
               )}
-              <Button
-                type="submit"
-                size="icon"
-                aria-label="发送"
-                disabled={!canSubmit}
-                className="h-8 w-8 rounded-full"
-              >
-                <ArrowUp aria-hidden className="h-4 w-4" />
-              </Button>
+              {hasContent && (
+                <Button
+                  type="submit"
+                  size="icon"
+                  aria-label="发送"
+                  disabled={!canSubmit}
+                  className="h-8 w-8 rounded-full"
+                >
+                  <ArrowUp aria-hidden className="h-4 w-4" />
+                </Button>
+              )}
             </div>
           </div>
         </form>

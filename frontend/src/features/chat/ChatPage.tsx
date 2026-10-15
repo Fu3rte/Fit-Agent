@@ -60,7 +60,9 @@ export default function ChatPage({
         ? provider.error.message
         : NO_VALID_MODEL_CONFIG;
   /* 确认处理中禁用发送、编辑与重新生成（确认契约 §7.1）；确认入口本身不要求模型配置（§7.1、PRODUCT §3.4） */
-  const chatBlocked = view.confirming || view.busy || !view.ready;
+  const execBlocked = view.confirming || view.busy || !view.ready;
+  /* 运行中的输入提交进入该运行的 Steering（运行接口契约 §6.1、PRODUCT §3.4），busy 不参与输入门禁 */
+  const composerBlocked = view.confirming || !view.ready;
 
   const blank = isDraft && view.rounds.length === 0;
 
@@ -82,8 +84,8 @@ export default function ChatPage({
           onRetry={run.retry}
           onWithdraw={run.withdraw}
           retrying={view.retrying}
-          canEdit={!chatBlocked && canRun}
-          canConfirm={view.history === "loaded" && !chatBlocked}
+          canEdit={!execBlocked && canRun}
+          canConfirm={view.history === "loaded" && !execBlocked}
           proposals={view.proposals}
           confirmations={view.confirmations}
           onConfirm={run.confirmProposal}
@@ -107,7 +109,7 @@ export default function ChatPage({
       <ChatComposer
         centered={blank}
         busy={view.busy}
-        ready={!chatBlocked && inputAllowed}
+        ready={!composerBlocked && inputAllowed}
         error={view.error ?? blockedByProvider}
         unknownKeys={unknownKeys}
         onSend={run.send}
