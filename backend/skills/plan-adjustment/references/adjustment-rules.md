@@ -1,128 +1,72 @@
 # 调整规则（plan-adjustment reference）
 
-本文件随 `plan-adjustment` 正文一起加载，给出生成调整候选时**必须遵守**的规则，以及这些规则在
-Fit-Agent 里的确定实现位置。
+本文件随 [SKILL.md](../SKILL.md) 一起阅读，给出准备调整提案时的判断口径，不新增业务规则。与工具参数模型
+校验结果冲突时以校验结果为准。
 
-权威顺序：已合入源码 > 本文件。本文件只复述 `app/domain/plans/rules.py` 与
-`app/domain/plans/schema.py` 的确定性规则已经实现的口径，不新增业务口径；与源码冲突时以源码为准。
+## 1. 事实依据与优先级
 
-## 1. 基线与保留
+```text
+本次 Run 的 Tool 事实 → 已保存画像的字段 → 当前计划内容 → 到此为止
+```
 
-调整候选建立在 `payload.active_plan` 之上，未被本次调整证据推翻的部分原样沿用：
+- 训练事实只来自 `list_workouts` 返回的 `items`；每条为一个训练日期的完整最新记录。
+- 不做统计重算：不计算 PB、趋势、容量与完成率；工具没返回的事实保持未知，不补默认值。
+- 相对日期按可信 `business_date` 折算。
 
-| active 字段 | 沿用方式 |
+## 2. 保留与未涉及
+
+未被本次请求涉及的部分原样沿用：训练日结构与相对顺序、动作顺序、组数与次数、休息、原有 `notes` 与
+`suggested_fields`。
+
+- 未涉及的动作保留 `exercise_id`、`name` 与全部字段。
+- 目录外动作保留真实名称，`exercise_id` 写 null，并说明核实状态与相关限制。
+- 重量有值（包括 0）必须明确 `load_convention`；未知保持 null。
+
+## 3. 可调整对象与信息充分性
+
+按任务索取必要信息，缺失保持未知：
+
+| 调整对象 | 需要明确 |
 | --- | --- |
-| `goal` | 原样保留，除非用户本次明确改变目标 |
-| `weekly_frequency` | 必须等于画像里 `known` 的每周训练次数，本 Skill 无法改动 |
-| `training_days[].scheduled_on` | 保留训练日结构与相对间隔；日期必须落在新窗口内（见 §6） |
-| 动作与 `sets` | 原样保留，除非用户本次请求改变它们 |
-| 次数区间与 `progression_note` | 原样保留；自重与计时处方不含负荷字段 |
-| `explanation` | 未被涉及的文字保留，只为改动追加依据 |
-
-## 2. 负荷来源
-
-外加负重动作（`weighted_reps`，对应目录 `record_type='reps_weight'`）的 `load` 有两种写法：
-
-- `known`：`weight_kg` **必须等于**同动作 `progression_decisions[].decision.load_kg`，并且
-  `decision.action` 是 `increase`／`keep`／`regress` 之一；`source_workout_session_id` 与
-  `source_set_no` 沿用 `candidate_actions[].starting_load` 给出的最近一次有效工作组身份。
-- `needs_calibration`：`decision.action` 为 `needs_calibration` 时只能写
-  `{"status": "needs_calibration"}`，禁止给出任何具体重量。
-
-`progression_decisions` 里没有该动作时（active 里它没有带 `known` 负荷的目标处方，或目录未给出
-`min_load_increment_kg`），照抄 `candidate_actions[].starting_load`：`known` 时连同来源训练与组序号
-一起照抄，`needs_calibration` 时保持待校准。
-
-禁止从 PB 推算训练负荷：`read_progress` 的三类成绩是指标，不是当前训练能力，也不构成加重依据。
-无有效工作组历史时不得给出具体重量。
-
-## 3. 渐进与回退（当前 `resolve_progression` 规则，10B／10B-1）
-
-输入：active 的目标处方（`sets`、`reps_min`、`reps_max`、`target_load_kg`）、目录
-`min_load_increment_kg`、该计划关联日程下的训练身份，以及全部有效工作组
-（`set_type='work'` 且度量与记录口径匹配）。单次训练的判定口径：按组序号取前 `sets` 个目标组，目标组
-不齐、次数缺失或任一低于 `reps_min` 即**失败**；未失败且目标组同为单一重量即**完整完成**；完整完成且
-每个目标组都不低于 `reps_max` 即**达到次数上限**。据此：
-
-1. 参与判定的关联训练少于两次 → `keep`，负荷维持 `target_load_kg`。
-2. 最近两次都完整完成、使用同一负荷且都达到次数上限 → `increase`，
-   新负荷 = 该负荷 + `min_load_increment_kg`（按记录精度取一位小数）。
-3. 最近两次都失败 → 回退到这些关联训练里**最近一次完整完成的负荷**（`regress`）；一次完整完成的
-   训练都没有 → `needs_calibration`，不带负荷。
-4. 其余情况 → `keep`。
-
-由此得到的四条行为约束：
-
-- 加重单位只有目录的 `min_load_increment_kg`，没有百分比加重与百分比减重。
-- 达到上限加重后，次数区间本身不变，实际执行回到区间下部由 `progression_note` 说明。
-- 决策的 `sets` 与次数区间一律取自 **active** 的目标处方（同一动作多处出现以首次出现
-  为准）；`increase` 的负荷锚定这两次训练的实际有效工作组，其余决策的负荷见 §2 与上文。候选改写
-  这些字段不会改变决策，也无法为新负荷提供理由。
-- 只有关联到该计划训练日的训练参与判定：额外训练既不计入也不打断；未关联的历史不改变决策。
+| 结构或频率 | 只索取完成本次调整所需的信息；动作详情可以继续为空 |
+| 指定动作组数 | 明确改的是哪个训练日的哪个位置 |
+| 替换动作 | 核实目录事实、相关伤病与器械限制 |
+| 按实际表现调整 | 相关逐组数据、重量口径与必要反馈 |
 
 ## 4. 一次只改一个主要变量
 
-同一次调整里，一个动作只允许改变重量、次数区间、组数中的一个主要变量。理由是可归因：同时改多个变量
-就无法判断是哪一项起了作用，等于没做对照；对照方法与观察次数见
-[diagnosis-and-experiment.md](../../training-theory/references/diagnosis-and-experiment.md)
-（「一次只改一件事」）：
+同一次调整里，一个动作只改重量、次数或组数中的一项。理由是可归因：同时改多个变量就无法判断是哪一项起了
+作用，等于没做对照。对照方法与观察次数见
+[diagnosis-and-experiment.md](../../training-theory/references/diagnosis-and-experiment.md)（「一次只改一件事」）。
+一个动作的调整不牵连同一天或同一计划里的其他动作。
 
-- 负荷变化由 §2 与 §3 唯一确定，模型没有裁量空间。
-- 因此需要改变次数区间或组数时，负荷保持 `keep` 值，改动只体现用户本次明确要求的那一项。
-- 禁止用缩窄次数区间、增删组数来"凑"出更高或更低的重量。
-- 一个动作的判定不牵连同一天或同一计划的其他动作：每个动作各按自己的 `progression_decisions` 条目。
+## 5. 保守复训
 
-## 5. 停训回归
+停练时间不超过此前训练时长时，已获得的收益大体维持，复训回升比初次更快；「一组能做很多次」这类表现回升
+速度与力量不同，不能按力量的恢复速度推断它。依据见
+[performance-factors.md](../../training-theory/references/performance-factors.md)（「停练之后」）。
 
-依据见 [performance-factors.md](../../training-theory/references/performance-factors.md)（「停练之后」）：
-停练时间不超过此前训练时长时，已获得的收益大体维持；复训时回升比初次练更快。但「一次能连续做很多次」
-这类表现与力量回升的速度不同，不能按力量的恢复速度推断它，所以回归期先减量、不动重量——把组数降下来，
-重量维持渐进决策给出的值，等实际训练记录再决定加不加。
+回归期先降量、不动重量是可用记录验证的保守做法：把组数或训练量降下来，等实际训练记录再决定是否回到原
+水平。具体降到多少、多久回到原水平，由本次需求与真实记录判断，并说明不确定性。
 
-停训天数只看 `payload.facts` 里 `read_progress` 的 `days_since_last_workout`：达到 21 天即进入回归期，
-`status == "no_data"` 或天数不足时不适用本节。天数由工具确定，不自行按日期推算。
+## 6. notes 写法
 
-回归期按该动作的渐进决策二选一，保证一个动作只改一个主要变量：
+计划级或训练日的 `notes` 写明：修改位置、原值、新值、理由、实际训练依据、记录日期、必要的重量口径、不
+确定性，以及删除内容的说明。这些说明必须写进 payload 的 `notes`，不能只写在对话回复里。原有
+`suggested_fields` 全部保留。
 
-| `progression_decisions` 的决策 | 负荷 | 组数 |
-| --- | --- | --- |
-| `keep` | 照抄 `decision.load_kg` | 该训练日首动作减一组 |
-| `regress` | 照抄 `decision.load_kg` | 全部沿用 active |
-| `needs_calibration` | 只写待校准状态，不带重量 | 全部沿用 active |
+## 7. 准备、展示与确认
 
-- 回归期的 `increase` 已被确定性层降为 `keep`，不会出现；负荷变了就不再减组，减组只在负荷未动时发生。
-- 首动作指每个训练日的第一个动作；减组后不得低于一组。
-- 回归期内每个训练日的动作数量、顺序与身份必须与 active 一致，组数按上表取值。确定性层以
-  `structure_mismatch` 与 `sets_mismatch` 阻断其他写法，包括保留原组数、多减、改非首动作与调换顺序。
-- `explanation` 说明本次按停训回归处理、依据是停训天数，以及负荷为何未动或已回退。
-- 与 `few-shots.md` 的示例冲突时以本节为准。
-- 不排多档任务（`PlanDraft` 只有一份七天安排，没有档位字段）；不给百分比减载；不做安全判定。
-
-## 6. 结构、频率与七天窗口
-
-- `PlanDraft` 强制：`training_days` 数量等于 `weekly_frequency`；日期互不重复且全部落在
-  `starts_on` 起连续七天内；`starts_on` 不早于 `business_day`；每个训练日至少一个动作，同日不重复
-  同一动作。
-- `weekly_frequency` 与画像 `known` 值不一致时确定性阻断（`weekly_frequency_mismatch`）。改变每周
-  训练次数属于结构调整：本 Skill 无写入权，用户需先更新画像，本 Skill 不静默改频率。
-- 改变训练日结构、动作体系或目标本身同样属于结构调整：在 `explanation` 里写清触发事实与建议改动，
-  由用户确认环节裁决，不在候选里偷偷替换。
-
-## 7. 一次修订与用户确认
-
-- 一次修订：结构校验或评审未通过时，把失败理由交回计划生成环节逐项修正一次；二次不通过即本次不
-  产生可激活计划。
-- 确认前不生效：候选通过后进入待确认状态，用户确认之前不得向用户宣称计划已生效；用户拒绝则原
-  active 不变。
-- 失败候选不写入：只有通过校验与评审的候选才被持久化，失败候选不产生可激活计划。
+- `prepare_plan_adjustment` 只创建待确认快照；完整展示后等待用户点击该快照的确认按钮。
+- 提案固定使用准备时查询到的训练事实。确认前新增训练或修正记录、用户要求采用新事实时，重新查询、准备
+  完整提案、展示全部业务字段与依据，等待新快照的确认。
+- 结果未知时按原 `proposal_id` 调用 `get_plan_save_status` 核对原操作，核实前不创建新的保存操作。
 
 ## 8. 本 Skill 不做
 
-- 不计算 PB、趋势、月历与任何统计量；只解释与使用工具给出的事实。
-- 不做医疗判断与安全分流；急性关键词由 `safety_scan` 决定。
-- 不写复盘记录、不维护训练日志、不改写用户已记录的训练事实：训练记录全程只读。
-- 不输出第二套数据结构，不以 Markdown 计划表代替结构化候选。
-- 不把 RIR／RPE 写成处方刻度，不输出估算 1RM、训练容量、完成率；解释概念时按 training-theory 的
-  口径：处方变量范围见
-  [training-variables.md](../../training-theory/references/training-variables.md)，用词见
+- 不计算 PB、趋势与任何统计量；只使用工具给出的事实。
+- 不做医疗判断；出现明确医疗风险时停止相关训练建议并提示就医。
+- 不改写用户已记录的训练事实：训练记录全程只读。
+- 不输出第二套数据结构，不以 Markdown 计划表代替结构化 payload。
+- 不把 RIR／RPE 写成处方刻度，不输出估算 1RM、训练容量与完成率；用词见
   [user-facing-language.md](../../training-theory/references/user-facing-language.md)。

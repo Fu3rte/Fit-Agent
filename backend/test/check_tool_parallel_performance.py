@@ -103,9 +103,10 @@ def git_state() -> dict:
     return {"commit": run(["rev-parse", "HEAD"]), "status_porcelain": run(["status", "--porcelain"])}
 
 
-def build_files() -> tuple[TemporaryDirectory, Path, str, list[Path]]:
+def build_files(tmp_root: Path | None = None) -> tuple[TemporaryDirectory, Path, str, list[Path]]:
     # 文件工具按统一 tmp 根解析相对路径，测量文件位于当前会话 workspace 之下。
-    directory = TemporaryDirectory()
+    # 传入 tmp_root 时微基准临时根落在实验目录内，避免写入系统临时目录。
+    directory = TemporaryDirectory(dir=None if tmp_root is None else str(tmp_root))
     root = Path(directory.name).resolve()
     workspace, prefix = session_workspace(root)
     payload = "".join(f"line-{index:05d} " + "x" * 69 + "\n" for index in range(LINES))
@@ -267,10 +268,11 @@ def loop_integration(read, calls: list[ToolCall]) -> tuple[dict, list[ToolResult
     return evidence, parallel_results
 
 
-async def persist(results: list[ToolResultMessage], calls: list[ToolCall], read) -> dict:
-    database = await open_database(
-        temporary_root("tool-parallel-perf") / f"persist-{uuid4().hex}.db"
-    )
+async def persist(results: list[ToolResultMessage], calls: list[ToolCall], read, tmp_root: Path | None = None) -> dict:
+    # 传入手工隔离根时持久化库落在同一实验目录内；否则沿用测试专用目录。
+    base = temporary_root("tool-parallel-perf") if tmp_root is None else Path(tmp_root)
+    base.mkdir(parents=True, exist_ok=True)
+    database = await open_database(base / f"persist-{uuid4().hex}.db")
     try:
         service = SessionService(SqliteSessionRepository(database))
         session_id = str(uuid4())
@@ -342,8 +344,9 @@ def mode_stats(samples: list[dict], mode: str) -> dict:
     return {"batch": summarize(batch), "first": summarize(first)}
 
 
-def run_benchmark(experiment_dir: str) -> BenchmarkResult:
-    directory, root, prefix, paths = build_files()
+def run_benchmark(experiment_dir: str, *, tmp_root: Path | None = None) -> BenchmarkResult:
+    resolved_tmp = None if tmp_root is None else Path(tmp_root)
+    directory, root, prefix, paths = build_files(resolved_tmp)
     try:
         file_bytes = paths[0].stat().st_size
         read = create_file_tools(TEST_SESSION, tmp_root=root)["read"]
@@ -369,7 +372,7 @@ def run_benchmark(experiment_dir: str) -> BenchmarkResult:
 
         samples = asyncio.run(measure())
         integration, parallel_results = loop_integration(read, calls)
-        persistence = asyncio.run(persist(parallel_results, calls, read))
+        persistence = asyncio.run(persist(parallel_results, calls, read, resolved_tmp))
     finally:
         directory.cleanup()
 

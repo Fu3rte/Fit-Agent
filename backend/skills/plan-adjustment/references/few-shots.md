@@ -1,79 +1,67 @@
 # 调整示例（plan-adjustment reference）
 
-三个示例给出「请求 → 本次事实 → 候选输出」的最小对应关系：每例只放一个动作的事实片段，其余字段与
-active 原样一致；动作身份与增重单位取自目录，不代表任何用户的真实记录。
+示例给出「请求 → 本次事实 → 工具参数」的对应关系。示例里的 ID、字段值与日期都是演示数据，`exercise_id`
+取当前动作目录已存在的记录。需要工具参数时给出完整真实 schema。
 
-## 示例 1：证据支持加重
+## 示例 1：直接调整上传计划
 
-**用户请求**：「深蹲最近很轻松，帮我加重量。」
+**用户请求**：我上传了一份计划文件，直接把里面的深蹲从 5 组改成 3 组。
 
-**本次事实**：`barbell-back-squat` 的目录 `min_load_increment_kg` 为 `2.5`，两次关联训练都在 60kg 上完成三个目标
-组、都达到 `reps_max` 8 次。
+**Tool 事实**：`get_profile` 返回 `version=3`；`get_current_plan` 返回 `id=null`、`content=null`；
+`list_workouts(date_from=null, date_to=business_date, page=1, page_size=10)` 返回 `items=[]`。
 
-```json
-{ "progression_decisions": [ {
-    "exercise_id": "barbell-back-squat", "sets": 3, "reps_min": 5, "reps_max": 8,
-    "target_load_kg": 60.0, "decision": { "action": "increase", "load_kg": 62.5 } } ] }
-```
-
-**候选输出**：只改负荷与 `progression_note`，组数与次数区间不变。
+**期望行为**：上传计划调整使用真实画像版本与当前计划 ID 作依据。其余字段与原有说明保留，改动只落在目标
+动作；修改位置、原值、新值、理由、日期与不确定性写进 `notes`。
 
 ```json
-{ "exercise_id": "barbell-back-squat", "sets": 3,
-  "prescription": { "type": "weighted_reps", "reps_min": 5, "reps_max": 8,
-                    "progression_note": "加重后从区间下部起步，逐次回到 8 次。",
-                    "load": { "status": "known", "weight_kg": 62.5,
-                              "source_workout_session_id": 22, "source_set_no": 3 } } }
+{
+  "base_profile_version": 3,
+  "base_plan_id": null,
+  "payload": {
+    "repeat": true,
+    "days": [
+      {
+        "kind": "training",
+        "focus": "下肢",
+        "exercises": [
+          {
+            "exercise_id": "1436",
+            "name": "杠铃高杠深蹲",
+            "sets": 3,
+            "reps": 5,
+            "duration_seconds": null,
+            "weight_kg": null,
+            "load_convention": null,
+            "rest_seconds": 120
+          }
+        ],
+        "notes": null
+      },
+      {"kind": "rest", "focus": null, "exercises": [], "notes": null}
+    ],
+    "notes": "改动位置：/days/0/exercises/0/sets；原值 5，新值 3；依据：用户本次明确要求；本次没有可用的训练记录，负荷保持未知。",
+    "suggested_fields": []
+  }
+}
 ```
 
-负荷写 65kg 或 70kg 都会被确定性层以 `load_source_mismatch` 阻断，期望值是 62.5kg。
+## 示例 2：最近训练零条或不足十条
 
-## 示例 2：证据不足保持原计划
+**用户请求**：根据我最近的训练调整一下计划。
 
-**用户请求**：「深蹲涨不动了，直接上 70kg 吧。」
+**Tool 事实**：`list_workouts(date_from=null, date_to=business_date, page=1, page_size=10)` 返回 `items=[]`
+（或只有若干条，不足十条）。
 
-**本次事实**：两次关联训练都在 60kg 上的次数为 8/8/8 与 7/8/8，只有一次全部达到上限，两次都没有失败。
+**期望行为**：使用返回的全部 `items`：0 条就是空数组，不足十条全部使用。记录不足或原因不明时说明依据与
+不确定性，围绕本次调整收集必要信息；不编造记录、不把其他日期或他人的数据当成本次事实。若本次调整依赖
+训练表现而当前没有记录，先向用户索取。
 
-```json
-{ "progression_decisions": [ {
-    "exercise_id": "barbell-back-squat", "sets": 3, "reps_min": 5, "reps_max": 8,
-    "target_load_kg": 60.0, "decision": { "action": "keep", "load_kg": 60.0 } } ] }
-```
+## 示例 3：按新增训练事实重新准备提案
 
-**候选输出**：负荷与组次不变；`explanation` 在 active 原句后说明只有一次达到上限、递增条件未满足。
+**用户请求**：我刚补录了昨天的训练，按最新的再来一版。
 
-```json
-{ "exercise_id": "barbell-back-squat", "sets": 3,
-  "prescription": { "type": "weighted_reps", "reps_min": 5, "reps_max": 8,
-                    "progression_note": null,
-                    "load": { "status": "known", "weight_kg": 60.0,
-                              "source_workout_session_id": 22, "source_set_no": 3 } } }
-```
+**Tool 事实**：已有待确认提案 `proposal_id="..."`；用户补录后，`list_workouts` 能查到该条新记录。
 
-按用户要求写 70kg 会被 `load_source_mismatch` 阻断；用缩窄次数区间为负荷找理由违反一次只改一个主要
-变量。
-
-## 示例 3：无可回退负荷进入待校准
-
-**用户请求**：「这周深蹲老是做不完，帮我调一下。」
-
-**本次事实**：两次关联训练为 5/4/4 与 5/3/4，两次都失败，且这段关联训练里没有任何一次完整完成。
-
-```json
-{ "progression_decisions": [ {
-    "exercise_id": "barbell-back-squat", "sets": 3, "reps_min": 5, "reps_max": 8,
-    "target_load_kg": 60.0,
-    "decision": { "action": "needs_calibration", "load_kg": null } } ] }
-```
-
-**候选输出**：负荷改为待校准，组数与 5–8 次区间保持不变。
-
-```json
-{ "exercise_id": "barbell-back-squat", "sets": 3,
-  "prescription": { "type": "weighted_reps", "reps_min": 5, "reps_max": 8,
-                    "progression_note": "待校准：先记录一次能完整完成三个目标组的重量。",
-                    "load": { "status": "needs_calibration" } } }
-```
-
-渐进决策为 `needs_calibration` 时给出任何具体重量都是 `load_source_mismatch`；减少组数不会被确定性层
-拦下，但违反一次只改一个主要变量，候选里不得出现。
+**期望行为**：重新调用 `list_workouts` 查询、重新 `prepare_plan_adjustment` 准备完整提案，完整展示全部业务
+字段、`notes` 与所用依据，等待用户点击新快照的确认按钮。同会话新快照成功使旧 pending 失效。若原操作结果
+未知，按原 `proposal_id` 调用 `get_plan_save_status` 核对，核实前不创建新的保存操作。

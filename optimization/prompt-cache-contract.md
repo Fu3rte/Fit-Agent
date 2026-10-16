@@ -1,71 +1,15 @@
 # Fit-Agent 业务上下文消息契约
 
-## 1. 状态与适用范围
+设计见 [Prompt Cache 优化方案](prompt-cache-strategy.md)。
 
-本文件记录业务上下文消息的数据、存储与前后端接口契约。优化目标见 [prompt-cache-strategy.md](prompt-cache-strategy.md)。
+## 1. 内部节点
 
-已确认：独立 `custom_message` 会话节点、通用泛型消息与节点基类、强类型业务资料、完整基线与增量载荷、失效引用表示、只公开节点身份的历史接口、运行中的 SSE 身份通知、旧会话不回填。
+- 资料节点 `type="custom_message"`，独立参与会话树，仅由后端创建。
+- 普通发送、编辑、附件和 Steering 输入不能创建内部资料类型。
+- 节点内容、来源及发生位置不可变；真实业务工具结果继续使用 `toolResult`，保持真实调用配对。
+- 内部资料不构成保存授权，不作为用户聊天条目展示；模型转换在原位置输出 user-role 内容。
 
-运行中的资料节点通知契约见第 8 节。
-
-执行 agent 遇到待确认项必须停下来询问用户。
-
-## 2. 已确认的内部节点约束
-
-- 节点 `type` 为 `custom_message`，独立参与会话树。
-- 后端创建内部资料节点，普通发送、编辑、附件与 Steering 输入不能创建该类型。
-- 资料载荷使用第 5 节已确认的强类型字段与校验规则。
-- 节点有固定内容、来源与发生位置，既有历史内容保持不可变。
-- 真实业务工具返回值继续采用既有 `toolResult`，遵循真实工具调用配对。
-- 内部资料没有保存授权，也不作为真实用户输入展示。
-- 后续模型转换在原位置输出 user-role 内容；会话节点类型与模型协议角色分别定义。
-
-通用 `CustomMessage` 与 `CustomMessageEntry` 基类及其业务具体类型定义在 `backend/app/domain/session/models.py`。`SessionEntry` 登记 `BusinessContextEntry`，`AgentMessage` 登记 `BusinessContextMessage`；服务商 `Message` 联合保持原样。
-
-已确认采用 `CustomMessage[TData]` 与 `CustomMessageEntry[TMessage]` 两个通用泛型基类。`BusinessContextMessage` 包含强类型 `BusinessContextData`；`BusinessContextEntry` 将节点的消息类型指定为 `BusinessContextMessage`。类型契约见第 5 节。
-
-## 3. 已确认的公开历史契约
-
-公开历史响应中的 `custom_message` 节点只返回以下身份字段：
-
-| 字段 | 类型 | 语义 |
-|---|---|---|
-| type | 固定字符串 custom_message | 内部资料节点类型 |
-| entry_id | string | 当前节点身份 |
-| parent_id | string 或 null | 父节点身份，根节点允许 null |
-| run_id | string 或 null | 通用节点允许 null；BusinessContextEntry 必须关联当前真实运行，值为非空 string |
-| created_at | integer | 沿用当前节点的 UTC 毫秒时间 |
-
-- 完整业务资料、模型可读文本及内部附加内容不进入公开历史响应。
-- 前端识别该节点，保留祖先链与运行归属，不生成可见用户聊天条目。
-- `active_leaf_id` 指向的路径必须完整，隐藏内容不会移除必要的身份节点。
-- 后端公开投影使用白名单；Python 与 TypeScript 的字段定义和校验保持一致。
-
-运行期间通过已确认的 `custom_message` SSE 事件通知资料节点，载荷沿用本节公开身份白名单。事件字段、提交后通知顺序与前端处理见第 8 节。
-
-## 4. 已确认的历史处理策略
-
-- 已有会话记录保持原样，不回填过去的临时资料。
-- 后续运行生成并追加新的资料事件。
-- 旧节点 ID、父子关系、业务数据、运行与确认绑定保持完整。
-- 原本未保存的临时上下文不被声明为已原样恢复。
-- 数据库迁移保留外键、不可变约束与数据完整性。
-- 使用新增迁移支持获批结构，保持已执行的旧迁移文件完整。
-
-## 5. 已确认的基类与业务资料结构
-
-### 5.1 继承、包含与类型登记
-
-- `CustomMessage[TData]` 定义通用内部消息信封，`TData` 约束为 `Model`，用于结构化 `details`。
-- `CustomMessageEntry[TMessage]` 定义通用会话节点，`TMessage` 约束为 `CustomMessage`，节点包含单个 `message: TMessage`。
-- `BusinessContextMessage` 继承 `CustomMessage[BusinessContextData]`，固定业务类型、隐藏展示及必填资料。
-- `BusinessContextEntry` 继承 `CustomMessageEntry[BusinessContextMessage]`，要求非空 `run_id`。
-- 通用消息层负责信封，强类型资料层负责字段与校验，会话节点层负责树身份与运行关联。
-- 当前业务资料创建入口使用 `BusinessContextEntry`；`SessionEntry` 联合登记这个具体节点类型。
-- `AgentMessage` 联合登记 `BusinessContextMessage`。服务商协议 `Message` 保持现有类型联合，内部消息经 `convert_to_llm` 转换后进入适配器。
-- 既有 `BusinessContext` 继续用于工具执行身份，含 `session_id / run_id / request_entry_id / source_entry_id`；模型资料采用独立的 `BusinessContextData`。
-
-类型字段契约：
+类型定义位于 `backend/app/domain/session/models.py`：
 
 ```python
 TData = TypeVar("TData", bound=Model)
@@ -99,300 +43,153 @@ class BusinessContextEntry(CustomMessageEntry[BusinessContextMessage]):
     run_id: str
 ```
 
-`message.timestamp` 等于节点 `created_at`，均为 UTC 毫秒整数。`parent_id` 表达资料事件的发生位置。业务节点绑定当前真实运行；日期与请求来源由真实用户节点确定。
+`SessionEntry` 登记 `BusinessContextEntry`，`AgentMessage` 登记 `BusinessContextMessage`。服务商协议 `Message` 联合保持原样，内部消息经 `convert_to_llm` 转换。
 
-### 5.2 完整基线与增量载荷
+业务节点 `run_id` 非空且关联当前真实运行。`message.timestamp` 等于 `created_at`，均为 UTC 毫秒整数；`parent_id` 表达发生位置。
 
-`BusinessContextData` 为按 `mode` 判别的强类型联合：
+工具执行身份继续使用后端绑定的 `BusinessContext`，包含 `session_id/run_id/request_entry_id/source_entry_id`；模型资料使用独立的 `BusinessContextData`。Pydantic 校验采用 `strict=True` 和 `extra="forbid"`，未知资料类型直接失败。
 
-```python
-BusinessContextData = Annotated[
-    BusinessContextSnapshot | BusinessContextDelta,
-    Field(discriminator="mode"),
-]
-```
+## 2. 完整基线与增量
 
-`BusinessContextSnapshot`：
+`BusinessContextData` 为按 `mode` 判别的 `BusinessContextSnapshot | BusinessContextDelta` 联合。
 
-| 字段 | 类型 | 必填与语义 |
-|---|---|---|
-| mode | Literal["snapshot"] | 完整资料基线 |
-| request | RequestContext | 必填，当前请求资料 |
-| message_nodes | list[MessageNodeReference] | 必填，模型可见的 user、assistant、toolResult 来源节点；允许 [] |
-| pending_proposals | list[PendingProposalReference] | 必填，当前有效待确认提案集合；允许 [] |
+`BusinessContextSnapshot` 的必填字段：
 
-`BusinessContextDelta`：
+- `mode: Literal["snapshot"]`。
+- `request: RequestContext`。
+- `message_nodes: list[MessageNodeReference]`，模型可见的 user、assistant、toolResult 来源节点，允许 `[]`。
+- `pending_proposals: list[PendingProposalReference]`，当前有效待确认提案，允许 `[]`。
 
-| 字段 | 类型 | 必填与语义 |
-|---|---|---|
-| mode | Literal["delta"] | 增量资料 |
-| request | RequestContext 或 null | 必填；null 表示保持请求资料；对象表示整份替换 |
-| upsert_message_nodes | list[MessageNodeReference] | 必填，新增或变化节点的完整记录 |
-| remove_message_node_ids | list[OperationId] | 必填，移出模型可见集合的节点 ID |
-| upsert_pending_proposals | list[PendingProposalReference] | 必填，新增或变化提案的完整引用 |
-| remove_pending_proposals | list[RemovedPendingProposal] | 必填，移出待确认集合的引用及原因 |
+`BusinessContextDelta` 的必填字段：
 
-- 增量列表允许 `[]`；所有列表为空且 `request=null` 的空增量拒绝入库。
-- 每个列表拒绝重复键；同一键同时出现在新增与移除集合时校验失败。
-- 节点记录按 `entry_id` 合并；提案记录按 `(business_kind, proposal_id)` 合并。
-- 首次资料事件生成完整基线；已有基线的分支在资料变化时追加增量。
-- 当前分支的资料状态从最近完整基线开始，按顺序应用后续增量。
+- `mode: Literal["delta"]`。
+- `request: RequestContext | null`，`null` 表示保持原值，对象表示整份替换。
+- `upsert_message_nodes: list[MessageNodeReference]`，新增或变化节点的完整记录。
+- `remove_message_node_ids: list[OperationId]`，移出模型可见集合的节点 ID。
+- `upsert_pending_proposals: list[PendingProposalReference]`，新增或变化提案的完整引用。
+- `remove_pending_proposals: list[RemovedPendingProposal]`，移出提案及原因。
 
-### 5.3 请求与消息来源
+增量列表允许 `[]`；所有列表为空且 `request=null` 时拒绝入库。列表拒绝重复键，同一键同时新增和移除时校验失败。
 
-`RequestContext`：
+节点按 `entry_id`、提案按 `(business_kind, proposal_id)` 合并。首次资料事件生成完整基线；后续仅在变化时追加增量。分支状态从最近完整基线开始依次重放。
 
-| 字段 | 类型 | 来源与校验 |
-|---|---|---|
-| timezone | Literal["Asia/Shanghai"] | 必填，当前后端业务时区 |
-| business_date | YYYY-MM-DD 字符串 | 必填，按真实用户节点 created_at 换算；校验真实日期 |
-| request_entry_id | OperationId | 必填，当前真实用户节点；Steering 消费后更新 |
+## 3. 请求与来源引用
 
-所有节点与提案 ID 复用现有标准 UUID 校验。后端核验节点角色、当前路径与真实关联。重放使用发生时的业务日期。
+### 3.1 RequestContext
 
-`MessageNodeReference` 按 `role` 判别三个强类型记录，所有记录必填 `entry_id`：
+全部字段必填：
 
-| 资料类 | 固定 role | 其他必填字段 |
-|---|---|---|
-| UserNodeReference | user | confirmation: SaveConfirmation 或 null；proposal: ProposalKey 或 null |
-| AssistantNodeReference | assistant | tool_call_ids: list[str]，允许 [] |
-| ToolResultNodeReference | toolResult | tool_name: str；tool_call_id: str；proposal: ProposalKey 或 null |
+- `timezone: Literal["Asia/Shanghai"]`。
+- `business_date: YYYY-MM-DD`，按真实用户节点 `created_at` 换算并校验真实日期。
+- `request_entry_id: OperationId`，当前真实用户节点，Steering 消费后更新。
 
-`ProposalKey` 必填 `business_kind` 与 `proposal_id`，业务类型为 `profile / plan / workout`，提案 ID 使用 `OperationId`。
+节点和提案 ID 复用现有标准 UUID 校验。后端核验节点角色、当前路径及真实关联，重放保留发生时的日期。
 
-`confirmation` 复用既有 `SaveConfirmation`，记录已有后端确认绑定。`proposal` 取后端已保存的确认或展示关联。工具结果的展示节点就是该记录的 `entry_id`；工具调用 ID 保持真实配对。
+### 3.2 MessageNodeReference
 
-### 5.4 待确认提案与移出引用
+按 `role` 判别，全部记录必填 `entry_id`：
 
-`PendingProposalReference`：
+- `UserNodeReference`：`role="user"`，必填 `confirmation: SaveConfirmation | null`、`proposal: ProposalKey | null`。
+- `AssistantNodeReference`：`role="assistant"`，必填 `tool_call_ids: list[str]`，允许 `[]`。
+- `ToolResultNodeReference`：`role="toolResult"`，必填 `tool_name: str`、`tool_call_id: str`、`proposal: ProposalKey | null`。
 
-| 字段 | 类型与空值规则 | 来源 |
-|---|---|---|
-| business_kind | profile / plan / workout，必填 | 快照业务类型 |
-| proposal_id | OperationId，必填 | 快照身份 |
-| status | pending / processing，必填 | 快照当前状态 |
-| request_entry_id | OperationId，必填 | 准备时真实用户节点 |
-| source_entry_id | OperationId，必填 | 发起准备调用的 assistant 节点 |
-| display_entry_id | OperationId 或 null，必填 | 已绑定展示节点；尚未绑定时为 null |
-| confirmation_entry_id | OperationId 或 null，必填 | 已有后端确认操作绑定 |
+`ProposalKey` 必填 `business_kind: profile/plan/workout` 和 `proposal_id: OperationId`。
 
-- `processing` 要求展示与确认节点均已绑定；确认节点有值时，展示节点必须有值。
-- 提案引用使用完整当前分支核验；被压缩的来源节点仍可保留受控读取引用。
-- `message_nodes` 使用当前模型可见集合，两类资料分别确定有效范围。
-- 完整提案内容继续通过真实业务工具受控读取。
+`confirmation` 复用后端确认绑定；`proposal` 取已保存的确认或展示关联。工具结果的展示节点为该记录的 `entry_id`，调用 ID 保持真实配对。资料事件自身不进入 `message_nodes`。
 
-`RemovedPendingProposal`：
+### 3.3 PendingProposalReference
 
-| 字段 | 类型 | 语义 |
-|---|---|---|
-| business_kind | profile / plan / workout | 必填，提案业务类型 |
-| proposal_id | OperationId | 必填，移出的提案身份 |
-| reason | saved / invalidated / conflicted / deleted / out_of_scope | 必填，后端核实的移出原因 |
+全部字段必填：
 
-`saved / invalidated / conflicted` 表达真实状态变化；`deleted` 表达记录实际删除；`out_of_scope` 表达离开当前有效范围。移除只改变事件之后的有效集合，历史资料保持完整。
+- `business_kind: profile/plan/workout`。
+- `proposal_id: OperationId`。
+- `status: pending/processing`。
+- `request_entry_id: OperationId`，准备时的真实用户节点。
+- `source_entry_id: OperationId`，发起准备调用的 assistant 节点。
+- `display_entry_id: OperationId | null`，尚未绑定展示时为 `null`。
+- `confirmation_entry_id: OperationId | null`，后端确认操作绑定。
 
-### 5.5 存储、生成与重放
+`processing` 要求展示及确认节点均已绑定；确认节点有值时展示节点必须有值。
 
-- `details` 是结构化资料依据，`content` 是该事件固定的模型投影。
-- 后端创建入口校验 `details`，用固定 JSON 序列化生成 `content`，加入后端资料来源与无保存授权标记。
-- 投影一致性在创建入口与写入服务校验；消息模型层保持字段校验，历史读取不依赖当前模板重新计算内容。
-- `details` 与 `content` 在同一事务落库；重放直接使用已保存的 `content`。
-- 渲染模板更新影响新事件，历史文本保持原值。
-- Pydantic 沿用 `strict=True` 与 `extra="forbid"`；未知资料类型在校验处失败。
-- 下一次模型请求前比较真实资料，发生变化时追加节点并更新执行位置。
-- 准备调用的全部结果节点与展示绑定完成后，再追加该批资料事件，保持工具调用与全部结果的连续配对。
-- Steering 消费后更新请求资料及业务日期，随后追加相应资料事件。
-- 资料事件自身不进入 `message_nodes`，避免递归资料增长。
-- 压缩后持久化完整新资料基线；基线与压缩提交共同保证恢复完整性。
-- `transform_context` 读取当前分支的固定资料事件；`convert_to_llm` 在原位置仅输出 `content` 与时间，协议角色为 user。
-- `custom_type / display / details` 不作为额外协议字段发送；业务资料已经包含在固定 `content` 中。
-- `display=false` 控制展示；公开接口独立使用第 3 节白名单。
+消息来源采用模型可见集合，提案引用按完整当前分支核验；被压缩来源保留受控读取关联，完整提案通过真实业务工具读取。
 
-### 5.6 JSON 样例
+### 3.4 RemovedPendingProposal
 
-以下均为示意数据，表达已确认的字段与边界。
+必填 `business_kind`、`proposal_id` 和 `reason`：
 
-首次完整基线的 `details`：
+- `saved/invalidated/conflicted`：后端核实的真实状态变化。
+- `deleted`：快照缺失且无保存记录。
+- `out_of_scope`：pending/processing 提案离开当前有效集合。
 
-```json
-{
-  "mode": "snapshot",
-  "request": {
-    "timezone": "Asia/Shanghai",
-    "business_date": "2026-08-15",
-    "request_entry_id": "00000000-0000-4000-8000-000000000001"
-  },
-  "message_nodes": [
-    {
-      "entry_id": "00000000-0000-4000-8000-000000000001",
-      "role": "user",
-      "confirmation": null,
-      "proposal": null
-    }
-  ],
-  "pending_proposals": []
-}
-```
+`BusinessService.removed_proposal_reason()` 只读核验原因。移除仅改变事件之后的有效集合，历史资料保持完整。
 
-准备画像后新增的增量 `details`：
+## 4. 采集、持久化与模型转换
 
-```json
-{
-  "mode": "delta",
-  "request": null,
-  "upsert_message_nodes": [
-    {
-      "entry_id": "00000000-0000-4000-8000-000000000002",
-      "role": "assistant",
-      "tool_call_ids": ["call_prepare_1"]
-    },
-    {
-      "entry_id": "00000000-0000-4000-8000-000000000003",
-      "role": "toolResult",
-      "tool_name": "prepare_profile_update",
-      "tool_call_id": "call_prepare_1",
-      "proposal": {
-        "business_kind": "profile",
-        "proposal_id": "00000000-0000-4000-8000-000000000004"
-      }
-    }
-  ],
-  "remove_message_node_ids": [],
-  "upsert_pending_proposals": [
-    {
-      "business_kind": "profile",
-      "proposal_id": "00000000-0000-4000-8000-000000000004",
-      "status": "pending",
-      "request_entry_id": "00000000-0000-4000-8000-000000000001",
-      "source_entry_id": "00000000-0000-4000-8000-000000000002",
-      "display_entry_id": "00000000-0000-4000-8000-000000000003",
-      "confirmation_entry_id": null
-    }
-  ],
-  "remove_pending_proposals": []
-}
-```
+- `application/session/business_context.py` 负责采集、分支状态重放和增量生成；无变化不追加。
+- `details` 为结构化依据；`build_business_context_message()` 使用固定 JSON 序列化生成 `content`，包含后端资料来源和无保存授权标记。
+- 创建入口及写入服务校验投影一致性，`details/content` 同事务落库。历史重放直接读取固定 `content`，不依赖当前模板重新生成。
+- 下一次模型请求前追加变化资料，提交后同步执行位置。
+- 准备调用的全部结果和展示绑定完成后追加该批资料；保持工具调用与全部结果连续配对，完整工具批次提交及通知后才消费 Steering。
+- Steering 消费后更新对应真实用户节点、请求资料及业务日期。
+- `business_context_to_llm()` 和 `convert_to_llm()` 保留固定 `content/timestamp`，协议角色为 user；`custom_type/display/details` 不作为额外协议字段发送。
+- `build_effective_context()` 按原位置投影并映射真实资料节点 ID；`transform_context()` 从持久化分支重放，每条资料仅出现一次。
+- 业务资料不参与动态 system 注入，不作为真实用户回合或压缩切点。
+- `read_request_state()` 共用只读采集；`request_messages()` 与 `estimate_request()` 均计入本次待追加资料，文本创建及预算共用 `build_business_context_message()`。
 
-提案失效事件的完整持久化节点：
+## 5. 压缩与历史兼容
 
-```json
-{
-  "session_id": "00000000-0000-4000-8000-000000000100",
-  "id": "00000000-0000-4000-8000-000000000005",
-  "parent_id": "00000000-0000-4000-8000-000000000003",
-  "run_id": "00000000-0000-4000-8000-000000000101",
-  "type": "custom_message",
-  "created_at": 1786766400000,
-  "message": {
-    "role": "custom",
-    "custom_type": "business_context",
-    "display": false,
-    "timestamp": 1786766400000,
-    "content": "后端业务资料，仅供读取，不构成保存授权。\n<business_context>\n{\"mode\":\"delta\",\"request\":null,\"upsert_message_nodes\":[],\"remove_message_node_ids\":[],\"upsert_pending_proposals\":[],\"remove_pending_proposals\":[{\"business_kind\":\"profile\",\"proposal_id\":\"00000000-0000-4000-8000-000000000004\",\"reason\":\"invalidated\"}]}\n</business_context>",
-    "details": {
-      "mode": "delta",
-      "request": null,
-      "upsert_message_nodes": [],
-      "remove_message_node_ids": [],
-      "upsert_pending_proposals": [],
-      "remove_pending_proposals": [
-        {
-          "business_kind": "profile",
-          "proposal_id": "00000000-0000-4000-8000-000000000004",
-          "reason": "invalidated"
-        }
-      ]
-    }
-  }
-}
-```
+- 摘要输入和保留预算包含资料固定 `content`。
+- `commit_compaction()` 同事务提交检查点和完整 Snapshot 基线，运行末节点及会话叶指向基线；失败回滚，同身份提交幂等，凭据与授权继续校验。
+- 新基线按模型可见集合重建消息来源，待确认提案按完整分支核验；连续压缩及压缩后的独立按钮确认保持有效。
+- 旧会话不回填过去的临时资料。旧节点 ID、父子关系、业务数据、运行及确认绑定保持完整。
+- 数据库通过新增迁移支持内部节点，保留已执行的旧迁移、外键、不可变约束及数据完整性。
 
-同一节点的公开历史投影：
+## 6. 公开历史与前端
 
-```json
-{
-  "type": "custom_message",
-  "entry_id": "00000000-0000-4000-8000-000000000005",
-  "parent_id": "00000000-0000-4000-8000-000000000003",
-  "run_id": "00000000-0000-4000-8000-000000000101",
-  "created_at": 1786766400000
-}
-```
+公开历史中的 `custom_message` 仅包含：
 
-出现新的未确认业务决策或功能边界冲突时，执行 agent 必须停下来询问用户。
+- `type: Literal["custom_message"]`。
+- `entry_id: string`，当前节点身份。
+- `parent_id: string | null`，父节点身份。
+- `run_id: string | null`，通用节点可空，业务资料节点必须非空。
+- `created_at: integer`，UTC 毫秒时间。
 
-## 6. 安全与资料读取
+完整业务资料、模型文本和内部附加内容保持私有，公开投影使用白名单，Python 与 TypeScript 字段及校验一致。
 
-- 日期与执行身份继续由后端绑定。
-- 后端独立核验来源、当前路径、展示节点、提案状态及业务限制。
-- 模型可见资料提供读取线索，不创建保存授权。
-- 确认保存继续由独立后端接口执行。
-- 资料内容保持固定重放，后续状态变化通过新事实表达。
-- 内部内容不能因公开序列化或前端展示而泄露。
+前端使用 `ReActRound.hidden` 保留隐藏结构节点、祖先链及运行归属，不生成可见用户聊天条目。`active_leaf_id` 对应路径保持完整；按 `entry_id` 合并历史和流式身份，相同身份字段冲突按协议错误处理。断线及刷新沿用运行查询和历史恢复。
 
-## 7. 验证与文档归属
+## 7. SSE 通知
 
-每项改动完成必要的实际运行、局部功能验证和相关小范围测试，保证本任务改动能够正常使用。验证覆盖该次改动影响到的存储、迁移、接口与安全边界。
+现有运行事件流发送 `custom_message`，`data` 使用第 6 节五字段白名单；ID 使用 `OperationId` 校验，`run_id` 必填、非空且匹配当前流。
 
-每项任务无需执行全量测试或重新测量量化指标。真实缓存观测仍是优化功能范围，其指标重测不作为每项任务的交付要求。
+通知顺序：
 
-最终业务验收由用户执行。执行 agent 交付时明确已经运行的检查与剩余未验证范围，不能将未运行的检查标为通过。
+- 资料成功落库后通知，先于后续模型消息。
+- 父节点身份先于资料节点身份，已公开身份继续复用。
+- 完整批次的 `tool_result` 提交及通知后，发送该批 `custom_message`。
+- `steering_status(status=consumed)` 后，发送消费后的资料通知。
+- `compaction_end` 后，发送新基线的资料通知。
 
-方案与契约仅在设计约束变更时更新。任务进度、实现事实与验证结果集中记录在独立的 [实施简报](prompt-cache-implementation-report.md)，保持精炼。文档由主会话维护；执行 agent 仅回复需记录的事实，不修改设计文档。
+后续助手节点以资料节点为父节点。完整资料不进入 SSE，前端事件定义、解析及隐藏节点处理与历史白名单一致。
 
-模型与 TTL 能力核验按用户要求暂停。
+## 8. 缓存观测
 
-## 8. 已确认的运行中节点通知
+`app/agent/cache_observation.py` 统一负责最终投影指纹、差异定位、真实调用记录、跨运行及重启比较、读取汇总和 CLI。
 
-### 8.1 事件与公开载荷
+- 调用关联 `session_id/run_id`；普通调用绑定真实 `message_id`，历史摘要和前缀摘要绑定 `compaction_id`。
+- 记录请求时间、模型及 endpoint、system 和工具声明 hash、历史首个差异、已知上下文事件及真实四类 token 用量。
+- 按真实调用身份去重，命中率为 `cache_read / (input + cache_read + cache_write)`；零分母为 `null`。
+- `_usage_totals()` 和 `_bucket()` 分别按 `first/append/summary/reset` 输出调用数、有效及缺失用量数、`input/cache_read/cache_write/output` 和命中率。
+- `_observed()` 通过 `aclosing(source)` 关闭底层流，包装流关闭返回前完成底层收尾，观测结局只写一次。
+- 生产产物写入 `backend/data/cache-observation/`，验证产物写入 `backend/temp/` 下已忽略的运行目录；禁止记录凭据。
+- 读取入口为 `python -m app.agent.cache_observation [--directory D] [--session S]`。
+- 观测保持被动和故障隔离，不改变业务结局，不扩展公开历史、SSE 白名单或前端配置。
 
-通过当前运行的既有 SSE 事件流发送 `custom_message` 事件。事件 `data` 复用第 3 节公开身份白名单：
+## 9. 安全与一致性
 
-| 字段 | 类型 | 约束 |
-|---|---|---|
-| type | Literal["custom_message"] | 必填，节点类型 |
-| entry_id | OperationId | 必填，已提交资料节点身份 |
-| parent_id | OperationId 或 null | 必填，真实父节点身份 |
-| run_id | OperationId | 必填，非空且与当前运行事件流一致 |
-| created_at | integer | 必填，节点的 UTC 毫秒时间 |
-
-完整业务资料、模型文本与内部附加内容保持私有。Python 与 TypeScript 同步定义事件类型、字段校验与公开投影。
-
-事件样例沿用第 5.6 节示意节点：
-
-```json
-{
-  "event": "custom_message",
-  "data": {
-    "type": "custom_message",
-    "entry_id": "00000000-0000-4000-8000-000000000005",
-    "parent_id": "00000000-0000-4000-8000-000000000003",
-    "run_id": "00000000-0000-4000-8000-000000000101",
-    "created_at": 1786766400000
-  }
-}
-```
-
-### 8.2 节点身份通知顺序
-
-- 资料节点成功落库后发送身份通知，通知先于后续模型消息事件。
-- 前端先获知父节点身份，再收到新增资料节点身份；父子关系由 `parent_id` 表达。
-- 历史已经公开的节点身份继续复用。
-- 同批工具结果全部完成提交与通知后，再发送该批资料节点身份。
-
-三类节点的身份通知与后续资料通知关系如下：
-
-| 已提交的节点 | 先发送的现有事件 | 后发送的资料事件 |
-|---|---|---|
-| 工具结果节点 | tool_result | 该批资料节点的 custom_message |
-| 运行中补充的用户消息 | steering_status，status=consumed | 消费后资料节点的 custom_message |
-| 压缩检查点 | compaction_end | 新资料基线节点的 custom_message |
-
-例如工具结果节点 T 已提交，资料节点 C 的 `parent_id=T`：发送 `tool_result(T)` 后发送 `custom_message(C)`，随后开始下一次模型消息。后续助手节点 A 提交时，其 `parent_id=C`。
-
-### 8.3 前端处理与恢复
-
-- 前端只登记隐藏的结构节点与运行归属，保留完整祖先链，不生成可见用户聊天条目。
-- 按 `entry_id` 合并身份节点；相同身份的字段冲突按协议错误处理。
-- 同步更新前端事件类型、解析与隐藏节点处理。
-- 连接中断与刷新沿用既有运行查询及历史读取恢复流程，历史身份节点保持完整。
+- 日期和执行身份由后端绑定，独立核验来源、当前路径、展示节点、提案状态及业务限制。
+- 模型资料仅提供读取线索；确认保存由独立后端接口执行，保持授权、幂等和未授权零提交。
+- 资料内容固定重放，状态变化通过新事件表达，内部内容不得通过公开序列化或展示泄露。
+- 预算使用共享 `RequestBudget`，存储检查跟随 `SCHEMA_VERSION`，不得硬编码旧版本。
+- 一致性验证覆盖持久化及迁移、分支重放、预算和最终投影、完整工具批次、Steering、压缩恢复、公开身份及确认授权。
+- 前端确认展示验证使用真实 `ChatTranscript`、`TooltipProvider` 和 `QueryClientProvider` 组件链路。

@@ -99,4 +99,4 @@ tmp/                    本地设计与证据目录（gitignore）
 
 - [PRODUCT.md](PRODUCT.md)：产品定位、业务功能、业务规则及业务验收场景。
 - README.md：运行方式、配置、技术栈及验证入口。
-- [结构化保存确认方案](tmp/optimization/structured-save-confirmation.md)：已拍板的确认授权、HTTP、历史扩展及验收基线，待实现和联合验证。实现 Agent 只修改代码、迁移与测试，不修改文档。
+- [结构化保存确认方案](optimization/structured-save-confirmation.md)：已拍板的确认授权、HTTP、历史扩展及验收基线，待实现和联合验证。实现 Agent 只修改代码、迁移与测试，不修改文档。

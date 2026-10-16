@@ -3,7 +3,8 @@
 ## 0. 实施状态
 
 已按本方案实施完毕，校验通过：`backend/skills` 共 36 个 Markdown、75 条相对链接，断链 0、空文件 0、
-过时架构表述 0、生物学禁用词 0（禁用词仅出现在禁用清单本身）。校验脚本 `tmp/check_skills_docs.py`。
+过时架构表述 0、生物学禁用词 0（禁用词仅出现在禁用清单本身）。校验按链接可达性、空文件、架构表述与禁用词
+四类口径逐文件扫描执行。
 
 修正一处前期误判：`workout-planning/references/` 的六个文件一直存在且内容完整，此前判断为断链是列
 目录时被截断造成的，因此没有「空引用」可删。
@@ -130,7 +131,7 @@ frontmatter `description` 写明：单一 Agent 的共享训练方法论知识�
 | Currier BS, et al. ACSM Position Stand: Resistance Training Prescription for Muscle Function, Hypertrophy, and Physical Performance in Healthy Adults: An Overview of Reviews. *Med Sci Sports Exerc*. 2026. PMID 41843416，DOI 10.1249/MSS.0000000000003897 | PubMed 记录存在，为 2009 版立场声明的更新；综合 137 篇系统综述、逾 3 万名受试者 | 组数、频率、负荷区间、容量阈值、以及「力竭／组结构／器械／周期化／张力时间／血流限制未持续影响结果」这组证伪结论的主要依据 |
 | Wu S, et al. Effects of resistance training performed to repetition non-failure on exercise performance in healthy adults: a systematic review and meta-analysis. *BMC Sports Sci Med Rehabil*. 2026. PMID 42410632，DOI 10.1186/s13102-026-01861-z | PubMed 记录存在；20 项试验、556 名受试者；非力竭在动态力量上略优（SMD 0.24），等长力量、肌肥大、肌耐力、功率均无显著差异；结论明确「达到力竭并非必要条件」 | 「每组必须做到做不动才有效」不成立 |
 | `D:/Repository/Lzheng-fitness` 的 `knowledge/` 与 `skills/` | 本地仓库已读 | 事实优先级、P0—L3 分层、中断接回三档、来源登记写法（官方核验入口 + 书籍角色 + 使用限制） |
-| 理论 plus（`C:/Users/Ericcc/Desktop/理论plus.md`） | 本地文件已读 | 方法论骨架：三级证据标签、终点优先、机制→变量→方法、三层分离、证伪表、个人记录与结论分栏。个人训练记录与生物学机制章节不采纳 |
+| 理论 plus（本地资料，原件已移走，来源路径不再保留） | 已读 | 方法论骨架：三级证据标签、终点优先、机制→变量→方法、三层分离、证伪表、个人记录与结论分栏。个人训练记录与生物学机制章节不采纳 |
 
 ### 9.2 调研工具说明
 

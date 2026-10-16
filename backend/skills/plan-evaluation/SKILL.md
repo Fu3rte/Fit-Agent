@@ -1,66 +1,47 @@
 ---
 name: plan-evaluation
-description: 每次评审待确认的七天 PlanDraft 时固定加载；确定性领域校验通过后按 goal_alignment、schedule_reasonableness、explanation_quality 三个维度判定候选计划，只给布尔判定与理由。前两项是硬门槛，失败即阻断；解释质量只产生 warning。判定依据只来自本次 evaluation_tools 的真实调用，候选与评审的 revision 一致性由确定性代码核对。不给数值评分与权重、不改写计划、不重算业务事实、不产生新的计划版本、不写业务库。
+description: 对待确认训练计划做定性内容检查，从目标一致性、安排合理性、解释质量三项给出结论与理由；依据来自本次真实画像、当前计划、训练记录与动作目录事实，缺少依据时标记未知。只作内容检查意见，不保存、不改写计划、不做数值评分、不阻断保存，也不做医疗判断。
 ---
 
 # plan-evaluation：计划评审 Skill
 
-本 Skill 仅提供**模型指令**。三维度的门槛分层、`passed` 的合取、`snapshot_mismatch`
-阻断与一次修订流程都由确定性代码持有（`app/domain/plans/schema.py` 与
-`app/domain/plans/rules.py`）；本 Skill 只约束「独立读事实 → 三维度判定 → 理由」这一段的写法。
+本 Skill 提供**模型指令**。它只约束「独立读事实 → 三维度定性检查 → 写理由」这一段，不持有保存门禁，也不
+调度后台任务。
 
-## 职责
+Fit-Agent 是单一 Agent，没有按意图分发的多个角色，也没有独立的评审角色或专用工具组。评审结论只作为内容
+检查意见供后续整理参考。
 
-- 候选计划通过确定性领域校验之后评审它，产出三个维度的 `RubricResult`。
-- 用 `evaluation_tools` 独立读取事实作为判定依据，不拿候选计划的自我声明当事实。
-- 每个维度只写 `passed` 与 `reason`，不写数值评分、维度权重或总分。
-- 维度定义、门槛与结果合成见 [evaluation-rubric.md](references/evaluation-rubric.md)，样例见
-  [few-shots.md](references/few-shots.md)。
+## 检查维度
 
-## 何时加载
-
-评审待确认的七天计划草稿时加载：计划流程每次拿出候选 `PlanDraft` 请求评审时都加载本 Skill。
-确定性校验未通过的候选不会进入评审，本 Skill 也不补做确定性校验。
-
-## 可用 Tool
-
-| Tool | 用途 |
+| 维度 | 检查什么 |
 | --- | --- |
-| `read_user_profile` | 画像目标与已知限制：`goal_alignment` 的用户侧依据 |
-| `read_training_history` | 近期训练事实：候选安排与已练内容是否冲突 |
-| `read_progress` | PB 与趋势摘要：只解释工具给出的既有统计量 |
-| `search_exercises` | 目录事实：候选动作的身份、记录口径、是否可推荐与起始负荷 |
-| `read_active_plan` | 当前 active 计划与渐进决策：调整候选是否只改该改的部分 |
-| `read_training_calendar` | 计划日程与实际训练：七天窗口内是否撞车 |
+| `goal_alignment` | 计划的目标与画像目标、用户本次请求是否一致 |
+| `schedule_reasonableness` | 训练日与休息日的安排同画像、训练记录与目录事实是否自相矛盾 |
+| `explanation_quality` | 计划的 `notes` 是否说清安排依据、适用前提与仍缺的证据 |
 
-六个工具与计划生成环节同集、调用轨迹独立：本次评审读到的 revision 就是 `EvaluationResult.evidence`。
+每个维度只给结论与理由，不写数值评分、维度权重或总分。理由写清是哪条事实支撑判断。
 
-## 三个维度
+## 输入事实
 
-| 维度 | 门槛 | 判定依据 |
-| --- | --- | --- |
-| `goal_alignment` | 硬门槛 | 候选 `goal` 与画像目标、用户本次请求是否一致 |
-| `schedule_reasonableness` | 硬门槛 | 七天内的训练日安排与工具事实是否自相矛盾 |
-| `explanation_quality` | 建议项 | `explanation` 是否说清安排依据 |
+按需读取只读工具：`get_profile`（目标与已知限制）、`get_current_plan`（当前循环计划）、`list_workouts`
+（近期训练事实）、`search_exercises` 与 `get_exercise_details`（目录事实）。判断依据只来自本次工具返回的
+事实，候选计划的声明不当作已核实的用户事实。
 
-两个硬门槛失败即进 `blocking_failures` 且 `passed` 为假；`explanation_quality` 不通过只进 `warnings`，
-不改变 `passed`。理由写清是哪条工具事实支撑判定，不写数值评分。
+缺少依据时明确标记为未知，不补造事实，也不从计划的自我声明反推。
 
-## 事实与快照边界
+## 边界
 
-- 判定依据只能是本次 `evaluation_tools` 真实返回的 `facts`；工具没返回的事实不得编造，也不得从候选
-  计划反推。
-- 候选读取的 revision 与本次评审读到的 revision 是否一致由 `snapshot_mismatch_failures` 裁决，不一致
-  即 `snapshot_mismatch` 阻断失败；本 Skill 不做这项核对，也不消解不一致。
-- 不重算任何业务事实：PB、趋势都不由本 Skill 计算；也不把 RIR／RPE 写成处方刻度，不输出估算 1RM、
-  训练容量、完成率；解释概念时按 training-theory 的口径：处方变量范围见
-  [training-variables.md](../training-theory/references/training-variables.md)，用词见
+- 不改写计划、不产出新的计划版本；需要修改时由用户在计划流程里重新准备。
+- 不保存、不激活、不归档：完整展示后由用户点击快照的确认按钮，独立确认 HTTP 入口负责保存；普通聊天文字
+  不产生授权。
+- 不做医疗判断；出现明确医疗风险时停止相关训练建议并提示就医。
+- 不引入新的数值阈值：间隔天数、组数锚点、次数区间、完成率门槛一律不设。
+- 不把 RIR／RPE 写成处方刻度，不输出估算 1RM、训练容量与完成率；用词见
   [user-facing-language.md](../training-theory/references/user-facing-language.md)。
 
-## 禁止事项
+## 参考
 
-- 不改写候选计划、不产出新的计划版本；唯一一次修订由计划流程交回计划生成环节执行。
-- 不激活、不归档、不写库：完整展示后由用户点击快照确认按钮，独立确认 HTTP 调用业务保存服务，普通聊天不产生授权。契约见 [结构化保存确认方案](../../../tmp/optimization/structured-save-confirmation.md)。
-- 不做医疗判断与安全分流；急性风险在进入计划流程前已由 `safety_scan` 分流。
-- 不引入新的数值阈值：间隔天数、组数锚点、次数区间、完成率门槛一律不设。
-- 不引入本 Skill 与两份 reference 之外的知识来源，也不引用其中的示例数值充当用户事实。
+- [evaluation-rubric.md](references/evaluation-rubric.md)：三个维度的检查口径与前提核查。
+- [few-shots.md](references/few-shots.md)：三项检查的示例。
+- [training-variables.md](../training-theory/references/training-variables.md)：训练变量口径。
+- [performance-factors.md](../training-theory/references/performance-factors.md)：前提与限制来源。

@@ -248,11 +248,15 @@ def aggregate(samples: list[dict]) -> dict:
     }
 
 
-def run_benchmark(experiment_dir: str) -> BenchmarkResult:
+def run_benchmark(
+    experiment_dir: str, *, model_root: str | Path | None = None, database_dir: str | Path | None = None
+) -> BenchmarkResult:
     from app import model_config
+    from app.infrastructure.persistence.sqlite import database as database_module
 
-    assert (REPO_DATA_ROOT / "models.json").exists() and (REPO_DATA_ROOT / "auth.json").exists()
-    model_config.DATA_ROOT = REPO_DATA_ROOT
+    root = REPO_DATA_ROOT if model_root is None else Path(model_root)
+    assert (root / "models.json").exists() and (root / "auth.json").exists()
+    model_config.DATA_ROOT = root
     config = load_model_config()
     spec = resolve_model_spec(config)
     settings = DEFAULT_SETTINGS
@@ -260,7 +264,13 @@ def run_benchmark(experiment_dir: str) -> BenchmarkResult:
     assert settings.reserve_tokens == RESERVE_TOKENS and settings.keep_recent_tokens == KEEP_RECENT_TOKENS
     assert HISTORY_PARTS <= PARTS
 
-    path = patch_default_database("compaction-performance-p0")
+    if database_dir is None:
+        path = patch_default_database("compaction-performance-p0")
+    else:
+        target = Path(database_dir)
+        target.mkdir(parents=True, exist_ok=True)
+        path = target / f"{uuid4().hex}.db"
+        database_module.default_database_path = lambda: path
     sessions = [asyncio.run(seed(path, str(uuid4()), HISTORY_PARTS)) for _ in range(REPS)]
     state = git_state()
     env = {
@@ -269,6 +279,8 @@ def run_benchmark(experiment_dir: str) -> BenchmarkResult:
         "worktree_status": state["status_porcelain"],
         "platform": platform.platform(),
         "python": sys.version.split()[0],
+        "data_root": str(root),
+        "database_path": str(path),
         "model": {
             "id": spec.id,
             "provider": spec.provider,
