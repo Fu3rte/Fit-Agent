@@ -4,6 +4,7 @@ import sqlite3
 import subprocess
 import sys
 from pathlib import Path
+from uuid import uuid4
 
 import pytest
 
@@ -30,8 +31,17 @@ from test.v2_eval_support import (
     aggregate,
     experiment_env,
     load_cases,
+    sha256_file,
     slot_plan,
 )
+from test.v2_test_paths import OUTPUT_ROOT
+
+
+@pytest.fixture
+def tmp_path():
+    root = OUTPUT_ROOT / "pytest-r2/a" / uuid4().hex[:12] / "case"
+    root.mkdir(parents=True)
+    return root
 
 
 def env_for(root):
@@ -112,7 +122,8 @@ def source_experiment(root):
     claim_slot(env)
     identity = {"source_sha256": "identity-unit-check", "model_identity": {}}
     write_record(root / "manifest.json", {"experiment_id": "experiment", "execution_identity": identity,
-                                         "cases_path": str(CASES), "rounds": ROUNDS,
+                                         "cases_path": str(CASES), "cases_sha256": sha256_file(CASES),
+                                         "rounds": ROUNDS,
                                          "budget_ledger_path": str(root.parent / "budget-ledger.json")})
     return env, identity
 

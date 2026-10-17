@@ -18,9 +18,11 @@ import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+from uuid import uuid4
 
 from test.v2_attempts import (
     attempt_summary,
+    authorized_attachment_root,
     budget_path,
     create_attempt,
     execution_identity,
@@ -36,20 +38,23 @@ from test.v2_budget import (
     BudgetLedger,
     LedgerAttributionUnresolved,
     StopTriggered,
+    unsettled_model_attempts,
 )
 from test.v2_contract import ROUNDS, ExperimentEnv, RoundObservation
 from test.v2_eval_support import (
     BACKEND,
     DEFAULT_ACTIONS_PATH,
     DEFAULT_DATA_ROOT,
-    _milvus_identity,
     aggregate,
+    annotate_check_integrity,
     apply_v2_review,
     baseline_artifacts,
     baseline_identity,
     build_manifest,
     build_review_packet,
     compare_baseline,
+    environment_preflight,
+    evaluation_roots,
     exception_type,
     execution_guards,
     experiment_env,
@@ -114,6 +119,8 @@ def parse_args(argv):
     parser.add_argument("--benchmark-topic", default=None,
                         choices=("tool_parallel", "compaction", "save_confirmation"))
     parser.add_argument("--benchmarks-only", action="store_true")
+    parser.add_argument("--recover-benchmark", action="store_true")
+    parser.add_argument("--benchmark-attempt")
     parser.add_argument("--check-release", action="store_true")
     parser.add_argument("--purpose", choices=("reproduction", "extra"))
     parser.add_argument("--reason")
@@ -148,9 +155,13 @@ def precheck(cases_path: Path, experiment_dir: Path, smoke_cases: str | None = N
             raise SystemExit(f"冒烟用例不存在：{missing}")
         cases = [case for case in cases if case.case_id in wanted]
     experiment_dir.mkdir(parents=True, exist_ok=True)
-    probe = experiment_dir / ".write-probe"
-    probe.write_text("ok", encoding="utf-8")
-    probe.unlink()
+    probe = experiment_dir / f".write-probe-{os.getpid()}-{uuid4().hex}"
+    with probe.open("x", encoding="utf-8") as handle:
+        try:
+            handle.write("ok")
+        finally:
+            handle.close()
+            probe.unlink()
     return cases
 
 
@@ -212,9 +223,7 @@ def run_worker(args, cases) -> int:
         _trip_stop(ledger, experiment_dir, "frozen_identity_drift", experiment_id=args.experiment_id,
                    trigger=f"worker:p{args.process_index}", detail=str(error))
         raise
-    install_embedding_recorder(
-        ledger, experiment_id=args.experiment_id, process_index=args.process_index
-    )
+    runtime_ready = False
     logs = experiment_dir / "logs"
     logs.mkdir(parents=True, exist_ok=True)
     schedule = logs / f"schedule-p{args.process_index}.jsonl"
@@ -239,6 +248,10 @@ def run_worker(args, cases) -> int:
                     "at": timestamp(),
                 }, ensure_ascii=False) + "\n")
             continue
+        if not runtime_ready:
+            environment_preflight(experiment_dir / "preflight", manifest["protected_baseline_before"])
+            install_embedding_recorder(ledger, experiment_id=args.experiment_id, process_index=args.process_index)
+            runtime_ready = True
         env = experiment_env(
             args.experiment_id, case, round_index, slot, args.process_index,
             experiment_dir, identity, business_date_value,
@@ -399,6 +412,12 @@ def load_round_evidence(experiment_dir: Path) -> list[RoundObservation]:
     for path, record in zip(paths, rounds):
         if path.parent.name != f"round-{record.round_index}" or path.parent.parent.name != record.case_id:
             raise ValueError(f"正式槽位路径与结果不匹配：{path}")
+    # 读取既有证据时按冻结用例派生检查覆盖结论；原始 status/checks 原样保留。
+    manifest_path = Path(experiment_dir) / "manifest.json"
+    if manifest_path.exists():
+        cases_path = read_record(manifest_path).get("cases_path")
+        if cases_path and Path(cases_path).is_file():
+            rounds = annotate_check_integrity(rounds, load_cases(cases_path))
     return rounds
 
 
@@ -411,7 +430,164 @@ def benchmark_topics() -> tuple[tuple[str, str], ...]:
     )
 
 
+def benchmark_directory(args, topic):
+    root = Path(args.experiment_root) / args.experiment_id
+    if args.benchmark_attempt:
+        if len(args.benchmark_attempt) != 32 or any(c not in "0123456789abcdef" for c in args.benchmark_attempt):
+            raise ValueError("专项恢复 attempt 身份无效")
+        return root / "benchmark-attempts" / args.benchmark_attempt
+    return root / "benchmarks" / dict(benchmark_topics())[topic]
+
+
+def validate_benchmark_attempt(args, manifest, identity):
+    from app.application.business import retrieval_frozen
+
+    directory = benchmark_directory(args, args.benchmark_topic)
+    attempt = read_record(directory / "attempt.json")
+    if (attempt["attempt_id"] != args.benchmark_attempt
+            or attempt["topic"] != args.benchmark_topic or attempt["parent_experiment_id"] != args.experiment_id
+            or attempt["source_identity"] != manifest.get("execution_identity")
+            or attempt["budget_ledger_path"] != manifest["budget_ledger_path"]
+            or attempt["stop_scope"] != args.experiment_id
+            or attempt["tool_identity"] != current_identity(manifest["cases_path"], identity)
+            or attempt["model_identity"] != identity or identity != manifest["model_identity"]):
+        raise ValueError("专项恢复 attempt 身份不匹配")
+    if (sha256_file(manifest["cases_path"]) != manifest["cases_sha256"]
+            or sha256_file(DEFAULT_ACTIONS_PATH) != manifest["catalog_sha256"]
+            or retrieval_frozen.frozen_values() != manifest["retrieval_frozen"]):
+        raise ValueError("专项恢复冻结用例/目录/检索配置不兼容")
+    for item in attempt["source_evidence"]:
+        if sha256_file(item["path"]) != item["sha256"]:
+            raise ValueError("专项恢复源证据发生变化")
+    return attempt
+
+
+def run_existing_benchmarks(args):
+    if not args.experiment_id or args.benchmark_attempt:
+        raise ValueError("已有实验专项需要 --experiment-id")
+    directory = Path(args.experiment_root) / args.experiment_id
+    manifest = read_record(directory / "manifest.json")
+    identity = use_frozen_model_config(directory)
+    verify_frozen_identity(directory, manifest["cases_path"], identity)
+    raw = read_record(manifest["budget_ledger_path"])
+    outcomes = raw.get("experiments", {}).get(args.experiment_id, {}).get("outcomes", {})
+    if any((directory / "benchmarks" / name).exists() or f"topic:{topic}" in outcomes
+           for topic, name in benchmark_topics()):
+        raise ValueError("已有专项证据或结算；需要显式 --recover-benchmark --reason --benchmark-topic")
+    try:
+        results = run_benchmarks(directory)
+    finally:
+        run_finalize(args)
+    return 3 if results.get("shared_stop") or results.get("budget_paused") else 0
+
+
+def run_benchmark_recovery(args):
+    if (not args.benchmarks_only or not args.experiment_id or not args.benchmark_topic
+            or not args.reason or not args.reason.strip() or args.benchmark_attempt
+            or args.finalize_only or args.process_index is not None or args.purpose):
+        raise ValueError("专项恢复需要 --benchmarks-only --recover-benchmark --experiment-id --benchmark-topic --reason")
+    root = Path(args.experiment_root) / args.experiment_id
+    manifest = read_record(root / "manifest.json")
+    identity = use_frozen_model_config(root)
+    ledger = BudgetLedger(manifest["budget_ledger_path"], experiment_id=args.experiment_id)
+    ledger.check_settled()
+    snapshot = ledger.snapshot()
+    original = root / "benchmarks" / dict(benchmark_topics())[args.benchmark_topic]
+    terminal = snapshot["experiments"].get(args.experiment_id, {}).get("outcomes", {}).get(f"topic:{args.benchmark_topic}")
+    if terminal and terminal["terminal"]["outcome"] == "success":
+        raise ValueError("成功专项禁止重发")
+    if original.exists() and terminal is None:
+        raise ValueError("原专项缺少可确认终态，禁止重发")
+    sources = [root / "manifest.json", *sorted(original.rglob("*.json"))]
+    attempt_id = uuid4().hex
+    args.benchmark_attempt = attempt_id
+    directory = benchmark_directory(args, args.benchmark_topic)
+    attempt = {
+        "attempt_id": attempt_id, "parent_experiment_id": args.experiment_id,
+        "topic": args.benchmark_topic, "reason": args.reason, "created_at": timestamp(),
+        "source_identity": manifest.get("execution_identity"),
+        "tool_identity": current_identity(manifest["cases_path"], identity), "model_identity": identity,
+        "source_terminal": terminal, "source_directory": str(original),
+        "source_evidence": [{"path": str(path), "sha256": sha256_file(path)} for path in sources],
+        "budget_ledger_path": manifest["budget_ledger_path"], "budget_before": snapshot,
+        "stop_scope": args.experiment_id, "released": False,
+    }
+    def claim_attempt():
+        for previous in root.glob("benchmark-attempts/*/attempt.json"):
+            prior = read_record(previous)
+            if prior["topic"] == args.benchmark_topic:
+                outcome = previous.parent / "outcome.json"
+                receipt = previous.parent / "receipt.json"
+                if (not outcome.exists() or not receipt.exists()
+                        or read_record(receipt).get("exit_code") is None
+                        or read_record(outcome)["status"] == "pass"):
+                    raise ValueError("恢复专项已成功或终态未确认，禁止重发")
+        directory.mkdir(parents=True, exist_ok=False)
+        write_record(directory / "attempt.json", attempt)
+
+    ledger.claim_guarded(claim_attempt, require_settled=True)
+    validate_benchmark_attempt(args, manifest, identity)
+    before = protected_baseline(REPO_ROOT, snapshot_root=directory / "trace-snapshots")
+    drift = compare_baseline(manifest["protected_baseline_before"], before)
+    write_record(directory / "protection.json", {"source": manifest["protected_baseline_before"],
+                                                "before": before, "drift": drift})
+    if drift:
+        raise ValueError("专项恢复被未解决生产保护差异阻塞")
+    environment_preflight(directory / "preflight", manifest["protected_baseline_before"])
+    completed = None
+    try:
+        completed = subprocess.run([
+            sys.executable, "-m", "test.run_v2_eval", "--cases", manifest["cases_path"],
+            "--experiment-root", str(root.parent), "--experiment-id", args.experiment_id,
+            "--benchmark-topic", args.benchmark_topic, "--benchmark-attempt", attempt_id,
+        ], cwd=str(BACKEND), env=dict(os.environ))
+    finally:
+        after = protected_baseline(REPO_ROOT, snapshot_root=directory / "trace-snapshots-after")
+        drift = compare_baseline(before, after)
+        write_record(directory / "protection.json", {"before": before, "after": after, "drift": drift})
+        if drift:
+            _trip_stop(ledger, root, "production_drift", experiment_id=args.experiment_id,
+                       trigger=f"benchmark-attempt:{attempt_id}:protection",
+                       evidence_refs=[str(directory.relative_to(root) / "protection.json")], detail=drift)
+        write_record(directory / "receipt.json", {
+            "exit_code": completed.returncode if completed is not None else None, "at": timestamp(),
+            "budget_after": ledger.snapshot(), "released": False,
+        })
+    return completed.returncode or (4 if drift else 0)
+
+
 def run_benchmark_worker(args, topic: str) -> int:
+    from app import model_config
+
+    directory = benchmark_directory(args, topic)
+    attachments = authorized_attachment_root(directory, directory / "attachments")
+    original_model_root = model_config.DATA_ROOT
+    invocation = uuid4().hex
+    try:
+        with evaluation_roots(attachments, directory / "dbs" / "benchmark.db",
+                              directory / "trace.db", directory / "observations"):
+            return _run_benchmark_worker(args, topic, invocation)
+    except BaseException as error:
+        started = directory / "started.json"
+        if (started.exists() and read_record(started).get("invocation") == invocation
+                and not (directory / "outcome.json").exists()):
+            experiment_dir = Path(args.experiment_root) / args.experiment_id
+            manifest = read_record(experiment_dir / "manifest.json")
+            ledger = BudgetLedger(manifest["budget_ledger_path"], experiment_id=args.experiment_id)
+            status = "cancelled" if isinstance(error, (KeyboardInterrupt, SystemExit, asyncio.CancelledError)) else "run_error"
+            outcome = {"status": status, "failure_type": exception_type(error),
+                       "error": f"{exception_type(error)}: {error}", "attempt_id": args.benchmark_attempt,
+                       "evidence_ref": str(directory.relative_to(experiment_dir))}
+            write_record(directory / "outcome.json", outcome)
+            unit = (_unit_identity("attempt", attempt_id=args.benchmark_attempt)
+                    if args.benchmark_attempt else _unit_identity("topic", topic=topic))
+            _settle_benchmark(ledger, experiment_dir, args.experiment_id, topic, unit, outcome)
+        raise
+    finally:
+        model_config.DATA_ROOT = original_model_root
+
+
+def _run_benchmark_worker(args, topic: str, invocation: str) -> int:
     # 专项在独立子进程初始化：先显式注入冻结模型配置、隔离业务库/Trace/附件/临时根，再运行真实测量逻辑。
     from app import model_config
     from app.agent import telemetry
@@ -430,13 +606,15 @@ def run_benchmark_worker(args, topic: str) -> int:
     identity = use_frozen_model_config(experiment_dir)
     manifest = read_record(experiment_dir / "manifest.json")
     ledger = BudgetLedger(Path(manifest["budget_ledger_path"]), DEFAULT_LIMITS, experiment_id=manifest["experiment_id"])
-    try:
-        verify_frozen_identity(experiment_dir, args.cases, identity)
-    except ValueError as error:
-        _trip_stop(ledger, experiment_dir, "frozen_identity_drift", experiment_id=args.experiment_id,
-                   trigger=f"benchmark:{topic}", detail=str(error))
-        raise
-    install_embedding_recorder(ledger, experiment_id=args.experiment_id, process_index=-1)
+    if args.benchmark_attempt:
+        validate_benchmark_attempt(args, manifest, identity)
+    else:
+        try:
+            verify_frozen_identity(experiment_dir, args.cases, identity)
+        except ValueError as error:
+            _trip_stop(ledger, experiment_dir, "frozen_identity_drift", experiment_id=args.experiment_id,
+                       trigger=f"benchmark:{topic}", detail=str(error))
+            raise
     paused = ledger.paused_models()
     if paused:
         print(f"Embedding 额度触达阈值，专项 {topic} 停止运行：{paused}", flush=True)
@@ -446,13 +624,22 @@ def run_benchmark_worker(args, topic: str) -> int:
         write_stop_report(experiment_dir, stop)
         print(f"共享停止已置位（{stop.get('reason_category')}），专项 {topic} 停止运行", flush=True)
         return 3
-    directory = experiment_dir / "benchmarks" / names[topic]
-    directory.mkdir(parents=True, exist_ok=True)
+    ledger.check_settled()
+    environment_preflight(experiment_dir / "preflight", manifest["protected_baseline_before"])
+    install_embedding_recorder(ledger, experiment_id=args.experiment_id, process_index=-1)
+    directory = benchmark_directory(args, topic)
+    if not args.benchmark_attempt:
+        terminal = ledger.snapshot()["experiments"].get(args.experiment_id, {}).get("outcomes", {}).get(f"topic:{topic}")
+        if terminal is not None:
+            raise ValueError("专项已有终态；需要显式恢复 attempt")
+        ledger.claim_guarded(lambda: directory.mkdir(parents=True, exist_ok=False), require_settled=True)
+    with (directory / "started.json").open("x", encoding="utf-8") as handle:
+        json.dump({"at": timestamp(), "attempt_id": args.benchmark_attempt, "invocation": invocation}, handle)
     temp_root = directory / "tmp"
     temp_root.mkdir(parents=True, exist_ok=True)
     database_dir = directory / "dbs"
     database_dir.mkdir(parents=True, exist_ok=True)
-    attachments = directory / "attachments"
+    attachments = authorized_attachment_root(directory, directory / "attachments")
     attachments.mkdir(parents=True, exist_ok=True)
     # 隔离根显式注入：不触碰生产 backend/data 与系统临时目录。
     database_module.default_database_path = lambda: database_dir / "benchmark.db"
@@ -472,6 +659,8 @@ def run_benchmark_worker(args, topic: str) -> int:
                     "trace_database": str(telemetry.trace_database_path()),
                     "attachment_root": str(session_service.PROJECT_ROOT),
                     "temp_root": str(temp_root),
+                    "file_tools_tmp_root": str(attachments / "tmp"),
+                    "observations": str(directory / "observations"),
                 },
             },
             ensure_ascii=False,
@@ -482,10 +671,13 @@ def run_benchmark_worker(args, topic: str) -> int:
     )
     # 专项执行入口持有完整包装生命周期：初始化、真实调用、异常/取消/停止后的在途收尾
     # 全部落在 execution_guards 有效范围内；本进程是该 topic 的唯一终态结算所有者。
-    execution_unit = _unit_identity("topic", topic=topic)
-    outcome = {"status": "pass", "error": None, "failure_type": None}
+    execution_unit = (_unit_identity("attempt", attempt_id=args.benchmark_attempt)
+                      if args.benchmark_attempt else _unit_identity("topic", topic=topic))
+    outcome = {"status": "pass", "error": None, "failure_type": None,
+               "evidence_ref": str(directory.relative_to(experiment_dir)),
+               "attempt_id": args.benchmark_attempt}
     with execution_guards(ledger, directory / "evidence", experiment_id=args.experiment_id,
-                          execution_unit=execution_unit):
+                          execution_unit=execution_unit, attempt_id=args.benchmark_attempt):
         try:
             if topic == "tool_parallel":
                 result = check_tool_parallel_performance.run_benchmark(str(directory), tmp_root=temp_root)
@@ -510,6 +702,7 @@ def run_benchmark_worker(args, topic: str) -> int:
         except (KeyboardInterrupt, SystemExit, asyncio.CancelledError):
             # 取消与中断保留原控制流语义，同时按取消结算：不计入连续错误、不置位停止。
             outcome["status"] = "cancelled"
+            write_record(directory / "outcome.json", outcome)
             _settle_benchmark(ledger, experiment_dir, args.experiment_id, topic, execution_unit, outcome)
             raise
         except (StopTriggered, BudgetExhausted) as blocked:
@@ -520,14 +713,18 @@ def run_benchmark_worker(args, topic: str) -> int:
                 _write_budget_pause(experiment_dir, ledger, -1)
             else:
                 write_stop_report(experiment_dir, blocked.stop)
+            write_record(directory / "outcome.json", outcome)
+            _settle_benchmark(ledger, experiment_dir, args.experiment_id, topic, execution_unit, outcome)
             return 3
         except BaseException as failure:
             outcome["status"] = "run_error"
             outcome["failure_type"] = exception_type(failure)
             outcome["error"] = f"{outcome['failure_type']}: {failure}"
+            write_record(directory / "outcome.json", outcome)
+            _settle_benchmark(ledger, experiment_dir, args.experiment_id, topic, execution_unit, outcome)
+            raise
+        write_record(directory / "outcome.json", outcome)
         _settle_benchmark(ledger, experiment_dir, args.experiment_id, topic, execution_unit, outcome)
-    if outcome["status"] == "run_error":
-        raise RuntimeError(outcome["error"])
     return 0
 
 
@@ -539,13 +736,13 @@ def _settle_benchmark(ledger, experiment_dir, experiment_id, topic, execution_un
         record_outcome = "success" if status == "pass" else "business_failure"
         ledger.record_outcome(record_outcome, execution_unit=execution_unit, owner=experiment_id,
                               trigger=f"benchmark:{topic}",
-                              evidence_refs=[f"benchmarks/{topic}"])
+                              evidence_refs=[outcome["evidence_ref"]])
         return None
     if status == "run_error":
         result = ledger.record_outcome("run_error", execution_unit=execution_unit,
                                        error_type=outcome["failure_type"], owner=experiment_id,
                                        trigger=f"benchmark:{topic}",
-                                       evidence_refs=[f"benchmarks/{topic}"],
+                                       evidence_refs=[outcome["evidence_ref"]],
                                        detail={"error": outcome["error"]})
         if result["triggered"]:
             write_stop_report(experiment_dir, result["stop"])
@@ -553,7 +750,7 @@ def _settle_benchmark(ledger, experiment_dir, experiment_id, topic, execution_un
             return result["stop"]
         return None
     ledger.record_outcome(status, execution_unit=execution_unit, owner=experiment_id,
-                          trigger=f"benchmark:{topic}", evidence_refs=[f"benchmarks/{topic}"],
+                          trigger=f"benchmark:{topic}", evidence_refs=[outcome["evidence_ref"]],
                           detail={"error": outcome["error"]})
     return None
 
@@ -561,8 +758,10 @@ def _settle_benchmark(ledger, experiment_dir, experiment_id, topic, execution_un
 def _milvus_guard(ledger, experiment_dir, experiment_id) -> bool:
     # Milvus 实际错误：真实只读探针返回错误即置位共享停止；不触碰生产集合/别名/manifest。
     try:
-        identity = _milvus_identity()
-    except BaseException as error:
+        manifest = read_record(Path(experiment_dir) / "manifest.json")
+        environment_preflight(Path(experiment_dir) / "preflight", manifest["protected_baseline_before"])
+        identity = {}
+    except Exception as error:
         identity = {"error": f"{type(error).__name__}: {error}"}
     if identity.get("error"):
         _trip_stop(ledger, experiment_dir, "milvus_unavailable", experiment_id=experiment_id,
@@ -593,11 +792,11 @@ def run_benchmarks(experiment_dir: Path) -> dict:
             print(f"共享停止已置位（{stop.get('reason_category')}），专项 {name} 及其后专项停止运行", flush=True)
             results["shared_stop"] = {"before_topic": topic, "stop": stop}
             break
+        ledger.check_settled()
         if _milvus_guard(ledger, experiment_dir, experiment_dir.name):
             results["shared_stop"] = {"before_topic": topic, "stop": ledger.stop_info()}
             break
         directory = experiment_dir / "benchmarks" / name
-        directory.mkdir(parents=True, exist_ok=True)
         environment = dict(os.environ)
         environment["FIT_AGENT_V2_MODEL_SOURCE"] = str(experiment_dir / "model-config")
         completed = subprocess.run(
@@ -611,6 +810,8 @@ def run_benchmarks(experiment_dir: Path) -> dict:
             cwd=str(BACKEND),
             env=environment,
         )
+        directory.mkdir(parents=True, exist_ok=True)
+        write_record(directory / "process.json", {"exit_code": completed.returncode, "at": timestamp()})
         if completed.returncode == 3:
             # 子进程已按预算暂停或共享停止自行结算终态；主控只归档退出原因。
             settled.append(topic)
@@ -720,6 +921,21 @@ def _record_run_outcome(ledger, experiment_dir, experiment_id, status, error, *,
     return None
 
 
+def _integrity_reason(integrity: dict) -> str:
+    problems = [
+        f"{label} {integrity[key]}"
+        for key, label in (
+            ("missing_check_ids", "缺少必需检查"),
+            ("duplicate_check_ids", "检查项重复"),
+            ("unexpected_check_ids", "计划外检查"),
+            ("identity_errors", "检查身份错误"),
+            ("contract_errors", "检查契约错误"),
+        )
+        if integrity.get(key)
+    ]
+    return "; ".join(problems) if problems else "检查证据不完整"
+
+
 def _slot_reason(experiment_dir: Path, case_id: str, round_index: int, status: str) -> str | None:
     directory = experiment_dir / "cases" / case_id / f"round-{round_index}"
     error_path = directory / "error.json"
@@ -742,6 +958,9 @@ def _slot_status(experiment_dir: Path, case_id: str, round_index: int, record, s
             directory = experiment_dir / "cases" / case_id / f"round-{round_index}"
             kind = "precondition_failed" if (directory / "precondition.json").exists() is False else "run_error"
             return kind, _slot_reason(experiment_dir, case_id, round_index, kind)
+        integrity = record.check_integrity
+        if integrity is not None and not integrity.get("complete", False):
+            return "insufficient_evidence", _integrity_reason(integrity)
         return record.status, None
     if schedule_entry is not None and schedule_entry.get("status"):
         status = schedule_entry["status"]
@@ -776,6 +995,13 @@ def build_execution_ledger(plan, rounds: list[RoundObservation], experiment_dir=
                 "round_index": round_index,
                 "status": status,
                 "reason": reason,
+                "missing_round_evidence": (case_id, round_index) not in observed,
+                "schedule_status": (entry or {}).get("status"),
+                "claim_status": (
+                    read_record(Path(experiment_dir) / "claims" / f"{case_id}-r{round_index}.json").get("status")
+                    if experiment_dir and (Path(experiment_dir) / "claims" / f"{case_id}-r{round_index}.json").exists()
+                    else None
+                ),
                 "process_index": (
                     observed[(case_id, round_index)].process_index
                     if (case_id, round_index) in observed else (entry or {}).get("process_index")
@@ -1080,11 +1306,15 @@ def _review_blockers(experiment_dir: Path, manifest, rounds) -> tuple[list[str],
     return blockers, notes, payload.get("reviews")
 
 
-def release_check(experiment_dir: Path) -> dict:
+def release_check(experiment_dir: Path, review_path=None) -> dict:
     """冒烟放行判定：期望槽位取 manifest 冻结计划，必需项任一未满足即保持未放行。"""
     blockers: list[str] = []
     notes: list[str] = []
     manifest = read_record(experiment_dir / "manifest.json")
+    if (not manifest.get("cases_path") or not manifest.get("execution_identity")
+            or current_identity(manifest["cases_path"], manifest.get("model_identity", {}))
+            != manifest["execution_identity"]):
+        blockers.append("当前代码/配置身份与冻结冒烟身份不匹配")
     plan = manifest_slot_plan(experiment_dir)
     expected_pairs = {(record["case_id"], int(record["round_index"])) for record in plan}
     rounds = load_round_evidence(experiment_dir)
@@ -1094,12 +1324,35 @@ def release_check(experiment_dir: Path) -> dict:
             f"槽位集合与冻结计划不符：缺 {sorted(expected_pairs - observed_pairs)}，"
             f"多 {sorted(observed_pairs - expected_pairs)}"
         )
-    review_blockers, review_notes, reviews = _review_blockers(experiment_dir, manifest, rounds)
+    if review_path:
+        payload = read_record(review_path)
+        review_blockers, review_notes = _validate_review_payload(experiment_dir, manifest, rounds, payload)
+        reviews = payload.get("reviews") if not review_blockers else None
+    else:
+        review_blockers, review_notes, reviews = _review_blockers(experiment_dir, manifest, rounds)
     blockers += review_blockers
     notes += review_notes
     if reviews is not None and not review_blockers:
         rounds = apply_v2_review(rounds, reviews)
         notes.append(f"已应用 {len(reviews)} 条审阅结论")
+    cases_path = manifest.get("cases_path")
+    cases = load_cases(cases_path) if cases_path and Path(cases_path).is_file() else None
+    if cases is None:
+        blockers.append("缺少可用冻结用例，无法核对检查覆盖完整性")
+    else:
+        from test.v2_business_cases import check_coverage
+
+        by_case = {case.case_id: case for case in cases}
+        for round_item in rounds:
+            case = by_case.get(round_item.case_id)
+            if case is None:
+                blockers.append(f"{round_item.case_id}/r{round_item.round_index} 指向未知用例")
+                continue
+            coverage = check_coverage(case, round_item.checks, round_index=round_item.round_index)
+            if not coverage["complete"]:
+                blockers.append(
+                    f"{round_item.case_id}/r{round_item.round_index} 检查证据不完整：{_integrity_reason(coverage)}"
+                )
     for round_item in rounds:
         tag = f"{round_item.case_id}/r{round_item.round_index}"
         if round_item.status != "pass":
@@ -1136,7 +1389,28 @@ def release_check(experiment_dir: Path) -> dict:
             if bucket.get("paused_at"):
                 blockers.append(f"{model} 额度触达阈值已暂停（actual={bucket.get('actual')}）")
             if bucket.get("unknown_attempts"):
-                notes.append(f"{model} 有 {len(bucket['unknown_attempts'])} 次用量未知")
+                blockers.append(f"{model} 有 {len(bucket['unknown_attempts'])} 次用量未知")
+            if bucket.get("reserved") or bucket.get("unsettled_attempts"):
+                blockers.append(f"{model} 有未结清 attempt 或在途保留用量")
+        state = snapshot.get("experiments", {}).get(manifest["experiment_id"], {})
+        if state.get("stop") or state.get("dispatch_halt") or snapshot.get("attribution_unconfirmed"):
+            blockers.append("共享停止或账本归属未确认")
+    shared_path = manifest.get("budget_ledger_path")
+    if not shared_path or not Path(shared_path).is_file():
+        blockers.append("缺少冻结共享账本")
+    else:
+        shared = read_record(shared_path)
+        state = shared.get("experiments", {}).get(manifest["experiment_id"], {})
+        if state.get("stop") or state.get("dispatch_halt") or shared.get("stop") or shared.get("consecutive"):
+            blockers.append("当前共享账本存在停止或未裁定历史状态")
+        for model, bucket in shared.get("models", {}).items():
+            unsettled = unsettled_model_attempts(bucket)
+            if unsettled:
+                detail = [(item["attempt_id"], item.get("state")) for item in unsettled]
+                blockers.append(f"{model} 当前共享账本存在在途或 unknown attempt：{detail}")
+            if (bucket.get("unknown") or bucket.get("reserved")
+                    or (bucket.get("limit") is not None and bucket.get("actual", 0) >= bucket["limit"])):
+                blockers.append(f"{model} 当前共享预算阻塞")
     blockers += _trace_blockers(experiment_dir, manifest, expected_pairs)
     markers = ('"provider": "example"', '"model": "model-1"')
     for path in experiment_dir.glob("cases/*/round-*/step-*.json"):
@@ -1205,24 +1479,38 @@ def _trace_blockers(experiment_dir: Path, manifest, expected_pairs) -> list[str]
 
 def run_release(args) -> int:
     experiment_dir = Path(args.experiment_root) / args.experiment_id
-    result = release_check(experiment_dir)
+    result = release_check(experiment_dir, review_path=args.review)
     print(json.dumps(result, ensure_ascii=False, indent=2), flush=True)
     return 0 if result["released"] else 1
 
 
-def write_reports(experiment_dir: Path, experiment_id: str, plan, rounds, benchmarks, identity) -> dict:
-    manifest = read_record(Path(experiment_dir) / "manifest.json")
+def write_reports(experiment_dir: Path, experiment_id: str, plan, rounds, benchmarks, identity,
+                  *, source_dir=None, budget_snapshot=None) -> dict:
+    source_dir = Path(source_dir or experiment_dir)
+    manifest = read_record(source_dir / "manifest.json")
     case_ids = list(dict.fromkeys(record["case_id"] for record in plan))
     summary = {
         "experiment_id": experiment_id,
         "created_at": datetime.now(timezone.utc).isoformat(),
-        "cases_sha256": sha256_file(manifest["cases_path"]),
+        "cases_sha256": manifest["cases_sha256"],
         "planned_slots": len(plan),
         "smoke": bool(manifest.get("smoke")),
         "model_identity": identity,
-        "status": "incomplete" if len(rounds) != len(plan) or any(r.status == "error" for r in rounds) else "complete",
+        "status": "incomplete" if (
+            len(rounds) != len(plan) or any(r.status == "error" for r in rounds)
+            or any(r.check_integrity is not None and not r.check_integrity.get("complete", False) for r in rounds)
+            or (not manifest.get("smoke") and any(
+                benchmarks.get(topic, {}).get("status") != "complete" for topic, _ in benchmark_topics()
+            ))
+        ) else "complete",
         "aggregate": aggregate(rounds, case_ids, int(manifest["rounds"])),
-        "additional_runs": attempt_summary(experiment_dir),
+        "additional_runs": attempt_summary(source_dir),
+        "benchmark_recovery_attempts": [
+            {"attempt": read_record(path), "directory": str(path.parent),
+             "outcome": read_record(path.parent / "outcome.json") if (path.parent / "outcome.json").exists() else None,
+             "receipt": read_record(path.parent / "receipt.json") if (path.parent / "receipt.json").exists() else None}
+            for path in sorted(source_dir.glob("benchmark-attempts/*/attempt.json"))
+        ],
         "benchmarks": benchmarks,
         "rounds": [r.model_dump() for r in rounds],
     }
@@ -1230,17 +1518,17 @@ def write_reports(experiment_dir: Path, experiment_id: str, plan, rounds, benchm
         json.dumps(summary, ensure_ascii=False, allow_nan=False, indent=2), encoding="utf-8"
     )
     (experiment_dir / "execution-ledger.json").write_text(
-        json.dumps(build_execution_ledger(plan, rounds, experiment_dir), ensure_ascii=False, allow_nan=False, indent=2),
+        json.dumps(build_execution_ledger(plan, rounds, source_dir), ensure_ascii=False, allow_nan=False, indent=2),
         encoding="utf-8",
     )
     rows = build_comparison(benchmarks, summary, load_v1_recalc())
     with (experiment_dir / "comparison.csv").open("w", encoding="utf-8", newline="") as handle:
         writer = csv.writer(handle)
         writer.writerows(rows)
-    ledger = BudgetLedger(budget_path(experiment_dir), DEFAULT_LIMITS, experiment_id=experiment_id)
-    (experiment_dir / "budget-summary.json").write_text(
-        json.dumps(ledger.snapshot(), ensure_ascii=False, allow_nan=False, indent=2), encoding="utf-8"
-    )
+    if budget_snapshot is None:
+        ledger = BudgetLedger(budget_path(source_dir), DEFAULT_LIMITS, experiment_id=experiment_id)
+        budget_snapshot = ledger.snapshot()
+    write_record(experiment_dir / "budget-summary.json", budget_snapshot)
     return summary
 
 
@@ -1278,6 +1566,8 @@ def run_additional(args):
         write_stop_report(directory, stop)
         print(f"共享停止已置位（{stop.get('reason_category')}），追加运行停止派发", flush=True)
         return 3
+    ledger.check_settled()
+    environment_preflight(directory / "preflight", read_record(directory / "manifest.json")["protected_baseline_before"])
     attempt_root, record = create_attempt(directory, args.case_id, args.round_index, args.purpose, args.reason, identity)
     manifest = read_record(directory / "manifest.json")
     # 追加沿用父实验作用域，证据与结算另带独立 attempt 身份。
@@ -1423,11 +1713,10 @@ def run_orchestrator(args, cases_path: Path) -> int:
     )
     plan = manifest_slot_plan(experiment_dir)
     ledger = BudgetLedger(Path(manifest["budget_ledger_path"]), DEFAULT_LIMITS, experiment_id=manifest["experiment_id"])
+    environment_preflight(experiment_dir / "preflight", manifest["protected_baseline_before"])
     # 记账包装器幂等安装：主控进程内的专项与单进程派发都走同一真实 usage 口径。
     install_embedding_recorder(ledger, experiment_id=args.experiment_id, process_index=0)
-    if args.benchmarks_only:
-        rounds = load_round_evidence(experiment_dir)
-    elif args.processes > 1:
+    if args.processes > 1:
         spawn_processes(args, cases_path, model_source)
         rounds = load_round_evidence(experiment_dir)
     else:
@@ -1494,13 +1783,23 @@ def run_orchestrator(args, cases_path: Path) -> int:
                                 execution_unit=_unit_identity("slot", slot=slot),
                                 error_type=error_type, slot=slot, process_index=0)
         rounds = load_round_evidence(experiment_dir)
-    if manifest.get("smoke"):
-        # 冒烟只验证业务链路与放行门槛；专项样本在正式实验结算阶段独立运行。
-        benchmarks = {}
-        print("冒烟实验跳过专项基准，专项样本在正式实验内独立产出", flush=True)
-    else:
-        benchmarks = run_benchmarks(experiment_dir)
-    rounds, _reviews = _review_stage(experiment_dir, cases, rounds, args.review)
+    try:
+        if manifest.get("smoke"):
+            benchmarks = {}
+            print("冒烟实验跳过专项基准，专项样本在正式实验内独立产出", flush=True)
+        else:
+            benchmarks = run_benchmarks(experiment_dir)
+    except BaseException:
+        _complete_experiment(args, experiment_dir, manifest, cases, plan, rounds,
+                             existing_benchmarks(experiment_dir), identity, ledger, review=False)
+        raise
+    return _complete_experiment(args, experiment_dir, manifest, cases, plan, rounds,
+                                benchmarks, identity, ledger)
+
+
+def _complete_experiment(args, experiment_dir, manifest, cases, plan, rounds, benchmarks,
+                         identity, ledger, *, review=True):
+    rounds, _reviews = _review_stage(experiment_dir, cases, rounds, args.review if review else None)
     summary = write_reports(experiment_dir, args.experiment_id, plan, rounds, benchmarks, identity)
     paused = ledger.paused_models()
     if paused:
@@ -1549,14 +1848,79 @@ def run_finalize(args) -> int:
     experiment_dir = Path(args.experiment_root) / args.experiment_id
     manifest = read_record(experiment_dir / "manifest.json")
     cases = load_cases(manifest["cases_path"])
-    summary_path = experiment_dir / "summary.json"
-    existing = json.loads(summary_path.read_text(encoding="utf-8"))
+    if sha256_file(manifest["cases_path"]) != manifest["cases_sha256"]:
+        raise ValueError("冻结用例文件身份不匹配")
+    output = experiment_dir / "recovery" / uuid4().hex
+    output.mkdir(parents=True, exist_ok=False)
+    sources = [experiment_dir / "manifest.json", Path(manifest["cases_path"]),
+               Path(manifest["budget_ledger_path"])]
+    sources.extend(path for pattern in ("cases/**/*.json", "claims/*.json", "logs/*.jsonl",
+                                        "benchmarks/**/*.json", "reproductions/**/*.json",
+                                        "benchmark-attempts/**/*.json")
+                   for path in experiment_dir.glob(pattern))
+    sources.extend(path for name in ("summary.json", "review.json", "protection.json")
+                   if (path := experiment_dir / name).exists())
+    if args.review:
+        sources.append(Path(args.review))
+    sources.extend(path for path in V1_RECAL_CANDIDATES if path.exists())
+    evidence = [{"path": str(path), "sha256": sha256_file(path)}
+                for path in sorted(set(sources))]
+    provenance = {
+        "source_experiment": str(experiment_dir), "source_identity": manifest.get("execution_identity"),
+        "tool_identity": current_identity(manifest["cases_path"], manifest["model_identity"]),
+        "created_at": timestamp(), "evidence": evidence,
+        "released": False, "boundary": "派生报告独立留存；原实验身份及放行状态保持原状",
+    }
+    write_record(output / "provenance.json", provenance)
     rounds = load_round_evidence(experiment_dir)
-    rounds, _reviews = _review_stage(experiment_dir, cases, rounds, args.review)
-    benchmarks = existing.get("benchmarks", {})
-    write_reports(experiment_dir, args.experiment_id, manifest_slot_plan(experiment_dir),
-                  rounds, benchmarks, existing["model_identity"])
+    review_path = args.review or (experiment_dir / "review.json")
+    if Path(review_path).exists():
+        payload = read_record(review_path)
+        blockers, _notes = _validate_review_payload(experiment_dir, manifest, rounds, payload)
+        if blockers:
+            write_record(output / "review-rejected.json", {"blockers": blockers})
+        else:
+            rounds = apply_v2_review(rounds, payload["reviews"])
+    write_record(output / "review-packet.json", build_review_packet(rounds, cases))
+    benchmarks = existing_benchmarks(experiment_dir)
+    raw_budget = read_record(manifest["budget_ledger_path"])
+    summary = write_reports(output, args.experiment_id, manifest_slot_plan(experiment_dir), rounds,
+                            benchmarks, manifest["model_identity"], source_dir=experiment_dir,
+                            budget_snapshot={"source": manifest["budget_ledger_path"], "raw": raw_budget})
+    after = protected_baseline(REPO_ROOT, snapshot_root=output / "trace-snapshots")
+    drift = compare_baseline(manifest.get("protected_baseline_before", {}), after)
+    write_record(output / "protection.json", {"before": manifest.get("protected_baseline_before"),
+                                               "after": after, "drift": drift})
+    summary.update(released=False, protection_drift=drift, provenance="provenance.json",
+                   source_execution_identity=manifest.get("execution_identity"),
+                   tool_execution_identity=provenance["tool_identity"])
+    write_record(output / "summary.json", summary)
+    changed = [item["path"] for item in evidence if sha256_file(item["path"]) != item["sha256"]]
+    if changed:
+        write_record(output / "source-drift.json", {"changed": changed})
+        raise ValueError("最终化期间源证据发生变化")
+    print(f"派生报告目录: {output}", flush=True)
     return 0
+
+
+def existing_benchmarks(experiment_dir):
+    results = {}
+    manifest = read_record(Path(experiment_dir) / "manifest.json")
+    raw = read_record(manifest["budget_ledger_path"])
+    outcomes = raw.get("experiments", {}).get(manifest["experiment_id"], {}).get("outcomes", {})
+    for topic, name in benchmark_topics():
+        directory = Path(experiment_dir) / "benchmarks" / name
+        result = directory / "benchmark.json"
+        outcome = directory / "outcome.json"
+        results[topic] = {
+            **(read_record(result) if result.exists() else {}),
+            "source": str(directory),
+            "outcome": read_record(outcome) if outcome.exists() else None,
+            "source_terminal": outcomes.get(f"topic:{topic}"),
+            "execution_receipt": read_record(directory / "process.json") if (directory / "process.json").exists() else None,
+            "missing_evidence": not result.exists(),
+        }
+    return results
 
 
 def load_backend_env() -> None:
@@ -1571,7 +1935,11 @@ def load_backend_env() -> None:
 def main(argv=None) -> int:
     load_backend_env()
     args = parse_args(sys.argv[1:] if argv is None else argv)
+    if args.benchmark_attempt and (not args.benchmark_topic or args.recover_benchmark):
+        raise ValueError("--benchmark-attempt 仅用于已登记专项恢复子进程")
     cases_path = Path(args.cases)
+    if args.recover_benchmark:
+        return run_benchmark_recovery(args)
     if args.benchmark_topic is not None:
         return run_benchmark_worker(args, args.benchmark_topic)
     if args.purpose:
@@ -1580,6 +1948,8 @@ def main(argv=None) -> int:
         return run_release(args)
     if args.finalize_only:
         return run_finalize(args)
+    if args.benchmarks_only:
+        return run_existing_benchmarks(args)
     if args.process_index is not None:
         cases = precheck(cases_path, Path(args.experiment_root) / args.experiment_id, args.smoke_cases)
         return run_worker(args, cases)

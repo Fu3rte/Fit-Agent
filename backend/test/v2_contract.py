@@ -212,6 +212,9 @@ class RoundObservation(BaseModel):
     turns: list[TurnObservation] = Field(default_factory=list)
     confirmations: list[ConfirmationObservation] = Field(default_factory=list)
     checks: list[CheckResult] = Field(default_factory=list)
+    # 检查完整性派生标记：读取既有证据时按冻结用例核对覆盖与身份，
+    # 只用于派生判断，不回写原始 status/checks。
+    check_integrity: dict[str, Any] | None = None
     usage: dict[str, Any] | None = None
     # 场景耗时只覆盖业务步骤区间；启动与前置构造分别单列。
     duration_ms: float | None = None
