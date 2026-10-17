@@ -317,7 +317,7 @@ const historyBody = (confirmations, pending_proposals, extraEntries) => ({
     { type: "message", entry_id: prepareNode, parent_id: assistantId, run_id: runId, created_at: 3, message: { role: "toolResult", tool_call_id: prepareCall, tool_name: "prepare_plan", content: prepared, is_error: false, timestamp: 3 } },
     ...extraEntries,
   ],
-  runs: [{ session_id: sessionId, run_id: runId, request_entry_id: userEntry, last_entry_id: prepareNode, status: "completed", started_at: 1, finished_at: 4, error_code: null, error_message: null }],
+  runs: [{ session_id: sessionId, run_id: runId, request_entry_id: userEntry, last_entry_id: prepareNode, status: "completed", started_at: 1, finished_at: 4, error_code: null, error_message: null, stop_reason: null }],
   steering: [],
   confirmations,
   pending_proposals,

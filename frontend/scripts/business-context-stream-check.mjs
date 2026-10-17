@@ -196,6 +196,7 @@ const run = (run_id, request_entry_id, last_entry_id) => ({
   finished_at: 2,
   error_code: null,
   error_message: null,
+  stop_reason: null,
 });
 
 const parsed = api.parseSessionHistory(SESSION, {

@@ -40,6 +40,7 @@ const run = (overrides) => ({
   finished_at: 2,
   error_code: null,
   error_message: null,
+  stop_reason: null,
   ...overrides,
 });
 

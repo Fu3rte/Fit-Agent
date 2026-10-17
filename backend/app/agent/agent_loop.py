@@ -8,7 +8,7 @@ from typing import Literal, NotRequired, TypedDict
 from uuid import uuid4
 
 from app.agent.cache_observation import NORMAL_CALL
-from app.agent.compaction import ContextBudgetExceeded, should_compact
+from app.agent.compaction import ContextBudgetExceeded, compaction_scope, should_compact
 from app.agent.config import AgentLoopConfig, CompactionHooks
 from app.agent.message_context import prepare_message_context
 from app.agent.telemetry import TraceSpan
@@ -107,6 +107,8 @@ async def stream_assistant_response(
     emit: AgentEventSink,
     stream_fn: StreamFn,
     parent: TraceSpan,
+    *,
+    recovery: bool = False,
 ) -> AssistantMessage:
     messages = await prepare_message_context(
         context["messages"],
@@ -128,22 +130,26 @@ async def stream_assistant_response(
             raise ValueError(f"工具声明与执行注册表不一致: {declaration.name}")
     check_cancelled(signal)
     spec = _model_spec(config)
-    # 共享请求预算的检查与占用先于模型 Span 创建：预算拒绝时不产生虚假模型调用记录。
+    # 共享请求预算的预检先于模型 Span 创建：预算拒绝时不产生虚假模型调用记录；
+    # 真正的发送边界在 app.ai.stream 的统一重试入口内按每次实际尝试原子扣除。
     if config.request_budget is None:
         raise RuntimeError("正式运行必须装配共享模型请求预算")
-    config.request_budget.reserve()
+    config.request_budget.ensure_available(recovery=recovery)
     attributes = {"provider": spec.provider, "model": spec.id, "call_kind": NORMAL_CALL}
 
     async def model_operation(model_span: TraceSpan) -> AssistantMessage:
         options: StreamOptions = {
             "api_key": config.model.api_key,
             "signal": signal,
+            "deadline": config.deadline,
+            "budget": config.request_budget,
+            "recovery": recovery,
+            "run_control": config.run_control,
             "max_tokens": min(DEFAULT_MAX_OUTPUT_TOKENS, spec.max_tokens),
         }
         if config.observation is not None:
-            # 逐次真实调用绑定本回合助手节点身份；观测按实际发送的最终投影记录,
-            # 并把真实结局与用量补充到本模型 Span。
-            options["observation"] = config.observation.start_call(
+            # 每次真实尝试各自创建观测句柄：失败尝试的诊断与真实用量保留，成功尝试不覆盖。
+            options["observation_factory"] = lambda: config.observation.start_call(
                 NORMAL_CALL, message_id=node_id, span=model_span
             )
         llm_context: LlmContext = {"messages": messages}
@@ -239,7 +245,9 @@ async def run_compaction(
             "compaction_id": compaction_id,
             "reason": reason,
         })
-        result = await hooks.compact(compaction_id, signal, compaction_span)
+        # 压缩原因在同一调用链内传给摘要边界：阈值压缩不扣恢复额度，溢出恢复摘要扣恢复额度。
+        with compaction_scope(reason):
+            result = await hooks.compact(compaction_id, signal, compaction_span)
         if result.entry_id != compaction_id or not result.parent_id:
             raise ValueError("压缩提交节点身份与阶段事件不一致")
         context["messages"] = result.messages
@@ -349,6 +357,8 @@ async def run_loop(
         # 同一连续失败过程最多压缩恢复一次；成功响应后重置，恢复后的续接轮跳过阈值压缩。
         recovery_used = False
         skip_threshold = False
+        # 溢出恢复后紧接的一次重发属于共享恢复额度；随后的新模型步骤恢复普通计数。
+        recovery_resend = False
         while has_more_tool_calls or pending_messages:
             check_cancelled(signal)
             if model_calls >= config.max_turns:
@@ -383,8 +393,16 @@ async def run_loop(
                     )
                 skip_threshold = False
                 message = await stream_assistant_response(
-                    context, config, signal, message_id, emit, stream_fn, turn_span
+                    context,
+                    config,
+                    signal,
+                    message_id,
+                    emit,
+                    stream_fn,
+                    turn_span,
+                    recovery=recovery_resend,
                 )
+                recovery_resend = False
                 model_calls += 1
                 seen = {
                     block.id
@@ -408,6 +426,7 @@ async def run_loop(
                         config.observation.note_event("overflow_recovery")
                     # 恢复后必须重试一次：无论本回合由工具续接还是 Steering 触发，都要求循环再入。
                     has_more_tool_calls = True
+                    recovery_resend = True
                     continue
                 messages.append(message)
                 if message.stop_reason == "aborted":
@@ -462,6 +481,10 @@ async def run_loop(
                     on_tool_update=config.on_tool_update,
                     contains_credentials=config.contains_credentials,
                     telemetry_span=turn_span,
+                    deadline=config.deadline,
+                    run_control=config.run_control,
+                    tracker=config.tool_tracker,
+                    timeout=config.tool_timeout_seconds,
                 )
                 tool_timing = batch
                 for tool_result in batch.messages:

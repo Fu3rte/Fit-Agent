@@ -27,6 +27,7 @@ from app.ai.messages import (
 from app.ai.overflow import build_overflow_message, is_context_overflow_error
 from app.ai.quota import raise_if_provider_quota_exceeded
 from app.ai.types import (
+    DEFAULT_MODEL_TIMEOUTS,
     AssistantStreamEvent,
     DoneEvent,
     LlmContext,
@@ -422,12 +423,28 @@ async def stream(
     created: int | None = None
     finish_reason: str | None = None
     headers = {**(model.headers or {}), **(options.get("headers") or {})}
-    async with httpx.AsyncClient() as http_client:
+    timeouts = options.get("timeouts") or DEFAULT_MODEL_TIMEOUTS
+    deadline = options.get("deadline")
+    remaining = max(0.001, deadline.remaining()) if deadline is not None else None
+
+    def limit(value: float) -> float:
+        return value if remaining is None else min(value, remaining)
+
+    # 分项超时：建连 10s、连接池等待 5s、写入 10s、读取下一数据块 60s；
+    # 每项再取运行剩余预算的较小值，测试可注入缩短值。
+    http_timeout = httpx.Timeout(
+        connect=limit(timeouts.http_connect_seconds),
+        read=limit(timeouts.http_read_seconds),
+        write=limit(timeouts.http_write_seconds),
+        pool=limit(timeouts.http_pool_seconds),
+    )
+    # 客户端与响应流均由本生成器的 async with 负责关闭：正常结束、异常、超时与提前关闭一致。
+    async with httpx.AsyncClient(timeout=http_timeout) as http_client:
         async with AsyncOpenAI(
             api_key=options["api_key"],
             base_url=model.base_url,
             max_retries=0,
-            timeout=120,
+            timeout=http_timeout,
             default_headers=headers or None,
             http_client=http_client,
         ) as client:

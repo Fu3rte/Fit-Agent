@@ -3,12 +3,15 @@ import json
 import logging
 import os
 import re
+from collections import deque
 from collections.abc import AsyncIterator, Awaitable, Callable
 from concurrent.futures import CancelledError, ThreadPoolExecutor
-from contextlib import asynccontextmanager
-from queue import Queue
+from contextlib import asynccontextmanager, suppress
+from dataclasses import dataclass
+from math import ceil
+from queue import Empty
 from threading import Event, Lock
-from time import perf_counter, time_ns
+from time import monotonic, perf_counter, time, time_ns
 from traceback import walk_tb
 from typing import Annotated, Literal
 from uuid import UUID, uuid4
@@ -17,6 +20,9 @@ from weakref import WeakValueDictionary
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, StreamingResponse
+from limits import parse
+from limits.storage import MemoryStorage
+from limits.strategies import MovingWindowRateLimiter
 from pydantic import (
     BaseModel,
     BeforeValidator,
@@ -48,11 +54,29 @@ from app.agent.compaction import (
 from app.agent.config import AgentLoopConfig, CompactionHooks, LoopCompactionResult
 from app.agent.diagnostic import run_diagnostic
 from app.agent.events import AgentEvent
+from app.agent.governance import (
+    CANCEL_COOPERATIVE_WAIT_SECONDS,
+    DIAGNOSTIC_WRITE_WAIT_SECONDS,
+    SESSION_RUN_RATE_LIMIT,
+    SSE_EVENT_MAX_BYTES,
+    SSE_HEARTBEAT_SECONDS,
+    SSE_QUEUE_MAX_BYTES,
+    SSE_QUEUE_MAX_EVENTS,
+    SSE_SEND_WAIT_SECONDS,
+    TERMINAL_DRAIN_TOTAL_SECONDS,
+    TERMINAL_PERSIST_WAIT_SECONDS,
+    TOOL_EXECUTION_SECONDS,
+    RunControl,
+    RunDeadline,
+    RunStopReason,
+    configured_run_budget_seconds,
+    stop_terminal,
+)
 from app.agent.message_context import business_context_to_llm
 from app.agent.permissions import create_before_tool_call
 from app.agent.prompts import SYSTEM_PROMPT
 from app.agent.telemetry import RunTrace, TraceSpan, connect_trace_store
-from app.agent.tool import CredentialDetectedError
+from app.agent.tool import CredentialDetectedError, ToolExecutionTracker
 from app.agent.tools.business import (
     bind_business_tools,
     business_tool_declarations,
@@ -188,6 +212,178 @@ def session_gate(session_id: str) -> asyncio.Lock:
     return session_gates.setdefault(session_id, asyncio.Lock())
 
 
+class SessionRunRateLimiter:
+    """会话新运行受理额度：移动窗口、内存存储，仅成功受理扣减。"""
+
+    def __init__(self, rate: str = SESSION_RUN_RATE_LIMIT) -> None:
+        self._rate = parse(rate)
+        self._limiter = MovingWindowRateLimiter(MemoryStorage())
+
+    def available(self, session_id: str) -> bool:
+        return self._limiter.test(self._rate, session_id)
+
+    def consume(self, session_id: str) -> bool:
+        return self._limiter.hit(self._rate, session_id)
+
+    def remaining(self, session_id: str) -> int:
+        return self._limiter.get_window_stats(self._rate, session_id).remaining
+
+    def retry_after(self, session_id: str) -> int:
+        # Retry-After 为整数秒；窗口内仍有拒绝时至少返回 1 秒。
+        stats = self._limiter.get_window_stats(self._rate, session_id)
+        return max(1, ceil(stats.reset_time - time()))
+
+
+session_run_limits = SessionRunRateLimiter()
+
+# 故障封闭：协作收尾或终态持久化失败后拒绝新运行，直到人工受控重启。
+_fault_lock = Lock()
+_fault_closed = False
+
+
+def enter_fault_closure() -> None:
+    global _fault_closed
+    with _fault_lock:
+        _fault_closed = True
+
+
+def is_fault_closed() -> bool:
+    with _fault_lock:
+        return _fault_closed
+
+
+def reset_fault_closure() -> None:
+    global _fault_closed
+    with _fault_lock:
+        _fault_closed = False
+
+
+# 队列结果：普通输出只有成功入队才继续接收；超限后终止接收并请求取消。
+QUEUE_OK = "ok"
+QUEUE_CLOSED = "closed"
+
+
+@dataclass(frozen=True)
+class EncodedEvent:
+    event: AgentEvent
+    payload: bytes
+
+    @property
+    def name(self) -> str:
+        return self.event.event
+
+
+class BoundedEventQueue:
+    """单运行有界 SSE 队列：普通事件受数量与字节上限约束，终态使用独立槽位。"""
+
+    def __init__(
+        self,
+        *,
+        max_events: int = SSE_QUEUE_MAX_EVENTS,
+        max_bytes: int = SSE_QUEUE_MAX_BYTES,
+        max_event_bytes: int = SSE_EVENT_MAX_BYTES,
+    ) -> None:
+        self._lock = Lock()
+        self._items: deque[EncodedEvent] = deque()
+        self._bytes = 0
+        self._accepting = True
+        self._terminal: EncodedEvent | None = None
+        self._terminal_at: float | None = None
+        self.max_events = max_events
+        self.max_bytes = max_bytes
+        self.max_event_bytes = max_event_bytes
+
+    @property
+    def pending_events(self) -> int:
+        with self._lock:
+            return len(self._items)
+
+    @property
+    def pending_bytes(self) -> int:
+        with self._lock:
+            return self._bytes
+
+    @property
+    def accepting(self) -> bool:
+        with self._lock:
+            return self._accepting
+
+    @property
+    def terminal_filled(self) -> bool:
+        with self._lock:
+            return self._terminal is not None
+
+    def put(self, event: EncodedEvent) -> str:
+        size = len(event.payload)
+        with self._lock:
+            if size > self.max_event_bytes:
+                self._accepting = False
+                return "output_too_large"
+            if not self._accepting:
+                return QUEUE_CLOSED
+            if (
+                len(self._items) >= self.max_events
+                or self._bytes + size > self.max_bytes
+            ):
+                # 队列积压超限：停止接收普通输出并请求取消，生产线程不得等待。
+                self._accepting = False
+                return "slow_consumer"
+            self._items.append(event)
+            self._bytes += size
+            return QUEUE_OK
+
+    def put_terminal(self, event: EncodedEvent) -> str:
+        # 终态槽位不受普通队列容量影响；填充时刻是排空总时限起点。
+        size = len(event.payload)
+        with self._lock:
+            self._accepting = False
+            if self._terminal is not None:
+                return QUEUE_CLOSED
+            if size > self.max_event_bytes:
+                return "output_too_large"
+            self._terminal = event
+            self._terminal_at = monotonic()
+            return QUEUE_OK
+
+    def take(self) -> EncodedEvent | None:
+        with self._lock:
+            if not self._items:
+                return None
+            event = self._items.popleft()
+            self._bytes -= len(event.payload)
+            return event
+
+    def empty(self) -> bool:
+        with self._lock:
+            return not self._items and self._terminal is None
+
+    def get_nowait(self) -> AgentEvent:
+        # 既有检查脚本使用的队列读取兼容入口；生产发送方分别走 take()/take_terminal()。
+        event = self.take()
+        if event is not None:
+            return event.event
+        with self._lock:
+            if self._terminal is not None:
+                terminal = self._terminal
+                self._terminal = None
+                return terminal.event
+        raise Empty
+
+    def take_terminal(self) -> EncodedEvent | None:
+        with self._lock:
+            return self._terminal
+
+    def terminal_remaining(self) -> float | None:
+        with self._lock:
+            if self._terminal_at is None:
+                return None
+            return TERMINAL_DRAIN_TOTAL_SECONDS - (monotonic() - self._terminal_at)
+
+    def close_normal(self) -> None:
+        with self._lock:
+            self._accepting = False
+
+
 TERMINAL_RUN_STATUSES = frozenset(
     {"completed", "failed", "cancelled", "interrupted"}
 )
@@ -198,6 +394,19 @@ CONTEXT_BUDGET_EXCEEDED_MESSAGE = "当前模型的上下文预算不足，无法
 CONTEXT_OVERFLOW_MESSAGE = "恢复后仍超出容量，无法继续执行。"
 MODEL_OUTPUT_LIMIT_MESSAGE = "回答达到输出上限，内容未完成"
 PROVIDER_QUOTA_EXCEEDED_MESSAGE = "模型服务账户额度不足，无法继续执行。"
+# 治理停止原因的固定公开文案：与运行记录使用完全相同的文本。
+MODEL_TIMEOUT_MESSAGE = "模型响应超时，请重新发起请求。"
+TOOL_TIMEOUT_MESSAGE = "工具执行超时，已结束本次运行。"
+RUN_TIMEOUT_MESSAGE = "本次运行已超时结束。"
+SLOW_CONSUMER_MESSAGE = "客户端读取过慢，已结束本次运行。"
+OUTPUT_TOO_LARGE_MESSAGE = "输出内容超过单事件上限，已结束本次运行。"
+STOP_REASON_MESSAGES: dict[str, str] = {
+    "model_timeout": MODEL_TIMEOUT_MESSAGE,
+    "tool_timeout": TOOL_TIMEOUT_MESSAGE,
+    "run_timeout": RUN_TIMEOUT_MESSAGE,
+    "slow_consumer": SLOW_CONSUMER_MESSAGE,
+    "output_too_large": OUTPUT_TOO_LARGE_MESSAGE,
+}
 
 
 def compaction_settings() -> CompactionSettings:
@@ -356,27 +565,96 @@ class ProviderWriteBody(BaseModel):
 
 
 class RunState:
-    def __init__(self, session_id: UUID):
+    def __init__(self, session_id: UUID, *, budget_seconds: float | None = None):
         self.run_id = uuid4()
         self.session_id = session_id
         self.operation_id = ""
         self.request_entry_id = ""
         self.cancel = Event()
-        self.events: Queue[AgentEvent] = Queue()
+        # 有界输出队列：所有生产者共用同一入口，终态使用独立槽位。
+        self.events = BoundedEventQueue()
+        # 运行控制上下文：与 state.cancel 共用同一取消信号，另携带单调截止时间与首个停止原因；
+        # 主事件循环与工作线程通过该对象共享运行级治理状态。
+        self.control = RunControl(
+            deadline=RunDeadline(
+                configured_run_budget_seconds()
+                if budget_seconds is None
+                else budget_seconds
+            ),
+            cancel=self.cancel,
+        )
+        # 运行级在途工具执行证据：与执行线程看到同一实例。
+        self.tool_tracker = ToolExecutionTracker()
         self.coordinator: SteeringCoordinator | None = None
         self.task: asyncio.Task | None = None
         self.closed_without_terminal = False
         self.secrets: tuple[str, ...] = ()
         # 运行来源：send / edit / regenerate；观测据此标注编辑与分支等已知事件。
         self.origin = "send"
+        # 故障证据：收尾超时后保留真实在途句柄与原因，供人工恢复核对。
+        self.fault_reason: str | None = None
+        self.inflight_work = None
+        self.inflight_tools: tuple = ()
+        # 有界协调读取的底层任务：等待超时后继续保留，禁止把超时当作回滚证据。
+        self.inflight_reads: list[asyncio.Task] = []
+        # 故障诊断写入异步进行：数据库等待不得再次阻塞主事件循环或收尾。
+        self.diagnostic_tasks: list[asyncio.Task] = []
+        self._state_lock = Lock()
+        self._last_tool_call_id: str | None = None
 
-    def publish(self, name: str, data: dict) -> None:
-        self.events.put(AgentEvent(name, {"run_id": str(self.run_id), **data}))
+    def publish(self, name: str, data: dict) -> bool:
+        # 生产线程与主事件循环共用入口：编码后计量，超限不阻塞、不拆分业务快照。
+        with self._state_lock:
+            if name == "tool_start":
+                self._last_tool_call_id = data.get("tool_call_id")
+            elif name == "tool_result":
+                self._last_tool_call_id = None
+        event = AgentEvent(name, {"run_id": str(self.run_id), **data})
+        outcome = self.events.put(
+            EncodedEvent(event, encode(event).encode("utf-8"))
+        )
+        if outcome == "output_too_large":
+            self.control.request_cancel("output_too_large")
+        elif outcome == "slow_consumer":
+            self.control.request_cancel("slow_consumer")
+        return outcome == QUEUE_OK
+
+    def publish_terminal(self, name: Literal["done", "error"], data: dict) -> None:
+        # 仅终态持久化成功后调用；独立槽位在普通队列已满时仍可登记。
+        if name == "error":
+            with self._state_lock:
+                tool_call_id = self._last_tool_call_id
+            data = {"tool_call_id": tool_call_id, **data}
+        event = AgentEvent(name, {"run_id": str(self.run_id), **data})
+        outcome = self.events.put_terminal(
+            EncodedEvent(event, encode(event).encode("utf-8"))
+        )
+        if outcome != "output_too_large":
+            return
+        # 终态帧本身超过单事件上限：发布固定最小错误，不公开部分内容。
+        fallback = AgentEvent("error", {
+            "run_id": str(self.run_id),
+            "status": "failed",
+            "code": "output_too_large",
+            "message": OUTPUT_TOO_LARGE_MESSAGE,
+            "tool_call_id": None,
+        })
+        self.events.put_terminal(
+            EncodedEvent(fallback, encode(fallback).encode("utf-8"))
+        )
 
     def disconnect(self) -> None:
-        self.cancel.set()
+        self.control.request_cancel("cancelled")
         if self.coordinator is not None:
             self.coordinator.close(str(self.run_id))
+
+    def mark_fault(self, reason: str, work, tools: tuple) -> None:
+        # 故障封闭：不提交成功确认、不释放名额；保留真实在途句柄供重启核对。
+        self.fault_reason = reason
+        self.inflight_work = work
+        self.inflight_tools = tools
+        self.closed_without_terminal = True
+        self.events.close_normal()
 
 
 runs: dict[UUID, RunState] = {}
@@ -404,6 +682,7 @@ def active_secrets(session_id: str | None = None) -> tuple[str, ...]:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    reset_fault_closure()
     database = await open_database()
     service = SessionService(SqliteSessionRepository(database))
     await service.recover_interrupted()
@@ -447,7 +726,7 @@ async def lifespan(app: FastAPI):
         with runs_lock:
             states = list(runs.values())
         for state in states:
-            state.cancel.set()
+            state.control.request_cancel("cancelled")
             if state.coordinator is not None:
                 state.coordinator.close(str(state.run_id))
         # 异步排空收尾任务，覆盖与受理交错后刚登记的任务，期间主事件循环保持可调度。
@@ -484,7 +763,8 @@ async def invalid_request(request: Request, error: RequestValidationError):
 
 @app.exception_handler(HTTPException)
 async def http_error(request: Request, error: HTTPException):
-    return JSONResponse({"detail": error.detail}, error.status_code, headers=NO_STORE)
+    headers = {**NO_STORE, **(error.headers or {})}
+    return JSONResponse({"detail": error.detail}, error.status_code, headers=headers)
 
 
 @app.exception_handler(BusinessError)
@@ -567,12 +847,17 @@ async def model_not_configured(request: Request, error: ModelNotConfigured):
 
 
 def reject(
-    status: int, code: str, message: str, *, reason: str | None = None
+    status: int,
+    code: str,
+    message: str,
+    *,
+    reason: str | None = None,
+    headers: dict[str, str] | None = None,
 ) -> None:
     detail = {"code": code, "message": message}
     if reason is not None:
         detail["reason"] = reason
-    raise HTTPException(status, detail)
+    raise HTTPException(status, detail, headers=headers)
 
 
 def reject_operation_expired() -> None:
@@ -587,7 +872,11 @@ async def reject_if_expired(
 
 
 def encode(event: AgentEvent) -> str:
-    return f"event: {event.event}\ndata: {json.dumps(event.data, ensure_ascii=False, allow_nan=False)}\n\n"
+    # 最终 SSE 编码是唯一的字节计量口径：包含事件名、JSON 转义、封装与追加字段。
+    return (
+        f"event: {event.event}\n"
+        f"data: {json.dumps(event.data, ensure_ascii=False, allow_nan=False)}\n\n"
+    )
 
 
 def public_content(message: AssistantMessage, secrets: CredentialFilter, truncate: bool) -> list[dict]:
@@ -737,6 +1026,7 @@ def run_object(run) -> dict:
         "finished_at": run.finished_at,
         "error_code": run.error_code,
         "error_message": run.error_message,
+        "stop_reason": run.stop_reason,
     }
 
 
@@ -865,9 +1155,11 @@ async def require_run(service: SessionService, run_id: str, session_id: str) -> 
 
 
 def retire(state: RunState) -> None:
+    # 唯一收尾入口只释放一次：重复回调不得再次归还全局名额。
     with runs_lock:
-        runs.pop(state.run_id, None)
-    active.release()
+        removed = runs.pop(state.run_id, None)
+    if removed is not None:
+        active.release()
 
 
 # 计划域准备工具：成功结果持久化后均按 plan_prepared 登记绑定展示节点。
@@ -1249,6 +1541,8 @@ def execute(
         # 摘要 model 子 Span 挂在当前 Compaction 下，与检查点提交同属一次压缩操作。
         result = await generate_compaction_summary(
             preparation, spec, api_key=secrets[0], settings=settings, signal=signal,
+            deadline=state.control.deadline,
+            run_control=state.control,
             budget=budget, observation=observer, compaction_id=compaction_id, parent=span,
         )
         check_cancelled(signal)
@@ -1298,6 +1592,10 @@ def execute(
         max_turns=64,
         model_spec=spec,
         request_budget=budget,
+        deadline=state.control.deadline,
+        run_control=state.control,
+        tool_tracker=state.tool_tracker,
+        tool_timeout_seconds=TOOL_EXECUTION_SECONDS,
         compaction=CompactionHooks(
             estimate_request=estimate_request,
             compact=compact,
@@ -1334,12 +1632,12 @@ def execute(
 
 
 def publish_terminal(state: RunState, run, stop_reason: str | None) -> None:
-    # 公开终态由已提交运行记录决定，与数据库终态保持一致。
+    # 公开终态由已提交运行记录决定，与数据库终态保持一致；仅终态持久化成功后调用。
     if run.status == "completed":
-        state.publish("done", {"status": "completed", "stop_reason": stop_reason})
+        state.publish_terminal("done", {"status": "completed", "stop_reason": stop_reason})
         return
     cancelled = run.status == "cancelled"
-    state.publish("error", {
+    state.publish_terminal("error", {
         "status": run.status,
         "code": run.error_code or ("cancelled" if cancelled else "execution_failed"),
         "message": run.error_message
@@ -1348,11 +1646,19 @@ def publish_terminal(state: RunState, run, stop_reason: str | None) -> None:
 
 
 def terminal_decision(
-    failure: BaseException | None, cancelled: bool
+    failure: BaseException | None,
+    cancelled: bool,
+    stop_reason: RunStopReason | None = None,
 ) -> tuple[str, str | None, str | None]:
-    # 凭据命中优先于取消；否则按取消、失败、完成的顺序裁决候选终态。
+    # 凭据命中优先于取消与停止原因；否则停止原因裁决终态，再按取消、失败、完成的顺序兜底。
     if isinstance(failure, CredentialDetectedError):
         return "failed", "credential_detected", CREDENTIAL_SAFE_MESSAGE
+    if stop_reason is not None:
+        status, code = stop_terminal(stop_reason)
+        message = STOP_REASON_MESSAGES.get(code)
+        if message is None:
+            message = "执行已取消。" if status == "cancelled" else "执行失败，请重新发起请求。"
+        return status, code, message
     if isinstance(failure, CompactionSummaryError):
         return "failed", "compaction_failed", COMPACTION_FAILED_MESSAGE
     if isinstance(failure, (ContextBudgetExceeded, NoSummarizableHistory)):
@@ -1370,6 +1676,131 @@ def terminal_decision(
     if failure is not None:
         return "failed", "execution_failed", "执行失败，请重新发起请求。"
     return "completed", None, None
+
+
+# 故障封闭哨兵：收尾超出共享预算或终态持久化失败，不发布终态、不释放名额。
+FAULT_CLOSED = object()
+
+
+def _consume_future(future) -> None:
+    # 迟到的底层结果只取回异常，禁止再次发布终态或释放名额。
+    with suppress(Exception):
+        if not future.cancelled():
+            future.exception()
+
+
+async def _record_diagnostic(
+    service: SessionService, session_id: str, run_id: str, reason: str
+) -> None:
+    # 诊断写入受短上限约束；数据库阻塞时后台重试，仍不阻塞主事件循环或收尾。
+    for attempt in range(3):
+        try:
+            await asyncio.wait_for(
+                service.record_run_diagnostic(session_id, run_id, reason),
+                timeout=DIAGNOSTIC_WRITE_WAIT_SECONDS,
+            )
+            return
+        except TimeoutError:
+            if attempt == 2:
+                logger.error("运行诊断写入超时（%s）", reason)
+                return
+            await asyncio.sleep(0.1)
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            logger.error("运行诊断写入失败（%s/%s）", reason, type(error).__name__)
+            return
+
+
+# 有界协调读取超时哨兵：底层任务继续保留，实际结果仍可在之后核对。
+READ_TIMEOUT = object()
+
+
+def _schedule_diagnostic(
+    state: RunState,
+    service: SessionService,
+    session_id: str,
+    run_id: str,
+    reason: str,
+) -> None:
+    # 故障状态先落地；诊断写入异步进行，数据库等待不得阻塞收尾或主事件循环。
+    task = asyncio.create_task(
+        _record_diagnostic(service, session_id, run_id, reason)
+    )
+    state.diagnostic_tasks.append(task)
+    task.add_done_callback(_consume_future)
+
+
+async def _bounded_read(
+    state: RunState, awaitable: Awaitable, timeout: float
+) -> object:
+    # 投影与收尾状态读取共用有界协调：超时返回哨兵，不取消底层任务、不回滚。
+    task = asyncio.ensure_future(awaitable)
+    try:
+        done, _ = await asyncio.wait({task}, timeout=max(0.0, timeout))
+    except BaseException:
+        state.inflight_reads.append(task)
+        task.add_done_callback(_consume_future)
+        raise
+    if task in done:
+        return task.result()
+    state.inflight_reads.append(task)
+    task.add_done_callback(_consume_future)
+    return READ_TIMEOUT
+
+
+def _finalization_read_budget(_state: RunState) -> float:
+    # 终态提交前的收尾读取使用独立短上限；不与执行收尾预算重复起算，也不无限等待。
+    return TERMINAL_PERSIST_WAIT_SECONDS
+
+
+async def _watch_control(
+    state: RunState, coordinator: SteeringCoordinator, run_id: str
+) -> None:
+    # 主事件循环监控同一运行截止时间；停止信号一到即关闭 Steering 新输入。
+    deadline = state.control.deadline
+    while not state.control.cancelled:
+        if deadline is not None and deadline.expired():
+            state.control.request_cancel("run_timeout")
+            break
+        wait = 0.05 if deadline is None else min(0.05, max(0.001, deadline.remaining()))
+        await asyncio.sleep(wait)
+    state.control.note_stop()
+    coordinator.close(run_id)
+
+
+async def _fault_close(
+    state: RunState,
+    root: TraceSpan,
+    coordinator: SteeringCoordinator,
+    service: SessionService,
+    session_id: str,
+    run_id: str,
+    reason: str,
+    work,
+    concurrent_future,
+) -> object:
+    # 保留运行占用并进入故障封闭：不发布成功确认、不释放名额。
+    state.mark_fault(reason, concurrent_future, state.tool_tracker.pending())
+    # 故障状态先落地；诊断写入异步进行，避免数据库等待再次阻塞收尾。
+    _schedule_diagnostic(state, service, session_id, run_id, reason)
+    root.set_status("failed", reason)
+    coordinator.close(run_id)
+    enter_fault_closure()
+    if work is not None and not work.done():
+        work.add_done_callback(_consume_future)
+    logger.error("运行进入故障封闭（%s/%s）", run_id, reason)
+    return FAULT_CLOSED
+
+
+async def _wait_tools(state: RunState) -> bool:
+    # 共享收尾预算：从首次停止时刻起算，任务二工具层已消耗的等待不重复计时。
+    cooperative_deadline = state.control.cooperative_deadline()
+    if cooperative_deadline is None:
+        cooperative_deadline = monotonic() + CANCEL_COOPERATIVE_WAIT_SECONDS
+    remaining = max(0.0, cooperative_deadline - monotonic())
+    # wait_all 是阻塞等待：放入线程执行，保持主事件循环可调度。
+    return await asyncio.to_thread(state.tool_tracker.wait_all, remaining)
 
 
 async def coordinate(
@@ -1394,50 +1825,144 @@ async def coordinate(
 
     async def settle(root: TraceSpan):
         nonlocal failure, stop_reason
-        try:
-            # 模型请求使用摘要感知投影；原始路径继续供业务校验与公开历史使用。
-            projection = await service.get_projection(session_id, run.request_entry_id)
-            branch = projection.context.messages
-            future = executor.submit(
-                execute, run, session_id, branch, tools, state, service, business,
-                loop, model, secrets, root,
-            )
-            stop_reason = await asyncio.wrap_future(future)
-        except BaseException as error:
-            failure = error
-
-        cancelled = isinstance(failure, CancelledError) or state.cancel.is_set()
-        status, code, message = terminal_decision(failure, cancelled)
-
-        current = await service.get_run(session_id, run.id)
-        if current.status in TERMINAL_RUN_STATUSES:
-            # 已有终态保持原值，仍执行收尾以关闭接收入口并丢弃剩余输入。
-            status, code, message = (
-                current.status,
-                current.error_code,
-                current.error_message,
-            )
-        outcome = await coordinator.finish(
-            session_id,
-            run.id,
-            status,
-            error_code=code,
-            error_message=message,
+        watcher = asyncio.create_task(
+            _watch_control(state, coordinator, run.id)
         )
-        # 业务终态提交成功后才显式设置根状态；读取或提交失败时根按自动失败结算。
-        root_status = {"completed": "completed", "cancelled": "cancelled"}.get(status, "failed")
-        root.set_status(root_status, code)
-        return outcome
+        concurrent_future = None
+        future = None
+        try:
+            try:
+                # 投影读取纳入运行截止时间与共享协作预算；数据库持锁不得越过两项时限。
+                projection = await _bounded_read(
+                    state,
+                    service.get_projection(session_id, run.request_entry_id),
+                    state.control.deadline.remaining()
+                    + CANCEL_COOPERATIVE_WAIT_SECONDS,
+                )
+                if projection is READ_TIMEOUT:
+                    # 底层投影任务保留在 state.inflight_reads，等待超时不作为回滚证据。
+                    state.control.request_cancel("run_timeout")
+                    return await _fault_close(
+                        state, root, coordinator, service, session_id, run.id,
+                        "terminal_persist_failed", None, None,
+                    )
+                branch = projection.context.messages
+                concurrent_future = executor.submit(
+                    execute, run, session_id, branch, tools, state, service, business,
+                    loop, model, secrets, root,
+                )
+                future = asyncio.wrap_future(concurrent_future)
+            except BaseException as error:
+                failure = error
+
+            if future is not None:
+                # 主循环持续观察工作 future 的真实退出；停止后超过共享收尾预算即故障封闭。
+                while True:
+                    done, _ = await asyncio.wait({future}, timeout=0.05)
+                    if done:
+                        break
+                    if state.control.cancelled:
+                        state.control.note_stop()
+                        deadline = state.control.cooperative_deadline()
+                        if deadline is not None and monotonic() >= deadline:
+                            return await _fault_close(
+                                state, root, coordinator, service, session_id, run.id,
+                                "worker_stuck", future, concurrent_future,
+                            )
+                try:
+                    stop_reason = future.result()
+                except BaseException as error:
+                    failure = error
+
+            if not await _wait_tools(state):
+                return await _fault_close(
+                    state, root, coordinator, service, session_id, run.id,
+                    "worker_stuck", future, concurrent_future,
+                )
+
+            cancelled = isinstance(failure, CancelledError) or state.cancel.is_set()
+            # 首个有效停止原因（若有）裁决终态；仅取消信号而无停止原因时沿用既有取消契约。
+            recorded_stop = state.control.stop.reason
+            status, code, message = terminal_decision(failure, cancelled, recorded_stop)
+
+            try:
+                # 收尾读取同样纳入共享协作预算；超时保留底层读取任务并故障封闭。
+                current = await _bounded_read(
+                    state,
+                    service.get_run(session_id, run.id),
+                    _finalization_read_budget(state),
+                )
+            except BaseException:
+                return await _fault_close(
+                    state, root, coordinator, service, session_id, run.id,
+                    "terminal_persist_failed", future, concurrent_future,
+                )
+            if current is READ_TIMEOUT:
+                return await _fault_close(
+                    state, root, coordinator, service, session_id, run.id,
+                    "terminal_persist_failed", future, concurrent_future,
+                )
+            if current.status in TERMINAL_RUN_STATUSES:
+                # 已有终态保持原值，仍执行收尾以关闭接收入口并丢弃剩余输入。
+                status, code, message = (
+                    current.status,
+                    current.error_code,
+                    current.error_message,
+                )
+
+            # 终态持久化等待从实际调用 finish 提交时起计；超时不回滚、不再次提交。
+            finish_task = asyncio.create_task(coordinator.finish(
+                session_id,
+                run.id,
+                status,
+                error_code=code,
+                error_message=message,
+                stop_reason=recorded_stop,
+            ))
+            done, _ = await asyncio.wait(
+                {finish_task}, timeout=TERMINAL_PERSIST_WAIT_SECONDS
+            )
+            if not done:
+                finish_task.add_done_callback(_consume_future)
+                return await _fault_close(
+                    state, root, coordinator, service, session_id, run.id,
+                    "terminal_persist_failed", future, concurrent_future,
+                )
+            try:
+                outcome = finish_task.result()
+            except BaseException:
+                return await _fault_close(
+                    state, root, coordinator, service, session_id, run.id,
+                    "terminal_persist_failed", future, concurrent_future,
+                )
+            # 业务终态提交成功后才显式设置根状态；读取或提交失败时根按自动失败结算。
+            root_status = {"completed": "completed", "cancelled": "cancelled"}.get(
+                status, "failed"
+            )
+            root.set_status(root_status, code)
+            return outcome
+        finally:
+            watcher.cancel()
+            with suppress(asyncio.CancelledError):
+                await watcher
 
     try:
         outcome = await trace.start_span("agent_run", {}, settle)
     except BaseException:
         # 收尾读取或终态提交失败：根已记为 failed，尝试保存诊断，不发布已持久化终态确认，
         # 保留数据库真实状态及尚未完成收尾的运行占用。
-        state.closed_without_terminal = True
+        state.mark_fault("terminal_persist_failed", None, state.tool_tracker.pending())
+        _schedule_diagnostic(
+            state, service, session_id, run.id, "terminal_persist_failed"
+        )
+        coordinator.close(str(run.id))
+        enter_fault_closure()
         await trace.finish(store)
         raise
     await trace.finish(store)
+    if outcome is FAULT_CLOSED:
+        # 故障封闭路径已关闭 SSE 并保留占用，禁止发布终态或释放名额。
+        return
     publish_terminal(state, outcome.run, stop_reason)
     retire(state)
 
@@ -1461,36 +1986,48 @@ def track(application: FastAPI, task: asyncio.Task) -> None:
     task.add_done_callback(finalized)
 
 
-def stream(request: Request, state: RunState) -> AsyncIterator[str]:
-    async def generate() -> AsyncIterator[str]:
-        tool_call_id = None
+SSE_HEARTBEAT = b": keep-alive\n\n"
+
+
+def stream(request: Request, state: RunState) -> AsyncIterator[bytes]:
+    async def generate() -> AsyncIterator[bytes]:
+        last_emit = monotonic()
         while True:
+            # 故障封闭：保留占用但立即关闭 SSE，不发布任何终态确认。
+            if state.closed_without_terminal:
+                return
             if await request.is_disconnected():
                 state.disconnect()
                 return
-            while not state.events.empty():
-                if await request.is_disconnected():
-                    state.disconnect()
+            if state.events.terminal_filled:
+                remaining = state.events.terminal_remaining()
+                if remaining is not None and remaining <= 0:
                     return
-                event = state.events.get_nowait()
-                if event.event == "tool_start":
-                    tool_call_id = event.data["tool_call_id"]
-                elif event.event == "tool_result":
-                    tool_call_id = None
-                elif event.event == "error":
-                    event.data["tool_call_id"] = tool_call_id
-                yield encode(event)
-                if event.event in {"done", "error"}:
+            event = state.events.take()
+            if event is None and state.events.terminal_filled:
+                event = state.events.take_terminal()
+            if event is not None:
+                yield event.payload
+                last_emit = monotonic()
+                if event.name in {"done", "error"}:
                     return
-            if state.closed_without_terminal:
-                return
-            await asyncio.sleep(0.01)
+                continue
+            now = monotonic()
+            idle = now - last_emit
+            if idle >= SSE_HEARTBEAT_SECONDS:
+                # 心跳不刷新运行预算，只遵守同一发送时限。
+                yield SSE_HEARTBEAT
+                last_emit = monotonic()
+            else:
+                await asyncio.sleep(
+                    min(0.02, max(0.001, SSE_HEARTBEAT_SECONDS - idle))
+                )
 
     return generate()
 
 
 class RunStream(StreamingResponse):
-    def __init__(self, state: RunState, body: AsyncIterator[str]):
+    def __init__(self, state: RunState, body: AsyncIterator[bytes]):
         super().__init__(body, media_type="text/event-stream", headers={
             "Cache-Control": "no-cache",
             "X-Accel-Buffering": "no",
@@ -1502,9 +2039,32 @@ class RunStream(StreamingResponse):
         self.state = state
 
     async def __call__(self, scope, receive, send):
+        # 在真实 ASGI send 边界施加单次发送时限；终态排空期间动态取剩余总时限的较小值。
+        async def bounded_send(message):
+            pending = asyncio.ensure_future(send(message))
+            started = monotonic()
+            try:
+                while True:
+                    timeout = SSE_SEND_WAIT_SECONDS - (monotonic() - started)
+                    remaining = self.state.events.terminal_remaining()
+                    if remaining is not None:
+                        timeout = min(timeout, remaining)
+                    if timeout <= 0:
+                        raise TimeoutError("SSE 发送超过时限")
+                    done, _ = await asyncio.wait(
+                        {pending}, timeout=min(0.05, timeout)
+                    )
+                    if done:
+                        await pending
+                        return
+            finally:
+                if not pending.done():
+                    pending.cancel()
+
         try:
-            await super().__call__(scope, receive, send)
+            await super().__call__(scope, receive, bounded_send)
         finally:
+            # 断连回调只发出取消信号并关闭 Steering；已提交终态与名额由 coordinate 独占管理。
             self.state.disconnect()
 
 
@@ -1852,26 +2412,58 @@ async def launch_run(
     service: SessionService = request.app.state.session_service
     coordinator: SteeringCoordinator = request.app.state.steering
     loop = asyncio.get_running_loop()
-    # 新操作再检查关闭状态：关闭期间返回 run_busy，不创建记录、不调度线程。
+    # 故障封闭与关闭状态先于额度检查：恢复依赖人工受控重启。
+    if is_fault_closed():
+        reject(503, "service_unavailable", "服务正在恢复，暂不接受新运行。")
     if not request.app.state.accepting_runs:
         reject(409, "run_busy", "服务正在关闭，暂不接受新运行。")
 
-    if not active.acquire(blocking=False):
-        reject(409, "run_busy", "已有任务正在执行")
-
-    submitted = False
+    # 参数与会话存在性校验先于名额与额度。
     try:
-        disconnected = await request.is_disconnected()
         await service.get_session(session_id)
-        model = load_model_config()
-        # 运行凭据快照覆盖模型密钥与检索密钥；两者均参与消息、Trace 与结果的凭据检查。
-        secrets = tuple(secret for secret in (model.api_key, retrieval_secret()) if secret)
-        tools = create_file_tools(session_id)
+    except SessionNotFound:
+        reject(404, "session_not_found", "会话不存在。")
+
+    # 同会话运行冲突沿用既有 409；不同会话继续竞争全局名额。
+    if await service.find_running_run_for_session(session_id) is not None:
+        reject(409, "run_busy", "已有任务正在执行。")
+
+    # 会话频率额度：只检查不扣减；受理成功后才扣一次。
+    if not session_run_limits.available(session_id):
+        retry_after = session_run_limits.retry_after(session_id)
+        reject(
+            429,
+            "rate_limited",
+            "请求过于频繁，请稍后重试。",
+            headers={"Retry-After": str(retry_after)},
+        )
+
+    model = load_model_config()
+    # 运行凭据快照覆盖模型密钥与检索密钥；两者均参与消息、Trace 与结果的凭据检查。
+    secrets = tuple(secret for secret in (model.api_key, retrieval_secret()) if secret)
+    tools = create_file_tools(session_id)
+    disconnected = await request.is_disconnected()
+
+    # 全局名额在同一主事件循环临界区检查并占用；不排队，失败直接 503。
+    if not active.acquire(blocking=False):
+        reject(503, "capacity_exceeded", "当前已有任务执行中，请稍后重试。")
+
+    slot_owned = True
+    accepted_run = None
+    try:
         outcome = await accept(service, tools, secrets)
         if not outcome.created:
+            # 幂等重放不启动执行、不扣额度；防御性归还预占名额。
             active.release()
+            slot_owned = False
             return JSONResponse(send_result(operation_id, outcome.run))
+
+        accepted_run = outcome.run
         run = outcome.run
+        # 受理成功扣减一次会话额度；同会话受理由 session_gate 串行。
+        if not session_run_limits.consume(session_id):
+            logger.error("会话运行额度扣减失败（%s）", session_id)
+
         # 新运行受理成功：捕获受理起点并复用真实业务身份，建立唯一记录器与 agent_run 根 Span。
         trace = RunTrace(
             session_id=session_id,
@@ -1897,47 +2489,70 @@ async def launch_run(
             request.app.state.executor, loop, trace, request.app.state.trace_store,
         ))
         # 运行登记与独立收尾任务登记同关闭快照互斥，确保已受理运行必被等待。
+        # 运行登记后立即移交名额所有权；收尾任务异常也不得回落到预占路径。
         state.task = task
         with runs_lock:
             runs[state.run_id] = state
+        slot_owned = False
+        with runs_lock:
             track(request.app, task)
             closing = not request.app.state.accepting_runs
-        # 断连或关闭只设置取消信号并关闭接收入口，收尾任务继续完成收尾。
+        # 断连或关闭只设置同一取消信号并关闭接收入口，收尾任务继续完成收尾。
         if disconnected or closing:
-            state.cancel.set()
+            state.control.request_cancel("cancelled")
             coordinator.close(run.id)
-        submitted = True
         return RunStream(state, stream(request, state))
     except OperationExpired:
-        active.release()
+        if slot_owned:
+            active.release()
         reject_operation_expired()
     except CredentialDetected:
-        active.release()
+        if slot_owned:
+            active.release()
         reject(422, "credential_detected", CREDENTIAL_SAFE_MESSAGE)
     except RunBusy:
-        active.release()
+        if slot_owned:
+            active.release()
         reject(409, "run_busy", "已有任务正在执行。")
     except InvalidTargetEntry:
-        active.release()
+        if slot_owned:
+            active.release()
         reject(409, "invalid_target_entry", "目标节点必须是用户消息。")
     except EntryNotFound:
-        active.release()
+        if slot_owned:
+            active.release()
         reject(404, "entry_not_found", "指定会话中找不到目标节点。")
     except IncompleteToolChain:
-        active.release()
+        if slot_owned:
+            active.release()
         reject(409, "incomplete_tool_chain", "执行分支存在未配对的工具调用。")
     except OperationConflict:
-        active.release()
+        if slot_owned:
+            active.release()
         reject(409, "operation_conflict", "操作请求冲突。")
     except SessionMismatch:
-        active.release()
+        if slot_owned:
+            active.release()
         reject(409, "session_mismatch", "运行与会话不匹配。")
     except SessionNotFound:
-        active.release()
+        if slot_owned:
+            active.release()
         reject(404, "session_not_found", "会话不存在。")
     except BaseException:
-        if not submitted:
-            active.release()
+        if slot_owned:
+            try:
+                if accepted_run is not None:
+                    # 受理记录已提交：尽力落为可追踪失败，随后归还预占名额。
+                    with suppress(Exception):
+                        await service.finish_run(
+                            session_id,
+                            accepted_run.id,
+                            "failed",
+                            error_code="execution_failed",
+                            error_message="执行失败，请重新发起请求。",
+                        )
+            finally:
+                active.release()
         raise
 
 

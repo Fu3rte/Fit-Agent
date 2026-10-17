@@ -507,7 +507,9 @@ def check() -> None:
             ) as response:
                 assert response.status_code == 200
                 assert active.locked()
-                assert client.post("/api/agent/run", json=payload).status_code == 409
+                capacity = client.post("/api/agent/run", json=payload)
+                assert capacity.status_code == 503
+                assert capacity.json()["detail"]["code"] == "capacity_exceeded"
                 assert (
                     client.post(
                         "/api/agent/run",
@@ -553,7 +555,9 @@ def check() -> None:
                 assert disconnected[-1]["event"] == "tool_result"
                 assert disconnected[-1]["data"]["tool_call_id"] == write_id
             assert active.locked()
-            assert client.post("/api/agent/run", json=payload).status_code == 409
+            capacity = client.post("/api/agent/run", json=payload)
+            assert capacity.status_code == 503
+            assert capacity.json()["detail"]["code"] == "capacity_exceeded"
             wait_idle()
             assert stored_messages(session) == session_after_failure
             assert (cancelled_workspace / "disconnect.txt").read_text(encoding="utf-8") == token

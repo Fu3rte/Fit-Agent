@@ -136,7 +136,7 @@ const history = {
     { type: "message", entry_id: nodeSlow, parent_id: assistantId, run_id: runId, created_at: 3, message: { role: "toolResult", tool_call_id: "tc-slow", tool_name: "read", content: "slow-result", is_error: false, timestamp: 3 } },
     { type: "message", entry_id: nodeFast, parent_id: nodeSlow, run_id: runId, created_at: 4, message: { role: "toolResult", tool_call_id: "tc-fast", tool_name: "ls", content: "fast-result", is_error: false, timestamp: 4 } },
   ],
-  runs: [{ session_id: u(50), run_id: runId, request_entry_id: userEntry, last_entry_id: nodeFast, status: "completed", started_at: 1, finished_at: 5, error_code: null, error_message: null }],
+  runs: [{ session_id: u(50), run_id: runId, request_entry_id: userEntry, last_entry_id: nodeFast, status: "completed", started_at: 1, finished_at: 5, error_code: null, error_message: null, stop_reason: null }],
   steering: [],
   // 确认契约 §7.6：确认操作与待确认引用为历史必填数组，本场景两份均为空
   confirmations: [],

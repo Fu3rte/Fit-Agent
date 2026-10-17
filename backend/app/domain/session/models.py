@@ -422,6 +422,10 @@ class SessionRun(Model):
     finished_at: int | None
     error_code: str | None
     error_message: str | None
+    # 首个有效停止原因：与终态状态分离，供重启后查询；无停止原因时为 None。
+    stop_reason: str | None = None
+    # 执行诊断原因：worker_stuck / terminal_persist_failed；无诊断时为 None。
+    stop_diagnostic: str | None = None
 
 
 SteeringStatus: TypeAlias = Literal[

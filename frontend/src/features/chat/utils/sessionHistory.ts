@@ -18,6 +18,7 @@ import {
   attachmentDisplay,
   preparedPlanDisplay,
   registerHiddenNode,
+  runErrorMessage,
   type HiddenNode,
   type PendingOperation,
   type ReActEntry,
@@ -154,6 +155,7 @@ export function historyToRounds(history: SessionHistoryWire): ReActRound[] {
   const ensureRound = (run: HistoryRunWire): ReActRound => {
     const existing = roundByRun.get(run.run_id);
     if (existing !== undefined) return existing;
+    const error = runErrorMessage(run);
     const round: ReActRound = {
       id: run.run_id,
       run_id: run.run_id,
@@ -162,7 +164,7 @@ export function historyToRounds(history: SessionHistoryWire): ReActRound[] {
       finished_at: run.finished_at,
       entries: [],
       status: run.status,
-      ...(run.error_message !== null ? { error: run.error_message } : {}),
+      ...(error !== undefined ? { error } : {}),
     };
     roundByRun.set(run.run_id, round);
     rounds.push(round);

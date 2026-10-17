@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Protocol
 
 from app.agent.compaction import EffectiveContext, build_effective_context
+from app.agent.governance import DIAGNOSTIC_REASONS, RunDiagnosticReason
 from app.ai.context import validate_tool_pairs
 from app.ai.messages import Message, SystemMessage, UserMessage, serialize_message
 from app.application.session.attachment_files import (
@@ -1074,6 +1075,7 @@ class SessionService:
         *,
         error_code: str | None = None,
         error_message: str | None = None,
+        stop_reason: str | None = None,
         credentials: Sequence[str] = (),
     ) -> RunOutcome:
         if _contains_credential(
@@ -1095,11 +1097,29 @@ class SessionService:
                     "finished_at": now,
                     "error_code": error_code,
                     "error_message": error_message,
+                    "stop_reason": stop_reason,
                 }
             )
             await self._repository.update_run(run)
             await self._discard_pending(session_id, run_id, status, now)
             return RunOutcome(changed=True, run=run)
+
+    async def record_run_diagnostic(
+        self,
+        session_id: str,
+        run_id: str,
+        diagnostic: RunDiagnosticReason,
+    ) -> SessionRun:
+        # 运行级诊断槽位：保留首个已记录证据，后续诊断不覆盖；供重启后核对故障原因。
+        if diagnostic not in DIAGNOSTIC_REASONS:
+            raise ValueError(f"未登记的运行诊断原因：{diagnostic}")
+        async with self._repository.transaction():
+            run = await self._require_run(session_id, run_id)
+            if run.stop_diagnostic is not None:
+                return run
+            run = run.model_copy(update={"stop_diagnostic": diagnostic})
+            await self._repository.update_run(run)
+            return run
 
     async def recover_interrupted(self) -> list[SessionRun]:
         async with self._repository.transaction():
@@ -1126,6 +1146,8 @@ class SessionService:
             finished_at=None,
             error_code=None,
             error_message=None,
+            stop_reason=None,
+            stop_diagnostic=None,
         )
 
     async def _record_operation(
@@ -1172,6 +1194,12 @@ class SessionService:
         running = await self._repository.find_running_run()
         if running is not None:
             raise RunBusy(f"已有运行正在执行: {running.id}")
+
+    async def find_running_run_for_session(
+        self, session_id: str
+    ) -> SessionRun | None:
+        # 会话级冲突检查：在全局名额与频率额度之前判定同会话运行冲突。
+        return await self._repository.find_running_run_for_session(session_id)
 
     async def ensure_idle(self) -> None:
         # 新确认与新 Agent 运行互斥：确认受理在空闲时校验，占用时拒绝登记。

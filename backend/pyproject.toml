@@ -19,6 +19,7 @@ dependencies = [
     "jsonschema>=4",
     "jsonpointer>=3,<4",
     "pymilvus>=3.0.2,<3.1",
+    "limits>=5,<6",
 ]
 
 # 源码以 backend/ 下的 app namespace package 直接导入。

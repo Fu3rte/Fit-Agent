@@ -19,6 +19,7 @@ const runItem = (overrides = {}) => ({
   finished_at: 2_000,
   error_code: null,
   error_message: null,
+  stop_reason: null,
   ...overrides,
 });
 
@@ -77,10 +78,18 @@ try {
   const detached = runItem({ request_entry_id: u(50), last_entry_id: u(51), status: "failed", finished_at: 3_000, error_code: "credential_detected", error_message: "安全失败。" });
   assert.deepEqual(runs([detached])().runs[0], detached, "分支外节点身份不影响列表解析");
 
-  // 4. 可空字段与必填字段：last_entry_id/finished_at/error_code/error_message 允许 null，缺失即报错
+  // 4. 可空字段与必填字段：last_entry_id/finished_at/error_code/error_message/stop_reason 允许 null，缺失即报错
   assert.equal(runs([runItem({ last_entry_id: null, finished_at: null })])().runs[0].last_entry_id, null, "可空字段接受 JSON null");
   invalid("缺少 error_code 报错", /无效/, runs([{ ...runItem(), error_code: undefined }]));
   invalid("缺少 run_id 报错", /无效/, runs([{ ...runItem(), run_id: undefined }]));
+
+  // 4.1 运行停止原因：null 与登记枚举原样返回，缺失或未登记值即报错
+  assert.equal(runs([runItem({ stop_reason: null })])().runs[0].stop_reason, null, "未记录停止原因接受 JSON null");
+  for (const reason of ["model_timeout", "tool_timeout", "run_timeout", "cancelled", "slow_consumer", "output_too_large"])
+    assert.equal(runs([runItem({ stop_reason: reason })])().runs[0].stop_reason, reason, `停止原因 ${reason} 原样返回`);
+  invalid("缺少 stop_reason 报错", /无效/, runs([{ ...runItem(), stop_reason: undefined }]));
+  invalid("未登记停止原因报错", /无效/, runs([runItem({ stop_reason: "provider_restart" })]));
+  invalid("停止原因非字符串报错", /无效/, runs([runItem({ stop_reason: "" })]));
 
   // 5. 身份校验：顶层及每项 session_id 必须等于路径会话
   invalid("顶层会话身份不一致报错", /不匹配/, () => parseSessionRunList(sessionId, { session_id: otherSession, runs: [] }));
@@ -151,7 +160,8 @@ try {
 
   // 13. 枚举、时间与必填字段校验：列表 timestamp 为 UTC Unix 毫秒整数（§3、§4）
   invalid("未知输入状态报错", /无效/, steering([steeringItem({ status: "accepted" })]));
-  invalid("text 空串报错", /无效/, steering([steeringItem({ text: "" })]));
+  // 空文字是合法输入（附件非空时允许空文字，backend-http-sse-contract §6.1）：列表投影原样保留
+  assert.equal(steering([steeringItem({ text: "" })])().steering[0].text, "", "空文字输入原样保留");
   invalid("timestamp 非有限数值报错", /无效/, steering([steeringItem({ timestamp: Number.POSITIVE_INFINITY })]));
   invalid("timestamp 为字符串报错", /无效/, steering([steeringItem({ timestamp: "1500" })]));
   invalid("timestamp 为负报错", /无效/, steering([steeringItem({ timestamp: -1 })]));

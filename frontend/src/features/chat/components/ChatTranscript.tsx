@@ -449,6 +449,7 @@ function Entry({
 export default function ChatTranscript({
   sessionId,
   rounds,
+  stoppingRoundId,
   onRetry,
   onWithdraw,
   retrying,
@@ -463,6 +464,8 @@ export default function ChatTranscript({
 }: {
   sessionId: string;
   rounds: ReActRound[];
+  /** 已请求停止、等待持久化终态的轮次（治理契约）：保持运行未结束并展示“正在停止” */
+  stoppingRoundId: string | null;
   onRetry: (roundId: string, operationId: string) => void;
   onWithdraw: (roundId: string, steeringId: string) => void;
   retrying?: string;
@@ -617,7 +620,23 @@ export default function ChatTranscript({
                         entry.stop_reason === "length",
                     )) && (
                     <MessageScrollerItem messageId={`${round.id}:status`}>
-                      {round.status === "running" && (
+                      {stoppingRoundId === round.id && (
+                        <div className="flex items-center gap-2">
+                          <Loader2
+                            role="status"
+                            aria-label="正在停止"
+                            className="size-4 animate-spin text-muted-foreground"
+                          />
+                          <p
+                            role="status"
+                            className="text-sm text-muted-foreground"
+                          >
+                            正在停止
+                          </p>
+                        </div>
+                      )}
+                      {round.status === "running" &&
+                        stoppingRoundId !== round.id && (
                         <div className="flex items-center gap-2">
                           <Loader2
                             role="status"

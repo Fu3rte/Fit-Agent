@@ -4,6 +4,7 @@ from threading import Event
 
 from app.agent.budget import RequestBudget
 from app.agent.cache_observation import CacheObserver
+from app.agent.governance import TOOL_EXECUTION_SECONDS, RunControl, RunDeadline
 from app.agent.message_context import ConvertToLlm, TransformContext, convert_to_llm
 from app.agent.telemetry import TraceSpan
 from app.agent.tool import (
@@ -13,6 +14,7 @@ from app.agent.tool import (
     CredentialCheck,
     ExecutionMode,
     OnToolUpdate,
+    ToolExecutionTracker,
 )
 from app.ai.messages import Message
 from app.ai.types import ModelSpec
@@ -48,6 +50,14 @@ class AgentLoopConfig:
     model_spec: ModelSpec | None = None
     # 运行级共享请求预算；普通请求、摘要及恢复重试共用同一实例，未装配时为 None。
     request_budget: RequestBudget | None = None
+    # 运行截止时间（单调时钟）：与取消信号一同传入模型与压缩边界；未装配时不限制运行时长。
+    deadline: RunDeadline | None = None
+    # 运行控制：与 deadline 共用取消信号，模型/工具超时时记录首个停止原因；未装配时只抛出异常。
+    run_control: RunControl | None = None
+    # 在途工具执行证据：超时或取消后未退出的同步线程保留在此，供收尾任务核对真实退出。
+    tool_tracker: ToolExecutionTracker | None = None
+    # 单次工具执行上限；仍取自身值、运行剩余预算与任务当前时限的较小值。
+    tool_timeout_seconds: float = TOOL_EXECUTION_SECONDS
     compaction: CompactionHooks | None = None
     tool_execution: ExecutionMode = "parallel"
     convert_to_llm: ConvertToLlm = convert_to_llm

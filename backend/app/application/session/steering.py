@@ -201,6 +201,7 @@ class SteeringCoordinator:
         *,
         error_code: str | None = None,
         error_message: str | None = None,
+        stop_reason: str | None = None,
     ) -> RunOutcome:
         boundary = self._boundaries.get(run_id)
         if boundary is None:
@@ -210,6 +211,7 @@ class SteeringCoordinator:
                 status,
                 error_code=error_code,
                 error_message=error_message,
+                stop_reason=stop_reason,
             )
         async with boundary.gate.exclusive():
             boundary = self._boundaries.get(run_id)
@@ -220,6 +222,7 @@ class SteeringCoordinator:
                 status,
                 error_code=error_code,
                 error_message=error_message,
+                stop_reason=stop_reason,
             )
             if boundary is not None:
                 boundary.accepting = False
