@@ -2358,7 +2358,7 @@ def observe_milvus_rpc(stats: dict):
 
 
 def preflight_mode() -> None:
-    import test.retrieval_evaluation_support as support
+    from evaluation import retrieval_support as support
     from app.application.business.retrieval_index import MilvusConnection
 
     require_source_identity("preflight")

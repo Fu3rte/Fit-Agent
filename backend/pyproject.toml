@@ -27,7 +27,9 @@ package = false
 
 [dependency-groups]
 dev = [
+    "langsmith>=0.14.11",
     "pytest>=9.1",
+    "ranx>=0.3.21",
     "ruff>=0.16",
 ]
 

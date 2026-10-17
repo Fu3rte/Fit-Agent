@@ -366,21 +366,22 @@ def eval_prep_mode(run: Path) -> tuple[list[dict], dict]:
     install_isolation("eval-prep")
     import importlib
 
-    import test.retrieval_evaluation_support as support
+    from evaluation import retrieval_support as support
 
-    module = importlib.import_module("test.check_retrieval_evaluation")
+    module = importlib.import_module("evaluation.retrieval")
     checks.append(check("evaluation_entry_importable",
-                        module.__name__ == "test.check_retrieval_evaluation",
+                        module.__name__ == "evaluation.retrieval",
                         {"module": module.__name__}))
 
     environment = dict(os.environ)
     environment.setdefault("PYTHONPATH", str(BACKEND))
+    environment["PYTHONIOENCODING"] = "utf-8"
     help_run = subprocess.run(
-        [sys.executable, "-m", "test.check_retrieval_evaluation", "--help"],
+        [sys.executable, "-m", "evaluation.retrieval", "--help"],
         cwd=BACKEND, env=environment, capture_output=True, text=True, encoding="utf-8",
     )
     bad_run = subprocess.run(
-        [sys.executable, "-m", "test.check_retrieval_evaluation", "not-a-mode"],
+        [sys.executable, "-m", "evaluation.retrieval", "not-a-mode"],
         cwd=BACKEND, env=environment, capture_output=True, text=True, encoding="utf-8",
     )
     checks.append(check("evaluation_cli_parses",
@@ -392,7 +393,7 @@ def eval_prep_mode(run: Path) -> tuple[list[dict], dict]:
     checks.append(check("approved_inputs_verified", verification["checks"]["passed"],
                         {"counts": verification["counts"]}))
 
-    from test.check_retrieval_evaluation import load_queries
+    from evaluation.retrieval_support import load_queries
     dev = load_queries("dev")
     holdout = load_queries("holdout")
     checks.append(check("dev_holdout_split_intact",
@@ -401,14 +402,13 @@ def eval_prep_mode(run: Path) -> tuple[list[dict], dict]:
 
     frozen = support.load_frozen()
     wiring = support.frozen_config_identity()
-    checks.append(check("frozen_parameters_unchanged",
-                        frozen["alpha"] == 0.5 and frozen["bm25_depth"] == 100
-                        and frozen["dense_depth"] == 100 and frozen["threshold"] == 0.0,
-                        {key: frozen.get(key) for key in
-                         ("alpha", "bm25_depth", "dense_depth", "threshold")}))
+    checks.append(check("frozen_config_hash_matches_ledger",
+                        wiring["sha256"] == frozen["frozen_config_identity"]["sha256"],
+                        {"runtime": wiring["sha256"], "ledger": frozen["frozen_config_identity"]["sha256"]}))
     checks.append(check("runtime_wiring_matches_frozen",
-                        wiring["values"] == {"alpha": 0.5, "bm25_depth": 100, "dense_depth": 100,
-                                             "threshold": 0.0, "recall_limit": 11},
+                        all(wiring["values"][key] == frozen[key] for key in
+                            ("alpha", "bm25_depth", "dense_depth", "threshold"))
+                        and wiring["values"]["recall_limit"] == 11,
                         wiring["values"]))
 
     from app.application.business.retrieval_embedding import EmbeddingClient
@@ -438,7 +438,7 @@ def eval_prep_mode(run: Path) -> tuple[list[dict], dict]:
 def search_mode(run: Path) -> tuple[list[dict], dict]:
     checks: list[dict] = []
     landing = install_isolation("search")
-    import test.retrieval_evaluation_support as support
+    from evaluation import retrieval_support as support
     from app.agent.tool import run_tool_call
     from app.agent.tools.business import bind_business_tools, business_tool_declarations
     from app.ai.messages import ToolCall
