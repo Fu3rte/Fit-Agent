@@ -1,11 +1,12 @@
 import hashlib
 import json
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
 
 from test.v2_budget import BudgetLedger, LedgerAttributionUnresolved
-from test.v2_contract import ROUNDS
+from test.v2_contract import ROUNDS, ExperimentEnv
 
 
 def timestamp():
@@ -53,8 +54,39 @@ def execution_identity(backend, cases_path, model_identity, catalog_path):
     return {"source_sha256": digest.hexdigest(), "model_identity": model_identity}
 
 
+def slot_attachment_root(env: ExperimentEnv) -> Path:
+    return authorized_attachment_root(env.execution_root, env.attachment_root)
+
+
+def authorized_attachment_root(execution_root, attachment_root) -> Path:
+    from app.agent.tools.files import reject_links
+
+    def absolute(value):
+        value = str(value)
+        if os.name == "nt":
+            if value.startswith("\\\\?\\UNC\\"):
+                value = "\\\\" + value[8:]
+            elif value.startswith("\\\\?\\"):
+                value = value[4:]
+        path = Path(os.path.abspath(value))
+        reject_links(Path(path.anchor), path.relative_to(path.anchor))
+        return path
+
+    root = absolute(execution_root)
+    directory = absolute(attachment_root)
+    if directory == root or not directory.is_relative_to(root):
+        raise ValueError("附件根必须位于当前执行根的独立槽目录内")
+    # 扩展路径仅用于文件系统访问，env 与领取记录保留原始身份路径。
+    if os.name == "nt":
+        value = str(directory)
+        directory = Path("\\\\?\\UNC\\" + value[2:] if value.startswith("\\\\") else "\\\\?\\" + value)
+        reject_links(Path(directory.anchor), directory.relative_to(directory.anchor))
+    return directory
+
+
 def claim_slot(env):
     # 领取与共享停止置位共用同一把锁：置位后新领取被拒（不创建 claim），保证原子边界。
+    attachment_root = slot_attachment_root(env)
     root = Path(env.execution_root)
     claim = root / "claims" / f"{env.case_id}-r{env.round_index}.json"
     record = {
@@ -84,7 +116,7 @@ def claim_slot(env):
             "attribution": unresolved.attribution, "at": timestamp(),
         })
         raise
-    artifacts = [Path(env.evidence_dir), Path(env.attachment_root)]
+    artifacts = [Path(env.evidence_dir), attachment_root]
     for database in (env.database_path, env.trace_path):
         artifacts.extend(Path(database + suffix) for suffix in ("", "-wal", "-shm", "-journal"))
     if any(path.exists() for path in artifacts):
@@ -116,7 +148,7 @@ def create_attempt(directory, case_id, round_index, purpose, reason, identity):
     attempt_id = uuid4().hex
     attempt_root = root / "reproductions" / attempt_id
     ledger = BudgetLedger(budget_path(root), experiment_id=manifest["experiment_id"])
-    ledger.claim_guarded(lambda: attempt_root.mkdir(parents=True, exist_ok=False))
+    ledger.claim_guarded(lambda: attempt_root.mkdir(parents=True, exist_ok=False), require_settled=True)
     record = {
         "attempt_id": attempt_id, "purpose": purpose, "reason": reason,
         "parent_slot": {"experiment_id": manifest["experiment_id"], "case_id": case_id, "round_index": round_index},

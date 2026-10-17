@@ -429,11 +429,12 @@ def check_regenerate_rejects_confirmation(live: Live) -> dict:
         "target_entry_id": saved["confirmation_entry_id"],
     })
     assert regenerate.status_code == 409, regenerate.text
-    assert regenerate.json()["detail"]["code"] == "invalid_target_entry"
+    assert regenerate.json()["detail"]["code"] == "invalid_target_entry", regenerate.text
     # 确认结果查询保持原对象。
     fetched = live.get_op(session, saved["operation_id"])
     assert fetched.status_code == 200 and fetched.json()["status"] == "saved"
-    return {"regenerate": regenerate.json()["detail"]["code"]}
+    return {"regenerate": regenerate.json()["detail"]["code"],
+            "status_code": regenerate.status_code, "response": regenerate.json()}
 
 
 def check_history_filters_and_pending(live: Live) -> dict:

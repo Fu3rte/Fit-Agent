@@ -8,6 +8,7 @@ import platform
 import sqlite3
 import sys
 import time
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from functools import partial
 from pathlib import Path
@@ -15,10 +16,8 @@ from typing import Any, Callable, Sequence
 from uuid import uuid4
 
 from app import model_config
-from app.agent import telemetry
 from app.agent.tools.business import business_tool_declarations
 from app.ai.messages import TextContent, ToolResultMessage
-from app.application.session import service as session_service_module
 from app.domain.session.models import SendCommand, SendRequest
 from app.infrastructure.persistence.sqlite import database as database_module
 from app.interfaces.http import app
@@ -192,7 +191,9 @@ class SuiteRoot:
         self.base = experiment_dir / group_dir
         self.database_path = self.base / "app.db"
         self.trace_path = self.base / "trace.db"
-        self.attachment_root = self.base / ATTACHMENT_DIR
+        from test.v2_attempts import authorized_attachment_root
+
+        self.attachment_root = authorized_attachment_root(self.base, self.base / ATTACHMENT_DIR)
         self.samples_dir = self.base / "samples"
         self.attachment_root.mkdir(parents=True, exist_ok=True)
         self.samples_dir.mkdir(parents=True, exist_ok=True)
@@ -204,13 +205,25 @@ class SuiteRoot:
             "trace": str(self.trace_path),
             "attachments": str(self.attachment_root),
             "samples": str(self.samples_dir),
+            "file_tools_tmp_root": str(self.attachment_root / "tmp"),
+            "observations": str(self.base / "observations"),
         }
 
-    def bind(self) -> None:
-        # 生产库、生产观测库与会话附件根保持零改动：只重定向这三处模块级路径提供者。
-        session_service_module.PROJECT_ROOT = self.attachment_root
-        telemetry.trace_database_path = lambda: self.trace_path
-        database_module.default_database_path = lambda: self.database_path
+    @contextmanager
+    def bind(self):
+        from app.agent import cache_observation, telemetry
+        from app.application.session import service as session_service
+        from test.v2_eval_support import evaluation_roots
+
+        with evaluation_roots(self.attachment_root, self.database_path, self.trace_path,
+                              self.base / "observations"):
+            _write_json(self.base / "init.json", {
+                **self.paths(), "effective_database": str(database_module.default_database_path()),
+                "effective_trace": str(telemetry.trace_database_path()),
+                "effective_attachments": str(session_service.PROJECT_ROOT),
+                "effective_observations": str(cache_observation.observation_directory()),
+            })
+            yield self
 
 
 class MeasuredLive(Live):
@@ -609,9 +622,8 @@ def _guarded(
 
 
 def run_protocol(root: SuiteRoot) -> list[dict]:
-    root.bind()
     samples: list[dict] = []
-    with Server(app) as server:
+    with root.bind(), Server(app) as server:
         live = MeasuredLive(server)
         for name, items, scenario in PROTOCOL_SCENARIOS:
             live.reset()
@@ -621,9 +633,15 @@ def run_protocol(root: SuiteRoot) -> list[dict]:
     # 重启恢复两个分支各自使用独立库，均在专项目录内：lifespan 对账在真实启动序列中执行。
     for name, item, scenario in PROTOCOL_RECOVERY_SCENARIOS:
         samples.append(
-            _guarded(root, name, GROUP_PROTOCOL, (item,), partial(scenario, root.base))
+            _guarded(root, name, GROUP_PROTOCOL, (item,),
+                     partial(_run_recovery, root, scenario))
         )
     return samples
+
+
+def _run_recovery(root, scenario):
+    with root.bind():
+        return scenario(root.base)
 
 
 def _attach_protocol_timings(root: SuiteRoot, sample: dict, timings: dict) -> dict:
@@ -804,9 +822,8 @@ def real_sample(
 
 
 def run_real(root: SuiteRoot, identity: dict) -> list[dict]:
-    root.bind()
     samples: list[dict] = []
-    with Server(app) as server, client(server.base_url, timeout=900) as http:
+    with root.bind(), Server(app) as server, client(server.base_url, timeout=900) as http:
         live = Live(server)
         for name, kind, item, prompt in REAL_SCENARIOS:
             started = time.time()

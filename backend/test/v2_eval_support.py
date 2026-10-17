@@ -5,13 +5,14 @@ import hashlib
 import json
 import os
 import platform
+import re
 import shutil
 import subprocess
 import sys
 import time
 from contextlib import contextmanager
 from datetime import datetime, timezone
-from functools import wraps
+from functools import partial, wraps
 from pathlib import Path
 from uuid import uuid4
 
@@ -30,6 +31,7 @@ from test.v2_attempts import (
     budget_path,
     claim_slot,
     finish_slot,
+    slot_attachment_root,
     validate_unique_rounds,
 )
 from test.v2_budget import BudgetExhausted, BudgetLedger, StopTriggered
@@ -128,6 +130,20 @@ def validate_cases(cases: list[V2Case]) -> list[str]:
         duplicated = {item for item in check_ids if check_ids.count(item) > 1}
         if duplicated:
             errors.append(f"{case.case_id}: 检查项 ID 重复 {sorted(duplicated)}")
+        step_check_counts = {index: 0 for index in range(1, len(case.steps) + 1)}
+        for check in case.checks:
+            match = re.match(r"^[A-Z]\d+-S(\d+)-\d+$", check.check_id)
+            if match is None:
+                errors.append(f"{case.case_id}: 检查项 ID 格式非法 {check.check_id}")
+                continue
+            index = int(match.group(1))
+            if index not in step_check_counts:
+                errors.append(f"{case.case_id}: 检查项 {check.check_id} 指向不存在的步骤 {index}")
+                continue
+            step_check_counts[index] += 1
+        for index, count in step_check_counts.items():
+            if count == 0:
+                errors.append(f"{case.case_id}: 步骤 {index} 缺少检查项")
         for step in case.steps:
             if step.kind == "user" and not step.text:
                 errors.append(f"{case.case_id}: user 步骤缺少文本")
@@ -528,6 +544,7 @@ def capture_turn(http, session_id, *, case_id, round_index, step_index, request_
     try:
         with http.stream("POST", "/api/agent/run", json=payload) as response:
             if response.status_code != 200:
+                response.read()
                 raise RuntimeError(f"运行请求失败: {response.status_code} {response.text}")
             run_id = response.headers["X-Run-ID"]
             request_entry_id = response.headers["X-Request-Entry-ID"]
@@ -1035,8 +1052,26 @@ def _run_edit(http, session_id, *, case_id, round_index, step_index, step, opera
     )
 
 
-def _round_status(turns, confirmations, checks) -> str:
+def _integrity_error(integrity: dict) -> str | None:
+    problems: list[str] = []
+    if integrity.get("missing_check_ids"):
+        problems.append(f"缺少必需检查 {integrity['missing_check_ids']}")
+    if integrity.get("duplicate_check_ids"):
+        problems.append(f"检查项重复 {integrity['duplicate_check_ids']}")
+    if integrity.get("unexpected_check_ids"):
+        problems.append(f"计划外检查 {integrity['unexpected_check_ids']}")
+    if integrity.get("identity_errors"):
+        problems.append(f"检查身份错误 {integrity['identity_errors']}")
+    if integrity.get("contract_errors"):
+        problems.append(f"检查契约错误 {integrity['contract_errors']}")
+    return "; ".join(problems) if problems else None
+
+
+def _round_status(turns, confirmations, checks, integrity=None) -> str:
     if any(turn.terminal in {"error", "unknown"} for turn in turns if turn.kind == "user"):
+        return "error"
+    # 检查覆盖不完整属于证据缺口，任何空列表或缺项都不得落入 pass。
+    if integrity is not None and not integrity.get("complete", False):
         return "error"
     if any(check.status == "fail" for check in checks):
         return "fail"
@@ -1064,7 +1099,51 @@ def run_case_round(case: V2Case, round_index: int, slot: int, env: ExperimentEnv
                           execution_unit=execution_unit_of(env, slot),
                           attempt_id=env.attempt_id,
                           expected_trace_failure=env.expected_trace_failure):
-        return _run_case_round(case, round_index, slot, env, model_identity)
+        with slot_file_roots(env):
+            return _run_case_round(case, round_index, slot, env, model_identity)
+
+
+@contextmanager
+def evaluation_roots(directory, database_path, trace_path, observation_root):
+    from app.agent import cache_observation, telemetry
+    from test import p0_business_cases
+
+    originals = (database_module.default_database_path, telemetry.trace_database_path,
+                 cache_observation.observation_directory, p0_business_cases.TMP_ROOT)
+    database_module.default_database_path = lambda: Path(database_path)
+    telemetry.trace_database_path = lambda: Path(trace_path)
+    cache_observation.observation_directory = lambda: Path(observation_root)
+    p0_business_cases.TMP_ROOT = directory / "tmp"
+    try:
+        with file_roots(directory):
+            yield directory
+    finally:
+        (database_module.default_database_path, telemetry.trace_database_path,
+         cache_observation.observation_directory, p0_business_cases.TMP_ROOT) = originals
+
+
+@contextmanager
+def slot_file_roots(env: ExperimentEnv):
+    with evaluation_roots(slot_attachment_root(env), env.database_path, env.trace_path,
+                          Path(env.execution_root) / "observations") as directory:
+        yield directory
+
+
+@contextmanager
+def file_roots(directory):
+    from app.application.session import service as session_service
+    from app.interfaces import http as http_interface
+
+    directory = Path(directory)
+    original_root = session_service.PROJECT_ROOT
+    original_factory = http_interface.create_file_tools
+    session_service.PROJECT_ROOT = directory
+    http_interface.create_file_tools = partial(original_factory, tmp_root=directory / "tmp")
+    try:
+        yield directory
+    finally:
+        http_interface.create_file_tools = original_factory
+        session_service.PROJECT_ROOT = original_root
 
 
 def _run_case_round(case: V2Case, round_index: int, slot: int, env: ExperimentEnv, model_identity: dict) -> RoundObservation:
@@ -1079,13 +1158,18 @@ def _run_case_round(case: V2Case, round_index: int, slot: int, env: ExperimentEn
     database_path.parent.mkdir(parents=True, exist_ok=True)
     trace_path = Path(env.trace_path)
     from app.agent import telemetry
-    from app.application.session import service as session_service
 
-    attachment_root = Path(env.attachment_root)
+    attachment_root = slot_attachment_root(env)
     attachment_root.mkdir(parents=True, exist_ok=False)
-    session_service.PROJECT_ROOT = attachment_root
     telemetry.trace_database_path = lambda: trace_path
     database_module.default_database_path = lambda: database_path
+    # 逐模型调用观测同样隔离到本次实验目录：应用默认写 backend/data/cache-observation，
+    # 不重定向会让评测自写生产目录并在收尾被判为 business_data 漂移。
+    from app.agent import cache_observation
+
+    observation_root = Path(env.execution_root) / "observations"
+    observation_root.mkdir(parents=True, exist_ok=True)
+    cache_observation.observation_directory = lambda: observation_root
     evidence_dir = Path(env.evidence_dir)
     evidence_dir.mkdir(parents=True, exist_ok=True)
     session_id = str(uuid4())
@@ -1271,6 +1355,10 @@ def _run_case_round(case: V2Case, round_index: int, slot: int, env: ExperimentEn
                     raise StopTriggered(pending_stop)
             duration_ms = business_ms_total
             total_wall_ms = (time.perf_counter() - round_started) * 1000.0
+            from test.v2_business_cases import check_coverage
+
+            integrity = check_coverage(case, checks, round_index=round_index)
+            integrity_error = _integrity_error(integrity)
             observation = RoundObservation(
                 case_id=case.case_id,
                 round_index=round_index,
@@ -1280,6 +1368,7 @@ def _run_case_round(case: V2Case, round_index: int, slot: int, env: ExperimentEn
                 turns=turns,
                 confirmations=confirmations,
                 checks=checks,
+                check_integrity=integrity,
                 usage=_sum_turns_usage(turns),
                 duration_ms=duration_ms,
                 startup_ms=startup_ms,
@@ -1291,8 +1380,12 @@ def _run_case_round(case: V2Case, round_index: int, slot: int, env: ExperimentEn
                     "artifact_write_ms": artifact_write_ms,
                 },
                 total_wall_ms=total_wall_ms,
-                status=_round_status(turns, confirmations, checks),
-                error_type=next((turn.error_type for turn in turns if turn.status == "failed" and turn.error_type), None),
+                status=_round_status(turns, confirmations, checks, integrity),
+                error=integrity_error,
+                error_type=(
+                    next((turn.error_type for turn in turns if turn.status == "failed" and turn.error_type), None)
+                    or ("CheckCoverageError" if integrity_error else None)
+                ),
             )
     except BaseException as error:
         _write_json(
@@ -1311,6 +1404,19 @@ def _run_case_round(case: V2Case, round_index: int, slot: int, env: ExperimentEn
                 "completed_turns": [turn.model_dump() for turn in turns],
             },
         )
+        from test.v2_business_cases import check_coverage
+
+        observation = RoundObservation(
+            case_id=case.case_id, round_index=round_index, slot=slot,
+            session_id=session_id, process_index=env.process_index,
+            turns=turns, confirmations=confirmations, checks=checks,
+            check_integrity=check_coverage(case, checks, round_index=round_index),
+            usage=_sum_turns_usage(turns), status="error", error=str(error), error_type=exception_type(error),
+            startup_ms=startup_ms, precondition_ms=precondition_ms,
+            total_wall_ms=(time.perf_counter() - round_started) * 1000.0,
+        )
+        _write_json(evidence_dir / "round.json", observation.model_dump())
+        finish_slot(claim, observation)
         raise
     _write_json(evidence_dir / "round.json", observation.model_dump())
     finish_slot(claim, observation)
@@ -1441,6 +1547,41 @@ def _duration_totals(rounds: list[RoundObservation]) -> dict:
     }
 
 
+def annotate_check_integrity(rounds: list[RoundObservation], cases: list[V2Case]) -> list[RoundObservation]:
+    # 读取既有证据时按冻结用例派生覆盖结论：原始 status/checks 原样保留，只附加派生标记。
+    from test.v2_business_cases import check_coverage
+
+    by_case = {case.case_id: case for case in cases}
+    annotated: list[RoundObservation] = []
+    for observation in rounds:
+        case = by_case.get(observation.case_id)
+        if case is None:
+            integrity = {
+                "complete": False,
+                "required_check_ids": [],
+                "observed_check_ids": [item.check_id for item in observation.checks],
+                "missing_check_ids": [],
+                "duplicate_check_ids": [],
+                "unexpected_check_ids": [item.check_id for item in observation.checks],
+                "identity_errors": [],
+                "contract_errors": [f"未知用例 {observation.case_id}"],
+            }
+        else:
+            integrity = check_coverage(case, observation.checks, round_index=observation.round_index)
+        annotated.append(observation.model_copy(update={"check_integrity": integrity}))
+    return annotated
+
+
+def _effective_status(observation: RoundObservation) -> str:
+    # 已有 fail/error 保留业务终态；缺证据只覆盖 pass/pending，避免掩盖真实失败。
+    if observation.status in {"fail", "error"}:
+        return observation.status
+    integrity = observation.check_integrity
+    if integrity is not None and not integrity.get("complete", False):
+        return "insufficient_evidence"
+    return observation.status
+
+
 def aggregate(rounds: list[RoundObservation], planned_case_ids=None, repeats: int = ROUNDS) -> dict:
     validate_unique_rounds(rounds)
     ordered = sorted(rounds, key=lambda item: (item.case_id, item.round_index))
@@ -1454,24 +1595,28 @@ def aggregate(rounds: list[RoundObservation], planned_case_ids=None, repeats: in
     per_round = []
     for index in range(repeats):
         observed = [r for r in ordered if r.round_index == index]
-        passed = [r for r in observed if r.status == "pass"]
+        passed = [r for r in observed if _effective_status(r) == "pass"]
+        missing = [r for r in observed if _effective_status(r) == "insufficient_evidence"]
         per_round.append(
             {
                 "round_index": index,
                 "observed": len(observed),
                 "passed": len(passed),
+                "insufficient_evidence": len(missing),
                 "rate": (len(passed) / len(case_ids)) if case_ids else None,
             }
         )
 
+    # 正式分母固定为计划用例 × 轮次；缺证据单列，不改变分母。
     executions = len(case_ids) * repeats if planned_case_ids is not None else len(ordered)
-    passed_executions = sum(1 for r in ordered if r.status == "pass")
+    passed_executions = sum(1 for r in ordered if _effective_status(r) == "pass")
     distribution = {f"{count}/{repeats}": 0 for count in range(repeats + 1)}
     stable = 0
     for case_id in case_ids:
         bucket = rounds_by_case[case_id]
         passed_rounds = sum(
-            1 for index in range(repeats) if bucket.get(index) is not None and bucket[index].status == "pass"
+            1 for index in range(repeats)
+            if bucket.get(index) is not None and _effective_status(bucket[index]) == "pass"
         )
         distribution[f"{passed_rounds}/{repeats}"] += 1
         if passed_rounds == repeats:
@@ -1487,18 +1632,37 @@ def aggregate(rounds: list[RoundObservation], planned_case_ids=None, repeats: in
         bucket["cases"] += 1
         observed = [rounds_by_case[case_id][i] for i in range(repeats) if rounds_by_case[case_id].get(i)]
         bucket["executions"] += repeats if planned_case_ids is not None else len(observed)
-        bucket["passed_executions"] += sum(1 for r in observed if r.status == "pass")
-        if len(observed) == repeats and all(r.status == "pass" for r in observed):
+        bucket["passed_executions"] += sum(1 for r in observed if _effective_status(r) == "pass")
+        bucket["missing_evidence_executions"] = bucket.get("missing_evidence_executions", 0) + sum(
+            1 for r in observed if _effective_status(r) == "insufficient_evidence"
+        )
+        if len(observed) == repeats and all(_effective_status(r) == "pass" for r in observed):
             bucket["stable_cases"] += 1
-        bucket["pending_review_rounds"] += sum(1 for r in observed if r.status == "pending_review")
+        bucket["pending_review_rounds"] += sum(
+            1 for r in observed if _effective_status(r) == "pending_review"
+        )
     for bucket in categories.values():
         bucket["execution_pass_rate"] = bucket["passed_executions"] / bucket["executions"] if bucket["executions"] else None
         bucket["stable_pass_rate"] = bucket["stable_cases"] / bucket["cases"] if bucket["cases"] else None
 
     failures = [
-        {"case_id": r.case_id, "round_index": r.round_index, "slot": r.slot, "status": r.status}
+        {"case_id": r.case_id, "round_index": r.round_index, "slot": r.slot, "status": _effective_status(r)}
         for r in ordered
-        if r.status not in {"pass", "pending_review"}
+        if _effective_status(r) not in {"pass", "pending_review", "insufficient_evidence"}
+    ]
+    missing_evidence = [
+        {
+            "case_id": r.case_id,
+            "round_index": r.round_index,
+            "slot": r.slot,
+            "missing_check_ids": (r.check_integrity or {}).get("missing_check_ids", []),
+            "duplicate_check_ids": (r.check_integrity or {}).get("duplicate_check_ids", []),
+            "unexpected_check_ids": (r.check_integrity or {}).get("unexpected_check_ids", []),
+            "identity_errors": (r.check_integrity or {}).get("identity_errors", []),
+            "contract_errors": (r.check_integrity or {}).get("contract_errors", []),
+        }
+        for r in ordered
+        if r.check_integrity is not None and not r.check_integrity.get("complete", False)
     ]
     pending_review = [
         {"case_id": r.case_id, "round_index": r.round_index, "check_id": c.check_id, "reason": c.reason}
@@ -1511,8 +1675,10 @@ def aggregate(rounds: list[RoundObservation], planned_case_ids=None, repeats: in
         bucket = rounds_by_case[case_id]
         per_case[case_id] = {
             "category": _category_of(case_id),
-            "rounds": {str(i): (bucket[i].status if bucket.get(i) else None) for i in range(repeats)},
-            "passed_rounds": sum(1 for i in range(repeats) if bucket.get(i) and bucket[i].status == "pass"),
+            "rounds": {str(i): (_effective_status(bucket[i]) if bucket.get(i) else None) for i in range(repeats)},
+            "passed_rounds": sum(
+                1 for i in range(repeats) if bucket.get(i) and _effective_status(bucket[i]) == "pass"
+            ),
         }
     return {
         "independent_cases": len(case_ids),
@@ -1522,6 +1688,7 @@ def aggregate(rounds: list[RoundObservation], planned_case_ids=None, repeats: in
         "observed_executions": len(ordered),
         "expected_executions": len(case_ids) * repeats,
         "passed_executions": passed_executions,
+        "missing_evidence_executions": len(missing_evidence),
         "execution_pass_rate": (passed_executions / executions) if executions else None,
         "stable_cases": stable,
         "stable_pass_rate": (stable / len(case_ids)) if case_ids else None,
@@ -1532,6 +1699,7 @@ def aggregate(rounds: list[RoundObservation], planned_case_ids=None, repeats: in
         "usage": _usage_totals(ordered),
         "durations": _duration_totals(ordered),
         "failures": failures,
+        "missing_evidence": missing_evidence,
         "pending_review": pending_review,
     }
 
@@ -1670,7 +1838,10 @@ def apply_v2_review(
             observation.model_copy(
                 update={
                     "checks": checks,
-                    "status": _round_status(observation.turns, observation.confirmations, checks),
+                    "status": _round_status(
+                        observation.turns, observation.confirmations, checks,
+                        observation.check_integrity,
+                    ),
                 }
             )
         )
@@ -1799,15 +1970,13 @@ def _trace_artifact_metadata(stat: dict) -> dict:
 
 
 def _source_signature(source: dict[str, Path]) -> dict:
-    # 静默窗口判定签名：源数据文件（库本体与 -wal、-journal）的集合 + 内容/大小/mtime。
+    # 一致快照判定签名：源数据文件（库本体与全部既有 sidecar，含 -wal/-shm/-journal）
+    # 的集合 + 内容/大小/mtime。
     #
-    # `-shm` 是 WAL 的共享内存索引，由打开该库的连接创建、随连接关闭消失，其内容
-    # 随打开方式变化。它是连接级派生结构而非源数据，任何探针连接都会让它出现或
-    # 改变。因此它从稳定性判定中完全排除，只在副本里做尽力复制与存在性留证。
+    # 采集器全程不打开源库（SQLite 只在副本内开库），`-shm` 因此不再由探针自身连接
+    # 派生，可完整纳入零写入判定，不需要从稳定性比较中排除。
     signature = {}
     for name, item in sorted(source.items()):
-        if name.endswith("-shm"):
-            continue
         try:
             signature[name] = _file_identity(item)
         except (FileNotFoundError, PermissionError, OSError):
@@ -1841,105 +2010,44 @@ def _signature_stable(before: dict, after: dict) -> bool:
     return True
 
 
-def _exclusive_quiet_window(path: Path, *, timeout_seconds: float = 10.0,
-                            settle_seconds: float = 0.05) -> dict:
-    """以独占锁握手取得**可证明**的静默窗口：整个文件集合在窗口内不可能被写入。
+# 一致快照取得机制：文件级采样，全过程不打开源库。
+FILE_SNAPSHOT_MECHANISM = "file_level_snapshot_no_source_open"
 
-    单纯相邻采样签名相同不足以证明源静止：SQLite 在提交后可能把 WAL 帧留在
-    进程/OS 缓冲中，使持续提交的源在采样看来完全冻结（已实测：活动源 60 次采样
-    零可观察变化，而同一源在独占锁下立即报 database is locked）。因此本函数通过
-    真正的互斥握手取得窗口：
 
-    1. 以 SQLite 打开源库并取得 `BEGIN EXCLUSIVE` 事务。独占事务持有期间，
-       任何其他连接都无法提交写入；源因此从取得锁起处于可证明的静止状态。
-    2. 锁内按聚合签名确认源文件集合与内容身份；随后 `ROLLBACK` 立即释放。
-    3. 释放后仍可能产生新的写入，故复制完成后再取一次签名与锁内签名比对：
-       两者一致即证明复制发生在静默窗口内。
+def _copy_with_source_check(source: dict[str, Path], copy_dir: Path, *, path: Path) -> dict:
+    """在**不打开源库**的前提下取得一致文件副本。
 
-    该握手对源库只建立一次短事务并立即回滚：不提交、不写入、不 checkpoint、
-    不改变 journal mode。无法取得独占事务时按失败返回并给出具体原因，由调用方
-    明确 blocked，禁止降级为"采样看起来没变"就宣称窗口成立。
-
-    注意：以第二个连接打开 WAL 库会让 SQLite 建立 `-shm` 共享内存索引，这对
-    文件集合是一次真实新增。窗口签名因此在**取得锁之后**才采样，并在复制前
-    等待该派生 sidecar 出现并稳定，避免把探针自身引入的 `-shm` 误判为源被改写。
+    一致性判定：复制前后对源数据文件集合（库本体与全部既有 sidecar，含 -shm）取
+    内容/大小/mtime 签名并逐项比对。签名一致即证明复制期间源未发生可观察写入；
+    签名偏离即判失败，禁止把新状态当作基线。SQLite 只在副本内开库（见
+    `_trace_store_stat`），源库在整个采集过程中不建立任何连接，也不取得任何锁。
     """
-    import sqlite3
-
-    connection = sqlite3.connect(str(path), timeout=timeout_seconds, isolation_level=None)
-    try:
-        # 先取独占锁（需要写锁），锁内再置 query_only，确保探针自身不产生写入。
-        connection.execute("BEGIN EXCLUSIVE")
-        try:
-            connection.execute("PRAGMA query_only = ON")
-            time.sleep(settle_seconds)
-            # 锁内采样：签名只含源数据文件，见 `_source_signature` 的说明。
-            signature = _source_signature(_trace_source_files(path))
-        finally:
-            connection.execute("ROLLBACK")
-        return {
-            "acquired": True,
-            "mechanism": "sqlite_begin_exclusive_handshake",
-            "signature": signature,
-            "samples": 2,
-            "interval_seconds": settle_seconds,
-            "proof": "独占事务持有期间源库无法提交任何写入；事务内 PRAGMA query_only=ON 保证探针自身零写入",
-        }
-    except sqlite3.Error as error:
-        return {"acquired": False,
-                "mechanism": "sqlite_begin_exclusive_handshake",
-                "reason": f"无法取得独占静默窗口：{type(error).__name__}: {error}",
-                "blocked": True}
-    finally:
-        connection.close()
-
-
-def _copy_under_quiet_window(source: dict[str, Path], copy_dir: Path, *, path: Path,
-                             attempts: int = 3) -> dict:
-    """在可证明的静默窗口内复制完整集合，并在复制后验证窗口签名仍然成立。
-
-    窗口由独占事务握手取得（见 `_exclusive_quiet_window`）。复制结束后再取一次
-    源签名：只有与锁内签名一致才认定副本确实在静默窗口内取得。
-
-    复制期间签名一旦偏离，说明源在窗口内发生了真实写入，必须立即判失败：
-    禁止通过重新取窗口重试把已发生的写入"洗成"新基线——那会把活动源伪装成
-    静止源，是本机制要防的核心缺陷。仅当**从未观察到任何写入**时才允许重试
-    （例如窗口被并发事务短暂挡住）。
-    """
-    observed_write = False
-    for attempt in range(1, attempts + 1):
-        window = _exclusive_quiet_window(path)
-        if not window["acquired"]:
-            if observed_write:
-                break
-            continue
-        signature = window["signature"]
-        for name, item in source.items():
-            if not item.exists():
-                continue
+    before = _source_signature(_trace_source_files(path))
+    for name, item in source.items():
+        if item.exists():
             shutil.copyfile(item, copy_dir / name)
-        # 源文件集合可能在窗口与复制之间新增 sidecar：以复制后的集合为准补齐。
-        for name, item in _trace_source_files(path).items():
-            if not (copy_dir / name).exists() and item.exists():
-                shutil.copyfile(item, copy_dir / name)
-        post = _source_signature(_trace_source_files(path))
-        if _signature_stable(signature, post):
-            return {**window, "attempt": attempt, "post_copy_signature": post}
-        # 复制期间检出源写入：立即停止，不重试、不把新状态当作基线。
-        observed_write = True
+    # 源文件集合可能在采样与复制之间新增 sidecar：以复制后的集合为准补齐。
+    for name, item in _trace_source_files(path).items():
+        if not (copy_dir / name).exists() and item.exists():
+            shutil.copyfile(item, copy_dir / name)
+    after = _source_signature(_trace_source_files(path))
+    if not _signature_stable(before, after):
         for copied in copy_dir.glob("*"):
             copied.unlink()
         return {"acquired": False,
-                "mechanism": window.get("mechanism"),
-                "reason": "静默窗口取得失败：复制前后源文件签名不一致（复制期间源被写入）",
+                "mechanism": FILE_SNAPSHOT_MECHANISM,
+                "reason": "一致快照取得失败：复制前后源文件签名不一致（复制期间源被写入）",
                 "blocked": True,
-                "signature": signature, "post_copy_signature": post}
-    return {"acquired": False,
-            "reason": "静默窗口取得失败：重试耗尽",
-            "blocked": True}
+                "signature": before, "post_copy_signature": after}
+    return {"acquired": True,
+            "mechanism": FILE_SNAPSHOT_MECHANISM,
+            "samples": 2,
+            "signature": before,
+            "post_copy_signature": after,
+            "proof": "复制前后源文件集合与内容/大小/mtime 签名一致；全过程未打开源库"}
 
 
-def _trace_store_stat(path: Path, *, snapshot_root=None, quiet_window: bool = True) -> dict:
+def _trace_store_stat(path: Path, *, snapshot_root=None) -> dict:
     # 源文件零写入：不对源库创建任何 SQLite 连接，仅做标准文件复制。
     # 一致副本 = 库本体与既有 sidecar 的完整文件副本，SQLite 只打开本次独立副本；
     # 副本内的 WAL 恢复由 SQLite 处理，不手写 WAL parser、不 checkpoint 源库。
@@ -1953,35 +2061,26 @@ def _trace_store_stat(path: Path, *, snapshot_root=None, quiet_window: bool = Tr
     source = _trace_source_files(path)
     copy_dir = root / f"{path.stem}-{uuid4().hex}"
     copy_dir.mkdir(parents=True, exist_ok=True)
-    # 一致性取得机制：静默窗口必须覆盖复制前后；窗口有效才复制完整集合。
-    if quiet_window:
-        window = _copy_under_quiet_window(source, copy_dir, path=path)
-        if not window["acquired"]:
-            return _consistency_error(
-                "静默窗口未取得：" + window["reason"],
-                before=window.get("signature") or {},
-                after=window.get("post_copy_signature")
-                or _source_signature(_trace_source_files(path)),
-            )
-    else:
-        window = {"acquired": False, "reason": "未启用静默窗口取得",
-                  "interval_seconds": None, "samples": 0}
-        for name, item in source.items():
-            if item.exists():
-                shutil.copyfile(item, copy_dir / name)
+    # 一致性取得机制：文件级采样覆盖复制前后；签名一致才认定副本在一致状态内取得。
+    window = _copy_with_source_check(source, copy_dir, path=path)
+    if not window["acquired"]:
+        return _consistency_error(
+            "一致快照未取得：" + window["reason"],
+            before=window.get("signature") or {},
+            after=window.get("post_copy_signature")
+            or _source_signature(_trace_source_files(path)),
+        )
     before = window["signature"]
-    # 复制后的复核：只比较源数据文件的内容身份。副本已在静默窗口内取得，
-    # 窗口释放后源可能立即产生新的写入；此时以"窗口签名 vs 复制后签名"的
-    # 数据文件内容比对为准，内容未变即证明复制落在静默窗口内。
+    # 复制后的复核：以"复制前签名 vs 复制后签名"的数据文件内容比对为准，
+    # 内容未变即证明复制期间源未被写入。
     after = _source_signature(_trace_source_files(path))
     if not _signature_stable(before, after):
         return _consistency_error("采集窗口内源文件被改写，副本不保证一致", before=before, after=after)
     copied = {name: copy_dir / name for name in after if (copy_dir / name).exists()}
     copied_identity = {name: _content_identity(item) for name, item in copied.items()}
-    # 副本一致性只核对承载已提交数据的文件（库本体与 -wal）：-shm 是连接创建的
-    # 派生索引，内容随打开方式变化，不参与副本内容相等判定。
-    data_names = sorted(name for name, item in before.items()
-                        if "sha256" in item and not name.endswith("-shm"))
+    # 副本一致性核对全部数据文件（库本体与既有 sidecar，含 -shm）：采集不打开源库，
+    # -shm 的副本内容应与源一致。
+    data_names = sorted(name for name, item in before.items() if "sha256" in item)
     source_content = {name: {"sha256": before[name]["sha256"], "bytes": before[name]["bytes"]}
                       for name in data_names}
     copied_content = {name: copied_identity[name] for name in data_names if name in copied_identity}
@@ -2004,8 +2103,8 @@ def _trace_store_stat(path: Path, *, snapshot_root=None, quiet_window: bool = Tr
         # 源文件集合与逐文件内容/大小/mtime 的完整快照：受保护身份的核心证据。
         "source_identity": {name: dict(item) for name, item in sorted(before.items())},
         "source_unchanged": True,
-        "consistency": "静默窗口内取得的 db+sidecar 完整文件副本；源文件集合/内容/大小/mtime 逐项一致",
-        "quiet_window": {key: value for key, value in window.items() if key != "signature"},
+        "consistency": "文件级采样取得的 db+sidecar 完整文件副本；源文件集合/内容/大小/mtime 逐项一致（未打开源库）",
+        "acquisition": {key: value for key, value in window.items() if key != "signature"},
         "taken_at": datetime.now(timezone.utc).isoformat(),
         "copy_dir": str(copy_dir),
         # 复制完成时副本内的完整文件集合：db 本体与全部既有 sidecar。
@@ -2055,7 +2154,7 @@ def _trace_store_stat(path: Path, *, snapshot_root=None, quiet_window: bool = Tr
     except BaseException as error:
         result["read_only"] = False
         result["error"] = f"{type(error).__name__}: {error}"
-    # 采集结束后的终态复核：比较源数据文件签名（-shm 由连接生命周期决定，不参与）。
+    # 采集结束后的终态复核：比较源数据文件签名（库本体与全部既有 sidecar，含 -shm）。
     final = _source_signature(_trace_source_files(path))
     if not _signature_stable(before, final):
         return _consistency_error("采集结束后源文件发生变化", before=before, after=final)
@@ -2156,6 +2255,31 @@ def _volume_identity() -> dict:
     return result
 
 
+def environment_preflight(evidence_dir, expected=None):
+    evidence_dir = Path(evidence_dir)
+    evidence_dir.mkdir(parents=True, exist_ok=True)
+    observed = {}
+    for key, probe in (("milvus", _milvus_identity), ("volumes", _volume_identity)):
+        try:
+            observed[key] = probe()
+        except Exception as error:
+            observed[key] = {"error": f"{exception_type(error)}: {error}"}
+    blockers = []
+    for key, value in observed.items():
+        reason = _baseline_unverified(key, value)
+        if reason:
+            blockers.append(f"{key}:unverified({reason})")
+        if expected is not None and expected.get(key) != value:
+            blockers.append(f"{key}:冻结环境身份不匹配")
+        if key == "volumes" and value.get("errors"):
+            blockers.append("volumes:inventory读取失败")
+    _write_json(evidence_dir / f"environment-{uuid4().hex}.json",
+                {"at": datetime.now(timezone.utc).isoformat(), "observed": observed, "blockers": blockers})
+    if blockers:
+        raise RuntimeError("只读环境预检失败：" + "; ".join(blockers))
+    return observed
+
+
 def protected_baseline(root, *, snapshot_root=None) -> dict:
     """受保护数据的只读基线：正式库、生产 Trace、附件目录、Embedding 配置、Milvus 身份与受保护卷。"""
     backend = Path(root) / "backend"
@@ -2172,6 +2296,10 @@ def protected_baseline(root, *, snapshot_root=None) -> dict:
         milvus = _milvus_identity()
     except Exception as error:
         milvus = {"error": f"{type(error).__name__}: {error}"}
+    try:
+        volumes = _volume_identity()
+    except OSError as error:
+        volumes = {"error": f"{exception_type(error)}: {error}"}
     return {
         "taken_at": datetime.now(timezone.utc).isoformat(),
         "business_data": _directory_digest(data),
@@ -2182,7 +2310,7 @@ def protected_baseline(root, *, snapshot_root=None) -> dict:
         },
         "embedding_config": embedding,
         "milvus": milvus,
-        "volumes": _volume_identity(),
+        "volumes": volumes,
     }
 
 
@@ -2212,9 +2340,9 @@ def _baseline_unverified(key: str, value) -> str | None:
         return "Milvus 身份不完整"
     if key == "production_trace" and value.get("exists") and value.get("read_only") is not True:
         return "Trace 一致副本采集未确认只读"
-    if key == "production_trace" and value.get("exists") and value.get("quiet_window") is not None:
-        if not value["quiet_window"].get("acquired"):
-            return "Trace 采集未取得可验证静默窗口"
+    if key == "production_trace" and value.get("exists") and value.get("acquisition") is not None:
+        if not value["acquisition"].get("acquired"):
+            return "Trace 采集未取得可验证一致快照"
     return None
 
 

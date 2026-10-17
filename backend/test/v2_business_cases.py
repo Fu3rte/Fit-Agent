@@ -8,7 +8,9 @@
 
 import asyncio
 import json
+import re
 import sqlite3
+from collections import Counter
 from uuid import uuid4
 
 from app.application.business.catalog import Catalog
@@ -321,7 +323,14 @@ def _as_p0_case(case: V2Case):
     return P0Case(
         case_id=case.case_id,
         category=case.category,
-        precondition=case.precondition,
+        precondition={
+            **(case.precondition or {}),
+            "sessions": list(dict.fromkeys([
+                *(case.precondition or {}).get("sessions", []),
+                *(spec["session"] for key in ("session_seed_runs", "cross_session_pending")
+                  for spec in (case.precondition or {}).get(key, [])),
+            ])),
+        },
         turns=[],
         checks=[],
         product_basis=case.product_basis,
@@ -526,21 +535,63 @@ class _RuleShim:
         self.rule = rule
 
 
+_CHECK_ID_PATTERN = re.compile(r"^(?P<case>[A-Z]\d+)-S(?P<step>\d+)-(?P<seq>\d+)$")
+
+
 def _step_index(check_id: str) -> int:
-    for part in check_id.split("-"):
-        if part.startswith("S") and part[1:].isdigit():
-            return int(part[1:])
-    return 1
+    # 检查项身份固定为 <case_id>-S<step>-<seq>：第二步片段才是步骤号，
+    # 不能把 S02 这类用例 ID 误读为步骤 2。
+    match = _CHECK_ID_PATTERN.match(check_id)
+    if match is None:
+        raise ValueError(f"检查项 ID 格式非法：{check_id}")
+    return int(match.group("step"))
+
+
+def declared_checks(case: V2Case, step_index: int) -> list:
+    return [check for check in case.checks if _step_index(check.check_id) == step_index]
+
+
+def check_coverage(case: V2Case, checks, *, round_index: int) -> dict:
+    # 必需检查覆盖与身份核对：空契约、缺项、重复、计划外 ID、跨用例/跨轮归属均视为证据不完整。
+    required = [check.check_id for check in case.checks]
+    required_set = set(required)
+    counts = Counter(item.check_id for item in checks)
+    declared = {check.check_id: check for check in case.checks}
+    missing = [check_id for check_id in required if counts.get(check_id, 0) == 0]
+    duplicates = sorted(check_id for check_id, count in counts.items() if count > 1)
+    unexpected = sorted(set(counts) - required_set)
+    identity_errors: list[str] = []
+    for item in checks:
+        if item.case_id != case.case_id:
+            identity_errors.append(f"{item.check_id} 归属用例 {item.case_id}")
+        if item.round_index != round_index:
+            identity_errors.append(f"{item.check_id} 归属轮次 {item.round_index}")
+        expected = declared.get(item.check_id)
+        if expected is not None and item.kind != expected.kind:
+            identity_errors.append(f"{item.check_id} 类型 {item.kind} != {expected.kind}")
+    contract_errors = [] if required else ["用例未声明冻结检查项"]
+    complete = not (missing or duplicates or unexpected or identity_errors or contract_errors)
+    return {
+        "complete": complete,
+        "required_check_ids": required,
+        "observed_check_ids": [item.check_id for item in checks],
+        "missing_check_ids": missing,
+        "duplicate_check_ids": duplicates,
+        "unexpected_check_ids": unexpected,
+        "identity_errors": identity_errors,
+        "contract_errors": contract_errors,
+    }
 
 
 def evaluate(case: V2Case, *, observation, service, database_path, business_context) -> list[CheckResult]:
     state = read_state(database_path, observation.session_id)
     catalog = Catalog.load()
     business_date = business_context.business_date
+    step_checks = declared_checks(case, observation.step_index)
+    if not step_checks:
+        raise ValueError(f"{case.case_id} 步骤 {observation.step_index} 缺少冻结检查项")
     results: list[CheckResult] = []
-    for check in case.checks:
-        if _step_index(check.check_id) != observation.step_index:
-            continue
+    for check in step_checks:
         if check.kind == "manual":
             results.append(
                 CheckResult(

@@ -2,9 +2,9 @@ from app.application.business.retrieval_response import SEARCH_LIMIT
 
 # T8 冻结参数接线：正式 runtime 的权重、两路召回深度与融合门槛。
 # 本文件为声明式运行配置，不计入 run_identity 源码快照；取值由
-# tmp/action-retrieval-t8/frozen-parameters.json 显式绑定，冻结前后核对取值与 SHA-256。
-# 取值来自 T8 开发集网格选定（alpha=0.5、两路深度=100、门槛=0.0），由冻结账本绑定核验。
-ALPHA = 0.5
+# backend/temp/retrieval-evaluation/frozen-parameters.json 显式绑定，冻结前后核对取值与 SHA-256。
+# 取值来自 T8 开发集网格选定（alpha=0.1、两路深度=100、门槛=0.0），由冻结账本绑定核验。
+ALPHA = 0.1
 BM25_DEPTH = 100
 DENSE_DEPTH = 100
 THRESHOLD: float | None = 0.0

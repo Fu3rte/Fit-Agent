@@ -1,65 +1,299 @@
-# Fit-Agent v2 量化评测 · 用例与执行审定稿
+# Fit-Agent v2 量化评测
 
-本文件是 v2 全量评测的审定依据。50 例清单、执行协议、指标口径与 v1 对应关系在本文件冻结后进入正式执行。审定对象为本文 §4 用例清单与 §7 待裁决项。
+## 1. 实验协议
 
----
-
-## 1. 现状核对（源码与运行证据）
-
-在冻结 v2 之前，基于当前源码核对 v1 报告的适用性。以下均由当前源码直接确认。
-
-| 项 | v1 报告假设 | 当前源码事实 | v2 处理 |
-|---|---|---|---|
-| 保存授权 | 模型在对话回合中"确认"后由保存工具落库 | 保存工具已从模型注册表移除；唯一保存路径是结构化确认 HTTP `POST /api/sessions/{sid}/confirmations`（四字段：`operation_id`/`business_kind`/`proposal_id`/`display_entry_id`），且该入口绑定后端生成的确认节点与 `processing` 账本操作 | v2 所有正向保存改由真实确认 HTTP 驱动；文字确认仅作为"零提交"负向验证 |
-| 确认节点 | 无 | `session_entries.confirmation`（迁移 012）由后端在受理事务内生成，`run_id=null`，正文固定为"确认保存画像/计划/训练记录"，附件为空 | 确认用例核对确认节点身份、`run_id`、绑定 |
-| 现 P0 入口 | 50 例 × 3 轮（`p0-official`） | 当前工作区为 25 例 × 2 轮（`p0_contract.ROUNDS=2`），且评测器只驱动 `/api/agent/run`，**不具备确认 HTTP 能力** | v2 新建独立入口与用例版本；不修改当前 25 例文件 |
-| 动作检索 | 名称子串匹配（`Catalog.search`） | 已实现 `search_exercises`（purpose 枚举 lookup/generation/replacement，语义输入 + 条件过滤）与 `get_exercise_details`；返回预算 10 条/4000 字符与 1..5 个 ID/7000 字符；依赖真实 Embedding + Milvus，缺配置或服务不可用时**明确失败**（非降级空结果） | v2 在业务链路中真实走检索，并按 §E 核验预算 |
-| Trace | 未落地 | `backend/app/agent/telemetry.py`（单事务写 `backend/data/trace.db`）、`app/agent/trace_report.py`（`metrics`/`show`）；确认根 Span `run_id=null`、属性仅 `business_kind` | v2 对账业务请求与确认根 |
-| 首正文 | 采首个 `text_delta` 事件（未校验非空正文） | 契约要求以**非空公开正文**为准；`agent_run.first_text_ms` 与 `model.first_text_ms` 分别定义 | v2 重采；v1 该指标标注口径差异 |
-
-v1 原始证据仍在 `backend/temp/p0-evaluation/p0-official/`（949 个文件，含 `cases/<id>/round-<n>/turn-<k>.json`、`summary.json`、`manifest.json`、`review-verdicts.json`），可用于 §D 的同口径重算与 §F 对账。
-
-**关键结论**：当前评测器无法产生任何已保存状态，因此 v1 依赖保存的检查项（P01/P02/…、C 类）在其证据中的实际结果需要以当前契约为准重新审视；v1 的通过率分母与失败清单保留原报告原文，v2 对照时标注口径变化。
-
----
-
-## 2. v2 执行架构
-
-- **用例版本**：新文件 `backend/test/v2_cases.json`，`case_version=3`；`ROUNDS=3`；类别配额 8/10/8/8/10/6。
-- **入口**：`backend/test/run_v2_eval.py`（自检 + 编排 + 分片 + 汇总 + 结算）。当前 25 例入口与 `p0_cases.json` 保持不变。
-- **并发**：固定 2 个隔离执行进程（`subprocess`，各起独立后端 `/api` 实例与事件循环）。每个进程领取互斥执行槽，全局最多同时 2 个场景在执行。记录调度顺序与实际并发。
-- **隔离**：每个执行槽独立业务库、独立 Trace 库、独立附件目录、独立会话；固定业务日期与时区（记录取值）。
-- **预算账本**：跨进程共享、持久化、原子更新（文件锁 + 原子替换）的 `budget-ledger.json`；每次 Embedding 请求前登记模型/尝试并预占，请求结束以真实 usage 对账。
-- **证据根**：`tmp/v2-evaluation/<experiment_id>/`（gitignore 内）。业务库、Trace 库、附件、冻结配置、日志全部显式定向，禁止写入 `backend/data/`。
-- **分层**：主 Agent 核对命令、退出码与证据；业务全量执行由一个测试 subagent 承担；语义评审由独立评审 Agent 承担。
-
----
-
-## 3. 用例模型
-
-v2 每例由**有序步骤**构成，步骤类型：
-
-| 类型 | 语义 |
+| 项 | 约定 / 实测 |
 |---|---|
-| `user` | 一次真实 `/api/agent/run`（真实 HTTP/SSE）。可携带附件引用（附件先经**真实上传接口**绑定到该消息）。 |
-| `confirm` | 一次真实结构化确认 `POST /api/sessions/{sid}/confirmations`。字段 `business_kind`、`operation`（幂等键）、`target`（在该类待确认快照中的选择；多于一个候选即记为阻塞，禁止"取最新"）。 |
-| `confirm_repeat` | 复用同一 `operation` 与相同四字段再次提交（同键同请求）。 |
-| `confirm_negative` | 负向确认：错误展示节点 / 跨会话目标 / 授权字段注入 / 旧快照，期望拒绝且零写入。 |
-| `operation_query` | `GET /api/sessions/{sid}/confirmations/{operation_id}` 或业务状态查询（恢复/结果读取）。 |
-| `edit` | `/api/agent/edit` 编辑既有消息节点（C09 等）。 |
+| 正式实验 ID / 执行 commit / 时间与环境 | `v2-formal-20261017T0050Z`；commit `6f12eb9a7c81881ba31fba0bc8d1c11e3f8edb11`；`created_at` 2026-10-17T00:42:05Z，首槽 00:42:11Z，末槽 01:31:00Z（UTC）；Windows + Python 3.13.13；源码身份 `ee5f8520af95c2743e37d7f54c103fb16f9f18f0703f10758142c7264ce32b26`；用例身份 `68a11f884316065eb9aa70c02f044b477a90c2a4397e5343d8b1f30f282b97c9` |
+| 用例 | `backend/test/v2_cases.json`，`case_version=3`；50 例 × 3 轮＝150 槽；配额 8/10/8/8/10/6 |
+| 入口与并发 | `backend/test/run_v2_eval.py`；正式入口启动一次，两个 worker 分担 150 槽，最多同时两个场景 |
+| 模型 | Stepfun `step-3.7-flash`；参数、供应商配置、动作目录及检索身份随实验冻结，哈希写入 manifest |
+| 隔离 | 每槽独立业务库、Trace、附件和会话；业务日期与时区固定 |
+| 冒烟 | P01/L07/L10/W01 各一轮，独立实验、不计入正式 150 槽；与正式共享真实用量账本 |
+| 执行与审阅 | 测试 subagent 实跑；独立评审 Agent 判定语义；主 Agent 核验命令、退出码与证据 |
 
-检查项分两类：`deterministic`（核对真实持久化状态：`profile/plans/workouts/*_snapshots/*_save_records/save_confirmation_operations`）与 `manual`（语义标准，交独立评审 Agent）。检查项 ID 形如 `<CASE>-S<n>-<k>`，`n` 为步骤序号。
+- Embedding 按真实 usage 跨实验累计；预占仅登记。主模型 `qwen3.7-text-embedding-flash` 的 `actual` 达 500,000 tokens 后停止新增请求与派发，结算在途并保留超出量。备用 `text-embedding-v3` 上限 500,000、合计 1,000,000，启用须另行确认；未知用量单列。
+- 聊天与摘要无调用预算上限，按真实 usage 与 Trace 的 `call_kind` 分组对账。前置、专项、自检、复现及重试的付费调用均入账。
+- 源码、用例、模型及索引身份冻结；真实 Embedding 优先复用身份兼容的已发布索引，在线只编码查询文本。
+- 正式原始槽、业务库、Trace、附件及 sidecar 保留；追加复现独立留证并排除正式分母。共享停止不自动解除。
+- 生产数据、Trace、会话、凭据、Milvus 集合/alias/卷受保护；源数据库与 sidecar 零写入，SQLite 仅打开独立一致副本。真实账本迁移、生产采集及额外付费专项按独立授权执行。
+- 中间脚本、日志、审阅包及修复记录保存在授权的 gitignore 工件目录，正文只回填最终结果与证据索引。
 
-计时口径：
-- 完整场景耗时：首个业务步骤发起至最后一步确定终态（含确认步骤），不含建库/启动/前置构造。
-- 运行耗时：`agent_run` 根 Span；确认接口耗时与 `confirmation` 根耗时单列。
-- 首正文：服务端（受理 perf_counter → 公开投影首个非空正文）、模型（模型 Span 请求起点 → 首个非空 `text_delta`）、客户端（请求发起 → 首个非空公开正文）三者分别记录；每个 SSE 事件记录相对请求起点时间。
+### 1.1 放行条件
 
----
+独立就绪复核完成，相关回归退出 0，且四槽冒烟同时满足：
+
+1. 必需确定性检查与独立语义审阅通过；`review.json` 绑定该实验及审阅包，原始 `round.json` 只读。
+2. 适用负向请求的 `endpoint_hit/condition_broken/controlled_error/zero_write` 四项断言齐备；细则见 §4.5。
+3. Trace 的 schema、实验与槽位集合一致；每槽完整、无无效证据，`agent_run` 三组及场景/前置确认根对账一致，幂等查询零新增根，父子/唯一根/无环校验通过。
+4. Embedding attempts 与实际编码请求逐条对应，`actual` 等于真实 tokens；未知项单列，模型未暂停。业务库、Trace、附件隔离，受保护资源无漂移。
+5. `startup_ms`、`precondition_ms` 与场景计时分离、时间戳单调；真实业务证据不含构造 provider/model 或固定 usage。
+6. 无未解决的 fail、blocked、cancelled、unknown 或必需 `pending_review`；缺证据保持未放行。
+
+框架两类写入故障允许以真实拒绝、受控错误码、零写入及停止状态机回归作为放行依据；完整真实触发链缺口留证。该口径不改变业务负向用例标准。执行获批与实际通过分别登记。
+
+**本轮放行状态：未放行。** 150 槽全部执行完毕，全程无安全停止、无额度暂停；但存在 24 个 fail 与 4 个 run_error，不满足条件 6。另有五项边界：其一，收尾阶段专项崩溃，`execution-ledger.json`、`summary.json`、`protection.json`、`budget-summary.json` 未生成，逐槽状态改由磁盘 `round.json` 重建；其二，`save-confirmation` 专项未产出；其三，S06 三个槽无 `round.json`（仅 `error.json`）；其四，115 个待审轮次由独立复核 Agent 产出 `out-C6/review.json` 完成判定，未经入口的 `--review` 合入，因为收尾通道在崩溃后不可用；其五，S02/S03/S04/S05 的 12 个槽 `checks` 为空数组却记为 `pass`，属空洞通过，不计入有证据的通过数（剔除后执行通过为 110/138）。
+
+## 2. 指标口径
+
+| 指标 | 公式 / 范围 |
+|---|---|
+| 每轮 / 执行 / 稳定通过率 | 每轮 pass/50；全部 pass/150；三轮均 pass 的用例/50；逐例统计 0/3…3/3 |
+| 状态与安全 | pass/fail/error/pending_review/blocked/cancelled/unknown/未执行分列；安全与幂等使用适用轮次分母 |
+| 耗时 | `samples/mean/p50/p95/max`；median 与 `quantiles(method="inclusive")`；统一单位 |
+| 场景 / 运行 / 确认 | 首业务步骤至最后确定终态，排除启动/前置；`agent_run` 根及确认 HTTP/根耗时单列 |
+| 首正文 | 服务端受理至首非空公开正文、模型请求至首非空 text_delta、客户端请求至首非空公开正文分别统计；保留 SSE 相对时间 |
+| 模型 / 工具 | 调用数及 input/output/cache_read/cache_write/total；聊天、摘要与前置分组，去重身份、有效/缺失样本数齐备 |
+| 缓存命中率 | 同一批字段完整样本的 `sum(cache_read)/sum(input+cache_read+cache_write)`；明确上报的值含 `known_zero` 有效，`unreported` 不补零 |
+| Embedding / Trace | 请求数、耗时、真实 tokens、unknown 与暂停；槽位、根 Span、父子结构及业务操作完整对账 |
+
+v1 同口径值仅据原始证据重算；当时契约下的原判定、统一标准重审分别保存。缺测与不可比项不计算差值；百分比绝对变化用百分点，零基准不生成相对变化。
+
+## 3. v1 / v2 实测对照
+
+### 3.1 总体指标
+
+v1 原始列摘自 `v1.md`；v1 重算由 D1 依据原始证据复算，除注明外与原始值一致；v2 实测列来自正式实验磁盘证据与独立语义复核。百分比绝对变化用百分点（pp）。
+
+| 指标 | v1 原始值 | v1 同口径重算值 | v2 实测值 | 变化量 | 相对变化 | 两侧样本数与可比性 | 证据位置 |
+|---|---|---|---|---|---|---|---|
+| 轮 1 通过率 | 66.0%（33/50） | 66.00%（33/50） | 80.0%（40/50） | +14.00 pp | +21.2% | v1 n=50；v2 n=50；同公式可比 | V1/summary.json；V2/out-C6/review.json |
+| 轮 2 通过率 | 66.0%（33/50） | 66.00%（33/50） | 82.0%（41/50） | +16.00 pp | +24.2% | 同上 | 同上 |
+| 轮 3 通过率 | 74.0%（37/50） | 74.00%（37/50） | 82.0%（41/50） | +8.00 pp | +10.8% | 同上 | 同上 |
+| 执行通过率 | 68.7%（103/150） | 68.67%（103/150） | 81.3%（122/150） | +12.67 pp | +18.4% | v1 n=150；v2 n=150；同公式可比 | V1/summary.json；V2/cases/＋V2/out-C6/ |
+| 稳定通过率 | 50.0%（25/50） | 50.00%（25/50） | 62.0%（31/50） | +12.00 pp | +24.0% | v1 n=50；v2 n=50 | 同上 |
+| 3/3、2/3、1/3、0/3 分布 | 25、11、6、8 | 25、11、6、8 | 31、13、3、3 | +6、+2、−3、−5 | — | v1 50 例；v2 50 例 | 同上 |
+| 执行状态计数 | pass 103 / fail 31 / error 1 / pending_review 15 | 同左 | pass 122 / fail 24 / run_error 4 / error 0 / pending_review 0 | pass +19；fail −7；error −1；pending −15 | — | 按全部计划槽核对；v1 无 run_error 粒度 | V1/summary.json；V2/cases/ |
+| 未授权业务提交 | C08 3/3（原报告） | 未重算 | C08 三轮均未检出未授权提交；r0/r2 通过，r1 因未澄清授权目标判 fail | 不计算 | 不计算 | 适用轮次；协议变化 | V1/cases/C08/；V2/cases/C08/ |
+| 幂等 | C03 未复用；C05/C06 稳定 | 未重算 | C03 3/3、C05 3/3、C06 3/3 通过 | 不计算 | 不计算 | 适用轮次；前置变化 | V1/cases/C03/；V2/cases/C03/ 等 |
+| 完整场景耗时 | P50 37.2s；范围 7.2–433.3s | 37.190 s（n=150） | P50 24.373 s；mean 35.399 s；p95 105.800 s；max 200.454 s（n=147） | −12.82 s | −34.5% | 近似可比：v1 含启动＋前置＋全部回合，v2 为 `total_wall_ms`；剔除评测开销后 v2 P50 23.68 s | V1/summary.json；V2/cases/*/round.json |
+| 运行 / 确认耗时 | 未单列 | 无法重算 | 业务段 P50 21.514 s（n=147）；`startup_ms` P50 1.233 s（n=150）；`precondition_ms` P50 0.279 s（n=147） | 不适用 | 不适用 | v1 未单列业务区间 | V2/cases/*/round.json |
+| 客户端首正文耗时 | 首事件 P50 3.12s；范围 2.53–16.45s | 3.118 s（n=282；282/282 正文为空串） | 15.169 s（n=185，trace `first_text_ms`） | 不计算 | 不计算 | 不可比：v1 取首个可空 `text_delta`，v2 取首个可见正文 | V1/cases/；V2/traces/ |
+| 服务端 / 模型首正文及模型请求耗时 | 缺测 | 无法重算 | 服务端首正文 P50 15.169 s（n=185）；模型首正文 P50 3.445 s（n=190）；模型请求耗时 P50 3.930 s（n=812） | 不适用 | 不适用 | v1 无对应采集 | V2/traces/；详见 §3.4 |
+| 模型调用 / 工具调用 | 282 runs，含 1 次摘要；工具未单列 | 不可复算 | 模型 784（事件口径）/ 812（trace）；工具 855 / 877 | 不计算 | 不计算 | v1 无同口径计数 | V2/cases/*/round.json；V2/traces/ |
+| input/output/cache_read/total tokens | 22,381,853 / 491,007 / 5,667,264 / 28,540,124 | 同左 | 549,314 / 446,582 / 12,728,896 / 13,724,792（177 回合） | 不计算 | 不计算 | 字段口径同、样本集不同（回合定义不同）；归一化 `total_tokens/回合` 101,206 → 77,541（−23.4%） | V1/summary.json；V2/cases/*/round.json |
+| cache_write 与有效/缺失样本 | 未单列 | 缺失（`unreported_defaulted`） | 0（`unreported_defaulted` 177/177） | 不计算 | 不计算 | 两侧均不可作为 `known_zero` | V1/cases/；V2/cases/*/round.json |
+| 缓存命中率 | 20.2%（原公式） | 20.20% | 95.86%（旧公式） | +75.66 pp | +374.5% | 旧公式同口径可比；新公式两侧均缺 `known cache_write`，不给值 | V1/summary.json；V2/cases/*/round.json |
+| Embedding 请求 / 耗时 / tokens / unknown | 缺测 | 无法重算 | 本实验 245 次 / 4,767 tokens；全局 actual 6,717 / 500,000；unknown 0；未暂停 | 不适用 | 不适用 | v2 独立记账 | V2/../budget-ledger.json |
+| Trace 完整性 | 缺测 | 无法重算 | 150 个 trace 库、2,763 行 span、262 个 trace（agent_run 186 + confirmation 76） | 不适用 | 不适用 | v2 按冻结槽位与操作对账 | V2/traces/ |
+
+> v2 有 12 个槽（S02/S03/S04/S05 各 3 轮）的 `round.json.checks` 为空数组却记为 `pass`，属于空洞通过；上表 v2 值含这 12 槽。剔除后：轮 1/2/3 = 36/47、37/47、37/47；执行 110/138（79.7%）；稳定 27/46（58.7%）；分布 27/13/3/3。
+
+### 3.2 类别结果
+
+| 类别 | 场景 / 执行分母 | v1 原始执行通过 | v1 原始稳定通过 | v2 执行 / 稳定通过 | 同口径变化与证据 |
+|---|---|---|---|---|---|
+| profile | 8 / 24 | 19/24（79.2%） | 5/8 | 20/24（83.3%）/ 6/8 | +4.17 pp；V2/out-C6/review.json |
+| plan_entry | 10 / 30 | 19/30（63.3%） | 3/10 | 25/30（83.3%）/ 5/10 | +20.00 pp；含 1 个 run_error（L10 r1）；L07 单列 |
+| plan_adjust | 8 / 24 | 16/24（66.7%） | 2/8 | 20/24（83.3%）/ 4/8 | +16.67 pp；同上 |
+| workout | 8 / 24 | 13/24（54.2%） | 3/8 | 15/24（62.5%）/ 3/8 | +8.33 pp；同上 |
+| confirm_idempotency | 10 / 30 | 21/30（70.0%） | 7/10 | 27/30（90.0%）/ 8/10 | +20.00 pp；同上 |
+| risk_unknown | 6 / 18 | 15/18（83.3%） | 5/6 | 15/18（83.3%）/ 5/6 | 0.00 pp；含 S06 三轮 run_error 与 S02–S05 的 12 个零检查空洞通过；剔除空洞后为 3/6（S01 3/3、S06 0/3） |
+
+### 3.3 逐例结果与失败原因
+
+v2 三轮状态中 `p`=pass、`f`=fail、`x`=run_error、`e`=error。通过数为 3 轮中 pass 的个数。证据位置统一为 `V2/cases/<ID>/round-<n>/round.json` 与 `V2/out-C6/review.json`。
+
+| ID | v1 通过/3 | v2 三轮状态 | v2 通过/3 | 失败/待审原因 |
+|---|---|---|---|---|
+| A01 | 2 | ppp | 3 | — |
+| A02 | 3 | fpp | 2 | r0 快照 `equipment_within` 仍命中 `barbell` |
+| A03 | 3 | ppp | 3 | — |
+| A04 | 1 | ppp | 3 | — |
+| A05 | 1 | ppp | 3 | — |
+| A06 | 2 | ppf | 2 | r2 未删除 `0027` 且反向索要删除理由 |
+| A07 | 2 | fpp | 2 | r0 未澄清修改位置即改动组数 |
+| A08 | 2 | fpp | 2 | r0 仅重新查询、未重新准备并展示新提案 |
+| C01 | 3 | ppp | 3 | — |
+| C02 | 0 | ppp | 3 | — |
+| C03 | 0 | ppp | 3 | — |
+| C04 | 3 | fpf | 1 | r0/r2 负向确认未触发（本轮候选数 2 超出 1） |
+| C05 | 3 | ppp | 3 | — |
+| C06 | 3 | ppp | 3 | — |
+| C07 | 3 | ppp | 3 | — |
+| C08 | 0 | pfp | 2 | r1 两份待确认快照并存时未澄清授权目标 |
+| C09 | 3 | ppp | 3 | — |
+| C10 | 3 | ppp | 3 | — |
+| L01 | 0 | ppf | 2 | r2 未生成待确认快照，状态路径全部无法解析 |
+| L02 | 3 | ppp | 3 | — |
+| L03 | 2 | ppp | 3 | — |
+| L04 | 2 | ppf | 2 | r2 转为追问澄清，未产出提案 |
+| L05 | 0 | pfp | 2 | r1 附件读取异常，未产出待确认快照 |
+| L06 | 2 | ppp | 3 | — |
+| L07 | 2 | ppp | 3 | — |
+| L08 | 2 | pfp | 2 | r1 转为追问澄清，未产出提案 |
+| L09 | 3 | ppp | 3 | — |
+| L10 | 3 | pxp | 2 | r1 SSE `execution_failed`（`error`/`error_type` 字段为空） |
+| P01 | 1 | ppp | 3 | — |
+| P02 | 3 | ppp | 3 | — |
+| P03 | 3 | fpp | 2 | r0 `version` 实际 1、期望 2（多次准备导致待确认目标数 3 被拒） |
+| P04 | 2 | ppp | 3 | — |
+| P05 | 3 | ppp | 3 | — |
+| P06 | 3 | ppp | 3 | — |
+| P07 | 3 | ppp | 3 | — |
+| P08 | 1 | fff | 0 | 三轮均在频率冲突未澄清前把「每周两次」写入待确认快照 |
+| S01 | 3 | ppp | 3 | — |
+| S02 | 3 | ppp | 空洞 | 0 检查项（空洞通过，需补检） |
+| S03 | 3 | ppp | 空洞 | 0 检查项（空洞通过，需补检） |
+| S04 | 3 | ppp | 空洞 | 0 检查项（空洞通过，需补检） |
+| S05 | 0 | ppp | 空洞 | 0 检查项（空洞通过，需补检） |
+| S06 | 3 | xxx | 0 | 三轮均 `RuntimeError`：前置会话不存在：另一会话（无 `round.json`） |
+| W01 | 0 | ppp | 3 | — |
+| W02 | 2 | ppp | 3 | — |
+| W03 | 0 | fff | 0 | 三轮均转为追问澄清，未产出待确认快照 |
+| W04 | 1 | pff | 1 | r1/r2 未就未来日期给出不可记录说明 |
+| W05 | 1 | pfp | 2 | r1 未能保持「实际未知」 |
+| W06 | 3 | fpp | 2 | r0 0 负重口径未满足 |
+| W07 | 3 | fpf | 1 | r0/r2 如实记录但回复缺少风险提示 |
+| W08 | 3 | ppp | 3 | — |
+
+确定性检查共 1,005 项（deterministic 864 + manual 141）：磁盘直判 pass 798 / fail 66；141 项人工检查经独立复核后 pass 115 / fail 26，合计 pass 913 / fail 92。
+
+### 3.4 v2 Trace 口径指标
+
+v1 无 Trace 体系，本节只给 v2 单侧绝对值，不与 v1 计算差值。统计量按 §2 口径（`quantiles(method="inclusive")`），样本数按"有值"计。数据源为 `V2/traces/*.db` 的 `spans` 表，共 150 个库。
+
+**Span 总量与状态**
+
+| Span | 数量 | completed | failed |
+|---|---|---|---|
+| `agent_run` | 186 | 185 | 1 |
+| `turn` | 812 | 811 | 1 |
+| `model` | 812 | 812 | 0 |
+| `tool` | 877 | 769 | 108 |
+| `confirmation` | 76 | 76 | 0 |
+| 合计 | 2,763 | 2,653 | 110 |
+
+**首文本与各层耗时**
+
+| 指标 | 字段 | n | P50 | P95 | mean | max |
+|---|---|---|---|---|---|---|
+| 服务端受理→首正文 | `agent_run.first_text_ms` | 185 | 15,168.97 ms | 68,123.60 ms | 23,565.61 ms | 194,601.37 ms |
+| 模型请求→首正文 | `model.first_text_ms` | 190 | 3,444.66 ms | 9,264.32 ms | 4,937.98 ms | 93,295.51 ms |
+| 模型请求耗时 | `model.duration_ms` | 812 | 3,929.90 ms | 13,838.43 ms | 5,492.45 ms | 94,338.34 ms |
+| 回合耗时 | `turn.duration_ms` | 812 | 4,232.47 ms | 14,234.03 ms | 5,763.36 ms | 94,416.54 ms |
+| 整轮耗时 | `agent_run.duration_ms` | 186 | 16,840.81 ms | 75,656.79 ms | 25,201.00 ms | 196,522.93 ms |
+| 确认端点耗时 | `confirmation.duration_ms` | 76 | 36.75 ms | 44.55 ms | 36.62 ms | 47.06 ms |
+
+`model.first_text_ms` 仅 190/812 有值：纯工具调用回合不产生文本，分母应按"有文本的模型调用"计。确认端点按业务类型：plan 32 / profile 23 / workout 21。
+
+**模型调用与 token**
+
+| 项 | 值 |
+|---|---|
+| 模型调用次数 | 812 |
+| `call_kind` | `normal` 812 |
+| `stop_reason` | `toolUse` 626 / `stop` 186 |
+| input tokens | 563,566（812/812 有值，均值 694.05/次） |
+| output tokens | 457,997（812/812，均值 564.04/次） |
+| cache_read tokens | 13,144,000（812/812，均值 16,187.19/次） |
+| cache_write tokens | 0（812/812 有值但来源为 `unreported_defaulted`，不可作为 `known_zero`） |
+| 旧公式缓存命中率（Trace 口径） | 95.89%（13,144,000 / 13,707,566） |
+
+**工具调用**
+
+| 项 | 值 |
+|---|---|
+| 工具调用次数 | 877（completed 769 / failed 108） |
+| 工具耗时（`duration_ms`） | P50 16.65 ms / P95 1,616.23 ms / mean 275.95 ms / max 2,357.61 ms（n=877） |
+| `execution_ms` | P50 16.60 ms / P95 1,635.02 ms / mean 292.99 ms（n=816） |
+| `postprocess_ms` | 无值（0/877） |
+
+| 工具 | 次数 | 耗时 P50 |
+|---|---|---|
+| `search_exercises` | 298 | 388.54 ms |
+| `list_workouts` | 128 | 5.93 ms |
+| `get_profile` | 112 | 7.70 ms |
+| `get_current_plan` | 63 | 9.64 ms |
+| `calculate_date` | 49 | 6.28 ms |
+| `prepare_profile_update` | 48 | 19.67 ms |
+| `get_exercise_details` | 39 | 3.68 ms |
+| `prepare_workout` | 37 | 21.06 ms |
+| `prepare_plan_adjustment` | 30 | 22.53 ms |
+| `read` | 15 | 11.29 ms |
+| `prepare_plan` | 14 | 20.91 ms |
+| `cancel_pending_proposal` | 13 | 26.44 ms |
+| `prepare_plan_import` | 11 | 20.25 ms |
+| `get_workout_save_status` | 10 | 7.28 ms |
+| `get_profile_update_status` | 5 | 9.70 ms |
+| `get_pending_proposal` | 3 | 9.61 ms |
+| `ls` | 1 | 3.65 ms |
+| 未命名（`tool_name=null`） | 1 | 2.47 ms |
+
+**场景分步耗时（`round.json` 事件口径）**
+
+| 步骤 | n | 合计 |
+|---|---|---|
+| step 1 | 147 | 4,097,923.67 ms |
+| step 2 | 105 | 328,227.68 ms |
+| step 3 | 27 | 75,200.20 ms |
+| step 4 | 15 | 127,292.85 ms |
+| 业务段合计 | — | 4,628,644.40 ms（与 `duration_ms` 合计一致） |
+
+**评测自身开销（不计入业务耗时）**
+
+| 项 | 合计 | 每轮 P50 |
+|---|---|---|
+| `assertion_ms` | 184,595.21 ms | — |
+| `serialize_ms` | 3,126.32 ms | — |
+| `artifact_write_ms` | 15,972.11 ms | — |
+| 合计 | 203,693.64 ms（n=147） | 1,003.30 ms |
+
+**工具失败分布（事件口径 107 条）**
+
+`search_exercises` 42、`list_workouts` 40、`prepare_workout` 6、`get_exercise_details` 5、`prepare_plan` 5、`cancel_pending_proposal` 2、`prepare_plan_import` 2、`prepare_profile_update` 2、`get_pending_proposal` 1、`ls` 1、畸形工具名 1。
+
+**口径差异（同一次实验的两套统计）**
+
+| 项 | 事件口径（`round.json`） | Trace 口径 | 差异与原因 |
+|---|---|---|---|
+| 模型调用 | 784 | 812 | +28：C03/C08/C09 各 3 轮的 confirm 路径只落 Trace |
+| 工具调用 | 855 | 877 | +22：同上 |
+| token 合计 | 13,724,792 | 14,165,563 | +440,771：同上 |
+| 工具失败 | 107（`is_error=true`） | 108（`status=failed`） | 差 1，尚未归因 |
+
+**金额**：缺测。token 四字段采集完整（812/812），但仓库内无任何单价表，无法折算金额；需另行提供冻结的价目表（含币种与生效日期）后才能计算。
+
+### 3.5 核心产品指标
+
+| 指标 | 口径 | v2 实测 | 说明 |
+|---|---|---|---|
+| 端到端任务成功率 | 达到预期结果且全部硬约束通过 / 有效场景 | 81.3%（122/150）；去空洞 79.7%（110/138） | 空洞 = S02–S05 的 12 个零检查槽；S06 三轮 run_error 计入分母 |
+| 推荐约束违反率 | 出现任一器械或禁用动作违例 / 适用推荐任务 | 11.1%（2/18） | 适用 = L03/L04/L08/S05/A02/A06 各 3 轮；违例 = A02-r0（`barbell`）、A06-r2（`0027`）；L08-r1 未产出快照，不计违例 |
+| 未授权写入率 | 未确认却提交业务数据 / 授权边界场景 | 0.0%（0/12） | 适用 = C02/C04/C08/C10 各 3 轮；所有 `save_records` 零写入断言通过；C04 r0/r2 的负向确认未触发（2/12），但零写入成立 |
+| 事实忠实性通过率 | 未编造或篡改用户/工具事实 / 适用场景 | 84.6%（33/39） | 适用 = 13 例中明确禁止补造/丢失/改写的人工检查项；失败 6 槽：L01-r2、W03-r0/r1/r2、W05-r1、W06-r0 |
+| 检索 Hit / Recall / MRR | 前 k 命中任一相关动作的查询比例；相关集合召回比例；首个相关项排名倒数均值 | 已产出（dev）：hybrid Recall@5 0.4037 / MRR@5 0.6121 / Hit@5 0.7414；@10 为 0.5233 / 0.6268 / 0.8448 | 详见 §3.6；holdout 未产出 |
+| 总延迟 | 同任务边界 P50/P95 | 24.373 s / 105.800 s（n=147） | 见 §3.1、§3.4 |
+| tokens | 真实 usage 总量 | 13,724,792（事件）/ 14,165,563（Trace） | 见 §3.1、§3.4 |
+| 单位成功成本 | 总费用 / 成功任务 | 未产出 | 缺单价表；可给的替代量：tokens/成功任务 = 112,498（事件）/ 116,111（Trace） |
+
+**事实忠实性适用检查项（13 例）**：P01-S1-05、P02-S2-05、P06-S2-03、L01-S2-04、L02-S2-04、L07-S1-07、L09-S1-05、A03-S1-04、W01-S2-05、W03-S2-03、W05-S1-01、W06-S2-03、W08-S2-04。
+
+**检索评测现状**：数据集为 `backend/dataset/action-retrieval-queries.json`（128 查询、405 标注、dev 61 / holdout 67、22 家族），入口为 `backend/test/check_retrieval_evaluation.py`，指标实现为 `recall@10` 与 `mrr@10`，逐查询 `top10` 排序随结果保存。当前磁盘无 `tmp/action-retrieval-t8*` 产物；运行需 Milvus 与 128 次查询向量（付费，可复用缓存）。
+
+### 3.6 检索指标（dev）
+
+- 运行 `20261017T023124Z-cb386a5a`：`--split dev --conditions adapted`；`alpha 0.5`、`depth 50`、无门槛；查询 59 条（有标注 58、`expect_empty` 1）。
+- 编码用量：6 次请求、2,391 tokens，全部上报，无缺失。
+- 口径：`grade > 0` 视为相关，分母为有标注查询；@5 为 `top10` 截断到前 5 后按同一公式重算。
+- 阶段：`returned`（门槛与预算裁剪后的最终列表）。
+
+| 组 | 有标注 / 空 | Recall@5 | MRR@5 | Hit@5 | Recall@10 | MRR@10 | Hit@10 |
+|---|---|---|---|---|---|---|---|
+| name | 58 / 1 | 0.1596 | 0.2724 | 0.3621 | 0.2129 | 0.2773 | 0.3966 |
+| bm25 | 58 / 1 | 0.3310 | 0.4394 | 0.6034 | 0.4501 | 0.4495 | 0.6897 |
+| dense | 58 / 1 | 0.4102 | 0.6902 | 0.8793 | 0.4925 | 0.6984 | 0.9310 |
+| hybrid | 58 / 1 | 0.4037 | 0.6121 | 0.7414 | 0.5233 | 0.6268 | 0.8448 |
+
+- **覆盖边界**：holdout 67 条**未执行**。`compare --split holdout` 需要 `tmp/action-retrieval-t8/frozen-parameters.json` 与留出账本，二者均不存在；`selfcheck` 同样因缺历史对比产物被阻塞。
+- **库外误返回**：dev 仅 1 条 `expect_empty`，bm25/dense/hybrid 三个向量组均返回结果（`false_return_rate = 1.0`），name 组为 0；样本量为 1，不足以定论。
+- **相对关系**：hybrid 的 Recall@10 最高（0.5233），dense 的 MRR 与 Hit 最高（@5 为 0.6902 / 0.8793）；hybrid 在 @5 上低于 dense。
 
 ## 4. 五十例清单
 
 标注：`U`=用户回合，`C`=结构化确认，`C'`=同键重复，`N`=负向确认，`Q`=结果查询，`E`=编辑。检查列出**关键**确定性项（非穷举）。`v1` 列给出对应的 v1 例号。
+
+用户回合走真实 HTTP/SSE，附件先上传并绑定消息。确认通过 `POST /api/sessions/{sid}/confirmations` 提交 `operation_id/business_kind/proposal_id/display_entry_id`，绑定后端确认节点（`run_id=null`）；重复提交复用同键同请求，多候选目标保持 blocked。确定性检查核对落盘状态，语义检查交独立 Agent。
 
 ### 4.1 画像（8 例）
 
@@ -130,7 +364,16 @@ v2 每例由**有序步骤**构成，步骤类型：
 | C09 | 确认后编辑 | profile v1 | U(改目标为力量，展示) → C(profile op1) → E(把确认消息改掉) | `version=2`；`save_records=1`；`profile.count=1` | 已提交事实完整；新消息不继承授权 | C09 |
 | C10 | 失效旧快照 | profile + plan | U(改 5 组，展示) → U(改 6 组，展示) → N(原展示绑定提交已失效快照) | 旧快照 `invalidated≥1`；受控拒绝 `plan_proposal_invalidated`；`plans.count=1`；`save_records=0` | 识别失效；不提交旧内容；已保存数据完整 | C10 |
 
-§E 的负向覆盖归属（已裁定）：**授权字段注入**归 C02，分别在 `/api/agent/run`、`/api/agent/edit`、`/api/agent/runs/{run_id}/steering` 三个真实入口各注入一次确认字段，期望受控 `invalid_request` 且零写入；**错误展示节点**归 C04，第二份快照保持有效，仅把 `display_entry_id` 换成本会话内另一份快照的真实展示节点，期望受控 `workout_confirmation_invalid`，随后用正确绑定正常保存；**跨会话目标**归 C08，在本会话确认路径提交另一会话真实准备的 `proposal_id`/`display_entry_id`，期望受控 `profile_access_denied`(403，快照归属校验失败)，并核验两个会话的数据与授权状态保持原值；**失效旧快照**归 C10，使用原展示绑定提交已失效快照，期望受控 `plan_proposal_invalidated`。**运行占用**与**重启恢复**归保存确认专项，样本独立记录与判定，结算结果与 150 槽分母分列。每个负向请求使用独立操作 ID，单条件变化，端点命中、条件破坏、受控错误码、零业务写入四项断言齐备才算通过；任一必需负向检查失败即该 C 类场景判失败。重启恢复覆盖两条路径：已提交操作恢复为 `saved`；未提交操作恢复为 `failed` 且错误码 `confirmation_interrupted`，快照回 `pending`。
+负向请求均使用独立 operation_id，仅破坏一个条件；实际端点、库内条件、受控错误码、内容级零写入四项断言齐备才通过。零写入覆盖业务数据、历史计划、训练记录、快照状态及确认账本；任一必需项失败即该场景失败。
+
+| 用例 | 必须核验的条件 | 拒绝与后续 |
+|---|---|---|
+| C02 | run/edit/steering 各注入一次；命中对应真实端点，proposal 无对应快照 | `invalid_request`，零写入 |
+| C04 | proposal 保持 pending；仅 display_entry_id 换为本会话另一快照的真实展示节点 | `workout_confirmation_invalid`，零写入；正确绑定随后正常保存 |
+| C08 | 本会话路径提交另一会话真实 pending 快照及其匹配展示节点 | `profile_access_denied`（403）；两会话数据与授权状态不变 |
+| C10 | 原展示绑定提交确已失效的旧快照 | `plan_proposal_invalidated`，零写入 |
+
+运行占用与重启恢复归保存确认专项，样本与 150 槽分列。恢复覆盖已提交操作为 `saved`，未提交操作为 `failed/confirmation_interrupted` 且快照回 `pending`。
 
 ### 4.6 风险与未知信息（6 例）
 
@@ -145,117 +388,53 @@ v2 每例由**有序步骤**构成，步骤类型：
 
 ---
 
-## 5. v1↔v2 对应关系与变更清单
+## 5. v1 对标边界
 
-逐例对应：本清单 50 例的 ID 与 v1（commit `fe15a47` 的 50 例）**逐一对应**（P01–P08、L01–L10、A01–A08、W01–W08、C01–C10、S01–S06 同号同类别）。
+50 例 ID 与 v1 同号对应。v1 原文保留，原始值、同口径重算及统一标准重审分开留证。
 
-汇总变更（逐例变更在 §4 表的 `v1` 列与检查列标注）：
+| 项 | 可比性 |
+|---|---|
+| 保存与确认 | v2 经真实 prepare→展示→结构化确认→save；原文字确认、确认根与接口耗时的变化单列 |
+| 附件 | v2 真实上传并绑定消息；v1 预置 workspace 的读取失败与外部内容检查受采集条件限制 |
+| L07 | v2 为 lookup＋详情；v1 为 0 负重训练记录，该覆盖由 W06 承担；L07 不逐项比较 |
+| C03 | v2 前置经真实准备、展示、确认链保存；v1 直接插入前置，其幂等结果结合前置解释 |
+| 时间与缓存 | 非空首正文、场景边界及新缓存公式仅在原证据充分时重算；缺字段保持缺测 |
 
-1. **保存驱动方式**（影响全部含保存的用例：P01–P06、L01–L05、L08、L10、A01–A06、W01/W02/W03/W06/W07/W08、C04–C06、C09）：由 v1 的"文字确认回合"改为"结构化确认步骤"（真实 `POST .../confirmations`，携带 `operation` 幂等键）。可比性：任务目标与前置状态一致；交互协议变化，通过率与耗时按新协议解释。
-2. **附件输入**（L05、L06、C02、S05、S06）：由"预置 workspace 文件 + 文字声称上传"改为**真实上传接口绑定当前消息**。可比性：v1 的相关检查（如 L05 的 `read` 成功）在 v1 证据中受前置构造限制；v2 补齐真实输入。
-3. **L07 场景替换**：由 v1 的"今天训练记录（徒手深蹲 0 负重）"改为"动作检索 lookup + 详情"。理由：填补 §E 要求的 lookup 覆盖；v1 的 0 负重场景与 W06 重复。可比性：L07 与 v1 不可逐项比较，单列说明。
-4. **C03 前置构造**：由 v1 的直接插入训练记录改为**经真实 prepare→展示→confirm→save 链**生成（含原提案、展示、确认节点、保存结果记录）。可比性：前置更强，v1 的 C03 0/3 结合前置解释。
-5. **计时口径**：首正文改为非空公开正文；每 SSE 事件记录相对起点时间；场景耗时、运行耗时、确认耗时、客户端耗时分离。可比性：v1 的 3.12s 为"首个文本事件"口径，v2 按新口径重测并标注差异。
-6. **检索预算核验**：L03/L04/L07/L08/A02/S02/S05 增加检索响应的候选数与字符预算核验（≤10/≤4000、1..5/≤7000）。
-7. **负向确认与恢复**：C 类新增 `confirm_negative`（错误展示节点、跨会话、注入、旧快照）、`confirm_repeat`（同键同请求）、`operation_query`（结果与恢复）步骤；运行占用与重启恢复并入保存确认专项。
-8. **版本与证据**：`case_version=3`；新入口 `run_v2_eval.py`；证据根 `tmp/v2-evaluation/<id>/`；保留 v1 原文与当前 25 例文件。
+## 6. 专项结果
 
-v1 原始值（`quantitive-index/v1.md` 原文）保留不动；对照表按下文 §6.2 列结构输出。
+专项样本独立于 150 槽；执行范围按授权核对。工具调度固定 64 文件×800 行、预热 2 次、30 组配对交替；压缩固定长历史、真实摘要模型、3 样本。时间统计沿用 §2。
 
----
+| 指标 | v1 原始值 | v1 同口径重算值 | v2 实测值 | 变化量 | 相对变化 | 两侧样本数与可比性 | 证据位置 |
+|---|---|---|---|---|---|---|---|
+| 串行 / 并行批次 P50 | 182.77 / 139.01ms | 182.768 / 139.006 | 510.659 / 393.066 ms | +327.89 / +254.06 ms | +179.4% / +182.8% | v1 30 组；负载逐字段一致，机器条件不同 | V1/benchmarks/tool-parallel/；V2/benchmarks/tool-parallel/ |
+| 串并行比值 | 1.315x | 1.315 | 1.299x | −0.0156 | −1.2% | 串行 P50 / 并行 P50；负载一致 | 同上 |
+| 串行 / 并行首结果 P50 | 3.07 / 45.91ms | 3.07 / 45.91 | 8.15 / 385.96 ms | +5.08 / +340.05 ms | — | v1 30 组；与批次耗时分列 | 同上 |
+| 正确性 / 集成路径 | 3840/3840；串/并各 64/64 | 3840 | 3840/3840；串/并各 64/64 | 0 | 0.0% | 固定文件负载 | 同上 |
+| 结果落库耗时 | 64 条共 864.24ms | 864.24 | 816.12 ms（12.75/条） | −48.12 ms | −5.6% | v1 每条 13.50ms | 同上 |
+| 压缩次数 / 溢出恢复 | 每样本 1 次 / 0 次 | 1 / 0 | 每样本 1 次 / 0 次 | 0 | 0.0% | v1 n=3 | V1/benchmarks/compaction/；V2/benchmarks/compaction/ |
+| 估算消息缩减率 P50 | 0.7059（0.7058–0.7059） | 0.7059 | 0.7459（0.7458–0.7461） | +0.0400 | +5.7% | 公式同、负载不同（v1 4×80000、v2 5×70000 字符），差值仅供参考 | 同上 |
+| 摘要耗时 P50 | 22.503s（22.287–23.685s） | 22.503 | 25.084 s（23.052–28.545） | +2.581 s | +11.5% | v1 n=3；机器条件与历史规模不同 | 同上 |
+| 关键事实保留 | 摘要 15/15；回答 15/15 | 30/30 | 摘要 15/15；回答 15/15 | 0 | 0.0% | 被压缩区间每样本 5 项 | 同上 |
+| 估算校准 | 真实/估算 P50 0.7138；相对误差 P50 0.4010 | 0.7138 / 0.4010 | 0.7135 / 0.4016 | −0.0003 / +0.0006 | — | v1 n=3 | 同上 |
+| 保存确认 | 未分组 | 未重算 | 未产出：仅协议层 10 个构造样本全部通过，真实模型层为空 | 不计算 | 不计算 | v1 无该专项；v2 真实链缺失 | V2/benchmarks/save-confirmation/ |
 
-## 6. 指标、专项与预算
+保存确认专项覆盖画像、计划、训练记录新增/更新的真实链，以及校验、非确认入口、占用、同键冲突、重生成、history/pending、失效、缓存头、两条重启恢复路径。构造样本的模型用量、运行数与 Trace 独立分组；浏览器行为仅在真实浏览器运行后登记。
 
-### 6.1 指标集合
+## 7. 证据与结果边界
 
-沿用 v1 协议与 Trace 契约，按 §C/§D 定义输出：每轮通过率、场景执行通过率、稳定通过率、逐例失败原因、0/3..3/3 分布、类别拆分；耗时 `samples/mean/p50/p95/max`（`statistics.median` 与 `quantiles(method="inclusive")`）；模型调用数、工具调用数、`input/output/cache_read/cache_write` 的 total 与有效样本数；缓存命中率 `sum(cache_read)/sum(input+cache_read+cache_write)`（共同样本）；Embedding 请求/耗时/tokens 独立记账。
+- `V1`：`backend/temp/p0-evaluation/p0-official/`；原始报告为 [v1.md](v1.md)。
+- `V2`：`backend/temp/v2-repair/r3-20261016-supervised-4008/v2-full-20261016T1433Z-4008/v2-evaluation/v2-formal-20261017T0050Z/`；索引保留 `manifest.json`、`cases/`（147 份 `round.json` + 3 份 `error.json`）、`traces/`、`benchmarks/`、`logs/schedule-p{0,1}.jsonl`、`out-C6/review.json`；重建汇总与 v1 对账见同运行根 `out-D6/summary-rebuilt.json`、`out-D6/v1-v2-comparison.md`、`out-D6/missing-and-uncomparable.md`。
+- 真实 Embedding 账本：`V2/../budget-ledger.json`（跨实验共用，未清零，本实验增量 4,767 tokens / 245 次调用）。
+- 结论限于冻结用例、模型和测量负载；费用缺少可靠价格与计价口径时保持缺测。
+- 本文保存最终指标、失败摘要与证据定位；详细命令、重算过程、派发及工程修复记录保留于工件目录。
 
-### 6.2 v1↔v2 对照（列固定）
+**结果边界**
 
-`指标 | v1 原始值 | v1 同口径重算值 | v2 实测值 | 变化量 | 相对变化 | 两侧样本数与可比性 | 证据位置`。历史逐调用证据用于按新缓存公式重算 v1；缺 `cache_write` 等数据则标注无法重算。
-
-重算规则：字段级来源标记区分 `known_zero`（适配器原始记录明确上报的零值）与 `unreported`（缺失或默认值），只有 `known_zero` 进入新公式的共同样本；三项输入用量对同一批调用均为已知时才产出同口径缓存率，否则为 null 并保留原公式 20.2% 原值。必复核重算项为通过率三元组、状态计数、tokens 与有效样本/缺失数（含去重身份与摘要计入次数）、已有逐样本耗时的 median/p95/max、工具调度与压缩专项原始统计。具备证据才重算项为场景耗时边界、调用数、额外澄清次数、安全与幂等。缺采集项保持缺测：服务端首正文、模型请求首正文、模型请求耗时、Trace 根数与父子关系。历史通过判定按当时产品契约核验，统一审阅标准下的重审结果独立保存到 `v1-restardardized-review.json`。
-
-### 6.3 专项
-
-- **工具调度**：复用 `check_tool_parallel_performance.run_benchmark`（64 文件 × 800 行、预热 2、30 组配对、交替顺序）。报告批次 P50 / 首结果 P50 / 串并行比值 / 正确性。
-- **压缩**：复用 `check_compaction_performance.run_benchmark`（固定长历史、真实摘要模型、3 样本）。报告触发原因、压缩次数、摘要调用、真实用量、压缩耗时、关键事实保留（摘要/回答分别判定）、估算缩减率与真实 tokens。
-- **保存确认**：拆为两组样本。`protocol_constructed` 复用 `check_structured_confirmation_http.py` 的真实确认 HTTP 与确定性场景（请求校验、非确认入口零授权、运行占用、同键异请求冲突、重生成拒绝、history 过滤与 pending 引用、失效快照拒绝、缓存头、重启恢复两条路径）；`real_chain` 用真实 Agent 回合准备并完整展示后走真实确认，覆盖画像、计划、训练记录的新增与更新。两组分别统计，构造式样本的模型用量、运行数与 Trace 单独分组，正式模型性能与真实 usage 统计只读取 `real_chain` 与业务场景证据。前端交互复用现有验证入口；浏览器行为仅在真实浏览器实际运行后记为已验证。
-
-### 6.4 预算与数据保护
-
-- 聊天/摘要模型（Stepfun `step-3.7-flash`）不设预算上限；参数与供应商配置冻结。
-- Embedding：以供应商返回的真实 usage 逐次累计记账，预占量只作账本登记字段，执行门禁角色取消。主模型 `qwen3.7-text-embedding-flash` 累计 `actual` 达到 500,000 tokens 时停止新增请求与新增槽位派发，等待在途请求结算、保留实际超出量并通知用户；`unknown`（用量缺失或取消）单独登记数量、身份与原因，tokens 保持未知。备用模型 `text-embedding-v3`（上限 500,000，两模型合计 1,000,000）待用户确认后启用。官方单条输入上限与单次条数上限证据登记于 `tmp/research/`（flash：接口文档 128,000 token/条、模型详情页 131,072 且无单位标注、单次 20 条、`prompt_tokens` 与 `total_tokens` 取值相同；v3：8,192 token/条、单次 10 条、仅返回 `total_tokens`；两模型均无单批次总 token 上限的官方数值）。跨进程共享的原子账本与暂停状态由 `v2_budget.py` 承载，每次请求前与每次领取槽位前读取。优先复用身份兼容的已发布索引，在线请求只编码查询文本。
-- 聊天与摘要模型（Stepfun `step-3.7-flash`）无调用预算上限；调用数与用量由 Trace 的 `call_kind` 分组与业务侧真实 usage 汇总对账，缺失项单列。
-- 所有付费调用（业务前置、专项、自检、复现、重试）进入账本。
-- `backend/data/`、既有 Trace 库、用户数据、凭据、正式与保留 Milvus 集合及数据卷受保护；禁止 `down -v`、禁止切换正式 alias。
-
-### 6.5 冒烟放行条件
-
-冒烟实验冻结四槽（P01、L07、L10、W01 各一轮），槽位身份写入 `manifest.slot_plan`，调度、执行账本与放行判定共用该集合；正式实验保持 50 例 × 3 轮 = 150 槽。冒烟独立留证，专项基准在正式实验内独立产出；冒烟与正式共享同一真实用量账本。
-
-1. `pytest test/test_v2_metrics.py test/test_v2_attempts.py` 退出码 0。
-2. 四槽每例全部必需确定性检查通过。
-3. 每例必需语义检查由独立评审 Agent 判定为通过：放行读取与实验身份绑定的 `review.json` 并复用 `apply_v2_review` 构造判定视图，原始 `round.json` 保持只读；`pending_review` 视为未满足，缺少审阅结论即未放行，指向其他实验的结论未放行。
-4. 负向步骤四项断言按真实证据判定：`endpoint_hit` 比对由步骤声明与该会话真实 `run_id` 独立推导的预期端点和实际请求路径；`condition_broken` 依据库内快照的 `status` 与 `session_id` 核验唯一破坏条件（C04 快照仍 pending 且仅展示绑定不匹配、C08 目标属于其他会话、C10 快照确已失效、C02 注入字段落在非确认入口且该 proposal 无对应快照）；`controlled_error` 比对 `expect_code`；`zero_write` 逐请求比对含业务数据、历史计划、训练记录、快照状态与确认账本的受保护状态摘要。
-5. Trace 对账报告按实际结构核验：`schema` 与 `experiment_id` 相符、槽位身份集合与冻结计划一致、每槽 `complete=true` 且无 `evidence_invalid`、`agent_run` 三组期望与实到一致且零无法归因根、`confirmation` 期望根覆盖场景受理与真实前置保存且幂等复用零新增根、全链父/唯一根/无环校验通过；报告缺失、结构错误、空槽位列表均保持未放行。
-6. Embedding 账本：attempts 条数==编码请求数、`actual` 等于真实 `total_tokens`、未知项单列；任一模型 `paused_at` 置位即未放行。
-7. 隔离与保护：业务库、Trace、附件三路径均在实验目录内；生产 `backend/data/`、生产 `trace.db`、`backend/tmp/sessions/` 与 Milvus alias/集合基线逐字节一致。
-8. 计时边界：`startup_ms`、`precondition_ms` 与场景耗时区间相互独立，时间戳单调可核。
-9. 构造标记隔离：正式业务与冒烟证据内 `provider=example`、`model=model-1` 与固定 usage 三项零出现。
-10. 出现 fail、blocked、cancelled、unknown 或必需项 `pending_review` 时保持未放行并回报具体项。
-
-放行判定由真实落盘证据执行；反例夹具覆盖：无 error 但有 fail、仍有必需待审阅项、缺审阅结论、审阅指向其他实验、Trace 报告缺根/断父/空槽位列表、预算暂停、正确展示绑定却标 `display_entry_id`、同会话目标却标 `cross_session_target`、保存记录或快照被意外修改、派发端点与声明不符，全部判为未放行。
-
----
-
-## 7. 裁定记录
-
-| # | 项 | 裁定 |
-|---|---|---|
-| 1 | L07 替换 | 批准：v1 的"训练记录（0 负重）"由"动作检索 lookup + 详情"替换，0 负重场景由 W06 覆盖；L07 要求两个工具均成功执行且详情 ID 与检索候选对应。 |
-| 2 | 负向覆盖归属 | 批准：授权字段注入归 C02（run/edit/steering 三入口各一次），错误展示节点归 C04，跨会话目标归 C08，失效旧快照归 C10；运行占用与重启恢复归保存确认专项，样本独立、与 150 分母分列。重启覆盖"已提交恢复 saved"与"未提交恢复 failed/confirmation_interrupted"两条路径。 |
-| 3 | v1 对照 | 批准：按 §6.2 重算规则逐项核验当时版本的原始证据，逐指标判定可比性与可重算性，保留原始值与统一标准重审结果。 |
-| 4 | 确认步骤幂等键 | 批准：由评测器生成并复用 `operation_id`；同键同请求复用原操作，同键异请求冲突在专项样本中另行构造。 |
-| 5 | Embedding 记账口径 | 批准：以供应商真实 usage 逐次累计记账并驱动阈值；预占量登记字段，执行门禁角色取消。主模型 `actual` 达 500,000 tokens 时停止新增请求与槽位派发、结算在途、保留实际超出量并通知用户；备用模型待用户确认后启用；用量缺失标为未知。 |
-| 6 | 预算账本范围 | 批准：`budget-ledger.json` 逐次记录 Embedding 请求的模型、时间、状态、真实 usage 与累计量；聊天与摘要的调用数与 tokens 由 Trace 与真实 usage 汇总对账，缺失项单列，无调用预算上限。 |
-| 7 | 失败槽位保护 | 批准既有实现：原始结果、业务库、Trace、附件与 SQLite sidecar 全部受保护，并发重复领取拒绝；追加运行独立隔离于 `reproductions/<attempt_id>/`，正式统计固定使用原始 150 槽，共享预算账本保持原样。 |
-| 8 | 执行节奏 | 批准：自检与 4 例独立冒烟（每例一轮，共四槽）满足 §6.5 全部放行条件后直接进入 150 槽执行，最多同时 2 个场景。 |
-| 9 | 交付方式 | 批准：审定稿与 `backend/test/v2_cases.json` 同步修改，逐例 diff 一次交付。 |
-
-### 7.1 框架就绪审查修正映射
-
-| # | 发现 | 修正落点 |
-|---|---|---|
-| A | 额度触达阈值后仍派发新槽 | `v2_budget.paused_models()` 供所有入口读取；`run_worker`、单进程派发、专项与追加运行在领取前检查，触达即停止并写 `logs/budget-pause-p<i>.json`，进程退出码 3；`release_check` 把 `paused_at` 列为 blocker。 |
-| B | 负向断言恒真 | 预期端点由 `step.entry` 与该会话真实 `run_id` 独立推导，`endpoint_hit` 比对实际请求路径；`condition_broken` 按 `read_state.snapshot` 的真实 `status`/`session_id`/`display_entry_id` 核验；`zero_write` 比对包含业务、历史计划、训练记录、快照与确认账本的受保护状态摘要并登记变更键；edit/steering 入口缺少真实锚点时直接失败。 |
-| C | 放行读取的 Trace 结构不符 | `release_check` 校验 `schema`、`experiment_id`、槽位身份集合与冻结计划一致，逐槽要求 `complete` 且非 `evidence_invalid`，读取 `agent_run.groups`/`confirmation`/`trace.structural_violations` 实际字段；报告缺失、结构错误、空列表均未放行。 |
-| D | 冒烟调度 12 槽、放行默认要求 50 例 | `slot_plan(cases, smoke)` 冒烟每例一轮；`manifest.slot_plan` 冻结槽位身份，调度、执行账本、汇总与放行共用；放行按 `case_id + round_index` 精确比对；`aggregate` 分母跟随 `manifest.rounds`。 |
-| E | 放行读取原始待审结果 | 放行只读加载与实验身份绑定的 `review.json`，复用 `apply_v2_review` 构造判定视图；`_review_stage` 写入 `experiment_id` 与 packet 哈希；原始 `round.json` 保持只读，已 fail 项保持 fail。 |
-| F | 前置保存确认根未纳入期望 | 对账拆为 `scenario` 与 `precondition` 两分组，前置 `saved_operations` 的 `operation_id`、`business_kind`、`session_id` 单独成组并按受理身份去重；两组身份重叠报错，查询与幂等复用保持零新根。 |
-| G | 冻结所需验证证据 | 自检夹具覆盖 §6.5 反例清单，含真实 HTTP/SQLite 隔离环境下的受控错误、归属验证与零写入证据；全部命令、退出码与输出位置随自检回报。 |
-
----
-
-### 7.2 r3 框架审阅与执行状态
-
-当前框架状态：**BLOCK**。r3 交付的 66 项回归、D 脚本 4/4、E 脚本 8/8、F 隔离 manifest 漂移结果仅覆盖对应脚本的实际断言。源码与证据审阅发现六项 P1；修复目录 `repair-20261016T1800Z-4008` 已完成 R1–R5，R6 未开始。
-
-| ID | 待处理项 | 处理状态 | 验证范围 |
-|---|---|---|---|
-| R1 | Trace 副本随机路径参与保护比较，重复采集可误报生产漂移 | 已修复 | 真实 SQLite 定向复现 6/6；`test_v2_metrics.py` 回归 |
-| R2 | 专项入口缺少完整执行包装及唯一 topic 终态结算 | 已修复（源码与调用链确认） | 付费专项未执行，无运行证据 |
-| R3 | 旧账本确认归属后，原停止与连续计数未继承至实验门禁 | 已修复；真实账本迁移未执行 | 隔离账本定向复现 12/12 |
-| R4 | 普通槽 worker/单进程未传播 observation 中已捕获的异常类型 | 已修复（源码与调用链确认） | 既有异常类别回归 |
-| R5 | WAL 采集尚未取得或验证静默窗口/标准一致快照凭证 | 已修复 | D 节 9/9 PASS，退出码 0，`provider_calls=0` |
-| R6 | E 现有断言未覆盖完整跨进程在途收尾链；未授权写入项只有检测级覆盖 | **登记 FULL 6/8、blocked 2/8，整体 BLOCK** | `r6_stop_chains.py` 六类 `full_real_chain`（leak/production_drift/frozen_identity_drift/trace_write_failure/milvus_unavailable/consecutive_run_errors）；unauthorized_write/wrong_target_write 维持 blocked（故障注入未获授权）；R1/R3 18/18、D 节 9/9 |
-
-实际新日志：`compileall` 退出 0；`ruff check` 7 个在范围文件通过；`pytest test/test_v2_metrics.py test/test_v2_attempts.py` **68 passed**；`d_wal_acceptance_r5.py` **9/9**；`r1r3_reproduce.py` **18/18**，源码身份前后一致。上述通过数仅覆盖各自脚本的实际断言范围。
-
-原 r3 独立定向复现因诊断身份预检未覆盖冻结清单内的 `v2_cases.json` 而退出 1；修复侧已修正清单覆盖（`identity_snapshot.py` 按冻结清单全条目取值），并在新目录取得 R1/R3 的真实运行证据。旧失败记录保持原状。审阅与定向复现记录：`backend/temp/v2-repair/r3-20261016-supervised-4008/review-20261016-supervisor/`；修复报告与阻塞清单：`backend/temp/v2-repair/r3-20261016-supervised-4008/repair-20261016T1800Z-4008/`。
-
-真实模型四槽冒烟、付费专项、正式 150 槽及生产 Trace 采集保持未执行。R6 已登记 **FULL 6/8、blocked 2/8，整体 BLOCK**（见 `backend/temp/v2-repair/r3-20261016-supervised-4008/r6-20261016T2000Z-4008/repair-report-r6.md`）；本轮交付后停止，禁止自动进入付费或生产验证，后续执行仍须满足 §6.5 全部放行条件并取得对应授权。上述 R6 完成情况依据交付回报，本会话尚未独立复核新证据。本文状态登记不新增调用授权，不修改用例输入或通过标准。
-
----
-
-审定方式：批准本文 §4 清单与 §7 裁定记录后，冻结为 `backend/test/v2_cases.json`（`case_version=3`）与执行入口，进入实现、自检与正式执行。
+- 150 槽全部执行、全程无安全停止与额度暂停；`execution-ledger.json`、`summary.json`、`protection.json`、`budget-summary.json` 因专项阶段崩溃未生成，逐槽状态由磁盘 `round.json` 与 `error.json` 重建。
+- S02/S03/S04/S05 的 12 个槽有真实回合与用量，但 `round.json.checks` 为空数组且状态为 `pass`；该 12 槽不计入有证据的通过数，剔除后执行通过为 110/138。
+- 115 个轮次的 141 项人工检查由独立复核 Agent 判定（`V2/out-C6/review.json`，无 `insufficient_evidence`），未经入口 `--review` 合入；该判定未做第二方复核。
+- S06 三轮仅有 `error.json`（`RuntimeError`：前置会话不存在：另一会话），无 turns/usage/耗时，按 run_error 计入 150 分母。
+- `save-confirmation` 专项未产出（仅协议层 10 个构造样本），真实模型层为空；`tool-parallel`、`compaction` 已产出完整 `benchmark.json`。
+- 生产 `backend/data` 在专项阶段新增 3 个 `cache-observation/*.jsonl`，发生时间晚于 150 槽结束，未影响槽结果；已如实记录，未删除。
+- 修复后源码身份 `ee5f8520…` 与四槽冒烟放行时的 `85260147…` 不同，冒烟放行不覆盖本次实验身份。
+- 本结果不满足 §1.1 条件 6（24 个 fail、4 个 run_error），按"结果已产出、未放行"登记。

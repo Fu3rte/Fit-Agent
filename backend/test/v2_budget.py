@@ -74,6 +74,11 @@ class LedgerAttributionMigrationInvalid(RuntimeError):
         self.record = record
 
 
+def unsettled_model_attempts(bucket: dict) -> list[dict]:
+    return [attempt for attempt in bucket.get("attempts", [])
+            if attempt.get("state") not in {"settled", "reconciled"}]
+
+
 class BudgetLedger:
     def __init__(self, path, limits: dict[str, int] | None = None, *, experiment_id: str | None = None):
         # 共享停止与连续计数按 experiment_id 隔离：同一实验的 worker/单进程/专项/追加共用一个作用域。
@@ -210,6 +215,21 @@ class BudgetLedger:
         self._acquire()
         try:
             self._check_dispatch(self._load())
+        finally:
+            self._release()
+
+    def _check_settled(self, data: dict) -> None:
+        self._check_dispatch(data)
+        for model, bucket in data["models"].items():
+            attempts = unsettled_model_attempts(bucket)
+            if attempts or bucket["reserved"] or bucket["unknown"]:
+                detail = [(item["attempt_id"], item.get("state")) for item in attempts]
+                raise ValueError(f"{model} 在途或 unknown 用量未结清：{detail}")
+
+    def check_settled(self) -> None:
+        self._acquire()
+        try:
+            self._check_settled(self._load())
         finally:
             self._release()
 
@@ -657,11 +677,15 @@ class BudgetLedger:
         finally:
             self._release()
 
-    def claim_guarded(self, create):
-        # 领取原子边界：与停止置位共用同一把锁，置位后拒绝新领取（不执行 create）。
+    def claim_guarded(self, create, *, require_settled=False):
+        # 领取原子边界：与停止置位共用同一把锁；恢复另核实所有 attempt 已结清。
         self._acquire()
         try:
-            self._check_dispatch(self._load())
+            data = self._load()
+            if require_settled:
+                self._check_settled(data)
+            else:
+                self._check_dispatch(data)
             return create()
         finally:
             self._release()
@@ -693,6 +717,7 @@ class BudgetLedger:
                     "trigger_actual": bucket.get("trigger_actual"),
                     "attempts": len(bucket["attempts"]),
                     "unknown_attempts": unknown_attempts,
+                    "unsettled_attempts": unsettled_model_attempts(bucket),
                 }
             actual, reserved = self._total(data)
             attribution = self._attribution(data)

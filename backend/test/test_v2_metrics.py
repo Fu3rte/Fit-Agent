@@ -10,6 +10,8 @@ import re
 import shutil
 import sqlite3
 import stat
+import subprocess
+import sys
 import time
 from pathlib import Path
 from uuid import uuid4
@@ -24,6 +26,7 @@ from test.run_v2_eval import (
     budget_pause_guard,
     build_comparison,
     build_execution_ledger,
+    current_identity,
     load_round_evidence,
     load_v1_recalc,
     pairs_from_plan,
@@ -62,10 +65,24 @@ from test.v2_eval_support import (
     slot_plan,
     validate_cases,
 )
+from test.v2_test_paths import OUTPUT_ROOT
 
 CASES = Path(__file__).resolve().parent / "v2_cases.json"
 # 中间产物一律写入 gitignore 的本地目录，禁止使用 /tmp。
-SELFCHECK_ROOT = BACKEND / "temp" / "v2-selfcheck"
+SELFCHECK_ROOT = OUTPUT_ROOT / "selfcheck" / uuid4().hex[:12]
+@pytest.fixture
+def tmp_path():
+    root = OUTPUT_ROOT / "pytest-r2/m" / uuid4().hex[:12] / "case"
+    root.mkdir(parents=True)
+    from app import model_config
+
+    original = model_config.DATA_ROOT
+    try:
+        yield root
+    finally:
+        model_config.DATA_ROOT = original
+
+
 SESSION = "00000000-0000-4000-8000-000000000001"
 EXPERIMENT_ID = "selfcheck-release"
 
@@ -604,8 +621,59 @@ def test_budget_threshold_uses_settled_actual_only(tmp_path):
     assert inflight.settle("m", "c2", 30)["actual"] == 130
 
 
-def test_embedding_recorder_settles_real_usage_and_is_idempotent(tmp_path, monkeypatch):
+_EMBEDDING_STATE_ATTRS = ("_v2_recorder_owner", "_v2_original_embed", "_v2_recorder_installed")
+_MISSING = object()
+
+
+def _embedding_state(EmbeddingClient):
+    return {name: getattr(EmbeddingClient, name, _MISSING) for name in _EMBEDDING_STATE_ATTRS}
+
+
+def _restore_embedding_state(EmbeddingClient, state):
+    for name, value in state.items():
+        if value is _MISSING:
+            if hasattr(EmbeddingClient, name):
+                delattr(EmbeddingClient, name)
+        else:
+            setattr(EmbeddingClient, name, value)
+
+
+@pytest.fixture
+def embedding_class_state(request):
     from app.application.business.retrieval_embedding import EmbeddingClient
+
+    # 进入 fixture 立即保存真实原始状态；参数化前置只用于构造测试条件。
+    original = _embedding_state(EmbeddingClient)
+    initial = getattr(request, "param", "current")
+    if initial == "absent":
+        for name in _EMBEDDING_STATE_ATTRS:
+            if hasattr(EmbeddingClient, name):
+                delattr(EmbeddingClient, name)
+        expected = {name: _MISSING for name in _EMBEDDING_STATE_ATTRS}
+    elif initial == "present":
+        EmbeddingClient._v2_recorder_owner = "seed-owner"
+        EmbeddingClient._v2_original_embed = EmbeddingClient._embed
+        EmbeddingClient._v2_recorder_installed = True
+        expected = _embedding_state(EmbeddingClient)
+    else:
+        expected = original
+    assert _embedding_state(EmbeddingClient) == expected
+
+    for name in ("_v2_recorder_owner", "_v2_original_embed"):
+        if hasattr(EmbeddingClient, name):
+            delattr(EmbeddingClient, name)
+    EmbeddingClient._v2_recorder_installed = False
+
+    try:
+        yield EmbeddingClient
+    finally:
+        _restore_embedding_state(EmbeddingClient, original)
+        after = _embedding_state(EmbeddingClient)
+        assert after == original, f"recorder 类状态未还原: {original} -> {after}"
+
+
+def test_embedding_recorder_settles_real_usage_and_is_idempotent(tmp_path, monkeypatch, embedding_class_state):
+    EmbeddingClient = embedding_class_state
 
     model = next(iter(DEFAULT_LIMITS))
     calls: list[int] = []
@@ -633,8 +701,7 @@ def test_embedding_recorder_settles_real_usage_and_is_idempotent(tmp_path, monke
     config.model = model
     fake_self = type("Fake", (), {"_config": config})()
 
-    # 先写入哨兵属性，teardown 时该属性被删除，_embed 一并还原为真实实现。
-    monkeypatch.setattr(EmbeddingClient, "_v2_recorder_installed", False, raising=False)
+    # fixture 记录调用前的完整类状态，并按全新类状态安装；teardown 精确还原。
     monkeypatch.setattr(EmbeddingClient, "_embed", fake_embed)
     ledger = BudgetLedger(_fresh("embedding-recorder") / "budget.json", DEFAULT_LIMITS, experiment_id="selfcheck")
     install_embedding_recorder(ledger, experiment_id="selfcheck", process_index=0)
@@ -666,6 +733,41 @@ def test_embedding_recorder_settles_real_usage_and_is_idempotent(tmp_path, monke
     assert ledger.snapshot()["models"][model]["unknown_attempts"][0]["context"] == {
         "experiment_id": "selfcheck", "process_index": 0
     }
+
+
+@pytest.mark.parametrize("embedding_class_state", ["absent", "present"], indirect=True)
+def test_embedding_recorder_class_state_teardown(request, embedding_class_state, monkeypatch):
+    EmbeddingClient = embedding_class_state
+
+    async def fake_embed(self, texts):
+        raise AssertionError("teardown 检查不应发起编码请求")
+
+    monkeypatch.setattr(EmbeddingClient, "_embed", fake_embed)
+    ledger = BudgetLedger(
+        _fresh(f"embedding-state-{request.node.callspec.id}") / "budget.json",
+        DEFAULT_LIMITS,
+        experiment_id="state-check",
+    )
+    install_embedding_recorder(ledger, experiment_id="state-check", process_index=0)
+    assert EmbeddingClient._v2_recorder_owner == "state-check"
+    assert EmbeddingClient._v2_recorder_installed is True
+
+
+def test_embedding_recorder_fresh_process_state():
+    result_path = OUTPUT_ROOT / "embedding-class-state" / f"{uuid4().hex}.json"
+    result_path.parent.mkdir(parents=True, exist_ok=True)
+    environment = dict(os.environ)
+    environment["PYTHONPATH"] = os.pathsep.join((str(BACKEND / "test"), str(BACKEND),
+                                                 environment.get("PYTHONPATH", "")))
+    environment["FIT_AGENT_B6_TEST_OUTPUT_ROOT"] = str(OUTPUT_ROOT)
+    environment["EMBEDDING_CLASS_STATE_RESULT"] = str(result_path)
+    completed = subprocess.run([sys.executable, str(BACKEND / "test/check_embedding_class_state.py")],
+                               cwd=BACKEND, env=environment, capture_output=True, timeout=300)
+    assert completed.returncode == 0, completed.stdout.decode(errors="replace") + completed.stderr.decode(errors="replace")
+    result = read_record(result_path)
+    assert result["exit_code"] == 0
+    assert result["equal"] is True
+    assert result["before"] == result["after"]
 
 
 def _slot_trace(path: Path, *, session_id: str, run_id: str, operation_id: str, confirmations: list[str]) -> None:
@@ -759,10 +861,12 @@ def _release_rounds(root: Path):
             turns=[user_turn(case_a, 0, session_a, run_a, op_a)],
             confirmations=[accepted(case_a, 0, session_a, confirm_a), injection(case_a, 0, session_a)],
             checks=[
-                CheckResult(case_id=case_a, round_index=0, check_id="A-state", kind="deterministic",
-                            status="pass", reason="落库状态与期望一致"),
-                CheckResult(case_id=case_a, round_index=0, check_id="A-boundary", kind="deterministic",
-                            status="fail", reason="越界写入未被拦截"),
+                CheckResult(
+                    case_id=case_a, round_index=0, check_id=check.check_id, kind=check.kind,
+                    status="fail" if check.check_id == "P01-S1-01" else "pass",
+                    reason="越界写入未被拦截" if check.check_id == "P01-S1-01" else "落库状态与期望一致",
+                )
+                for check in cases[0].checks
             ],
             usage={"input": 100, "output": 7, "cache_read": 40, "cache_write": 10, "total_tokens": 157},
             duration_ms=9000.0, startup_ms=1500.0, precondition_ms=2200.0, status="pass",
@@ -772,8 +876,12 @@ def _release_rounds(root: Path):
             turns=[user_turn(case_b, 0, session_b, run_b, op_b)],
             confirmations=[accepted(case_b, 0, session_b, confirm_b)],
             checks=[
-                CheckResult(case_id=case_b, round_index=0, check_id="B-wording", kind="manual",
-                            status="pending_review", reason="公开正文口径需人工审阅"),
+                CheckResult(
+                    case_id=case_b, round_index=0, check_id=check.check_id, kind=check.kind,
+                    status="pending_review" if check.check_id == "P02-S2-05" else "pass",
+                    reason="公开正文口径需人工审阅" if check.check_id == "P02-S2-05" else "口径符合",
+                )
+                for check in cases[1].checks
             ],
             usage={"input": 100, "output": 7, "cache_read": 40, "cache_write": 10, "total_tokens": 157},
             duration_ms=9000.0, startup_ms=1600.0, precondition_ms=2300.0, status="pending_review",
@@ -801,7 +909,10 @@ def test_release_check_blocks_on_fail_and_pending(tmp_path):
     _record(root / "manifest.json", {
         "experiment_id": EXPERIMENT_ID, "slot_plan": plan,
         "cases_path": str(CASES), "rounds": 1,
+        "model_identity": {}, "execution_identity": current_identity(CASES, {}),
+        "budget_ledger_path": str(root / "budget-ledger.json"),
     })
+    _record(root / "budget-ledger.json", {"models": {}, "experiments": {}})
     packet = build_review_packet(load_round_evidence(root), load_cases(CASES))
     packet_sha = hashlib.sha256(
         json.dumps(packet, ensure_ascii=False, sort_keys=True).encode("utf-8")
@@ -814,15 +925,15 @@ def test_release_check_blocks_on_fail_and_pending(tmp_path):
     assert first["released"] is False
     assert first["planned_slots"] == 2
     joined = "\n".join(first["blockers"])
-    assert any("检查 A-boundary 失败" in blocker and cases[0].case_id in blocker for blocker in first["blockers"])
-    assert "仍待审阅" in joined and "检查 B-wording" in joined
+    assert any("检查 P01-S1-01 失败" in blocker and cases[0].case_id in blocker for blocker in first["blockers"])
+    assert "仍待审阅" in joined and "检查 P02-S2-05" in joined
     assert "缺少 review.json" in joined
     assert "缺少 protection.json" in joined
     assert "缺少 budget-summary.json" in joined
     assert "缺少 trace-reconciliation.json" in joined
 
     # 指向其他实验的审阅结论不参与判定。
-    verdict = {"case_id": cases[1].case_id, "round_index": 0, "check_id": "B-wording", "status": "pass",
+    verdict = {"case_id": cases[1].case_id, "round_index": 0, "check_id": "P02-S2-05", "status": "pass",
                "reason": "正文口径符合产品依据", "reviewer": "qoder-agent",
                "evidence_refs": [f"cases/{cases[1].case_id}/round-0/round.json"]}
     _record(root / "review.json", {"experiment_id": "other-experiment", "packet_sha256": packet_sha, "reviews": [verdict]})
@@ -864,12 +975,15 @@ def test_release_check_blocks_on_fail_and_pending(tmp_path):
     assert all(item["confirmation"]["idempotency_check"]["passed"] for item in report["slots"])
     third = release_check(root)
     assert third["released"] is False
-    assert any("A-boundary" in blocker for blocker in third["blockers"])
-    assert any("用量未知" in note for note in third["notes"])
+    assert any("P01-S1-01" in blocker for blocker in third["blockers"])
+    assert any("用量未知" in blocker for blocker in third["blockers"])
+    # 未知用量已在上一阶段单独验证为阻断项；最终放行阶段使用已结清的干净快照。
+    _record(root / "budget-summary.json",
+            BudgetLedger(root / "budget-final.json", DEFAULT_LIMITS, experiment_id="e").snapshot())
 
     fixed_checks = [
         item.model_copy(update={"status": "pass", "reason": "越界写入已拦截"})
-        if item.check_id == "A-boundary" else item
+        if item.check_id == "P01-S1-01" else item
         for item in reviewed[0].checks
     ]
     # 修复后的证据按 run_case_round 同一口径重算轮次状态。
@@ -1333,8 +1447,8 @@ def test_trace_probe_reads_committed_wal_from_independent_copy(tmp_path, monkeyp
     path = tmp_path / "trace-wal.db"
     connection = sqlite3.connect(str(path), isolation_level=None)
     # 关闭自动 checkpoint：已提交记录留在 WAL，且空闲连接不改写源文件。
-    # 使用 normal 锁模式：采集器需要以第二个连接取得独占静默窗口，
-    # locking_mode=EXCLUSIVE 会让该握手不可用（对应 test_trace_probe_blocks_when_exclusive_lock_holds）。
+    # 采集器只做文件级复制、不打开源库，因此锁模式不影响采集（见
+    # test_trace_probe_ignores_exclusive_lock_and_does_not_open_source）。
     connection.execute("PRAGMA journal_mode = WAL")
     connection.execute("PRAGMA wal_autocheckpoint = 0")
     connection.executescript(telemetry._SCHEMA_SQL)
@@ -1370,10 +1484,10 @@ def test_trace_probe_reads_committed_wal_from_independent_copy(tmp_path, monkeyp
         assert first["wal_bytes_before_open"] > 0
         assert Path(first["opened_path"]) != path
         assert str(first["opened_path"]).startswith(str(tmp_path / "snapshots"))
-        # 静默窗口由独占事务握手取得，窗口内复制完整 db/sidecar 集合。
-        window = first["quiet_window"]
+        # 一致快照由文件级采样取得，复制完整 db/sidecar 集合（全过程未打开源库）。
+        window = first["acquisition"]
         assert window["acquired"] is True
-        assert window["mechanism"] == "sqlite_begin_exclusive_handshake"
+        assert window["mechanism"] == "file_level_snapshot_no_source_open"
         assert sorted(first["copied_files"]) == sorted(first["source_files"])
         # 源数据文件集合、内容、大小与 mtime 均未变化。
         assert before == after
@@ -1382,8 +1496,8 @@ def test_trace_probe_reads_committed_wal_from_independent_copy(tmp_path, monkeyp
         connection.close()
 
 
-def test_trace_probe_blocks_when_exclusive_lock_holds(tmp_path, monkeypatch):
-    """源被独占锁持有：无法取得可证明静默窗口时必须 blocked，不得降级放行。"""
+def test_trace_probe_ignores_exclusive_lock_and_does_not_open_source(tmp_path, monkeypatch):
+    """源被独占锁持有但保持静默：采集不打开源库，仍取得一致副本并证明源未被写入。"""
     import sqlite3
     from uuid import uuid4 as new_uuid
 
@@ -1405,14 +1519,16 @@ def test_trace_probe_blocks_when_exclusive_lock_holds(tmp_path, monkeypatch):
     )
     try:
         result = eval_support._trace_store_stat(path)
-        assert result["read_only"] is not True and result["consistent"] is False
-        assert "静默窗口" in result["error"]
+        assert result["read_only"] is True and result["spans"] == 3
+        assert result["source_unchanged"] is True
+        assert result["acquisition"]["acquired"] is True
+        assert result["acquisition"]["mechanism"] == "file_level_snapshot_no_source_open"
     finally:
         connection.close()
 
 
-def test_trace_quiet_window_does_not_launder_writes_during_copy(tmp_path, monkeypatch):
-    """复制途中出现源写入：立即判失败，禁止重取窗口把该写入洗成新基线。"""
+def test_trace_snapshot_does_not_launder_writes_during_copy(tmp_path, monkeypatch):
+    """复制途中出现源写入：立即判失败，禁止把该写入洗成新基线。"""
     import sqlite3
     from uuid import uuid4 as new_uuid
 
@@ -1452,7 +1568,7 @@ def test_trace_quiet_window_does_not_launder_writes_during_copy(tmp_path, monkey
     result = eval_support._trace_store_stat(path)
     assert state["fired"] is True
     assert result["read_only"] is not True and result["consistent"] is False
-    assert "静默窗口" in result["error"]
+    assert "一致快照" in result["error"]
 
 
 def test_trace_probe_blocks_on_inconsistent_copy(tmp_path, monkeypatch):
@@ -1582,70 +1698,71 @@ def test_compare_baseline_identity_and_scope():
 
 
 def _worker_experiment(tmp_path) -> Path:
+    from app import model_config
+    from test.run_v2_eval import load_backend_env
+    from test.v2_eval_support import (
+        build_manifest,
+        freeze_model_config,
+        protected_baseline,
+    )
+
+    load_backend_env()
     root = tmp_path / "experiment"
     root.mkdir()
-    cases = load_cases(CASES)[:1]
-    identity = {"provider": "stepfun", "api": "openai-completions", "model": "m", "base_url": "https://x/"}
-    (root / "model-config").mkdir()
-    write_record(root / "model-config" / "models.json", identity)
-    write_record(root / "model-config" / "auth.json", {"api_key": "local"})
-    write_record(root / "manifest.json", {
-        "experiment_id": "experiment", "slot_plan": slot_plan(cases), "rounds": ROUNDS,
-        "cases_path": str(CASES), "business_date": "2026-01-01",
-        "budget_ledger_path": str(root.parent / "budget-ledger.json"),
-    })
+    original_config = model_config.DATA_ROOT
+    try:
+        identity = freeze_model_config(BACKEND / "data", root)
+    finally:
+        model_config.DATA_ROOT = original_config
+    manifest = build_manifest(BACKEND.parent, root.name, CASES, identity, "2026-01-01", 1)
+    manifest.update(slot_plan=slot_plan(load_cases(CASES)[:1]),
+                    execution_identity=current_identity(CASES, identity),
+                    budget_ledger_path=str(tmp_path / "worker-budget.json"),
+                    protected_baseline_before=protected_baseline(BACKEND.parent, snapshot_root=tmp_path / "snapshots"))
+    write_record(root / "manifest.json", manifest)
+    write_record(manifest["budget_ledger_path"], {"limits": DEFAULT_LIMITS, "models": {},
+                                                "experiments": {}, "completion_seq": 0})
     return root
 
 
-def _stub_runtime(monkeypatch, run_v2_eval) -> None:
-    monkeypatch.setattr(run_v2_eval, "use_frozen_model_config",
-                        lambda _dir: {"provider": "stepfun", "api": "openai-completions",
-                                      "model": "m", "base_url": "https://x/"})
-    monkeypatch.setattr(run_v2_eval, "verify_frozen_identity", lambda *a, **k: None)
-    monkeypatch.setattr(run_v2_eval, "install_embedding_recorder", lambda *a, **k: None)
+def _control_process(root, mode, kind):
+    driver = BACKEND / "test/lifecycle_driver_r2.py"
+    environment = dict(os.environ, FIT_AGENT_B6_TEST_INSTANCE=uuid4().hex)
+    environment.pop("FIT_AGENT_B6_TEST_HOOK", None)
+    environment.pop("FIT_AGENT_B6_TEST_ROOT", None)
+    environment["PYTHONPATH"] = os.pathsep.join((str(driver.parent), str(BACKEND), environment.get("PYTHONPATH", "")))
+    environment["FIT_AGENT_B6_TEST_OUTPUT_ROOT"] = str(OUTPUT_ROOT)
+    for key in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"):
+        environment.pop(key, None)
+    completed = subprocess.run([sys.executable, str(driver), mode, str(root), kind],
+                               cwd=BACKEND, env=environment, capture_output=True, timeout=120)
+    (root / f"{mode}-{kind}.log").write_bytes(completed.stdout + completed.stderr)
+    assert completed.returncode != 0
+    result = read_record(root / "driver-result.json")
+    assert result["event"]["target"].endswith("precondition.json")
+    assert result["error_type"] == f"{'asyncio.exceptions' if kind == 'CancelledError' else 'builtins'}.{kind}"
+    if kind == "SystemExit":
+        assert completed.returncode == 23 and result["error"] == "23"
+    assert not read_record(root.parent / "worker-budget.json").get("models")
 
 
-def test_worker_propagates_control_flow_exceptions(tmp_path, monkeypatch):
-    from test import run_v2_eval
-
-    _worker_experiment(tmp_path)
-    _stub_runtime(monkeypatch, run_v2_eval)
-    args = argparse.Namespace(experiment_root=str(tmp_path), experiment_id="experiment",
-                              cases=str(CASES), processes=1, process_index=0, smoke_cases=None)
-    cases = load_cases(CASES)[:1]
-    for exc in (KeyboardInterrupt, SystemExit, asyncio.CancelledError):
-        def boom(*_a, **_k):
-            raise exc()
-        monkeypatch.setattr(run_v2_eval, "run_case_round", boom)
-        with pytest.raises(exc):
-            run_v2_eval.run_worker(args, cases)
+def test_worker_propagates_control_flow_exceptions(tmp_path):
+    for kind in ("KeyboardInterrupt", "SystemExit", "CancelledError"):
+        namespace = tmp_path / kind
+        namespace.mkdir()
+        root = _worker_experiment(namespace)
+        _control_process(root, "slot", kind)
+        result = read_record(root / "cases/P01/round-0/round.json")
+        assert result["error_type"].endswith(kind)
 
 
-def test_additional_propagates_control_flow_exceptions(tmp_path, monkeypatch):
-    from test import run_v2_eval
-
+def test_additional_propagates_control_flow_exceptions(tmp_path):
     root = _worker_experiment(tmp_path)
-    _stub_runtime(monkeypatch, run_v2_eval)
-    attempt_root = tmp_path / "attempt"
-    attempt_root.mkdir()
-    monkeypatch.setattr(
-        run_v2_eval, "create_attempt",
-        lambda *a, **k: (attempt_root, {"attempt_id": "a1",
-                                        "budget_ledger_path": str(root.parent / "budget-ledger.json")}),
-    )
-    cases = load_cases(CASES)[:1]
-    args = argparse.Namespace(
-        experiment_root=str(tmp_path), experiment_id="experiment", cases=str(CASES),
-        case_id=cases[0].case_id, round_index=0, purpose="extra", reason="propagation",
-        finalize_only=False, benchmarks_only=False, process_index=None, parent_experiment_id=None,
-    )
-
-    def boom(*_a, **_k):
-        raise KeyboardInterrupt
-
-    monkeypatch.setattr(run_v2_eval, "run_case_round", boom)
-    with pytest.raises(KeyboardInterrupt):
-        run_v2_eval.run_additional(args)
+    case = load_cases(CASES)[0]
+    manifest = read_record(root / "manifest.json")
+    claim_slot(experiment_env(root.name, case, 0, 0, 0, root, manifest["model_identity"], "2026-01-01"))
+    _control_process(root, "additional", "KeyboardInterrupt")
+    assert len(list(root.glob("reproductions/*/attempt.json"))) == 1
 
 
 # ---------- B4 用量来源、样本与调用计数 ----------
@@ -1915,27 +2032,22 @@ def test_claim_slot_rejected_after_shared_stop(tmp_path):
     assert not (tmp_path / "claims").exists()
 
 
-def test_worker_stops_when_shared_stop_set(tmp_path, monkeypatch):
+def test_worker_stops_when_shared_stop_set(tmp_path):
     from test import run_v2_eval
 
     root = _worker_experiment(tmp_path)
-    _stub_runtime(monkeypatch, run_v2_eval)
-    # 账本路径改为不叫 budget-ledger.json：避免污染 basetemp 的旧式预算守卫。
     manifest = read_record(root / "manifest.json")
     manifest["budget_ledger_path"] = str(tmp_path / "shared-stop.json")
     write_record(root / "manifest.json", manifest)
     BudgetLedger(tmp_path / "shared-stop.json", DEFAULT_LIMITS, experiment_id="experiment").request_stop(
         "leak", owner="experiment", trigger="unit")
 
-    def forbidden(*_a, **_k):
-        raise AssertionError("共享停止置位后不得执行新槽位")
-
-    monkeypatch.setattr(run_v2_eval, "run_case_round", forbidden)
     args = argparse.Namespace(experiment_root=str(tmp_path), experiment_id="experiment",
                               cases=str(CASES), processes=1, process_index=0, smoke_cases=None)
     assert run_v2_eval.run_worker(args, load_cases(CASES)[:1]) == 3
     assert (root / "stop-report.json").exists()
     assert not (root / "claims").exists()
+    assert not (root / "preflight").exists()
 
 
 def test_capture_turn_preserves_control_flow_exceptions(monkeypatch):

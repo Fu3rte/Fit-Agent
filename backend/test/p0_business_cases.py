@@ -1,8 +1,8 @@
 import asyncio
 import json
 import sqlite3
-import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date, timedelta
 from pathlib import Path
 from uuid import uuid4
@@ -54,17 +54,8 @@ def _database_path(service, database_path: str | None) -> Path:
 
 def _run_in_own_loop(coroutine_factory):
     # 私有事件循环运行：调用方可能持有运行中的 loop，前置构造使用独立连接避免冲突。
-    outcome: dict = {}
-
-    def runner() -> None:
-        outcome["value"] = asyncio.run(coroutine_factory())
-
-    thread = threading.Thread(target=runner)
-    thread.start()
-    thread.join()
-    if "value" not in outcome:
-        raise RuntimeError("前置构造协程未返回结果")
-    return outcome["value"]
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        return executor.submit(lambda: asyncio.run(coroutine_factory())).result()
 
 
 # ---------- 前置状态构造 ----------
