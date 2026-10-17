@@ -1,5 +1,7 @@
 import json
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from math import ceil
 from threading import Event
@@ -12,6 +14,7 @@ from app.agent.cache_observation import (
     CacheObserver,
 )
 from app.agent.compaction_summary import CompactionSummaryMessage
+from app.agent.governance import RunControl, RunDeadline
 from app.agent.message_context import business_context_to_llm, convert_to_llm
 from app.agent.telemetry import TraceSpan
 from app.ai.messages import (
@@ -52,6 +55,25 @@ TURN_PREFIX_SUMMARY_RATIO = 0.5
 # 图片内容按固定字符数参与估算，与 Pi 保持一致；文本换算后图片仍按既有除数得到固定 token。
 ESTIMATED_IMAGE_CHARS = 4800
 ESTIMATED_IMAGE_TOKENS = ESTIMATED_IMAGE_CHARS // 4
+
+
+# 压缩原因在同一异步调用链内传递：阈值压缩不占恢复额度，溢出恢复摘要占恢复额度。
+_COMPACTION_REASON: ContextVar[str] = ContextVar("compaction_reason", default="threshold")
+
+
+@contextmanager
+def compaction_scope(reason: str) -> Iterator[None]:
+    if reason not in {"threshold", "overflow"}:
+        raise ValueError(f"未知压缩原因: {reason}")
+    token = _COMPACTION_REASON.set(reason)
+    try:
+        yield
+    finally:
+        _COMPACTION_REASON.reset(token)
+
+
+def current_compaction_reason() -> str:
+    return _COMPACTION_REASON.get()
 
 
 class CompactionError(Exception):
@@ -742,9 +764,12 @@ async def _call_summary(
     label: str,
     budget: RequestBudget | None,
     turn_prefix: bool = False,
+    recovery: bool = False,
     observation: CacheObserver | None = None,
     compaction_id: str | None = None,
     parent: TraceSpan | None = None,
+    deadline: RunDeadline | None = None,
+    run_control: RunControl | None = None,
 ) -> CompactionSummaryResult:
     check_cancelled(signal)
     prompt = _summary_prompt(
@@ -755,8 +780,9 @@ async def _call_summary(
     _check_summary_budget(prompt, model, max_tokens, label)
     if budget is None:
         raise ValueError(f"{label}缺少共享请求预算，无法计数")
-    # 共享请求预算的检查与占用先于模型子 Span 创建：预算拒绝时不产生虚假模型调用记录。
-    budget.reserve()
+    # 发送前预检先于模型子 Span 创建：预算拒绝时不产生虚假模型调用记录；
+    # 真正的扣除在公共模型消费边界按每次实际尝试完成。
+    budget.ensure_available(recovery=recovery)
     kind = TURN_PREFIX_SUMMARY_CALL if turn_prefix else HISTORY_SUMMARY_CALL
     attributes = {"provider": model.provider, "model": model.id, "call_kind": kind}
 
@@ -764,12 +790,16 @@ async def _call_summary(
         options: StreamOptions = {
             "api_key": api_key,
             "signal": signal,
+            # 摘要请求与普通调用共用同一运行截止时间实例与共享请求预算。
+            "deadline": deadline,
+            "budget": budget,
+            "recovery": recovery,
+            "run_control": run_control,
             "max_tokens": max_tokens,
         }
         if observation is not None:
-            # 每个实际摘要请求各记录一次，标明历史摘要或任务前缀摘要并关联真实压缩身份,
-            # 真实结局与用量同时补充到本模型子 Span。
-            options["observation"] = observation.start_call(
+            # 每次真实摘要尝试各自创建观测句柄，失败尝试的诊断不被后续成功覆盖。
+            options["observation_factory"] = lambda: observation.start_call(
                 kind, compaction_id=compaction_id, span=summary_span
             )
         return await complete(model, _build_summary_context(prompt), options)
@@ -812,11 +842,17 @@ async def generate_compaction_summary(
     observation: CacheObserver | None = None,
     compaction_id: str | None = None,
     parent: TraceSpan | None = None,
+    deadline: RunDeadline | None = None,
+    run_control: RunControl | None = None,
+    recovery: bool | None = None,
 ) -> CompactionSummaryResult:
     # 独立摘要请求：只有摘要系统提示词与序列化历史，不注册任何业务工具。
     # parent 为当前 Compaction Span：历史摘要与任务前缀摘要分别在其下建立 model 子 Span。
     if not api_key:
         raise ValueError("api_key 不能为空")
+    if recovery is None:
+        # 生产路径由 run_compaction 设置压缩原因；直接调用时默认按阈值压缩计数。
+        recovery = current_compaction_reason() == "overflow"
     if preparation.is_split_turn and preparation.turn_prefix_messages:
         history = (
             await _call_summary(
@@ -829,9 +865,12 @@ async def generate_compaction_summary(
                 ratio=HISTORY_SUMMARY_RATIO,
                 label="历史摘要",
                 budget=budget,
+                recovery=recovery,
                 observation=observation,
                 compaction_id=compaction_id,
                 parent=parent,
+                deadline=deadline,
+                run_control=run_control,
             )
             if preparation.messages_to_summarize
             else None
@@ -847,9 +886,12 @@ async def generate_compaction_summary(
             label="任务前缀摘要",
             budget=budget,
             turn_prefix=True,
+            recovery=recovery,
             observation=observation,
             compaction_id=compaction_id,
             parent=parent,
+            deadline=deadline,
+            run_control=run_control,
         )
         history_text = (
             history.summary if history is not None else preparation.previous_summary or "无先前历史。"
@@ -873,7 +915,10 @@ async def generate_compaction_summary(
         ratio=HISTORY_SUMMARY_RATIO,
         label="历史摘要",
         budget=budget,
+        recovery=recovery,
         observation=observation,
         compaction_id=compaction_id,
         parent=parent,
+        deadline=deadline,
+        run_control=run_control,
     )

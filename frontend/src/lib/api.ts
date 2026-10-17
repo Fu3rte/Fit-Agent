@@ -81,6 +81,15 @@ const RUN_STATUSES = [
   "cancelled",
   "interrupted",
 ] as const;
+/** 运行停止原因（治理契约）：与后端 RunStopReason 集合一致，null 表示未记录。 */
+const RUN_STOP_REASONS = [
+  "model_timeout",
+  "tool_timeout",
+  "run_timeout",
+  "cancelled",
+  "slow_consumer",
+  "output_too_large",
+] as const;
 const STEERING_STATUSES = [
   "pending",
   "consumed",
@@ -102,8 +111,16 @@ const DISCARD_REASONS = [
 ] as const;
 const OPERATION_KINDS = ["send", "edit", "regenerate", "steering"] as const;
 
+/** 准入拒绝的 Retry-After（治理契约）：只接受非负整数秒，缺失或非法保持 null */
+function retryAfterSeconds(response: Response): number | null {
+  const raw = response.headers.get("Retry-After");
+  if (raw === null || !/^[0-9]+$/.test(raw)) return null;
+  const value = Number(raw);
+  return Number.isSafeInteger(value) ? value : null;
+}
+
 /** 会话持久化接口错误（§11.5、确认契约 §7.4）：body 形如 ``{"detail":{"code":"...","message":"..."}}``，
- *  操作失效冲突附带 ``detail.reason`` */
+ *  操作失效冲突附带 ``detail.reason``；429 另带 ``Retry-After`` */
 async function contractError(response: Response): Promise<ReActHttpError> {
   const body: unknown = await response.json().catch(() => null);
   const detail = isObject(body) && isObject(body.detail) ? body.detail : null;
@@ -118,6 +135,7 @@ async function contractError(response: Response): Promise<ReActHttpError> {
     detail.code,
     response.status,
     typeof detail.reason === "string" ? detail.reason : null,
+    retryAfterSeconds(response),
   );
 }
 
@@ -144,6 +162,10 @@ function parseRun(body: unknown): SessionRunWire {
     finished_at: nullableMillis(body.finished_at, "finished_at"),
     error_code: nullableString(body.error_code, "error_code"),
     error_message: nullableString(body.error_message, "error_message"),
+    stop_reason:
+      body.stop_reason === null
+        ? null
+        : requireEnum(body.stop_reason, RUN_STOP_REASONS, "stop_reason"),
   };
 }
 

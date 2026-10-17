@@ -4,14 +4,21 @@ import json
 import traceback
 from collections.abc import Awaitable, Callable, Mapping
 from concurrent.futures import CancelledError as FuturesCancelled
+from contextlib import suppress
 from copy import deepcopy
-from dataclasses import dataclass
-from threading import Event
-from time import perf_counter, time_ns
+from dataclasses import dataclass, field
+from threading import Event, Lock, Thread, current_thread
+from time import monotonic, perf_counter, time_ns
 from typing import Literal
 
 from pydantic import BaseModel, ValidationError
 
+from app.agent.governance import (
+    CANCEL_COOPERATIVE_WAIT_SECONDS,
+    TOOL_EXECUTION_SECONDS,
+    RunControl,
+    RunDeadline,
+)
 from app.agent.telemetry import TraceSpan
 from app.ai.messages import (
     JsonObject,
@@ -63,10 +70,70 @@ class _CancelledExecution(asyncio.CancelledError):
         self.result = result
 
 
+class ToolExecutionTimeout(Exception):
+    """工具超过自身时限或运行剩余预算；执行句柄保留在 tracker 中供真实退出核对。"""
+
+
 @dataclass(frozen=True)
 class AgentToolResult:
     content: list[TextContent]
     is_error: bool = False
+
+
+@dataclass
+class ToolExecutionHandle:
+    # 一次真实工具执行的句柄：done 只在工具函数真正返回或抛出后置位。
+    tool_call_id: str
+    kind: Literal["async", "thread"]
+    started_at: float
+    done: Event = field(default_factory=Event)
+    thread: Thread | None = None
+    task: asyncio.Future | None = None
+    result: AgentToolResult | None = None
+    error: BaseException | None = None
+
+    @property
+    def finished(self) -> bool:
+        return self.done.is_set()
+
+    def wait(self, timeout: float) -> bool:
+        return self.done.wait(timeout)
+
+
+class ToolExecutionTracker:
+    """运行级在途工具执行证据。
+
+    超时或取消不能证明同步线程已退出：句柄只在真实返回后标记完成。收尾任务据此
+    等待协作退出、记录 worker_stuck 并保持运行占用；本类不释放名额或提交终态。
+    """
+
+    def __init__(self) -> None:
+        self._lock = Lock()
+        self._handles: list[ToolExecutionHandle] = []
+
+    def add(self, handle: ToolExecutionHandle) -> None:
+        with self._lock:
+            self._handles.append(handle)
+
+    def snapshot(self) -> tuple[ToolExecutionHandle, ...]:
+        with self._lock:
+            return tuple(self._handles)
+
+    def pending(self) -> tuple[ToolExecutionHandle, ...]:
+        with self._lock:
+            return tuple(handle for handle in self._handles if not handle.finished)
+
+    def wait_all(self, timeout: float) -> bool:
+        # 返回 True 表示全部真实退出；False 表示仍有句柄未退出，证据保留。
+        end = monotonic() + max(0.0, timeout)
+        while True:
+            pending = self.pending()
+            if not pending:
+                return True
+            remaining = end - monotonic()
+            if remaining <= 0:
+                return False
+            pending[0].wait(min(0.05, remaining))
 
 
 UpdateCallback = Callable[[AgentToolResult], None]
@@ -162,6 +229,9 @@ class ToolBatchResult:
     first_result_at: float | None
     finalized_at: float
     failure: BaseException | None = None
+    # 超时或取消后仍未真实退出的执行句柄；收尾任务不得将其视为已结束。
+    inflight: tuple[ToolExecutionHandle, ...] = ()
+    tracker: ToolExecutionTracker | None = None
 
 
 OnToolStart = Callable[[ToolCall], Awaitable[None]]
@@ -281,6 +351,10 @@ async def execute_prepared_tool_call(
     signal: Event | None = None,
     on_update: UpdateCallback | None = None,
     contains_credentials: CredentialCheck | None = None,
+    deadline: RunDeadline | None = None,
+    run_control: RunControl | None = None,
+    tracker: ToolExecutionTracker | None = None,
+    timeout: float = TOOL_EXECUTION_SECONDS,
 ) -> FinalizedToolCall:
     tool_call = prepared.tool_call
     tool = prepared.tool
@@ -306,10 +380,22 @@ async def execute_prepared_tool_call(
 
     try:
         result = await _execute_with_cancel(
-            tool_call.id, tool, arguments, signal,
+            tool_call.id,
+            tool,
+            arguments,
+            signal,
             update if on_update is not None else None,
+            timeout=timeout,
+            deadline=deadline,
+            run_control=run_control,
+            tracker=tracker,
         )
-    except (CredentialDetectedError, _ResultProtocolError, _UpdatePublicationError):
+    except (
+        CredentialDetectedError,
+        _ResultProtocolError,
+        _UpdatePublicationError,
+        ToolExecutionTimeout,
+    ):
         raise
     except _CancelledExecution as error:
         cancellation = error
@@ -418,6 +504,10 @@ async def run_tool_call(
     signal: Event | None = None,
     on_update: UpdateCallback | None = None,
     contains_credentials: CredentialCheck | None = None,
+    deadline: RunDeadline | None = None,
+    run_control: RunControl | None = None,
+    tracker: ToolExecutionTracker | None = None,
+    timeout: float = TOOL_EXECUTION_SECONDS,
 ) -> ToolResultMessage:
     outcome = await prepare_tool_call(
         0,
@@ -444,6 +534,10 @@ async def run_tool_call(
         signal=signal,
         on_update=update if on_update is not None or contains_credentials is not None else None,
         contains_credentials=contains_credentials,
+        deadline=deadline,
+        run_control=run_control,
+        tracker=tracker,
+        timeout=timeout,
     )
     return finalized.message
 
@@ -462,9 +556,14 @@ async def run_tool_batch(
     on_tool_update: OnToolUpdate | None = None,
     contains_credentials: CredentialCheck | None = None,
     telemetry_span: TraceSpan | None = None,
+    deadline: RunDeadline | None = None,
+    run_control: RunControl | None = None,
+    tracker: ToolExecutionTracker | None = None,
+    timeout: float = TOOL_EXECUTION_SECONDS,
 ) -> ToolBatchResult:
     if len({call.id for call in tool_calls}) != len(tool_calls):
         raise ValueError("工具调用ID重复")
+    execution_tracker = tracker if tracker is not None else ToolExecutionTracker()
     messages: list[ToolResultMessage | None] = [None] * len(tool_calls)
     first_result_at: float | None = None
     prepare_started_at = perf_counter()
@@ -550,6 +649,13 @@ async def run_tool_batch(
         if signal is not None:
             signal.set()
 
+    def deadline_exhausted() -> bool:
+        # 预算已耗尽时禁止启动新的工具；停止原因只在首次生效。
+        if deadline is not None and deadline.expired():
+            _record_tool_stop(run_control, "run_timeout")
+            return True
+        return False
+
     sequential = execution_mode == "sequential" or any(
         (tool := tools.get(call.name)) is not None
         and tool.execution_mode == "sequential"
@@ -558,6 +664,10 @@ async def run_tool_batch(
     if sequential:
         for index, call in enumerate(tool_calls):
             if _cancelled(signal):
+                break
+            if deadline_exhausted():
+                failure = ToolExecutionTimeout("运行预算已耗尽")
+                stop()
                 break
             try:
                 await notify_start(call)
@@ -586,6 +696,10 @@ async def run_tool_batch(
                             signal=signal,
                             on_update=update,
                             contains_credentials=contains_credentials,
+                            deadline=deadline,
+                            run_control=run_control,
+                            tracker=execution_tracker,
+                            timeout=timeout,
                         )
                     finally:
                         active[0] = False
@@ -600,6 +714,10 @@ async def run_tool_batch(
         ] * len(tool_calls)
         for index, call in enumerate(tool_calls):
             if _cancelled(signal):
+                break
+            if deadline_exhausted():
+                failure = ToolExecutionTimeout("运行预算已耗尽")
+                stop()
                 break
             try:
                 await notify_start(call)
@@ -631,8 +749,22 @@ async def run_tool_batch(
                         break
                 elif isinstance(placement, PreparedToolCall):
                     prepared_calls.append(placement)
+        if failure is None and deadline_exhausted():
+            failure = ToolExecutionTimeout("运行预算已耗尽")
+            stop()
         if failure is None and prepared_calls and not _cancelled(signal):
             first_failure: list[BaseException] = []
+
+            def record_failure(error: BaseException) -> None:
+                # 凭据命中优先于普通失败：先到的超时不能掩盖后续安全终态。
+                if not first_failure:
+                    first_failure.append(error)
+                    stop()
+                elif isinstance(error, CredentialDetectedError) and not isinstance(
+                    first_failure[0], CredentialDetectedError
+                ):
+                    first_failure[0] = error
+                    stop()
 
             async def run(prepared: PreparedToolCall) -> None:
                 update, active = update_for(
@@ -645,6 +777,10 @@ async def run_tool_batch(
                         signal=signal,
                         on_update=update,
                         contains_credentials=contains_credentials,
+                        deadline=deadline,
+                        run_control=run_control,
+                        tracker=execution_tracker,
+                        timeout=timeout,
                     )
                 finally:
                     active[0] = False
@@ -652,12 +788,12 @@ async def run_tool_batch(
 
             def observe(task: asyncio.Task) -> None:
                 # 首个框架失败立即通知在途工具停止；聚合仍等待它们收尾。
-                if task.cancelled() or first_failure:
+                # 后续凭据命中仍会覆盖普通失败，保持安全错误优先级。
+                if task.cancelled():
                     return
                 error = task.exception()
                 if error is not None:
-                    first_failure.append(error)
-                    stop()
+                    record_failure(error)
 
             tasks = [asyncio.create_task(run(prepared)) for prepared in prepared_calls]
             for task in tasks:
@@ -668,8 +804,8 @@ async def run_tool_batch(
                 failure = error
             else:
                 for outcome in outcomes:
-                    if isinstance(outcome, BaseException) and not first_failure:
-                        first_failure.append(outcome)
+                    if isinstance(outcome, BaseException):
+                        record_failure(outcome)
                 if first_failure:
                     failure = first_failure[0]
 
@@ -684,7 +820,15 @@ async def run_tool_batch(
         first_result_at,
         perf_counter(),
         failure,
+        inflight=execution_tracker.pending(),
+        tracker=execution_tracker,
     )
+
+
+def _record_tool_stop(run_control: RunControl | None, reason: str) -> None:
+    # 工具超时先记录首个停止原因并置位同一取消信号；已有原因时保持原值。
+    if run_control is not None:
+        run_control.request_cancel(reason)
 
 
 async def _execute_with_cancel(
@@ -693,38 +837,143 @@ async def _execute_with_cancel(
     arguments: BaseModel,
     signal: Event | None,
     on_update: UpdateCallback | None,
+    *,
+    timeout: float = TOOL_EXECUTION_SECONDS,
+    deadline: RunDeadline | None = None,
+    run_control: RunControl | None = None,
+    tracker: ToolExecutionTracker | None = None,
 ) -> AgentToolResult:
     # 协程 execute 直接在当前事件循环执行；同步 execute 放入线程池，两者共用取消收尾。
-    if inspect.iscoroutinefunction(tool.execute):
-        pending: asyncio.Future = asyncio.ensure_future(
-            tool.execute(tool_call_id, arguments, signal, on_update)
-        )
-    else:
-        pending = asyncio.get_running_loop().run_in_executor(
-            None, tool.execute, tool_call_id, arguments, signal, on_update
-        )
-    try:
-        return await asyncio.shield(pending)
-    except asyncio.CancelledError:
-        # 任务取消桥接到工具信号，等待在途工作完成收尾并接收结果后再向外传播。
+    budget = timeout if deadline is None else deadline.effective(timeout)
+    if budget <= 0:
+        reason = "run_timeout" if deadline is not None and deadline.expired() else "tool_timeout"
+        _record_tool_stop(run_control, reason)
         if signal is not None:
             signal.set()
-        while not pending.done():
+        raise ToolExecutionTimeout(f"工具 {tool.name} 没有可用的执行预算")
+
+    handle = ToolExecutionHandle(
+        tool_call_id=tool_call_id,
+        kind="async" if inspect.iscoroutinefunction(tool.execute) else "thread",
+        started_at=monotonic(),
+    )
+    if tracker is not None:
+        tracker.add(handle)
+
+    if handle.kind == "async":
+        async def invoke():
             try:
-                await asyncio.wait((pending,))
+                return await tool.execute(tool_call_id, arguments, signal, on_update)
+            finally:
+                handle.done.set()
+
+        pending: asyncio.Future = asyncio.ensure_future(invoke())
+        handle.task = pending
+    else:
+        def invoke():
+            handle.thread = current_thread()
+            try:
+                return tool.execute(tool_call_id, arguments, signal, on_update)
+            finally:
+                handle.done.set()
+
+        pending = asyncio.get_running_loop().run_in_executor(None, invoke)
+
+    def consume_task_result(task: asyncio.Future) -> None:
+        # 超时或取消后底层任务仍可能继续；读取异常避免未取回告警，不改变句柄的真实退出状态。
+        if not task.cancelled():
+            with suppress(Exception):
+                task.exception()
+
+    pending.add_done_callback(consume_task_result)
+    hard_deadline = monotonic() + budget
+    cooperative_end: float | None = None
+    try:
+        while True:
+            if pending.done():
+                try:
+                    result = pending.result()
+                except (CredentialDetectedError, _ResultProtocolError, _UpdatePublicationError):
+                    raise
+                except Exception as error:
+                    handle.error = error
+                    raise
+                handle.result = result
+                return result
+            if _cancelled(signal):
+                # 协作取消：同一信号已通知工具；等待真实退出，超过共享收尾预算保留句柄。
+                if cooperative_end is None:
+                    limit = min(
+                        CANCEL_COOPERATIVE_WAIT_SECONDS,
+                        deadline.remaining()
+                        if deadline is not None
+                        else CANCEL_COOPERATIVE_WAIT_SECONDS,
+                    )
+                    cooperative_end = monotonic() + limit
+                    if run_control is not None:
+                        run_control.note_stop()
+                        shared = run_control.cooperative_deadline()
+                        if shared is not None:
+                            cooperative_end = min(cooperative_end, shared)
+                if monotonic() >= cooperative_end:
+                    raise _CancelledExecution(None)
+            else:
+                now = monotonic()
+                if now >= hard_deadline:
+                    reason = (
+                        "run_timeout"
+                        if deadline is not None and deadline.expired()
+                        else "tool_timeout"
+                    )
+                    # 先记录首个停止原因，再置位同一取消信号，保证观察者读到信号时原因已确定。
+                    _record_tool_stop(run_control, reason)
+                    if signal is not None:
+                        signal.set()
+                    raise ToolExecutionTimeout(f"工具 {tool.name} 超过执行时限")
+            remaining = hard_deadline - monotonic()
+            wait = min(0.05, max(0.001, remaining))
+            if cooperative_end is not None:
+                wait = min(wait, max(0.001, cooperative_end - monotonic()))
+            await asyncio.wait({pending}, timeout=wait)
+    except _CancelledExecution:
+        raise
+    except asyncio.CancelledError:
+        # 外层任务取消：桥接到工具信号，等待真实退出；未退出时保留句柄并保留取消语义。
+        if signal is not None:
+            signal.set()
+        limit = min(
+            CANCEL_COOPERATIVE_WAIT_SECONDS,
+            deadline.remaining()
+            if deadline is not None
+            else CANCEL_COOPERATIVE_WAIT_SECONDS,
+        )
+        end = monotonic() + limit
+        if run_control is not None:
+            run_control.note_stop()
+            shared = run_control.cooperative_deadline()
+            if shared is not None:
+                end = min(end, shared)
+        while not pending.done() and monotonic() < end:
+            try:
+                await asyncio.wait(
+                    {pending}, timeout=min(0.05, max(0.001, end - monotonic()))
+                )
             except asyncio.CancelledError:
                 continue
-        try:
-            result = pending.result()
-        except (CredentialDetectedError, _ResultProtocolError, _UpdatePublicationError):
-            raise
-        except asyncio.CancelledError:
-            result = None
-        except Exception as error:
-            result = AgentToolResult(
-                [TextContent(type="text", text=f"工具执行失败：{error}")], is_error=True
-            )
-        raise _CancelledExecution(result)
+        if pending.done():
+            try:
+                result = pending.result()
+            except (CredentialDetectedError, _ResultProtocolError, _UpdatePublicationError):
+                raise
+            except asyncio.CancelledError:
+                result = None
+            except Exception as error:
+                result = AgentToolResult(
+                    [TextContent(type="text", text=f"工具执行失败：{error}")], is_error=True
+                )
+            raise _CancelledExecution(result)
+        # 真实线程/任务仍未退出：句柄保留在 tracker，禁止标为已结束或丢弃。
+        raise
 
 
 def _validate_result(result: AgentToolResult) -> None:

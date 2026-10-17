@@ -724,6 +724,7 @@ const historyWire = (toolName, content, isError, confirmation = null) => {
         finished_at: 4,
         error_code: null,
         error_message: null,
+        stop_reason: null,
       },
     ],
     steering: [],

@@ -347,6 +347,7 @@ const baseHistory = () => ({
       finished_at: 3,
       error_code: null,
       error_message: null,
+      stop_reason: null,
     },
   ],
   steering: [

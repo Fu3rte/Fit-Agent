@@ -120,6 +120,7 @@ const runWire = (
   finished_at: finishedAt,
   error_code: null,
   error_message: null,
+  stop_reason: null,
   ...overrides,
 });
 // 祖先链顺序即分支时序：parent_id 按数组顺序补齐
@@ -618,6 +619,7 @@ const sseRound = (id, status, times) => ({
     finished_at: QUERY_FINISHED,
     error_code: null,
     error_message: null,
+    stop_reason: null,
   };
   const polled = {
     ...live,

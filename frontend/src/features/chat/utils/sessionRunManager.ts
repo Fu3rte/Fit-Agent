@@ -29,6 +29,7 @@ import type {
   ReActRunBody,
   RegenerateRunBody,
   RunStatusWire,
+  RunStopReasonWire,
   SaveConfirmationOperationWire,
   SaveConfirmationRequestWire,
   SendRunRepeatWire,
@@ -63,6 +64,7 @@ import {
   canSubmitChatInput,
   concludeReActRound,
   confirmDraftCreated,
+  failureMessage,
   failureOutcome,
   finishReActRound,
   forgetOperation,
@@ -70,6 +72,7 @@ import {
   isConfirmationNotFound,
   isExpiredOperation,
   pendingExecOperation,
+  runErrorMessage,
   readLedger,
   rememberOperation,
   resolveReActPending,
@@ -101,6 +104,7 @@ type RunSnapshot = {
   request_entry_id: string;
   status: RunStatusWire;
   error_message?: string | null;
+  stop_reason?: RunStopReasonWire | null;
   started_at?: number;
   finished_at?: number | null;
 };
@@ -131,8 +135,20 @@ export interface SessionRunView {
   proposals: PendingProposalReferenceWire[];
   /** 确认处理中或结果未知（§7.1）：禁用新的发送、编辑、重新生成及其它确认操作 */
   confirming: boolean;
+  /** 已请求停止、等待持久化终态的运行轮次（治理契约）：保持运行未结束并关闭 Steering 新输入 */
+  stoppingRoundId: string | null;
   error?: string;
   retrying?: string;
+}
+
+/** 原操作查询退避上限（治理契约）：仅在查询失败或尚未受理时递增，单操作保持一条查询链路 */
+const OPERATION_POLL_MAX_MS = 30_000;
+
+/** 一条原操作查询链路（§7.1、治理契约）：同一 operation_id 只允许一个定时器 */
+interface OperationWatch {
+  roundId: string;
+  delay: number;
+  timer?: ReturnType<typeof setTimeout>;
 }
 
 /** 终态查询节拍（§9.2、§5.3）：确认终态前持续补查 */
@@ -155,6 +171,7 @@ class SessionRunRecord {
   private readonly listeners = new Set<() => void>();
   private readonly inquiry = new AbortController();
   private readonly appliedDeletions = new Set<string>();
+  private readonly operationWatches = new Map<string, OperationWatch>();
   private view: SessionRunView;
   private exec: {
     controller: AbortController;
@@ -165,10 +182,16 @@ class SessionRunRecord {
   /** 确认提交在途控制器（确认契约 §7.2）：会话删除或页面卸载时关闭，服务端继续收尾原操作 */
   private confirm: AbortController | null = null;
   /** 原操作核实定时任务（§7.5）：仅在存在未决确认时排期 */
-  private confirmWatch: { timer?: ReturnType<typeof setTimeout> } | null = null;
+  private confirmWatch: {
+    timer?: ReturnType<typeof setTimeout>;
+    delay: number;
+  } | null = null;
+  /** 确认核实退避（§7.5）：首次 1s，之后翻倍并封顶，受理为 processing 后回到 1s */
+  private confirmDelay = RUN_POLL_MS;
   private watch: {
     roundId?: string;
     timer?: ReturnType<typeof setTimeout>;
+    delay: number;
   } | null = null;
   /** 历史代际：新执行、展示剪裁及后续历史查询使在途旧响应失效 */
   private generation = 0;
@@ -189,6 +212,7 @@ class SessionRunRecord {
       confirmations: [],
       proposals: [],
       confirming: false,
+      stoppingRoundId: null,
     };
   }
 
@@ -214,6 +238,7 @@ class SessionRunRecord {
   dispose(): void {
     this.removed = true;
     this.stopWatch();
+    this.stopOperationWatches();
     this.stopConfirmWatch();
     this.exec?.controller.abort();
     this.exec = null;
@@ -237,6 +262,38 @@ class SessionRunRecord {
 
   private setRounds(rounds: ReActRound[]): void {
     this.patch({ rounds });
+    this.settleStopping();
+  }
+
+  /** 停止等待收敛（治理契约）：仅当运行轮次取得持久化终态或已移出展示时结束“正在停止” */
+  private settleStopping(): void {
+    const roundId = this.view.stoppingRoundId;
+    if (roundId === null) return;
+    const round = this.view.rounds.find((item) => item.id === roundId);
+    if (
+      round === undefined ||
+      (round.status !== "running" && round.status !== "unknown")
+    )
+      this.patch({ stoppingRoundId: null });
+  }
+
+  /** 原操作查询链路清理（治理契约）：同一操作只保留一条链路，会话删除与终态一并释放计时器 */
+  private stopOperationWatch(operationId: string): void {
+    const watch = this.operationWatches.get(operationId);
+    if (watch === undefined) return;
+    this.operationWatches.delete(operationId);
+    if (watch.timer !== undefined) clearTimeout(watch.timer);
+  }
+
+  private stopOperationWatches(): void {
+    for (const operationId of [...this.operationWatches.keys()])
+      this.stopOperationWatch(operationId);
+  }
+
+  /** 指定轮次的原操作查询清理：运行终态后不再补查同一操作的受理结果 */
+  private stopOperationWatchesForRound(roundId: string): void {
+    for (const [operationId, watch] of [...this.operationWatches])
+      if (watch.roundId === roundId) this.stopOperationWatch(operationId);
   }
 
   private update(id: string, change: (round: ReActRound) => ReActRound): void {
@@ -325,20 +382,40 @@ class SessionRunRecord {
     }));
   }
 
-  /** 运行终态查询（§9.2、§5.3）：running 期间保持占用，终态后重新读取历史并成功合并才释放占用 */
+  /** 轮次是否已取得持久化终态：迟到的运行查询不得继续改写已结束轮次 */
+  private roundSettled(roundId: string): boolean {
+    const round = this.view.rounds.find((item) => item.id === roundId);
+    return (
+      round !== undefined &&
+      round.status !== "running" &&
+      round.status !== "unknown"
+    );
+  }
+
+  /** 运行终态查询（§9.2、§5.3）：running 期间保持占用，终态后重新读取历史并成功合并才释放占用；
+   *  查询失败按有界退避继续，已结束轮次不再补查。 */
   private watchRun(roundId: string, runId: string): void {
     this.stopWatch();
     this.patch({ ready: false });
     const signal = this.inquiry.signal;
-    const watch: { roundId?: string; timer?: ReturnType<typeof setTimeout> } = {
+    const watch = {
       roundId,
+      delay: RUN_POLL_MS,
+      timer: undefined as ReturnType<typeof setTimeout> | undefined,
     };
     this.watch = watch;
-    const retryLater = (): void => {
-      if (!this.removed && !signal.aborted && this.watch === watch)
-        watch.timer = setTimeout(poll, RUN_POLL_MS);
+    const retryLater = (delay = RUN_POLL_MS): void => {
+      if (this.removed || signal.aborted || this.watch !== watch) return;
+      watch.delay = Math.min(delay, OPERATION_POLL_MAX_MS);
+      watch.timer = setTimeout(poll, watch.delay);
     };
     const poll = (): void => {
+      if (this.removed || signal.aborted || this.watch !== watch) return;
+      if (this.roundSettled(roundId)) {
+        this.stopWatch();
+        this.stopOperationWatchesForRound(roundId);
+        return;
+      }
       void getRun(this.sessionId, runId, signal).then(
         (run) => {
           if (this.removed || signal.aborted || this.watch !== watch) return;
@@ -348,13 +425,11 @@ class SessionRunRecord {
             return;
           }
           this.update(roundId, (round) =>
-            concludeReActRound(
-              round,
-              run.status,
-              run.error_message ?? undefined,
-            ),
+            concludeReActRound(round, run.status, runErrorMessage(run)),
           );
-          this.watch = null;
+          this.stopWatch();
+          this.stopOperationWatchesForRound(roundId);
+          this.patch({ stoppingRoundId: null });
           this.loadHistory(signal, "refresh");
         },
         (failure: unknown) => {
@@ -368,56 +443,116 @@ class SessionRunRecord {
                 )
               : undefined;
           if (operation === undefined) {
-            retryLater();
+            retryLater(watch.delay * 2);
             return;
           }
           void getOperation(
             this.sessionId,
             operation.operation_id,
             signal,
-          ).then(retryLater, (probe: unknown) => {
-            if (this.removed || signal.aborted || this.watch !== watch) return;
-            if (isExpiredOperation(probe))
-              this.expireOperation(roundId, operation);
-            else retryLater();
-          });
+          ).then(
+            (probe) => {
+              if (this.removed || signal.aborted || this.watch !== watch)
+                return;
+              if (!probe.accepted || probe.run === null) {
+                retryLater(watch.delay * 2);
+                return;
+              }
+              /* 同一运行仍为 running：保留当前 watch 与累计退避，避免 404 与操作查询互相触发紧密循环 */
+              if (probe.run.status === "running" && probe.run.run_id === runId) {
+                this.settleRun(roundId, operation.operation_id, probe.run);
+                retryLater(watch.delay * 2);
+                return;
+              }
+              this.stopWatch();
+              this.resolveRun(roundId, operation, probe.run);
+            },
+            (probe: unknown) => {
+              if (this.removed || signal.aborted || this.watch !== watch)
+                return;
+              if (isExpiredOperation(probe))
+                this.expireOperation(roundId, operation);
+              else retryLater(watch.delay * 2);
+            },
+          );
         },
       );
     };
     poll();
   }
 
-  /** 操作查询确认受理结果（§7.1）：未受理表示原请求可能仍在处理中，保持未确认状态等待显式重试 */
+  /** 操作查询确认受理结果（§7.1、治理契约）：未受理只表示查询当时未查到，原请求仍可能在途；
+   *  同一 operation_id 保持一条有界退避查询链路，查到受理后绑定原运行。 */
   private confirmOperation(roundId: string, operation: PendingOperation): void {
+    if (this.removed || this.inquiry.signal.aborted) return;
+    if (this.exec?.operation.operation_id === operation.operation_id) return;
+    if (this.operationWatches.has(operation.operation_id)) return;
     const signal = this.inquiry.signal;
-    void getOperation(this.sessionId, operation.operation_id, signal).then(
-      (result) => {
-        if (
-          this.removed ||
-          signal.aborted ||
-          !result.accepted ||
-          this.exec?.operation.operation_id === operation.operation_id
+    const watch: OperationWatch = {
+      roundId,
+      delay: RUN_POLL_MS,
+    };
+    this.operationWatches.set(operation.operation_id, watch);
+    const schedule = (): void => {
+      if (this.removed || signal.aborted) return;
+      if (this.operationWatches.get(operation.operation_id) !== watch) return;
+      watch.delay = Math.min(watch.delay * 2, OPERATION_POLL_MAX_MS);
+      watch.timer = setTimeout(poll, watch.delay);
+    };
+    const poll = (): void => {
+      if (
+        this.removed ||
+        signal.aborted ||
+        this.operationWatches.get(operation.operation_id) !== watch
+      )
+        return;
+      if (
+        this.exec?.operation.operation_id === operation.operation_id ||
+        !this.view.operations.some(
+          (item) => item.operation_id === operation.operation_id,
         )
-          return;
-        if (result.kind === "steering") {
-          if (result.steering !== null)
-            this.applySteering(roundId, operation, result.steering);
-          return;
-        }
-        if (result.run !== null)
-          this.resolveRun(roundId, operation, result.run);
-      },
-      (failure: unknown) => {
-        if (
-          this.removed ||
-          signal.aborted ||
-          this.exec?.operation.operation_id === operation.operation_id
-        )
-          return;
-        if (isExpiredOperation(failure))
-          this.expireOperation(roundId, operation);
-      },
-    );
+      ) {
+        this.stopOperationWatch(operation.operation_id);
+        return;
+      }
+      void getOperation(this.sessionId, operation.operation_id, signal).then(
+        (result) => {
+          if (
+            this.removed ||
+            signal.aborted ||
+            this.operationWatches.get(operation.operation_id) !== watch
+          )
+            return;
+          if (!result.accepted) {
+            schedule();
+            return;
+          }
+          this.stopOperationWatch(operation.operation_id);
+          if (result.kind === "steering") {
+            if (result.steering !== null)
+              this.applySteering(watch.roundId, operation, result.steering);
+            return;
+          }
+          if (result.run !== null)
+            this.resolveRun(watch.roundId, operation, result.run);
+        },
+        (failure: unknown) => {
+          if (
+            this.removed ||
+            signal.aborted ||
+            this.operationWatches.get(operation.operation_id) !== watch
+          )
+            return;
+          if (isExpiredOperation(failure)) {
+            this.stopOperationWatch(operation.operation_id);
+            this.expireOperation(watch.roundId, operation);
+            return;
+          }
+          schedule();
+        },
+      );
+    };
+    poll();
   }
 
   /* ===== 结构化保存确认（structured-save-confirmation §7.2、§7.5、§7.6）===== */
@@ -438,15 +573,23 @@ class SessionRunRecord {
     if (watch.timer !== undefined) clearTimeout(watch.timer);
   }
 
-  /** 下一拍核实（§7.5）：processing 与查询失败持续查询，未登记保持未知并留下显式重试入口 */
+  /** 下一拍核实（§7.5）：processing 与查询失败持续查询，未登记保持未知并留下显式重试入口；
+   *  未登记与查询失败按有界退避继续，单操作保持一条核实链路 */
   private scheduleConfirmPoll(): void {
     if (this.removed) return;
     this.stopConfirmWatch();
-    const watch: { timer?: ReturnType<typeof setTimeout> } = {};
+    const watch: {
+      timer?: ReturnType<typeof setTimeout>;
+      delay: number;
+    } = { delay: this.confirmDelay };
     this.confirmWatch = watch;
     watch.timer = setTimeout(() => {
       if (!this.removed && this.confirmWatch === watch) this.verifyConfirmations();
-    }, RUN_POLL_MS);
+    }, watch.delay);
+    this.confirmDelay = Math.min(
+      this.confirmDelay * 2,
+      OPERATION_POLL_MAX_MS,
+    );
   }
 
   /** 专用状态查询（§7.3）：只读核实原操作，不创建确认节点也不触发保存；
@@ -456,7 +599,7 @@ class SessionRunRecord {
     onMissing?: () => void,
   ): void {
     if (this.removed) return;
-    const watch = this.confirmWatch ?? {};
+    const watch = this.confirmWatch ?? { delay: this.confirmDelay };
     this.confirmWatch = watch;
     const signal = this.inquiry.signal;
     void getSaveConfirmation(this.sessionId, operationId, signal).then(
@@ -487,7 +630,10 @@ class SessionRunRecord {
     }
     // 每个未决操作只保有一条核实链路：显式重试与轮询复用同一 watch 身份
     this.stopConfirmWatch();
-    this.probeOriginal(attempt.request.operation_id);
+    this.probeOriginal(attempt.request.operation_id, () => {
+      // 未登记只表示查询当时未查到，原请求仍可能在途；保持未知并按退避继续核对
+      this.scheduleConfirmPoll();
+    });
   }
 
   /** 真实操作对象落地（§7.3、§7.6）：saved 刷新业务查询与会话列表，终态后重读历史 */
@@ -497,6 +643,7 @@ class SessionRunRecord {
       applyConfirmationOperation(this.view.confirmations, operation),
     );
     if (operation.status === "processing") {
+      this.confirmDelay = RUN_POLL_MS;
       this.scheduleConfirmPoll();
       return;
     }
@@ -525,6 +672,7 @@ class SessionRunRecord {
 
   /** 移出账本与展示（§7.4：授权拒绝不创建操作） */
   private dropConfirmation(operationId: string): void {
+    this.stopConfirmWatch();
     updateConfirmationLedger(this.sessionId, (list) =>
       list.filter((item) => item.request.operation_id !== operationId),
     );
@@ -537,6 +685,7 @@ class SessionRunRecord {
   private dispatchConfirmation(request: SaveConfirmationRequestWire): void {
     const controller = new AbortController();
     this.confirm = controller;
+    this.confirmDelay = RUN_POLL_MS;
     this.stopConfirmWatch();
     this.patch({ ready: false, error: undefined });
     void postSaveConfirmation(this.sessionId, request, controller.signal).then(
@@ -643,6 +792,7 @@ class SessionRunRecord {
       !this.view.ready ||
       this.view.busy ||
       this.view.confirming ||
+      this.view.stoppingRoundId !== null ||
       this.exec !== null ||
       this.confirm !== null
     )
@@ -655,6 +805,20 @@ class SessionRunRecord {
         item.status === "pending",
     );
     if (reference === undefined) return;
+    // 确认资格只来自已完整展示且通过业务结构校验的同一快照（治理契约）
+    const displayed = this.view.rounds.some((round) =>
+      round.entries.some(
+        (entry) =>
+          entry.kind === "tool" &&
+          entry.entry_id === displayEntryId &&
+          (kind === "profile"
+            ? entry.profile?.proposal_id === proposalId
+            : kind === "workout"
+              ? entry.workout?.proposal_id === proposalId
+              : entry.plan?.proposal_id === proposalId),
+      ),
+    );
+    if (!displayed) return;
     const request = newConfirmationRequest(kind, proposalId, displayEntryId);
     updateConfirmationLedger(this.sessionId, (list) => [
       ...list,
@@ -680,6 +844,7 @@ class SessionRunRecord {
       attempt === undefined ||
       this.exec !== null ||
       this.confirm !== null ||
+      this.view.stoppingRoundId !== null ||
       !this.view.persistent
     )
       return;
@@ -696,10 +861,14 @@ class SessionRunRecord {
   ): void {
     this.attachRun(roundId, run);
     if (run.status === "running") return;
+    this.stopOperationWatch(operationId);
+    this.stopOperationWatchesForRound(roundId);
     this.setOperations(forgetOperation(this.sessionId, operationId));
     this.update(roundId, (round) =>
-      concludeReActRound(round, run.status, run.error_message ?? undefined),
+      concludeReActRound(round, run.status, runErrorMessage(run)),
     );
+    if (this.view.stoppingRoundId === roundId)
+      this.patch({ stoppingRoundId: null });
     this.stopWatch();
   }
 
@@ -708,6 +877,7 @@ class SessionRunRecord {
     operation: PendingOperation,
     run: RunSnapshot,
   ): void {
+    this.stopOperationWatch(operation.operation_id);
     /* 查询确认受理时同样应用删除范围（session-edit-regenerate-contract §8）：网络响应丢失后
      * 靠操作查询恢复，若不删除，历史合并会把已被后端删除的旧轮次当作本页未提交内容保留。 */
     if (operation.kind === "edit" || operation.kind === "regenerate")
@@ -771,9 +941,10 @@ class SessionRunRecord {
     });
     this.setRounds(rounds);
     if (operationId === undefined) return;
-    if (settled)
+    if (settled) {
+      this.stopOperationWatch(operationId);
       this.setOperations(forgetOperation(this.sessionId, operationId));
-    else
+    } else
       this.setOperations(
         updateLedger(this.sessionId, (list) =>
           list.map((item) =>
@@ -835,8 +1006,7 @@ class SessionRunRecord {
         return { state: "created" };
       },
       (failure: unknown): SessionOutcome => {
-        const message =
-          failure instanceof Error ? failure.message : "创建会话结果未知。";
+        const message = failureMessage(failure, "创建会话结果未知。");
         return failureOutcome(failure) === "rejected"
           ? { state: "rejected", message }
           : { state: "unknown", message };
@@ -900,8 +1070,14 @@ class SessionRunRecord {
     this.exec = current;
     this.generation += 1;
     this.stopWatch();
+    this.stopOperationWatch(operation.operation_id);
     this.update(operation.operation_id, (round) => resumeReActRound(round));
-    this.patch({ busy: true, ready: false });
+    this.patch({
+      busy: true,
+      ready: false,
+      stoppingRoundId: null,
+      error: undefined,
+    });
     const attachments = attachmentInputs(operation.attachments);
     const body: ReActRunBody | EditRunBody | RegenerateRunBody =
       operation.kind === "edit"
@@ -934,7 +1110,12 @@ class SessionRunRecord {
         /* 业务查询刷新只由结构化确认的真实终态触发（确认契约 §7.6）：模型运行不再执行保存。 */
         if (event.event === "done" || event.event === "error") {
           this.exec = null;
-          this.patch({ busy: false, ready: true });
+          this.stopOperationWatchesForRound(operation.operation_id);
+          this.patch({
+            busy: false,
+            ready: true,
+            stoppingRoundId: null,
+          });
           this.setOperations(
             forgetRunOperations(this.sessionId, current.run_id ?? ""),
           );
@@ -987,6 +1168,7 @@ class SessionRunRecord {
             : operation.kind === "regenerate"
               ? "重新生成"
               : "发送",
+          current.run_id,
         );
         onSettle?.(false);
       },
@@ -1006,13 +1188,14 @@ class SessionRunRecord {
       }
       this.patch({ error: outcome.message });
       if (outcome.state === "rejected") {
+        this.stopOperationWatch(operation.operation_id);
         this.setOperations(
           forgetOperation(this.sessionId, operation.operation_id),
         );
         this.update(operation.operation_id, (round) =>
           finishReActRound(resumeReActRound(round), "failed", outcome.message),
         );
-        this.patch({ ready: true });
+        this.patch({ ready: true, stoppingRoundId: null });
         return;
       }
       this.setOperations(rememberOperation(this.sessionId, operation));
@@ -1081,6 +1264,7 @@ class SessionRunRecord {
   /** 失效操作静默处理（§6.1、§8）：删除本地账本与重试入口、停止该操作查询、重读历史；
    *  不弹该失效操作的错误提示、不恢复或重发旧请求，不影响其他操作与当前新运行。 */
   private expireOperation(roundId: string, operation: PendingOperation): void {
+    this.stopOperationWatch(operation.operation_id);
     this.setOperations(forgetOperation(this.sessionId, operation.operation_id));
     this.setRounds(this.view.rounds.filter((round) => round.id !== roundId));
     if (this.watch?.roundId === roundId) this.stopWatch();
@@ -1088,21 +1272,23 @@ class SessionRunRecord {
     if (this.view.persistent) this.loadHistory(this.inquiry.signal, "refresh");
   }
 
-  /** 失败落地（§11.5）：4xx 为明确拒绝，其余保留原操作身份与未确认状态 */
+  /** 失败落地（§11.5）：明确拒绝按准入反馈结束本次提交；结果未知保留原操作身份，
+   *  已知 run_id 按运行查询收敛，其余按原 operation_id 查询。 */
   private handleFailure(
     roundId: string,
     operation: PendingOperation,
     failure: unknown,
     label: string,
+    runId?: string,
   ): void {
     if (this.removed) return;
     if (isExpiredOperation(failure)) {
       this.expireOperation(roundId, operation);
       return;
     }
-    const message =
-      failure instanceof Error ? failure.message : `${label}结果未知。`;
+    const message = failureMessage(failure, `${label}结果未知。`);
     if (failureOutcome(failure) === "rejected") {
+      this.stopOperationWatch(operation.operation_id);
       this.setOperations(
         forgetOperation(this.sessionId, operation.operation_id),
       );
@@ -1120,12 +1306,23 @@ class SessionRunRecord {
           this.view.rounds.filter((round) => round.id !== roundId),
         );
       }
-      this.patch({ ready: true });
+      // Steering 拒绝只结算该条输入，原运行仍占用时保留停止等待与交互门禁
+      if (
+        operation.kind !== "steering" ||
+        (this.exec === null &&
+          this.watch === null &&
+          this.view.stoppingRoundId === null)
+      )
+        this.patch({ ready: true, stoppingRoundId: null });
       return;
     }
     this.keepUnknown(roundId, operation);
     this.patch({ error: `${label}结果未知，可显式重试。`, ready: false });
-    void this.confirmOperation(roundId, operation);
+    const knownRun =
+      runId ?? (operation.kind === "steering" ? null : operation.run_id);
+    if (knownRun !== null && knownRun !== undefined)
+      this.watchRun(roundId, knownRun);
+    else void this.confirmOperation(roundId, operation);
   }
 
   /** 重复受理（§5、session-edit-regenerate-contract §5.2）：返回原运行当前持久化状态，不启动新的执行 */
@@ -1267,7 +1464,13 @@ class SessionRunRecord {
     const operation = this.view.operations.find(
       (item) => item.operation_id === operationId,
     );
-    if (operation === undefined || this.view.retrying !== undefined) return;
+    if (
+      operation === undefined ||
+      this.view.retrying !== undefined ||
+      this.view.stoppingRoundId !== null
+    )
+      return;
+    this.stopOperationWatch(operationId);
     this.patch({ error: undefined, retrying: operationId });
     void getOperation(this.sessionId, operationId, this.inquiry.signal).then(
       (result) => {
@@ -1296,17 +1499,24 @@ class SessionRunRecord {
           return;
         }
         this.patch({ error: "重试查询结果未知，保持未确认。" });
+        this.confirmOperation(roundId, operation);
       },
     );
   };
 
-  /** 用户停止（§9.1、§9.2）：关闭该会话活动运行的连接，保留运行身份与占用，由独立查询确认终态 */
+  /** 用户停止（§9.1、§9.2、治理契约）：中止连接后显示“正在停止”，保持运行未结束并关闭
+   *  Steering 新输入；只有 SSE 终态或持久化查询结果才能结束等待。 */
   stop = (): void => {
     const run = this.exec;
     if (run === null) return;
     this.exec = null;
     run.controller.abort();
-    this.patch({ busy: false, ready: false });
+    this.patch({
+      busy: false,
+      ready: false,
+      error: undefined,
+      stoppingRoundId: run.operation.operation_id,
+    });
     if (run.run_id !== undefined) {
       this.watchRun(run.operation.operation_id, run.run_id);
       return;
@@ -1320,7 +1530,8 @@ class SessionRunRecord {
     if (
       !this.view.persistent ||
       this.view.history === "loading" ||
-      this.exec !== null
+      this.exec !== null ||
+      this.view.stoppingRoundId !== null
     )
       return;
     this.stopWatch();
@@ -1337,6 +1548,7 @@ class SessionRunRecord {
     if (
       this.steering !== null ||
       this.watch !== null ||
+      this.view.stoppingRoundId !== null ||
       !canSubmitChatInput(
         request,
         attachments,

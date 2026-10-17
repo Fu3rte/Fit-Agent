@@ -139,7 +139,14 @@ def check_file_permission(context: BeforeToolCallContext) -> BeforeToolCallResul
     return None
 
 
-def iter_files(workspace: Workspace, path: str):
+def check_tool_signal(signal) -> None:
+    # 同步工具的协作取消点：在每个文件/行处理边界检查同一 threading.Event。
+    if signal is not None and signal.is_set():
+        raise InterruptedError("工具执行已取消")
+
+
+def iter_files(workspace: Workspace, path: str, signal=None):
+    check_tool_signal(signal)
     target = workspace.read_path(path)
     if target.is_file():
         yield target
@@ -147,12 +154,14 @@ def iter_files(workspace: Workspace, path: str):
     if not target.is_dir():
         raise NotADirectoryError(target)
     for directory, dirs, names in os.walk(target, onerror=raise_walk_error):
+        check_tool_signal(signal)
         dirs[:] = sorted(
             name
             for name in dirs
             if name not in EXCLUDED and not is_linked(Path(directory) / name)
         )
         for name in sorted(names):
+            check_tool_signal(signal)
             candidate = Path(directory) / name
             if is_linked(candidate):
                 continue
@@ -173,6 +182,8 @@ def create_file_tools(
         following = False
         with target.open(encoding="utf-8") as stream:
             for number, line in enumerate(stream, 1):
+                if number % 256 == 1:
+                    check_tool_signal(signal)
                 if number < params.offset:
                     continue
                 if len(collected) == params.limit:
@@ -191,6 +202,7 @@ def create_file_tools(
         return AgentToolResult([TextContent(type="text", text=text)])
 
     def write(tool_call_id, params: WriteArguments, signal, on_update) -> AgentToolResult:
+        check_tool_signal(signal)
         target = workspace.write_path(params.path)
         target.parent.mkdir(parents=True, exist_ok=True)
         target = workspace.write_path(params.path)
@@ -200,6 +212,7 @@ def create_file_tools(
         return AgentToolResult([TextContent(type="text", text=text)])
 
     def edit(tool_call_id, params: EditArguments, signal, on_update) -> AgentToolResult:
+        check_tool_signal(signal)
         target = workspace.write_path(params.path)
         content = target.read_text(encoding="utf-8")
         if content.count(params.old_text) != 1:
@@ -212,7 +225,7 @@ def create_file_tools(
 
     def find(tool_call_id, params: FindArguments, signal, on_update) -> AgentToolResult:
         matches = []
-        for candidate in iter_files(workspace, params.path):
+        for candidate in iter_files(workspace, params.path, signal):
             relative = candidate.relative_to(workspace.root)
             if relative.full_match(params.pattern):
                 matches.append(relative.as_posix())
@@ -225,12 +238,14 @@ def create_file_tools(
     def grep(tool_call_id, params: GrepArguments, signal, on_update) -> AgentToolResult:
         expression = re.compile(params.pattern)
         matches = []
-        for candidate in iter_files(workspace, params.path):
+        for candidate in iter_files(workspace, params.path, signal):
             relative = candidate.relative_to(workspace.root)
             if not relative.full_match(params.glob):
                 continue
             with candidate.open(encoding="utf-8") as stream:
                 for number, line in enumerate(stream, 1):
+                    if number % 256 == 1:
+                        check_tool_signal(signal)
                     if expression.search(line):
                         matches.append(
                             f"{relative.as_posix()}:{number}: {line.rstrip()}"
@@ -242,6 +257,7 @@ def create_file_tools(
         return AgentToolResult([TextContent(type="text", text=text)])
 
     def ls(tool_call_id, params: LsArguments, signal, on_update) -> AgentToolResult:
+        check_tool_signal(signal)
         target = workspace.read_path(params.path)
         entries = sorted(target.iterdir(), key=lambda item: item.name)
         text = "\n".join(

@@ -10,6 +10,8 @@ import type {
   ReActEvent,
   ReActStopReason,
   RunStatusWire,
+  RunStopReasonWire,
+  SessionRunWire,
   SteeringReceiveStatusWire,
   SteeringStatus,
   SteeringStatusWire,
@@ -298,15 +300,60 @@ function createDraft(): ChatDraft {
   return { session_id: crypto.randomUUID(), pending_title: null };
 }
 
-/** 失败分类（§11.5）：4xx 为服务端明确拒绝；网络中断、5xx 与协议解析失败结果未知，
- * 保留操作身份并通过操作查询确认。 */
+/** 准入拒绝码（治理契约）：这些结构化 5xx 是服务端对该次新运行的明确拒绝 */
+const ADMISSION_ERROR_CODES = new Set([
+  "rate_limited",
+  "capacity_exceeded",
+  "service_unavailable",
+]);
+
+/** 失败分类（§11.5）：4xx 与结构化准入拒绝为服务端明确拒绝；网络中断、其余 5xx 与协议解析失败
+ *  结果未知，保留操作身份并通过原操作查询确认。 */
 export function failureOutcome(failure: unknown): "rejected" | "unknown" {
-  return failure instanceof ReActHttpError &&
-    failure.http_status !== null &&
-    failure.http_status >= 400 &&
-    failure.http_status < 500
-    ? "rejected"
-    : "unknown";
+  if (!(failure instanceof ReActHttpError) || failure.http_status === null)
+    return "unknown";
+  if (failure.http_status >= 400 && failure.http_status < 500) return "rejected";
+  if (
+    failure.http_status === 503 &&
+    failure.code !== null &&
+    ADMISSION_ERROR_CODES.has(failure.code)
+  )
+    return "rejected";
+  return "unknown";
+}
+
+/** 安全失败文案（治理契约）：429 附带可用的 Retry-After，其余沿用后端固定安全提示 */
+export function failureMessage(failure: unknown, fallback: string): string {
+  if (!(failure instanceof Error)) return fallback;
+  if (
+    failure instanceof ReActHttpError &&
+    failure.code === "rate_limited" &&
+    failure.retry_after !== null
+  )
+    return `${failure.message}（${failure.retry_after} 秒后可重试）`;
+  return failure.message;
+}
+
+/** 停止原因的固定公开文案与后端一致（治理契约）：查询未携带 error_message 时使用安全兜底 */
+export const STOP_REASON_MESSAGES: Record<RunStopReasonWire, string> = {
+  model_timeout: "模型响应超时，请重新发起请求。",
+  tool_timeout: "工具执行超时，已结束本次运行。",
+  run_timeout: "本次运行已超时结束。",
+  cancelled: "执行已取消。",
+  slow_consumer: "客户端读取过慢，已结束本次运行。",
+  output_too_large: "输出内容超过单事件上限，已结束本次运行。",
+};
+
+/** 运行终态公开文案：优先持久化的安全错误信息，失败终态按停止原因兜底 */
+export function runErrorMessage(
+  run: Pick<SessionRunWire, "status"> & {
+    error_message?: string | null;
+    stop_reason?: RunStopReasonWire | null;
+  },
+): string | undefined {
+  if (run.error_message != null) return run.error_message;
+  if (run.status !== "failed" || run.stop_reason == null) return undefined;
+  return STOP_REASON_MESSAGES[run.stop_reason];
 }
 
 function rememberPending(
@@ -1183,8 +1230,13 @@ export function createReActParser(
                   data.code === "context_overflow" ||
                   data.code === "model_request_limit_exceeded" ||
                   data.code === "model_output_limit_exceeded" ||
-                  data.code === "provider_quota_exceeded")) ||
-              (data.status === "cancelled" && data.code === "cancelled")
+                  data.code === "provider_quota_exceeded" ||
+                  data.code === "model_timeout" ||
+                  data.code === "tool_timeout" ||
+                  data.code === "run_timeout" ||
+                  data.code === "output_too_large")) ||
+              (data.status === "cancelled" &&
+                (data.code === "cancelled" || data.code === "slow_consumer"))
             )
           )
             throw new Error("错误事件无效。");
@@ -1225,6 +1277,8 @@ export class ReActHttpError extends Error {
     readonly http_status: number | null = null,
     /** 冲突细分原因（operation_conflict 的 reason）：失效操作按 operation_expired 静默处理 */
     readonly reason: string | null = null,
+    /** 429 的 Retry-After 整数秒（治理契约）：缺失或非法时为 null */
+    readonly retry_after: number | null = null,
   ) {
     super(message);
   }

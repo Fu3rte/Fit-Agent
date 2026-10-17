@@ -4,6 +4,7 @@ import re
 from collections.abc import AsyncGenerator
 from time import time_ns
 
+import httpx
 from anthropic import AsyncAnthropic
 
 from app.ai.context import get_current_system_prompt, get_current_tools
@@ -26,6 +27,7 @@ from app.ai.messages import (
 from app.ai.overflow import build_overflow_message, is_context_overflow_error
 from app.ai.quota import raise_if_provider_quota_exceeded
 from app.ai.types import (
+    DEFAULT_MODEL_TIMEOUTS,
     AssistantStreamEvent,
     DoneEvent,
     LlmContext,
@@ -303,11 +305,26 @@ async def stream(
     start_usage = None
     delta_usage = None
     headers = {**(model.headers or {}), **(options.get("headers") or {})}
+    timeouts = options.get("timeouts") or DEFAULT_MODEL_TIMEOUTS
+    deadline = options.get("deadline")
+    remaining = max(0.001, deadline.remaining()) if deadline is not None else None
+
+    def limit(value: float) -> float:
+        return value if remaining is None else min(value, remaining)
+
+    # HTTP 分项超时再取运行剩余预算的较小值；测试可注入缩短值。
+    http_timeout = httpx.Timeout(
+        connect=limit(timeouts.http_connect_seconds),
+        read=limit(timeouts.http_read_seconds),
+        write=limit(timeouts.http_write_seconds),
+        pool=limit(timeouts.http_pool_seconds),
+    )
+    # 客户端与响应流均由本生成器的 async with 负责关闭：正常结束、异常、超时与提前关闭一致。
     async with AsyncAnthropic(
         api_key=options["api_key"],
         base_url=model.base_url,
         max_retries=0,
-        timeout=60,
+        timeout=http_timeout,
         default_headers=headers or None,
     ) as client:
         check_cancelled(signal)

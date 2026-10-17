@@ -81,6 +81,7 @@ export default function ChatPage({
         <ChatTranscript
           sessionId={sessionId}
           rounds={view.rounds}
+          stoppingRoundId={view.stoppingRoundId}
           onRetry={run.retry}
           onWithdraw={run.withdraw}
           retrying={view.retrying}

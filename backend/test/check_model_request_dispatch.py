@@ -162,6 +162,10 @@ def scripted(messages):
     state = {"calls": 0}
 
     def stream_fn(_spec, _context, _options) -> AssistantResponse:
+        # 模拟真实发送边界：生产扣除位于 app.ai.stream 的公共重试入口。
+        budget = _options.get("budget")
+        if budget is not None:
+            budget.reserve(recovery=bool(_options.get("recovery")))
         message = queue[state["calls"]]
         state["calls"] += 1
 
@@ -403,6 +407,9 @@ def test_provider_quota_propagates_and_maps() -> None:
     budget = RequestBudget()
 
     def stream_fn(_spec, _context, _options) -> AssistantResponse:
+        budget = _options.get("budget")
+        if budget is not None:
+            budget.reserve(recovery=bool(_options.get("recovery")))
         raise ProviderQuotaExceeded("供应商账户余额不足")
 
     with pytest.raises(ProviderQuotaExceeded):

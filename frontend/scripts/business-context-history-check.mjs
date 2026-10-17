@@ -64,6 +64,7 @@ const run = (run_id, request_entry_id, last_entry_id, status) => ({
   finished_at: status === "running" ? null : 2,
   error_code: null,
   error_message: null,
+  stop_reason: null,
 });
 
 /** 合法历史：资料节点位于链中（C1）与叶节点（C2），last_entry_id 指向资料节点 */

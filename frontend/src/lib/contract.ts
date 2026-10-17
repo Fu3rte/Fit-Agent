@@ -13,7 +13,17 @@ export interface SessionWire {
 export type RunStatusWire =
   "running" | "completed" | "failed" | "cancelled" | "interrupted";
 
-/** 运行对象（§11.2）：``last_entry_id``／``finished_at`` 与错误字段允许 null */
+/** 运行停止原因（治理契约）：只记录首个有效值，与终态状态分离，供重启后查询。
+ *  ``cancelled`` 沿用既有公开取消契约；慢客户端为 ``slow_consumer``。 */
+export type RunStopReasonWire =
+  | "model_timeout"
+  | "tool_timeout"
+  | "run_timeout"
+  | "cancelled"
+  | "slow_consumer"
+  | "output_too_large";
+
+/** 运行对象（§11.2）：``last_entry_id``／``finished_at``／错误字段与 ``stop_reason`` 允许 null */
 export interface SessionRunWire {
   session_id: string;
   run_id: string;
@@ -24,6 +34,7 @@ export interface SessionRunWire {
   finished_at: number | null;
   error_code: string | null;
   error_message: string | null;
+  stop_reason: RunStopReasonWire | null;
 }
 
 /** 输入状态（§11.2） */
@@ -785,7 +796,12 @@ export type ReActEvent = { data: { run_id: string } } & (
           | "context_overflow"
           | "model_request_limit_exceeded"
           | "model_output_limit_exceeded"
-          | "provider_quota_exceeded";
+          | "provider_quota_exceeded"
+          | "model_timeout"
+          | "tool_timeout"
+          | "run_timeout"
+          | "slow_consumer"
+          | "output_too_large";
         message: string;
         tool_call_id: string | null;
       };
@@ -838,6 +854,9 @@ export type ErrorCode =
   | "invalid_business_payload"
   | "credential_detected"
   | "model_not_configured"
+  | "rate_limited"
+  | "capacity_exceeded"
+  | "service_unavailable"
   | "internal_error";
 
 /* ===== 模型配置（PRODUCT.md §3.4）===== */

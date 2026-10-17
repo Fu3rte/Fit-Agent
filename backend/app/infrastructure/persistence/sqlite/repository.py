@@ -22,7 +22,7 @@ _ATTACHMENT_COLUMNS = "attachment_id, session_id, file_name, size_bytes, storage
 _ENTRY_COLUMNS = "*"
 _RUN_COLUMNS = (
     "session_id, id, request_entry_id, last_entry_id, status, started_at, "
-    "finished_at, error_code, error_message"
+    "finished_at, error_code, error_message, stop_reason, stop_diagnostic"
 )
 _STEERING_COLUMNS = (
     "session_id, id, run_id, message, status, entry_id, reason, created_at, "
@@ -377,8 +377,8 @@ class SqliteSessionRepository:
         await self._write(
             "INSERT INTO session_runs "
             "(session_id, id, request_entry_id, last_entry_id, status, started_at, "
-            "finished_at, error_code, error_message) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "finished_at, error_code, error_message, stop_reason, stop_diagnostic) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 run.session_id,
                 run.id,
@@ -389,6 +389,8 @@ class SqliteSessionRepository:
                 run.finished_at,
                 run.error_code,
                 run.error_message,
+                run.stop_reason,
+                run.stop_diagnostic,
             ),
         )
 
@@ -399,7 +401,8 @@ class SqliteSessionRepository:
         await self._write(
             "UPDATE session_runs SET request_entry_id = ?, last_entry_id = ?, "
             "status = ?, started_at = ?, finished_at = ?, error_code = ?, "
-            "error_message = ? WHERE session_id = ? AND id = ?",
+            "error_message = ?, stop_reason = ?, stop_diagnostic = ? "
+            "WHERE session_id = ? AND id = ?",
             (
                 run.request_entry_id,
                 run.last_entry_id,
@@ -408,6 +411,8 @@ class SqliteSessionRepository:
                 run.finished_at,
                 run.error_code,
                 run.error_message,
+                run.stop_reason,
+                run.stop_diagnostic,
                 run.session_id,
                 run.id,
             ),
@@ -440,6 +445,17 @@ class SqliteSessionRepository:
             f"SELECT {_RUN_COLUMNS} FROM session_runs WHERE status = 'running' "
             "ORDER BY started_at, id LIMIT 1",
             (),
+        )
+        return None if row is None else _row_to_run(row)
+
+    async def find_running_run_for_session(
+        self, session_id: str
+    ) -> SessionRun | None:
+        row = await self._fetch_one(
+            f"SELECT {_RUN_COLUMNS} FROM session_runs "
+            "WHERE session_id = ? AND status = 'running' "
+            "ORDER BY started_at, id LIMIT 1",
+            (session_id,),
         )
         return None if row is None else _row_to_run(row)
 

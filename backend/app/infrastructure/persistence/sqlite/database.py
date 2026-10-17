@@ -1,4 +1,5 @@
 import asyncio
+import os
 import sqlite3
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
@@ -15,7 +16,7 @@ T = TypeVar("T")
 # 提交否决判据：由连接线程在 COMMIT 执行期间同步调用，返回真值表示本次提交让位。
 CommitVeto = Callable[[], bool]
 
-SCHEMA_VERSION = 14
+SCHEMA_VERSION = 16
 
 _MIGRATIONS_DIR = Path(__file__).resolve().parent / "migrations"
 _INITIAL_SCHEMA = _MIGRATIONS_DIR / "001_initial.sql"
@@ -39,6 +40,8 @@ _MIGRATIONS: dict[int, Path] = {
     12: _MIGRATIONS_DIR / "012_structured_confirmation.sql",
     13: _MIGRATIONS_DIR / "013_save_confirmation_operations.sql",
     14: _MIGRATIONS_DIR / "014_business_context_nodes.sql",
+    15: _MIGRATIONS_DIR / "015_run_stop_reason.sql",
+    16: _MIGRATIONS_DIR / "016_run_stop_diagnostic.sql",
 }
 
 # 需要重建 session_entries 的迁移：重建期间临时关闭外键，避免级联删除关联附件。
@@ -85,6 +88,8 @@ _TABLE_COLUMNS: dict[str, frozenset[str]] = {
             "finished_at",
             "error_code",
             "error_message",
+            "stop_reason",
+            "stop_diagnostic",
         }
     ),
     "steering_inputs": frozenset(
@@ -194,6 +199,8 @@ _NULLABLE_COLUMNS = frozenset({
     ("session_runs", "finished_at"),
     ("session_runs", "error_code"),
     ("session_runs", "error_message"),
+    ("session_runs", "stop_reason"),
+    ("session_runs", "stop_diagnostic"),
     ("steering_inputs", "entry_id"),
     ("steering_inputs", "reason"),
     ("session_operations", "steering_id"),
@@ -491,10 +498,23 @@ class Database:
         await self._connection.close()
 
 
+def sqlite_connect_timeout() -> float:
+    # 默认沿用 sqlite3 的 5 秒；验收可通过环境变量延长真实锁等待。
+    raw = os.environ.get("FIT_AGENT_SQLITE_TIMEOUT_SECONDS")
+    if raw is None:
+        return 5.0
+    value = float(raw)
+    if value <= 0:
+        raise ValueError("FIT_AGENT_SQLITE_TIMEOUT_SECONDS 必须为正数")
+    return value
+
+
 async def open_database(path: Path | None = None) -> Database:
     resolved = Path(path) if path is not None else default_database_path()
     resolved.parent.mkdir(parents=True, exist_ok=True)
-    connection = await aiosqlite.connect(resolved, isolation_level=None)
+    connection = await aiosqlite.connect(
+        resolved, isolation_level=None, timeout=sqlite_connect_timeout()
+    )
     connection.row_factory = sqlite3.Row
     try:
         await _enable_foreign_keys(connection)

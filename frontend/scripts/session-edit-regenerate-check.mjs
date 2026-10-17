@@ -67,7 +67,7 @@ const history = {
     { type: "message", entry_id: A, parent_id: null, run_id: null, created_at: 1, message: { role: "user", text: "第一条。", timestamp: 1, attachments: [] } },
     { type: "message", entry_id: ASSIST, parent_id: A, run_id: RUN, created_at: 2, message: { role: "assistant", content: [], stop_reason: "stop", timestamp: 2 } },
   ],
-  runs: [{ session_id: sessionId, run_id: RUN, request_entry_id: A, last_entry_id: ASSIST, status: "completed", started_at: 1, finished_at: 2, error_code: null, error_message: null }],
+  runs: [{ session_id: sessionId, run_id: RUN, request_entry_id: A, last_entry_id: ASSIST, status: "completed", started_at: 1, finished_at: 2, error_code: null, error_message: null, stop_reason: null }],
   steering: [],
   // 确认契约 §7.6：确认操作与待确认引用为历史必填数组，本场景两份均为空
   confirmations: [],
@@ -108,8 +108,8 @@ const historyRound = historyToRounds({
     { type: "message", entry_id: A2, parent_id: S, run_id: RUN2, created_at: 4, message: { role: "assistant", content: [], stop_reason: "stop", timestamp: 4 } },
   ],
   runs: [
-    { session_id: sessionId, run_id: RUN0, request_entry_id: U0, last_entry_id: A0, status: "completed", started_at: 1, finished_at: 2, error_code: null, error_message: null },
-    { session_id: sessionId, run_id: RUN2, request_entry_id: S, last_entry_id: A2, status: "completed", started_at: 3, finished_at: 4, error_code: null, error_message: null },
+    { session_id: sessionId, run_id: RUN0, request_entry_id: U0, last_entry_id: A0, status: "completed", started_at: 1, finished_at: 2, error_code: null, error_message: null, stop_reason: null },
+    { session_id: sessionId, run_id: RUN2, request_entry_id: S, last_entry_id: A2, status: "completed", started_at: 3, finished_at: 4, error_code: null, error_message: null, stop_reason: null },
   ],
   steering: [{ session_id: sessionId, run_id: RUN0, steering_id: steerId, text: "追加。", attachments: [], timestamp: 3, status: "consumed", entry_id: S, reason: null, created_at: 3, updated_at: 3 }],
   // 确认契约 §7.6：确认操作与待确认引用为历史必填数组，本场景两份均为空

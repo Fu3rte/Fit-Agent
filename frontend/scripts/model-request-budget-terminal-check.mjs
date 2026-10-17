@@ -305,6 +305,7 @@ const truncationHistory = {
       finished_at: 2,
       error_code: "model_output_limit_exceeded",
       error_message: OUTPUT_LIMIT_MESSAGE,
+      stop_reason: null,
     },
   ],
   steering: [],

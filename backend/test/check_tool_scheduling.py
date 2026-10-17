@@ -10,6 +10,7 @@ from uuid import uuid4
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.agent.agent_loop import run_agent_loop
+from app.agent.budget import RequestBudget
 from app.agent.config import AgentLoopConfig
 from app.agent.tool import (
     AgentTool,
@@ -649,7 +650,12 @@ def check_credential_stops_scheduling() -> None:
                 def stream_fn(model_spec, context, options):
                     return single(tool_use)
 
-                config = AgentLoopConfig(model=model, max_turns=4, save_message=save_message)
+                config = AgentLoopConfig(
+                    model=model,
+                    max_turns=4,
+                    request_budget=RequestBudget(),
+                    save_message=save_message,
+                )
                 failure = None
                 try:
                     await run_agent_loop(
@@ -788,7 +794,12 @@ def check_database_ordering() -> None:
                     count["value"] += 1
                     return single(tool_use if count["value"] == 1 else stop)
 
-                config = AgentLoopConfig(model=model, max_turns=4, save_message=save_message)
+                config = AgentLoopConfig(
+                    model=model,
+                    max_turns=4,
+                    request_budget=RequestBudget(),
+                    save_message=save_message,
+                )
                 messages = await run_agent_loop(
                     [UserMessage(role="user", content="执行 probe", timestamp=0)],
                     {"messages": [system], "tools": tools},

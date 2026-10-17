@@ -213,7 +213,9 @@ def check() -> None:
                         reply = client.post(f"/api/agent/runs/{cancelled_run}/steering", json={"session_id": cancelled_session, "operation_id": str(uuid4()), "message": "只回复 LATE"})
                         assert reply.status_code == 200
                         assert active.locked()
-                        assert client.post("/api/agent/run", json={"session_id": str(uuid4()), "operation_id": str(uuid4()), "request": "OK"}).status_code == 409
+                        capacity = client.post("/api/agent/run", json={"session_id": str(uuid4()), "operation_id": str(uuid4()), "request": "OK"})
+                        assert capacity.status_code == 503
+                        assert capacity.json()["detail"]["code"] == "capacity_exceeded"
                         break
             # 断连只设置取消信号，收尾任务把运行推进到 cancelled 后才释放全局占用。
             wait_idle()
