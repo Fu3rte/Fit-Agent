@@ -6,6 +6,7 @@ from time import time_ns
 from uuid import uuid4
 
 from app.agent.agent_loop import run_agent_loop
+from app.agent.budget import RequestBudget
 from app.agent.config import AgentLoopConfig
 from app.agent.prompts import SYSTEM_PROMPT
 from app.agent.tool import AgentTool
@@ -23,7 +24,9 @@ from app.ai.messages import (
 )
 from app.application.business.catalog import Catalog
 from app.application.business.coordination import ReplacementCoordinator
-from app.application.business.service import BusinessService, business_date
+from app.application.business.profile import business_date
+from app.application.business.service import BusinessService
+from app.application.session.execution import PLAN_PREPARE_TOOLS
 from app.application.session.service import SessionService
 from app.domain.business.models import BusinessContext
 from app.domain.session.models import SendCommand, SendRequest, SessionMessageEntry
@@ -32,7 +35,6 @@ from app.infrastructure.persistence.sqlite.business_repository import (
 )
 from app.infrastructure.persistence.sqlite.database import open_database
 from app.infrastructure.persistence.sqlite.repository import SqliteSessionRepository
-from app.interfaces import http as interface
 from test.regression_support import install_test_model_config, temporary_root
 
 EVIDENCE = temporary_root("prompt")
@@ -70,8 +72,8 @@ async def run_scenario(
         system_message=system_message,
     )
     run = outcome.run
-    branch = await service.get_context(session_id, run.request_entry_id)
-    request_entry = await service.get_entry(session_id, run.request_entry_id)
+    branch = await service.queries.get_context(session_id, run.request_entry_id)
+    request_entry = await service.queries.get_entry(session_id, run.request_entry_id)
 
     loop = asyncio.get_running_loop()
     position = {"id": run.request_entry_id}
@@ -102,10 +104,10 @@ async def run_scenario(
 
     async def message_nodes(leaf_id: str) -> list[dict]:
         # 后端事实提供展示与确认绑定，模型据此引用真实节点，保存仍由后端校验。
-        displays = await business.list_plan_display_bindings(session_id)
-        bindings = await business.list_plan_confirmation_bindings(session_id)
+        displays = await business.plans.list_plan_display_bindings(session_id)
+        bindings = await business.plans.list_plan_confirmation_bindings(session_id)
         nodes = []
-        for node in await service.get_branch(session_id, leaf_id):
+        for node in await service.queries.get_branch(session_id, leaf_id):
             message = node.messages[0]
             item: dict = {"entry_id": node.id, "role": message.role}
             if isinstance(message, ToolResultMessage):
@@ -144,7 +146,7 @@ async def run_scenario(
         ]
 
     async def save_message(node_id: str, message) -> None:
-        await service.append_entry(
+        await service.entries.append_entry(
             SessionMessageEntry(
                 session_id=session_id,
                 id=node_id,
@@ -161,9 +163,9 @@ async def run_scenario(
         if message.tool_name == "prepare_profile_update":
             proposal_id = prepared.get(message.tool_call_id)
             if proposal_id is not None:
-                await business.bind_display_entry(proposal_id, node_id)
-        elif message.tool_name in interface.PLAN_PREPARE_TOOLS:
-            await business.bind_plan_display_entry(plan_prepared.pop(message.tool_call_id), node_id)
+                await business.profile.bind_display_entry(proposal_id, node_id)
+        elif message.tool_name in PLAN_PREPARE_TOOLS:
+            await business.plans.bind_plan_display_entry(plan_prepared.pop(message.tool_call_id), node_id)
 
     events: list = []
 
@@ -173,6 +175,7 @@ async def run_scenario(
     loop_config = AgentLoopConfig(
         model=config,
         max_turns=8,
+        request_budget=RequestBudget(),
         transform_context=transform_context,
         save_message=save_message,
         bind_tools=bind_tools,
@@ -182,7 +185,7 @@ async def run_scenario(
         "tools": bind_tools(run.request_entry_id),
     }
     messages = await run_agent_loop([branch[-1]], context, loop_config, emit)
-    await service.finish_run(session_id, run.id, "completed")
+    await service.runs.finish_run(session_id, run.id, "completed")
     assert events[-1]["type"] == "trace_end" and events[-1]["status"] == "completed"
     assistant = next(
         message for message in reversed(messages) if isinstance(message, AssistantMessage)
@@ -202,8 +205,8 @@ async def _scenarios(root: Path) -> list[str]:
         repository = SqliteBusinessRepository(database)
         catalog = Catalog.load()
         replacements = ReplacementCoordinator()
-        business = BusinessService(repository, catalog, service, replacements)
-        service.attach_snapshots(business)
+        business = BusinessService(repository, catalog, service.queries, replacements)
+        service.attach_snapshots(business.proposals)
         async with repository.transaction():
             await repository.replace_exercises(catalog.all())
         config = install_test_model_config()
@@ -224,14 +227,14 @@ async def _scenarios(root: Path) -> list[str]:
             elif index == 1:
                 # 录入需先准备并完整展示，保存授权来自展示之后的确认消息。
                 assert "保存" in text and "确认" in text, text
-                assert not await business.list_plans()
-                assert (await business.get_current_plan()).id is None
-                assert (await business.get_profile()).version is None
+                assert not await business.plans.list_plans()
+                assert (await business.plans.get_current_plan()).id is None
+                assert (await business.profile.get_profile()).version is None
             else:
                 assert "停止" in text and any(
                     word in text for word in ("急救", "120", "就医")
                 )
-                assert not await business.list_plans()
+                assert not await business.plans.list_plans()
             evidence.append(text)
         return evidence
     finally:

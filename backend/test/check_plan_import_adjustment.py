@@ -110,14 +110,14 @@ async def prepare(f, session, kind="import", version=None, base=None, content=No
     source = await f.append(session, run.id, run.request_entry_id, assistant(tool, call, args.model_dump()))
     display = None
     try:
-        proposal = await getattr(f.business, tool)(f.context(session, run.request_entry_id, source), args)
+        proposal = await getattr(f.business.plans, tool)(f.context(session, run.request_entry_id, source), args)
         data = proposal.model_dump()
         if extra:
             data["extra"] = True
         display = await f.append(session, run.id, source, ToolResultMessage(role="toolResult",
             tool_name=tool if display_kind is None else display_kind, tool_call_id=call,
             content=[TextContent(type="text", text=json.dumps(data))], is_error=False, timestamp=now_ms()))
-        await f.business.bind_plan_display_entry(proposal.proposal_id, display)
+        await f.business.plans.bind_plan_display_entry(proposal.proposal_id, display)
     except BusinessError as error:
         if display is None:
             await f.append(session, run.id, source, ToolResultMessage(role="toolResult",
@@ -125,7 +125,7 @@ async def prepare(f, session, kind="import", version=None, base=None, content=No
                 is_error=True, timestamp=now_ms()))
         raise
     finally:
-        await f.service.finish_run(session, run.id, "completed")
+        await f.service.runs.finish_run(session, run.id, "completed")
     snapshot = await f.repository.get_plan_snapshot(proposal.proposal_id)
     assert snapshot.preparation_kind == kind and snapshot.base_profile_version == version
     assert snapshot.payload == args.payload
@@ -144,44 +144,44 @@ async def check_business():
     try:
         session = await f.session()
         c, a = await prepare(f, session)
-        await assert_rejected("展示前请求授权", f.business.save_plan(c, a.model_copy(update={
+        await assert_rejected("展示前请求授权", f.business.plans.save_plan(c, a.model_copy(update={
             "confirmation_entry_id": (await f.repository.get_plan_snapshot(a.proposal_id)).request_entry_id})),
             "plan_confirmation_invalid")
-        first = await f.business.save_plan(c, a)
+        first = await f.business.plans.save_plan(c, a)
         assert first.content.model_dump() == INCOMPLETE
-        assert await f.business.save_plan(c, a) == first
+        assert await f.business.plans.save_plan(c, a) == first
         workout = make_record("2026-06-01")
         await f.repository.insert_workout(workout)
         partial = copy.deepcopy(CONTENT)
         partial["days"][0]["exercises"][0].update(sets=None, reps=None)
         c2, a2 = await prepare(f, session, "adjustment", base=first.id, content=partial)
-        second = await f.business.save_plan(c2, a2)
+        second = await f.business.plans.save_plan(c2, a2)
         assert second.content.model_dump() == partial
         assert await f.repository.get_workout(workout.id) == workout
         oldc, olda = await prepare(f, session, base=second.id)
         newc, newa = await prepare(f, session, "adjustment", base=second.id)
-        await assert_rejected("失效", f.business.save_plan(oldc, olda), "plan_proposal_invalidated")
-        await assert_rejected("跨计划确认", f.business.save_plan(newc, newa.model_copy(update={
+        await assert_rejected("失效", f.business.plans.save_plan(oldc, olda), "plan_proposal_invalidated")
+        await assert_rejected("跨计划确认", f.business.plans.save_plan(newc, newa.model_copy(update={
             "confirmation_entry_id": a.confirmation_entry_id})), "plan_confirmation_invalid")
         invalid = copy.deepcopy(partial)
         invalid["days"][0]["exercises"][0]["exercise_id"] = "unknown"
         await assert_rejected("准备失败保留pending", prepare(f, session, base=second.id, content=invalid),
                               "invalid_business_payload")
-        assert (await f.business.get_plan_save_status(newc, newa.proposal_id)).status == "pending"
+        assert (await f.business.plans.get_plan_save_status(newc, newa.proposal_id)).status == "pending"
         profile_proposal, _ = await profile(f, session)
-        await assert_rejected("跨业务确认", f.business.save_plan(newc, newa.model_copy(update={
+        await assert_rejected("跨业务确认", f.business.plans.save_plan(newc, newa.model_copy(update={
             "confirmation_entry_id": profile_proposal["confirmation"]})), "plan_confirmation_invalid")
-        await assert_rejected("null画像变为已保存", f.business.save_plan(newc, newa), "profile_version_conflict")
+        await assert_rejected("null画像变为已保存", f.business.plans.save_plan(newc, newa), "profile_version_conflict")
         await assert_rejected("已存在画像null依据", prepare(f, session, base=second.id), "profile_version_conflict")
-        assert await f.business.save_plan(c, a) == first
-        assert (await f.business.get_plan_save_status(c, a.proposal_id)).result == first
+        assert await f.business.plans.save_plan(c, a) == first
+        assert (await f.business.plans.get_plan_save_status(c, a.proposal_id)).result == first
         for kind in ("import", "adjustment"):
             exercise = f.catalog.all()[0]
             real = copy.deepcopy(partial)
             real["days"][0]["exercises"][0]["exercise_id"] = exercise.id
-            await profile(f, session, (await f.business.get_profile()).version,
+            await profile(f, session, (await f.business.profile.get_profile()).version,
                           forbidden_exercise_ids=[exercise.id])
-            version = (await f.business.get_profile()).version
+            version = (await f.business.profile.get_profile()).version
             await assert_rejected("已知限制", prepare(f, session, kind, version, second.id, real), "invalid_business_payload")
             unknown = copy.deepcopy(real)
             unknown["days"][0]["exercises"][0]["exercise_id"] = "unknown"
@@ -193,19 +193,19 @@ async def check_business():
                 await prepare(f, await f.session(), kind, version, second.id, display_kind="prepare_plan")
             with pytest.raises(ValidationError):
                 await prepare(f, session, kind, version, second.id, extra=True)
-        version = (await f.business.get_profile()).version
+        version = (await f.business.profile.get_profile()).version
         other = await f.session()
         stale, stalea = await prepare(f, other, version=version, base=second.id)
         current, currenta = await prepare(f, session, "adjustment", version, second.id)
-        third = await f.business.save_plan(current, currenta)
-        await assert_rejected("当前计划冲突", f.business.save_plan(stale, stalea), "plan_version_conflict")
+        third = await f.business.plans.save_plan(current, currenta)
+        await assert_rejected("当前计划冲突", f.business.plans.save_plan(stale, stalea), "plan_version_conflict")
         pc, pa = await prepare(f, session, version=version, base=third.id)
         await profile(f, session, version, health_notes="已补充")
-        await assert_rejected("画像版本冲突", f.business.save_plan(pc, pa), "profile_version_conflict")
-        assert await f.business.save_plan(c, a) == first
-        assert sum(p.is_current for p in await f.business.list_plans()) == 1
+        await assert_rejected("画像版本冲突", f.business.plans.save_plan(pc, pa), "profile_version_conflict")
+        assert await f.business.plans.save_plan(c, a) == first
+        assert sum(p.is_current for p in await f.business.plans.list_plans()) == 1
         await f.restart()
-        assert await f.business.save_plan(c, a) == first
+        assert await f.business.plans.save_plan(c, a) == first
         assert await f.repository.get_workout(workout.id) == workout
     finally:
         await f.close()
@@ -293,14 +293,14 @@ async def check_recent_workouts():
                 # 逆序插入，排序结果只可能来自服务的 performed_on/ID 倒序，与写入顺序无关。
                 for record in reversed(records):
                     await f.repository.insert_workout(record)
-                result = await f.business.list_workouts(arguments)
+                result = await f.business.workouts.list_workouts(arguments)
                 expected = sorted(records, key=lambda item: (item.performed_on, item.id), reverse=True)[:10]
                 assert result.page == 1 and result.page_size == 10
                 assert result.total == count and len(result.items) == min(count, 10)
                 assert result.items == expected
                 # 每条读取返回的全部 items 均为一训练日期的完整最新记录，逐字段等于独立读取。
                 for item in result.items:
-                    assert await f.business.get_workout(item.id) == item
+                    assert await f.business.workouts.get_workout(item.id) == item
             finally:
                 await f.close()
         # 可信截止日过滤未来记录，绑定工具与服务返回完全一致。
@@ -308,7 +308,7 @@ async def check_recent_workouts():
         future = make_record((day + timedelta(days=1)).isoformat())
         for record in records + [future]:
             await primary.repository.insert_workout(record)
-        service_result = await primary.business.list_workouts(arguments)
+        service_result = await primary.business.workouts.list_workouts(arguments)
         assert service_result.total == 12 and len(service_result.items) == 10
         assert all(item.performed_on <= cutoff for item in service_result.items)
         expected_ids = [item.id for item in sorted(records, key=lambda i: (i.performed_on, i.id), reverse=True)[:10]]
@@ -332,9 +332,9 @@ async def check_training_fact_lifecycle():
     try:
         session = await f.session("调整事实时效")
         await profile(f, session)
-        version = (await f.business.get_profile()).version
+        version = (await f.business.profile.get_profile()).version
         base_context, base_save = await prepare(f, session, "import", version=version, base=None)
-        first = await f.business.save_plan(base_context, base_save)
+        first = await f.business.plans.save_plan(base_context, base_save)
         content_x = copy.deepcopy(INCOMPLETE)
         content_x["notes"] = "依据2026年训练记录第3组8次调整重量"
         prepare_context, prepare_save = await prepare(f, session, "adjustment", version=version,
@@ -347,11 +347,11 @@ async def check_training_fact_lifecycle():
         await f.repository.insert_workout(workout)
         after = await f.repository.get_plan_snapshot(prepare_save.proposal_id)
         assert after.status == "pending" and after.payload.model_dump() == content_x
-        assert (await f.business.get_plan_save_status(prepare_context, prepare_save.proposal_id)).status == "pending"
+        assert (await f.business.plans.get_plan_save_status(prepare_context, prepare_save.proposal_id)).status == "pending"
         # 沿用原提案确认保存使用准备时固化的内容，忽略确认后新增的训练。
-        saved_x = await f.business.save_plan(prepare_context, prepare_save)
+        saved_x = await f.business.plans.save_plan(prepare_context, prepare_save)
         assert saved_x.content.model_dump() == content_x
-        assert (await f.business.get_current_plan()).id == saved_x.id
+        assert (await f.business.plans.get_current_plan()).id == saved_x.id
         assert await f.repository.get_workout(workout.id) == workout
         # 采用新事实重新准备，旧 pending 快照失效，需对新提案再次确认。
         content_y = copy.deepcopy(INCOMPLETE)
@@ -362,12 +362,12 @@ async def check_training_fact_lifecycle():
         context_z, save_z = await prepare(f, session, "adjustment", version=version, base=saved_x.id, content=content_z)
         assert (await f.repository.get_plan_snapshot(save_y.proposal_id)).status == "invalidated"
         assert (await f.repository.get_plan_snapshot(save_z.proposal_id)).status == "pending"
-        await assert_rejected("旧pending失效", f.business.save_plan(context_y, save_y), "plan_proposal_invalidated")
-        saved_z = await f.business.save_plan(context_z, save_z)
+        await assert_rejected("旧pending失效", f.business.plans.save_plan(context_y, save_y), "plan_proposal_invalidated")
+        saved_z = await f.business.plans.save_plan(context_z, save_z)
         assert saved_z.content.model_dump() == content_z
-        assert (await f.business.get_current_plan()).id == saved_z.id
+        assert (await f.business.plans.get_current_plan()).id == saved_z.id
         assert await f.repository.get_workout(workout.id) == workout
-        plans = await f.business.list_plans()
+        plans = await f.business.plans.list_plans()
         assert len(plans) == 3 and sum(item.is_current for item in plans) == 1
     finally:
         await f.close()
@@ -395,12 +395,12 @@ async def check_recent_workouts_completeness():
         assert latest.updated_at == records[0].updated_at + 10
         expected = sorted([latest, *records[1:]],
                           key=lambda item: (item.performed_on, item.id), reverse=True)[:10]
-        result = await f.business.list_workouts(arguments)
+        result = await f.business.workouts.list_workouts(arguments)
         assert result.page == 1 and result.page_size == 10 and result.total == 12
         assert result.items == expected
         # 每条为完整最新记录：与实际 get_workout 完整对象逐字段相等。
         for item in result.items:
-            assert await f.business.get_workout(item.id) == item
+            assert await f.business.workouts.get_workout(item.id) == item
         top = result.items[0]
         assert top.id == latest.id and top.version == 2 and top.updated_at == latest.updated_at
         assert len(top.content.exercises) == 2
@@ -412,7 +412,7 @@ async def check_recent_workouts_completeness():
         # 截止日包含边界：未来记录被排除，total 保持截止日内实际总数。
         future = full_record((day + timedelta(days=1)).isoformat(), notes="未来记录")
         await f.repository.insert_workout(future)
-        after = await f.business.list_workouts(arguments)
+        after = await f.business.workouts.list_workouts(arguments)
         assert after.total == 12 and len(after.items) == 10
         assert all(item.performed_on <= cutoff for item in after.items)
         assert future.id not in {item.id for item in after.items}
@@ -434,7 +434,7 @@ async def check_weight_convention():
     try:
         session = await f.session("调整重量口径")
         await profile(f, session)
-        version = (await f.business.get_profile()).version
+        version = (await f.business.profile.get_profile()).version
         context = f.context(session, new_id(), new_id())
 
         def arguments(weight, convention):
@@ -473,7 +473,7 @@ async def prepare_adjustment_result(f, session, version, base):
     call = new_id()
     source = await f.append(session, run.id, run.request_entry_id,
                             assistant("prepare_plan_adjustment", call, args.model_dump()))
-    proposal = await f.business.prepare_plan_adjustment(
+    proposal = await f.business.plans.prepare_plan_adjustment(
         f.context(session, run.request_entry_id, source), args)
     return run, source, call, proposal
 
@@ -484,9 +484,9 @@ async def check_display_binding_rejections():
     try:
         base_session = await f.session("调整展示绑定基线")
         await profile(f, base_session)
-        version = (await f.business.get_profile()).version
+        version = (await f.business.profile.get_profile()).version
         bootstrap, bootstrap_save = await prepare(f, base_session, "import", version=version, base=None)
-        base_plan = await f.business.save_plan(bootstrap, bootstrap_save)
+        base_plan = await f.business.plans.save_plan(bootstrap, bootstrap_save)
 
         rejected = []
         for label, field, override in (
@@ -510,10 +510,10 @@ async def check_display_binding_rejections():
                 message = message.model_copy(update={field: override})
             display = await f.append(session, run.id, source, message)
             try:
-                await assert_rejected(label, f.business.bind_plan_display_entry(proposal.proposal_id, display),
+                await assert_rejected(label, f.business.plans.bind_plan_display_entry(proposal.proposal_id, display),
                                       "plan_confirmation_invalid")
             finally:
-                await f.service.finish_run(session, run.id, "completed")
+                await f.service.runs.finish_run(session, run.id, "completed")
             assert (await f.repository.get_plan_snapshot(proposal.proposal_id)).display_entry_id is None
             rejected.append(label)
         # 非法来源：展示节点不在当前消息路径，或使用用户请求节点。
@@ -522,10 +522,10 @@ async def check_display_binding_rejections():
             session = await f.session(label)
             run, source, _, proposal = await prepare_adjustment_result(f, session, version, base_plan.id)
             try:
-                await assert_rejected(label, f.business.bind_plan_display_entry(proposal.proposal_id, pick(run, source)),
+                await assert_rejected(label, f.business.plans.bind_plan_display_entry(proposal.proposal_id, pick(run, source)),
                                       "plan_confirmation_invalid")
             finally:
-                await f.service.finish_run(session, run.id, "completed")
+                await f.service.runs.finish_run(session, run.id, "completed")
             assert (await f.repository.get_plan_snapshot(proposal.proposal_id)).display_entry_id is None
             rejected.append(label)
         return {"rejected": rejected}
@@ -542,15 +542,15 @@ async def check_payload_consistency():
         content["notes"] = "调整说明：第三组重量提升；依据2026-06-01训练记录第3组8次"
         context, save = await prepare(f, session, "adjustment", base=None, content=content)
         snapshot = await f.repository.get_plan_snapshot(save.proposal_id)
-        display = await f.service.get_entry(session, save.display_entry_id)
+        display = await f.service.queries.get_entry(session, save.display_entry_id)
         displayed = json.loads(display.messages[0].content[0].text)
         assert displayed["proposal_id"] == save.proposal_id
-        saved = await f.business.save_plan(context, save)
+        saved = await f.business.plans.save_plan(context, save)
         assert saved.content.model_dump() == snapshot.payload.model_dump() == displayed["payload"]
         assert saved.content.notes == content["notes"]
-        status = await f.business.get_plan_save_status(context, save.proposal_id)
+        status = await f.business.plans.get_plan_save_status(context, save.proposal_id)
         assert status.status == "saved" and status.result == saved
-        assert (await f.business.get_current_plan()).id == saved.id
+        assert (await f.business.plans.get_current_plan()).id == saved.id
         return {"proposal_id": save.proposal_id, "plan_id": saved.id}
     finally:
         await f.close()

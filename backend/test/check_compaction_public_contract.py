@@ -15,7 +15,7 @@ from app.ai.messages import (
     Usage,
     UserMessage,
 )
-from app.application.session.service import CREDENTIAL_SAFE_MESSAGE
+from app.application.session.credentials import CREDENTIAL_SAFE_MESSAGE
 from app.domain.session.attachments import AttachmentMetadata, attachment_storage_ref
 from app.domain.session.branch import build_session_path
 from app.domain.session.models import (
@@ -30,10 +30,10 @@ from app.infrastructure.persistence.sqlite import database as database_module
 from app.infrastructure.persistence.sqlite.repository import SqliteSessionRepository
 from app.interfaces.http import (
     app,
-    encode,
     history_entry,
     terminal_decision,
 )
+from app.interfaces.http_api.stream import encode
 from test.regression_support import Server, client
 
 ROOT = Path(__file__).resolve().parents[2] / "tmp" / "agent-compaction-public-contract"

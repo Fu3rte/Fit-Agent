@@ -195,7 +195,7 @@ async def check_business_flow() -> dict:
         parent = source
         for message in batch.messages:
             parent = await fixture.append(session, run.id, parent, message)
-        await fixture.service.finish_run(session, run.id, "completed")
+        await fixture.service.runs.finish_run(session, run.id, "completed")
         today, yesterday, start, boundary, tomorrow = (
             body(message)["date"] for message in batch.messages
         )
@@ -203,8 +203,8 @@ async def check_business_flow() -> dict:
 
         # 近七日范围按工具端点读取：范围内含昨日记录，范围外为空。
         saved_context, save_arguments, saved_run = await prepare(fixture, session, yesterday)
-        record = await fixture.business.save_workout(saved_context, save_arguments)
-        await fixture.service.finish_run(session, saved_run, "completed")
+        record = await fixture.business.workouts.save_workout(saved_context, save_arguments)
+        await fixture.service.runs.finish_run(session, saved_run, "completed")
         assert record.performed_on == yesterday and record.version == 1
 
         async def listing(date_from: str, date_to: str) -> dict:

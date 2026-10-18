@@ -6,6 +6,7 @@ from tempfile import TemporaryDirectory
 from time import time_ns
 from uuid import UUID, uuid4
 
+from app.agent.telemetry import TraceSpan
 from app.agent.tools.business import business_tool_declarations
 from app.ai.messages import (
     AssistantMessage,
@@ -19,13 +20,16 @@ from app.ai.messages import (
 from app.ai.stream import AssistantResponse
 from app.application.business.catalog import Catalog
 from app.application.business.coordination import ReplacementCoordinator
-from app.application.business.service import BusinessService, business_date
+from app.application.business.profile import business_date
+from app.application.business.service import BusinessService
+from app.application.session import execution as http_module
 from app.application.session.business_context import (
     BusinessBindings,
     collect_message_nodes,
     collect_pending_proposals,
     next_business_context_event,
 )
+from app.application.session.execution import execute, model_visible_entries
 from app.application.session.service import SessionService
 from app.application.session.steering import SteeringCoordinator
 from app.domain.business.models import (
@@ -52,8 +56,8 @@ from app.infrastructure.persistence.sqlite.business_repository import (
 )
 from app.infrastructure.persistence.sqlite.database import open_database
 from app.infrastructure.persistence.sqlite.repository import SqliteSessionRepository
-from app.interfaces import http as http_module
-from app.interfaces.http import RunState, execute, model_visible_entries
+from app.interfaces.http import RunState
+from app.interfaces.http_api.events import HttpRunEvents
 from app.model_config import ModelConfig
 from test.regression_support import temporary_root
 
@@ -129,9 +133,9 @@ async def build_services(path: Path):
     repository = SqliteBusinessRepository(database)
     catalog = Catalog.load()
     business = BusinessService(
-        repository, catalog, service, ReplacementCoordinator()
+        repository, catalog, service.queries, ReplacementCoordinator()
     )
-    service.attach_snapshots(business)
+    service.attach_snapshots(business.proposals)
     async with repository.transaction():
         await repository.replace_exercises(catalog.all())
     return database, service, repository, business
@@ -150,7 +154,7 @@ async def start_run(service, session_id: str, text: str = "建档"):
 
 async def append_entry(service, session_id, run_id, parent_id, message) -> str:
     node_id = uid()
-    await service.append_entry(
+    await service.entries.append_entry(
         SessionMessageEntry(
             session_id=session_id,
             id=node_id,
@@ -166,28 +170,28 @@ async def append_entry(service, session_id, run_id, parent_id, message) -> str:
 
 async def collect_bindings(business, session_id) -> BusinessBindings:
     return BusinessBindings(
-        profile_confirmations=await business.list_confirmation_bindings(session_id),
-        workout_confirmations=await business.list_workout_confirmation_bindings(session_id),
-        plan_confirmations=await business.list_plan_confirmation_bindings(session_id),
-        profile_displays=await business.list_display_bindings(session_id),
-        workout_displays=await business.list_workout_display_bindings(session_id),
-        plan_displays=await business.list_plan_display_bindings(session_id),
+        profile_confirmations=await business.profile.list_confirmation_bindings(session_id),
+        workout_confirmations=await business.workouts.list_workout_confirmation_bindings(session_id),
+        plan_confirmations=await business.plans.list_plan_confirmation_bindings(session_id),
+        profile_displays=await business.profile.list_display_bindings(session_id),
+        workout_displays=await business.workouts.list_workout_display_bindings(session_id),
+        plan_displays=await business.plans.list_plan_display_bindings(session_id),
     )
 
 
 async def next_event(service, business, session_id, leaf_id, request_entry_id):
     # 与 execute 内追加逻辑同口径：真实投影、白名单来源、完整分支核验与只读原因判定。
-    projection = await service.get_projection(session_id, leaf_id)
+    projection = await service.queries.get_projection(session_id, leaf_id)
     visible = set(projection.context.source_entry_ids)
     nodes = collect_message_nodes(
         model_visible_entries(projection.path, visible),
         await collect_bindings(business, session_id),
     )
     proposals = collect_pending_proposals(
-        await business.list_pending_references(session_id),
+        await business.proposals.list_pending_references(session_id),
         {entry.id for entry in projection.path},
     )
-    entry = await service.get_entry(session_id, request_entry_id)
+    entry = await service.queries.get_entry(session_id, request_entry_id)
     return await next_business_context_event(
         path=projection.path,
         request=RequestContext(
@@ -197,7 +201,7 @@ async def next_event(service, business, session_id, leaf_id, request_entry_id):
         ),
         nodes=nodes,
         proposals=proposals,
-        removal_reason=business.removed_proposal_reason,
+        removal_reason=business.proposals.removed_proposal_reason,
     )
 
 
@@ -210,7 +214,7 @@ async def commit(service, session_id, run_id, parent_id, details):
         details=details,
         created_at=now_ms(),
     )
-    outcome = await service.append_business_context(node)
+    outcome = await service.entries.append_business_context(node)
     assert outcome.created and not outcome.credential_detected
     return outcome.entry
 
@@ -235,7 +239,7 @@ async def scenario_snapshot_delta(root: Path) -> dict:
     assert details.message_nodes[0].role == "user"
     assert details.pending_proposals == []
     assert details.request.timezone == "Asia/Shanghai"
-    request_entry = await service.get_entry(session_id, user_id)
+    request_entry = await service.queries.get_entry(session_id, user_id)
     assert details.request.business_date == business_date(request_entry.created_at)
     first = await commit(service, session_id, run.id, user_id, details)
 
@@ -254,7 +258,7 @@ async def scenario_snapshot_delta(root: Path) -> dict:
         request_entry_id=user_id,
         source_entry_id=assistant_id,
     )
-    proposal = await business.prepare_profile_update(context, profile_arguments())
+    proposal = await business.profile.prepare_profile_update(context, profile_arguments())
     tool_id = await append_entry(
         service, session_id, run.id, assistant_id,
         tool_result(
@@ -262,7 +266,7 @@ async def scenario_snapshot_delta(root: Path) -> dict:
             json.dumps(proposal.model_dump(), ensure_ascii=False),
         ),
     )
-    await business.bind_display_entry(proposal.proposal_id, tool_id)
+    await business.profile.bind_display_entry(proposal.proposal_id, tool_id)
 
     delta = await next_event(service, business, session_id, tool_id, user_id)
     assert isinstance(delta, BusinessContextDelta), delta
@@ -291,7 +295,7 @@ async def scenario_snapshot_delta(root: Path) -> dict:
     assert await next_event(service, business, session_id, second.id, user_id) is None
 
     fixed_content = first.message.content
-    history = await service.get_session_history(session_id)
+    history = await service.queries.get_session_history(session_id)
     assert [entry.id for entry in history.entries][-1] == second.id
     await database.close()
 
@@ -299,7 +303,7 @@ async def scenario_snapshot_delta(root: Path) -> dict:
     reopened = await open_database(root / "snapshot.db")
     restored_service = SessionService(SqliteSessionRepository(reopened))
     restored_business = BusinessService(
-        SqliteBusinessRepository(reopened), Catalog.load(), restored_service,
+        SqliteBusinessRepository(reopened), Catalog.load(), restored_service.queries,
         ReplacementCoordinator(),
     )
     try:
@@ -309,7 +313,7 @@ async def scenario_snapshot_delta(root: Path) -> dict:
             )
             is None
         )
-        entries = await restored_service.list_entries(session_id)
+        entries = await restored_service.queries.list_entries(session_id)
         restored_first = next(entry for entry in entries if entry.id == first.id)
         assert restored_first.message.content == fixed_content
         assert restored_first.parent_id == user_id
@@ -335,7 +339,7 @@ async def scenario_proposal_lifecycle(root: Path) -> dict:
             service, session_id, run.id, snapshot.id,
             assistant([("call-1", "prepare_profile_update", {})], "toolUse"),
         )
-        request_entry = await service.get_entry(session_id, user_id)
+        request_entry = await service.queries.get_entry(session_id, user_id)
         context = BusinessContext(
             timezone="Asia/Shanghai",
             business_date=business_date(request_entry.created_at),
@@ -344,7 +348,7 @@ async def scenario_proposal_lifecycle(root: Path) -> dict:
             request_entry_id=user_id,
             source_entry_id=assistant_id,
         )
-        first = await business.prepare_profile_update(context, profile_arguments())
+        first = await business.profile.prepare_profile_update(context, profile_arguments())
         upsert = await next_event(service, business, session_id, assistant_id, user_id)
         assert isinstance(upsert, BusinessContextDelta)
         assert [item.proposal_id for item in upsert.upsert_pending_proposals] == [
@@ -353,7 +357,7 @@ async def scenario_proposal_lifecycle(root: Path) -> dict:
         node = await commit(service, session_id, run.id, assistant_id, upsert)
 
         # 新提案失效旧提案：移出原因取真实状态。
-        second = await business.prepare_profile_update(context, profile_arguments())
+        second = await business.profile.prepare_profile_update(context, profile_arguments())
         removal = await next_event(service, business, session_id, node.id, user_id)
         assert isinstance(removal, BusinessContextDelta)
         assert [item.proposal_id for item in removal.upsert_pending_proposals] == [
@@ -382,7 +386,7 @@ async def scenario_reason_evidence(root: Path) -> dict:
             service, session_id, run.id, snapshot.id,
             assistant([("call-1", "prepare_profile_update", {})], "toolUse"),
         )
-        request_entry = await service.get_entry(session_id, user_id)
+        request_entry = await service.queries.get_entry(session_id, user_id)
         context = BusinessContext(
             timezone="Asia/Shanghai",
             business_date=business_date(request_entry.created_at),
@@ -391,13 +395,13 @@ async def scenario_reason_evidence(root: Path) -> dict:
             request_entry_id=user_id,
             source_entry_id=assistant_id,
         )
-        pending = await business.prepare_profile_update(context, profile_arguments())
+        pending = await business.profile.prepare_profile_update(context, profile_arguments())
         # pending 且不在当前有效集合：out_of_scope。
-        assert await business.removed_proposal_reason("profile", pending.proposal_id) == "out_of_scope"
+        assert await business.proposals.removed_proposal_reason("profile", pending.proposal_id) == "out_of_scope"
         await repository.set_snapshot_status(pending.proposal_id, "conflicted")
-        assert await business.removed_proposal_reason("profile", pending.proposal_id) == "conflicted"
+        assert await business.proposals.removed_proposal_reason("profile", pending.proposal_id) == "conflicted"
         await repository.set_snapshot_status(pending.proposal_id, "invalidated")
-        assert await business.removed_proposal_reason("profile", pending.proposal_id) == "invalidated"
+        assert await business.proposals.removed_proposal_reason("profile", pending.proposal_id) == "invalidated"
         # 绑定真实展示与确认节点后置为已保存：saved 取真实状态证据。
         tool_id = await append_entry(
             service, session_id, run.id, assistant_id,
@@ -406,8 +410,8 @@ async def scenario_reason_evidence(root: Path) -> dict:
                 json.dumps(pending.model_dump(), ensure_ascii=False),
             ),
         )
-        await business.bind_display_entry(pending.proposal_id, tool_id)
-        confirmation = await service.append_confirmation_entry(
+        await business.profile.bind_display_entry(pending.proposal_id, tool_id)
+        confirmation = await service.entries.append_confirmation_entry(
             session_id,
             SaveConfirmation(
                 business_kind="profile",
@@ -417,14 +421,14 @@ async def scenario_reason_evidence(root: Path) -> dict:
         )
         await repository.begin_save(pending.proposal_id, confirmation.id)
         await repository.set_snapshot_status(pending.proposal_id, "saved")
-        assert await business.removed_proposal_reason("profile", pending.proposal_id) == "saved"
+        assert await business.proposals.removed_proposal_reason("profile", pending.proposal_id) == "saved"
         # 记录实际删除且没有保存记录：deleted。
-        doomed = await business.prepare_profile_update(context, profile_arguments())
+        doomed = await business.profile.prepare_profile_update(context, profile_arguments())
         await repository.delete_snapshots_for_entries(session_id, {assistant_id})
-        assert await business.removed_proposal_reason("profile", doomed.proposal_id) == "deleted"
+        assert await business.proposals.removed_proposal_reason("profile", doomed.proposal_id) == "deleted"
         # 未知业务类型停止报告。
         try:
-            await business.removed_proposal_reason("unknown", uid())
+            await business.proposals.removed_proposal_reason("unknown", uid())
         except ValueError:
             pass
         else:
@@ -444,7 +448,7 @@ async def scenario_branch_isolation(root: Path) -> dict:
             service, session_id, run.id, user_id,
             await next_event(service, business, session_id, user_id, user_id),
         )
-        await service.finish_run(session_id, run.id, "completed")
+        await service.runs.finish_run(session_id, run.id, "completed")
         regenerated = await service.accept_regenerate(
             RegenerateCommand(
                 operation_id=uid(),
@@ -488,7 +492,7 @@ async def scenario_steering(root: Path) -> dict:
         consumed = await coordinator.consume(run.id, await coordinator.take(run.id))
         assert consumed is not None
         assert notified[0]["status"] == "consumed"
-        new_user = await service.get_entry(session_id, consumed)
+        new_user = await service.queries.get_entry(session_id, consumed)
         delta = await next_event(service, business, session_id, consumed, consumed)
         assert isinstance(delta, BusinessContextDelta), delta
         assert delta.request is not None
@@ -544,7 +548,7 @@ async def scenario_execute(root: Path) -> dict:
         coordinator.open(
             session_id, run.id, lambda data: state.publish("steering_status", data)
         )
-        projection = await service.get_projection(session_id, run.request_entry_id)
+        projection = await service.queries.get_projection(session_id, run.request_entry_id)
         loop = asyncio.get_running_loop()
         model = ModelConfig(
             api="openai-completions",
@@ -583,7 +587,10 @@ async def scenario_execute(root: Path) -> dict:
             with ThreadPoolExecutor(max_workers=1) as executor:
                 future = executor.submit(
                     execute, run, session_id, projection.context.messages, {},
-                    state, service, business, loop, model, state.secrets,
+                    state, service.queries, service.entries, business, loop, model, state.secrets, TraceSpan(),
+                    create_events=lambda guard, parents: HttpRunEvents(
+                        state.publish, guard, parents, TraceSpan().record_first_text
+                    ),
                 )
                 stop = await asyncio.wrap_future(future)
         finally:
@@ -631,7 +638,7 @@ async def scenario_execute(root: Path) -> dict:
         for leaked in ("goal", "增肌", "details", "display", "content", "<business_context>"):
             assert leaked not in raw, leaked
 
-        history = await service.get_session_history(session_id)
+        history = await service.queries.get_session_history(session_id)
         custom = [entry for entry in history.entries if entry.type == "custom_message"]
         assert [entry.id for entry in custom] == [first["entry_id"], second["entry_id"]]
         assert custom[0].parent_id == run.request_entry_id
@@ -659,7 +666,7 @@ async def scenario_tool_failure(root: Path) -> dict:
         coordinator = SteeringCoordinator(service)
         state.coordinator = coordinator
         coordinator.open(session_id, run.id, lambda data: None)
-        projection = await service.get_projection(session_id, run.request_entry_id)
+        projection = await service.queries.get_projection(session_id, run.request_entry_id)
         loop = asyncio.get_running_loop()
         model = ModelConfig(
             api="openai-completions", base_url="https://example.com/v1",
@@ -680,7 +687,10 @@ async def scenario_tool_failure(root: Path) -> dict:
             with ThreadPoolExecutor(max_workers=1) as executor:
                 future = executor.submit(
                     execute, run, session_id, projection.context.messages, {},
-                    state, service, business, loop, model, state.secrets,
+                    state, service.queries, service.entries, business, loop, model, state.secrets, TraceSpan(),
+                    create_events=lambda guard, parents: HttpRunEvents(
+                        state.publish, guard, parents, TraceSpan().record_first_text
+                    ),
                 )
                 stop = await asyncio.wrap_future(future)
         finally:
@@ -697,7 +707,7 @@ async def scenario_tool_failure(root: Path) -> dict:
         assert names.index("tool_result") < last_custom
         # 失败结果仍作为来源节点进入资料增量。
         assert "tool_result" in names
-        history = await service.get_session_history(session_id)
+        history = await service.queries.get_session_history(session_id)
         custom = [entry for entry in history.entries if entry.type == "custom_message"]
         assert custom[1].message.details.mode == "delta"
         upsert = custom[1].message.details.upsert_message_nodes
@@ -741,7 +751,7 @@ async def scenario_steering_and_batch(root: Path) -> dict:
         coordinator.open(
             session_id, run.id, lambda data: state.publish("steering_status", data)
         )
-        projection = await service.get_projection(session_id, run.request_entry_id)
+        projection = await service.queries.get_projection(session_id, run.request_entry_id)
         loop = asyncio.get_running_loop()
         model = ModelConfig(
             api="openai-completions", base_url="https://example.com/v1",
@@ -806,7 +816,10 @@ async def scenario_steering_and_batch(root: Path) -> dict:
             with ThreadPoolExecutor(max_workers=1) as executor:
                 future = executor.submit(
                     execute, run, session_id, projection.context.messages, {},
-                    state, service, business, loop, model, state.secrets,
+                    state, service.queries, service.entries, business, loop, model, state.secrets, TraceSpan(),
+                    create_events=lambda guard, parents: HttpRunEvents(
+                        state.publish, guard, parents, TraceSpan().record_first_text
+                    ),
                 )
                 stop = await asyncio.wrap_future(future)
         finally:
@@ -844,7 +857,7 @@ async def scenario_steering_and_batch(root: Path) -> dict:
         assert len({data["entry_id"] for data in results}) == 2
         # 消费节点挂在本批最后一个工具结果之后，资料节点再挂在该真实用户节点之后。
         last_result = results[-1]["entry_id"]
-        consumed = await service.get_entry(session_id, steering["entry_id"])
+        consumed = await service.queries.get_entry(session_id, steering["entry_id"])
         assert consumed.parent_id == last_result
         assistants = [
             data for name, data in events
@@ -852,7 +865,7 @@ async def scenario_steering_and_batch(root: Path) -> dict:
         ]
         assert assistants[-1]["parent_id"] == delta_event["entry_id"]
 
-        history = await service.get_session_history(session_id)
+        history = await service.queries.get_session_history(session_id)
         custom = [entry for entry in history.entries if entry.type == "custom_message"]
         delta = custom[1].message.details
         assert isinstance(delta, BusinessContextDelta), delta

@@ -158,7 +158,7 @@ async def check_read_paths(root: Path) -> dict:
         empty = await fixture.invoke(GET_PROFILE, {}, context)
         assert empty.is_error is False
         assert envelope(empty) == {"version": None, "content": None}
-        assert (await fixture.business.get_profile()).model_dump() == {
+        assert (await fixture.business.profile.get_profile()).model_dump() == {
             "version": None,
             "content": None,
         }
@@ -207,7 +207,7 @@ async def check_read_paths(root: Path) -> dict:
             message = await fixture.invoke(STATUS, arguments, context)
             assert message.is_error is True
         # 参数层拒绝不产生任何画像写入。
-        assert (await fixture.business.get_profile()).version is None
+        assert (await fixture.business.profile.get_profile()).version is None
         return {"detail_count": len(body["items"]), "rejected": rejected}
     finally:
         await fixture.close()
@@ -227,7 +227,7 @@ async def check_argument_preparation(root: Path) -> dict:
         snapshot = await fixture.snapshot(ids["proposal"])
         assert snapshot.base_profile_version is None
         assert snapshot.payload.health_notes == "None"
-        assert (await fixture.business.get_profile()).version is None
+        assert (await fixture.business.profile.get_profile()).version is None
 
         context = fixture.save_context(ids)
         tools = bind_business_tools(fixture.business, context, fixture.call, {}, {})
@@ -287,7 +287,7 @@ async def check_payload_errors(root: Path) -> dict:
 
         async def errors(base, data: dict) -> list[dict]:
             try:
-                await fixture.business.prepare_profile_update(
+                await fixture.business.profile.prepare_profile_update(
                     context,
                     ProfileProposalArguments.model_validate(
                         prepare_arguments(base, data)
@@ -334,7 +334,7 @@ async def check_payload_errors(root: Path) -> dict:
         ids = await propose(fixture, session_id, prepare_arguments(None, valid))
         saved = envelope(await fixture.tool_save(ids))
         assert saved["version"] == 1 and saved["content"] == valid
-        profile = await fixture.business.get_profile()
+        profile = await fixture.business.profile.get_profile()
         assert profile.content.model_dump() == valid
         return {
             "paths": [item[0]["path"] for item in (references, bad_id)],
@@ -402,7 +402,7 @@ async def check_long_output_and_credentials(root: Path) -> dict:
         )
         assert isinstance(guarded.failure, CredentialDetectedError), guarded.failure
         assert guarded.messages == []
-        assert (await fixture.business.get_profile()).version == 1
+        assert (await fixture.business.profile.get_profile()).version == 1
         return {
             "long_chars": len(message_text(prepared)),
             "credential_guard": type(guarded.failure).__name__,
@@ -505,7 +505,7 @@ async def check_replacement_wins(root: Path) -> dict:
                 )
                 sync.release.set()
                 outcome = await replacement
-                await fixture.service.finish_run(session_id, outcome.run.id, "completed")
+                await fixture.service.runs.finish_run(session_id, outcome.run.id, "completed")
         detail = await _detail(task)
         assert detail["code"] == "profile_proposal_not_found", detail
         assert "errors" not in detail
@@ -573,17 +573,17 @@ async def check_commit_before_replacement(root: Path) -> dict:
         assert saved.version == 1
         async with fixture.replacements.register(session_id):
             outcome = await _regenerate(fixture, session_id, ids["request"])
-            await fixture.service.finish_run(session_id, outcome.run.id, "completed")
+            await fixture.service.runs.finish_run(session_id, outcome.run.id, "completed")
         assert await fixture.repository.list_snapshots(session_id) == []
         record = await fixture.repository.get_save_record(ids["proposal"])
         assert record is not None and record.result.model_dump() == saved.model_dump()
-        assert await fixture.business.list_confirmation_bindings(session_id) == {
+        assert await fixture.business.profile.list_confirmation_bindings(session_id) == {
             ids["confirmation"]: ids["proposal"]
         }
-        assert await fixture.business.list_display_bindings(session_id) == {}
+        assert await fixture.business.profile.list_display_bindings(session_id) == {}
         repeated = await fixture.service_save(ids)
         assert repeated.model_dump() == saved.model_dump()
-        assert (await fixture.business.get_profile()).version == 1
+        assert (await fixture.business.profile.get_profile()).version == 1
         return {
             "commit_first": "record_kept",
             "repeat": repeated.model_dump(),

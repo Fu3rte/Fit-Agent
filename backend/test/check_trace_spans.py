@@ -15,7 +15,8 @@ from app.agent.tool import BeforeToolCallResult, run_tool_batch
 from app.agent.tools.files import create_file_tools
 from app.ai.messages import TextContent, ToolCall, UserMessage
 from app.ai.model_capabilities import resolve_model_spec
-from app.interfaces.http import CredentialFilter, app
+from app.application.session.credentials import CredentialFilter
+from app.interfaces.http import app
 from app.model_config import load_model_config
 from test.check_http import (
     create_session,
@@ -136,7 +137,7 @@ def http_normal_chain(http) -> dict:
 
 
 def http_model_failure(http, config) -> dict:
-    import app.interfaces.http as http_module
+    from app.interfaces.http_api.routes import agent as http_module
 
     original = http_module.load_model_config
     bad = config.model_copy(update={"base_url": "http://127.0.0.1:1/v1"})

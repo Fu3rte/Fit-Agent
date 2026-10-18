@@ -22,6 +22,7 @@ from app.domain.session.models import (
 )
 from app.infrastructure.persistence.sqlite import database as database_module
 from app.interfaces import http
+from app.interfaces.http_api import errors
 from app.model_config import load_model_config
 from test.check_attachment_session import SYSTEM, reference, send_command, uid, upload
 from test.regression_support import Server, client, install_test_model_config
@@ -83,7 +84,7 @@ def listener_checks(root: Path, connection) -> None:
     assert operation.json()["run"]["run_id"] == accepted.run.id
     assert "accepted_attachments" not in operation.text and "storage_ref" not in operation.text
     assert_error(connection.get(operation_path + "?unknown=1"), 422, "invalid_request")
-    invoke(service.finish_run(session, accepted.run.id, "completed"))
+    invoke(service.runs.finish_run(session, accepted.run.id, "completed"))
     edit_command = EditCommand(operation_id=uid(), session_id=session,
         request=EditRequest(target_entry_id=accepted.run.request_entry_id, text=" "))
     edited = invoke(service.accept_edit(edit_command))
@@ -91,7 +92,7 @@ def listener_checks(root: Path, connection) -> None:
                     "target_entry_id": edit_command.request.target_entry_id, "request": " "}
     assert connection.post("/api/agent/edit", json=edit_payload).json()["run_id"] == edited.run.id
     assert_error(connection.post("/api/agent/edit", json={**edit_payload, "attachments": []}), 422, "invalid_request")
-    invoke(service.finish_run(session, edited.run.id, "completed"))
+    invoke(service.runs.finish_run(session, edited.run.id, "completed"))
     regenerate_command = RegenerateCommand(operation_id=uid(), session_id=session,
         request=RegenerateRequest(target_entry_id=edited.run.request_entry_id))
     regenerated = invoke(service.accept_regenerate(regenerate_command))
@@ -148,7 +149,7 @@ def listener_checks(root: Path, connection) -> None:
         assert_error(oversized, 413, "request_size_exceeded")
         exact_invalid = connection.post(path, content=iter([b"{" + b" " * 1048575]), headers={"Content-Type": "application/json"})
         assert_error(exact_invalid, 422, "invalid_request")
-    metadata = invoke(service.get_attachment_content(session, file["attachment_id"]))[0]
+    metadata = invoke(service.attachments.get_attachment_content(session, file["attachment_id"]))[0]
     original_path = root / metadata.storage_ref
     original_path.chmod(stat.S_IWRITE | stat.S_IREAD)
     original_bytes = original_path.read_bytes()
@@ -166,7 +167,7 @@ def listener_checks(root: Path, connection) -> None:
     safe_bytes = b"x" * len(key.encode())
     credential_file = upload(safe_bytes, "stored-private.txt")
     assert connection.post(steering_path, json={**steering_payload, "operation_id": uid(), "attachments": [credential_file]}).status_code == 200
-    protected_meta = invoke(service.get_attachment_content(session, credential_file["attachment_id"]))[0]
+    protected_meta = invoke(service.attachments.get_attachment_content(session, credential_file["attachment_id"]))[0]
     protected_path = root / protected_meta.storage_ref
     protected_path.chmod(stat.S_IWRITE | stat.S_IREAD)
     try:
@@ -188,7 +189,7 @@ def stored_metadata_damage_checks(root, connection, service, session, steering_p
     item = upload(b"unchanged original bytes", "damaged.txt")
     operation = uid()
     assert connection.post(steering_path, json={"session_id": session, "operation_id": operation, "message": "", "attachments": [item]}).status_code == 200
-    metadata = invoke(service.get_attachment_content(session, item["attachment_id"]))[0]
+    metadata = invoke(service.attachments.get_attachment_content(session, item["attachment_id"]))[0]
     database = service._repository._database
     path = root / "http.db"
     original = path.read_bytes()
@@ -256,9 +257,9 @@ def cleanup_failure_checks(root, connection, service, session, run_id, steering_
         response = pending.result(10)
     assert_error(response, 500, "internal_error")
     invoke(database.connection.execute("DROP TRIGGER fail_cleanup_operation"))
-    assert invoke(service.get_operation_outcome(session, operation)) is None
+    assert invoke(service.operations.get_operation_outcome(session, operation)) is None
     assert invoke(service._repository.get_attachments([item["attachment_id"]])) == {}
-    assert invoke(service.get_run(session, run_id)).status == "running"
+    assert invoke(service.queries.get_run(session, run_id)).status == "running"
     assert str(root) not in response.text and item["file_name"] not in response.text
 
 
@@ -344,13 +345,13 @@ async def asgi_body_checks(root: Path) -> None:
             (root / "non-attachment-missing").read_bytes()
         except OSError as error:
             with pytest.raises(OSError) as unchanged:
-                await http.attachment_native_error(None, error)
+                await errors.attachment_native_error(None, error)
             assert unchanged.value is error
         try:
             int("real invalid integer")
         except ValueError as error:
             with pytest.raises(ValueError) as unchanged:
-                await http.attachment_metadata_error(None, error)
+                await errors.attachment_metadata_error(None, error)
             assert unchanged.value is error
     (root / "body-evidence.json").write_text(json.dumps({"asgi_stream": "passed", "actual_limit": 1048576,
         "length_headers": ["missing", "underdeclared", "actual"], "early_rejection": "third frame unread",
@@ -369,8 +370,13 @@ def main() -> None:
     async def isolated(application):
         async with http.lifespan(application):
             service = SessionService(application.state.session_service._repository,
-                                     application.state.business, project_root=root)
+                                     application.state.business.proposals, project_root=root)
             application.state.session_service = service
+            application.state.session_queries = service.queries
+            application.state.session_entries = service.entries
+            application.state.session_runs = service.runs
+            application.state.session_operations = service.operations
+            application.state.session_attachments = service.attachments
             application.state.steering = SteeringCoordinator(service)
             yield
 

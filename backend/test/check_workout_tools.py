@@ -50,12 +50,12 @@ async def batch(f, session, calls):
     for message in results:
         parent = await f.append(session, run.id, parent, message)
         if not message.is_error and message.tool_name == "prepare_workout":
-            await f.business.bind_workout_display_entry(workouts.pop(message.tool_call_id), parent)
+            await f.business.workouts.bind_workout_display_entry(workouts.pop(message.tool_call_id), parent)
             displays[message.tool_call_id] = parent
         if not message.is_error and message.tool_name == "prepare_profile_update":
-            await f.business.bind_display_entry(profiles.pop(message.tool_call_id), parent)
+            await f.business.profile.bind_display_entry(profiles.pop(message.tool_call_id), parent)
             displays[message.tool_call_id] = parent
-    await f.service.finish_run(session, run.id, "completed")
+    await f.service.runs.finish_run(session, run.id, "completed")
     assert not profiles and not workouts
     return context, results, displays
 
@@ -77,11 +77,13 @@ async def check():
         _, results, displays = await batch(f, session, [call("list_workouts", {}), profile, prepare])
         proposal = body(results[-1])
         assert all(not result.is_error for result in results)
-        assert (await f.business.list_workouts(WorkoutListArguments())).total == 0
+        assert (await f.business.workouts.list_workouts(WorkoutListArguments())).total == 0
         snapshot = await f.repository.get_workout_snapshot(proposal["proposal_id"])
         assert snapshot.payload.model_dump() == CONTENT
         assert snapshot.display_entry_id == displays[prepare.id]
-        confirmations = ConfirmationService(f.repository, f.service, f.business)
+        confirmations = ConfirmationService(
+            f.repository, f.service.queries, f.service.operations, f.service.entries, f.business
+        )
 
         # 保存只经独立确认入口：后端生成确认节点，不创建运行、不调用模型。
         async def save(session, proposal_id, display_entry_id):
@@ -145,7 +147,7 @@ async def check():
             [call("prepare_workout", item) for item in invalid])
         assert all(message.is_error for message in rejected_args)
         await f.restart()
-        assert (await f.business.get_workout(first["id"])).version == 2
+        assert (await f.business.workouts.get_workout(first["id"])).version == 2
         await f.service.delete_session(other)
         assert await f.repository.get_workout_snapshot(a2["proposal_id"]) is None
         assert await f.repository.get_workout_save_record(a2["proposal_id"]) is not None

@@ -19,6 +19,7 @@ from app.agent.message_context import (
     business_context_to_llm,
     convert_to_llm,
 )
+from app.agent.telemetry import TraceSpan
 from app.agent.tools.business import business_tool_declarations
 from app.ai.api import anthropic_messages, openai_completions
 from app.ai.messages import (
@@ -35,13 +36,16 @@ from app.ai.stream import AssistantResponse
 from app.ai.types import ModelSpec
 from app.application.business.catalog import Catalog
 from app.application.business.coordination import ReplacementCoordinator
-from app.application.business.service import BusinessService, business_date
+from app.application.business.profile import business_date
+from app.application.business.service import BusinessService
+from app.application.session import execution as http_module
 from app.application.session.business_context import (
     BusinessBindings,
     collect_message_nodes,
     collect_pending_proposals,
     next_business_context_event,
 )
+from app.application.session.execution import execute, model_visible_entries
 from app.application.session.service import SessionService
 from app.application.session.steering import SteeringCoordinator
 from app.domain.session.models import (
@@ -62,8 +66,8 @@ from app.infrastructure.persistence.sqlite.business_repository import (
 )
 from app.infrastructure.persistence.sqlite.database import open_database
 from app.infrastructure.persistence.sqlite.repository import SqliteSessionRepository
-from app.interfaces import http as http_module
-from app.interfaces.http import RunState, execute, model_visible_entries
+from app.interfaces.http import RunState
+from app.interfaces.http_api.events import HttpRunEvents
 from app.model_config import ModelConfig
 from test.regression_support import temporary_root
 
@@ -176,8 +180,8 @@ async def build_services(path: Path):
     service = SessionService(SqliteSessionRepository(database))
     repository = SqliteBusinessRepository(database)
     catalog = Catalog.load()
-    business = BusinessService(repository, catalog, service, ReplacementCoordinator())
-    service.attach_snapshots(business)
+    business = BusinessService(repository, catalog, service.queries, ReplacementCoordinator())
+    service.attach_snapshots(business.proposals)
     async with repository.transaction():
         await repository.replace_exercises(catalog.all())
     return database, service, repository, business
@@ -196,7 +200,7 @@ async def start_run(service, session_id: str, text: str = "建档"):
 
 async def append_entry(service, session_id, run_id, parent_id, message) -> str:
     node_id = uid()
-    await service.append_entry(
+    await service.entries.append_entry(
         SessionMessageEntry(
             session_id=session_id,
             id=node_id,
@@ -211,24 +215,24 @@ async def append_entry(service, session_id, run_id, parent_id, message) -> str:
 
 
 async def next_event(service, business, session_id, leaf_id, request_entry_id):
-    projection = await service.get_projection(session_id, leaf_id)
+    projection = await service.queries.get_projection(session_id, leaf_id)
     visible = set(projection.context.source_entry_ids)
     nodes = collect_message_nodes(
         model_visible_entries(projection.path, visible),
         BusinessBindings(
-            profile_confirmations=await business.list_confirmation_bindings(session_id),
-            workout_confirmations=await business.list_workout_confirmation_bindings(session_id),
-            plan_confirmations=await business.list_plan_confirmation_bindings(session_id),
-            profile_displays=await business.list_display_bindings(session_id),
-            workout_displays=await business.list_workout_display_bindings(session_id),
-            plan_displays=await business.list_plan_display_bindings(session_id),
+            profile_confirmations=await business.profile.list_confirmation_bindings(session_id),
+            workout_confirmations=await business.workouts.list_workout_confirmation_bindings(session_id),
+            plan_confirmations=await business.plans.list_plan_confirmation_bindings(session_id),
+            profile_displays=await business.profile.list_display_bindings(session_id),
+            workout_displays=await business.workouts.list_workout_display_bindings(session_id),
+            plan_displays=await business.plans.list_plan_display_bindings(session_id),
         ),
     )
     proposals = collect_pending_proposals(
-        await business.list_pending_references(session_id),
+        await business.proposals.list_pending_references(session_id),
         {entry.id for entry in projection.path},
     )
-    entry = await service.get_entry(session_id, request_entry_id)
+    entry = await service.queries.get_entry(session_id, request_entry_id)
     return await next_business_context_event(
         path=projection.path,
         request=RequestContext(
@@ -238,7 +242,7 @@ async def next_event(service, business, session_id, leaf_id, request_entry_id):
         ),
         nodes=nodes,
         proposals=proposals,
-        removal_reason=business.removed_proposal_reason,
+        removal_reason=business.proposals.removed_proposal_reason,
     )
 
 
@@ -251,7 +255,7 @@ async def commit(service, session_id, run_id, parent_id, details):
         details=details,
         created_at=now_ms(),
     )
-    outcome = await service.append_business_context(node)
+    outcome = await service.entries.append_business_context(node)
     assert outcome.created and not outcome.credential_detected
     return outcome.entry
 
@@ -358,7 +362,7 @@ async def scenario_projection(root: Path) -> dict:
         )
         assert isinstance(delta.message.details, BusinessContextDelta)
 
-        projection = await service.get_projection(session_id, delta.id)
+        projection = await service.queries.get_projection(session_id, delta.id)
         by_id = {entry.id: entry for entry in projection.path}
         path_ids = [entry.id for entry in projection.path]
         assert len(path_ids) == 7
@@ -378,7 +382,7 @@ async def scenario_projection(root: Path) -> dict:
             "system", "user", "assistant", "toolResult", "toolResult",
         ]
         # 重复读取同一投影一致。
-        repeated = await service.get_projection(session_id, delta.id)
+        repeated = await service.queries.get_projection(session_id, delta.id)
         assert message_projection(repeated.context.messages) == message_projection(
             projection.context.messages
         )
@@ -392,7 +396,7 @@ async def scenario_projection(root: Path) -> dict:
         assert snapshot.id not in {entry.id for entry in selected}
         assert C._is_turn_start(by_id[snapshot.id]) is False
         assert C._is_cut_point(by_id[snapshot.id]) is False
-        branch = await service.get_current_branch(session_id)
+        branch = await service.queries.get_current_branch(session_id)
         assert [entry.id for entry in branch] == [
             projection.path[0].id, user_id, assistant_id, first, second,
         ]
@@ -409,7 +413,7 @@ async def scenario_projection(root: Path) -> dict:
         reopened = await open_database(root / "projection.db")
         restored = SessionService(SqliteSessionRepository(reopened))
         try:
-            restored_projection = await restored.get_projection(session_id, delta.id)
+            restored_projection = await restored.queries.get_projection(session_id, delta.id)
             assert message_projection(restored_projection.context.messages) == message_projection(
                 projection.context.messages
             )
@@ -536,7 +540,7 @@ async def scenario_execute(root: Path) -> dict:
         coordinator.open(
             session_id, run.id, lambda data: state.publish("steering_status", data)
         )
-        start_projection = await service.get_projection(session_id, run.request_entry_id)
+        start_projection = await service.queries.get_projection(session_id, run.request_entry_id)
         loop = asyncio.get_running_loop()
         model = ModelConfig(
             api="openai-completions", base_url="https://example.com/v1",
@@ -571,7 +575,10 @@ async def scenario_execute(root: Path) -> dict:
             with ThreadPoolExecutor(max_workers=1) as executor:
                 future = executor.submit(
                     execute, run, session_id, start_projection.context.messages, {},
-                    state, service, business, loop, model, state.secrets,
+                    state, service.queries, service.entries, business, loop, model, state.secrets, TraceSpan(),
+                    create_events=lambda guard, parents: HttpRunEvents(
+                        state.publish, guard, parents, TraceSpan().record_first_text
+                    ),
                 )
                 stop = await asyncio.wrap_future(future)
         finally:
@@ -618,7 +625,7 @@ async def scenario_execute(root: Path) -> dict:
         assert len(second_business) == 2
         assert len(captured[0]) == len(start_projection.context.messages) + 1
         # 连续模型调用不重复追加：数据库仅两条资料节点。
-        history = await service.get_session_history(session_id)
+        history = await service.queries.get_session_history(session_id)
         custom = [entry for entry in history.entries if entry.type == "custom_message"]
         assert len(custom) == 2
         assert custom[0].parent_id == run.request_entry_id

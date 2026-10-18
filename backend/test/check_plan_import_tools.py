@@ -13,9 +13,9 @@ from app.agent.tools.plan_import import (
     bind_plan_import_tools,
     plan_import_tool_declarations,
 )
+from app.application.session.execution import PLAN_PREPARE_TOOLS
 from app.domain.business.models import PlanAdjustmentProposal, PlanImportProposal
 from app.domain.session.models import SendCommand, SendRequest
-from app.interfaces import http as interface
 from test.check_plan_core import CONTENT, profile
 from test.check_profile_confirmation import SYSTEM, Fixture, count_rows, new_id
 from test.check_workout_service_http import assistant
@@ -62,9 +62,9 @@ async def binding(f, session, calls):
     assert {name: tool.definition() for name, tool in tools.items()} == PRODUCTION
     assert PRODUCTION.keys() >= DECLARED.keys()
     # 持久化后的展示绑定入口覆盖统一注册表中的全部计划域准备工具。
-    assert interface.PLAN_PREPARE_TOOLS == {name for name in PRODUCTION if name.startswith("prepare_plan")}
+    assert PLAN_PREPARE_TOOLS == {name for name in PRODUCTION if name.startswith("prepare_plan")}
     assert {name: tool.definition() for name, tool in bind_plan_import_tools(
-        f.business, context, f.call, {}).items()} == {name: PRODUCTION[name] for name in NAMES}
+        f.business.plans, context, f.call, {}).items()} == {name: PRODUCTION[name] for name in NAMES}
     for name in NAMES:
         tool = tools[name]
         assert tool.execution_mode == "sequential" and tool.max_output_chars is None
@@ -82,7 +82,7 @@ async def binding(f, session, calls):
             with pytest.raises(ValidationError):
                 tool.arguments.model_validate({identity: new_id()})
     # 冻结的身份快照：绑定后源上下文变化不影响已绑定实例，实例字段不可改写。
-    probe = bind_plan_import_tools(f.business, context.model_copy(update={"run_id": new_id()}), f.call, {})
+    probe = bind_plan_import_tools(f.business.plans, context.model_copy(update={"run_id": new_id()}), f.call, {})
     for name in NAMES:
         assert probe[name].trusted_context.run_id != context.run_id
         try:
@@ -108,10 +108,10 @@ async def batch(f, session, calls):
         parent = await f.append(session, run.id, parent, message)
         if not message.is_error:
             assert registrations[message.tool_call_id] == body(message)["proposal_id"]
-            await f.business.bind_plan_display_entry(registrations[message.tool_call_id], parent)
-            stored = await f.service.get_entry(session, parent)
+            await f.business.plans.bind_plan_display_entry(registrations[message.tool_call_id], parent)
+            stored = await f.service.queries.get_entry(session, parent)
             assert stored.messages[0] == message
-    await f.service.finish_run(session, run.id, "completed")
+    await f.service.runs.finish_run(session, run.id, "completed")
     return execution.messages, registrations
 
 
@@ -126,12 +126,12 @@ async def saved_chain(f, session, name, arguments):
     proposal = body(prepared)
     assert registrations == {call.id: proposal["proposal_id"]}
     display = await f.append(session, run.id, source, prepared)
-    assert (await f.service.get_entry(session, display)).messages[0] == prepared
-    await f.business.bind_plan_display_entry(proposal["proposal_id"], display)
+    assert (await f.service.queries.get_entry(session, display)).messages[0] == prepared
+    await f.business.plans.bind_plan_display_entry(proposal["proposal_id"], display)
     snapshot = await f.repository.get_plan_snapshot(proposal["proposal_id"])
     assert snapshot.display_entry_id == display and snapshot.status == "pending"
     assert snapshot.preparation_kind == proposal["preparation_kind"]
-    await f.service.finish_run(session, run.id, "completed")
+    await f.service.runs.finish_run(session, run.id, "completed")
 
     # 合法保存只经独立确认入口：后端生成确认节点并直接调用业务服务。
     operation = await f.confirm(
@@ -142,7 +142,7 @@ async def saved_chain(f, session, name, arguments):
     assert set(saved) == {"proposal_id", "id", "content", "created_at", "saved_at"}
     assert saved["proposal_id"] == proposal["proposal_id"] and saved["content"] == arguments["payload"]
     assert saved["created_at"] == saved["saved_at"]
-    assert (await f.business.get_current_plan()).id == saved["id"]
+    assert (await f.business.plans.get_current_plan()).id == saved["id"]
 
     # 重复确认同一快照返回固定结果；状态查询保持原结果，不新增版本或消息节点。
     replay = await f.confirm(
@@ -150,19 +150,19 @@ async def saved_chain(f, session, name, arguments):
         business_kind="plan")
     assert replay.status == "saved" and replay.result.model_dump() == saved
     assert replay.confirmation_entry_id == operation.confirmation_entry_id
-    status = await f.business.get_plan_save_status(
+    status = await f.business.plans.get_plan_save_status(
         f.context(session, new_id(), new_id()), proposal["proposal_id"])
     assert status.status == "saved" and status.result.model_dump() == saved
     snapshot = await f.repository.get_plan_snapshot(proposal["proposal_id"])
     assert snapshot.status == "saved"
     assert snapshot.confirmation_entry_id == operation.confirmation_entry_id
-    assert sum(item.is_current for item in await f.business.list_plans()) == 1
+    assert sum(item.is_current for item in await f.business.plans.list_plans()) == 1
     return saved
 
 
 async def shared_registry(f, session, version):
     """生成与录入准备共用运行级登记集合；批次含顺序工具时整批顺序执行，后建快照使旧 pending 失效。"""
-    current = (await f.business.get_current_plan()).id
+    current = (await f.business.plans.get_current_plan()).id
     real = f.catalog.all()[0]
     content = copy.deepcopy(CONTENT)
     content["days"][0]["exercises"][0].update(exercise_id=real.id, name=real.name)
@@ -195,7 +195,7 @@ async def shared_registry(f, session, version):
     parent = source
     for message in execution.messages:
         parent = await f.append(session, run.id, parent, message)
-    await f.service.finish_run(session, run.id, "completed")
+    await f.service.runs.finish_run(session, run.id, "completed")
     return imported["proposal_id"]
 
 
@@ -261,7 +261,7 @@ async def check():
             {"base_profile_version": None, "base_plan_id": imported_saved["id"],
              "payload": copy.deepcopy(INCOMPLETE)})
         assert adjusted_saved["id"] != imported_saved["id"]
-        assert (await f.business.get_current_plan()).id == adjusted_saved["id"]
+        assert (await f.business.plans.get_current_plan()).id == adjusted_saved["id"]
         assert await count_rows(f.database, "plans") == 2
         await profile(f, session)
         for name in NAMES:
@@ -269,37 +269,37 @@ async def check():
             messages, registrations = await batch(f, session, [invocation(name, args)])
             assert messages[0].is_error and body(messages[0])["code"] == "profile_version_conflict"
             assert set(body(messages[0])) == {"code", "message"} and not registrations
-            args["base_profile_version"] = (await f.business.get_profile()).version
-            args["base_plan_id"] = (await f.business.get_current_plan()).id
+            args["base_profile_version"] = (await f.business.profile.get_profile()).version
+            args["base_plan_id"] = (await f.business.plans.get_current_plan()).id
             messages, _ = await batch(f, session, [invocation(name, args)])
             assert not messages[0].is_error and body(messages[0])["base_profile_version"] == args["base_profile_version"]
             messages, registrations = await batch(f, session, [invocation(name, {**args, "base_plan_id": new_id()})])
             assert messages[0].is_error and body(messages[0])["code"] == "plan_version_conflict" and not registrations
         assert await count_rows(f.database, "plans") == 2
-        await shared_registry(f, await f.session("统一登记与顺序批次"), (await f.business.get_profile()).version)
+        await shared_registry(f, await f.session("统一登记与顺序批次"), (await f.business.profile.get_profile()).version)
         from test.check_plan_import_adjustment import prepare
 
-        context, save = await prepare(f, session, version=(await f.business.get_profile()).version,
-                                      base=(await f.business.get_current_plan()).id)
-        saved = await f.business.save_plan(context, save)
+        context, save = await prepare(f, session, version=(await f.business.profile.get_profile()).version,
+                                      base=(await f.business.plans.get_current_plan()).id)
+        saved = await f.business.plans.save_plan(context, save)
         for name in NAMES:
-            args = {"base_profile_version": (await f.business.get_profile()).version,
+            args = {"base_profile_version": (await f.business.profile.get_profile()).version,
                     "base_plan_id": saved.id, "payload": INCOMPLETE}
             messages, _ = await batch(f, session, [invocation(name, args)])
             assert not messages[0].is_error and body(messages[0])["base_plan_id"] == saved.id
-            assert (await f.business.get_current_plan()).id == saved.id
+            assert (await f.business.plans.get_current_plan()).id == saved.id
             assert await count_rows(f.database, "plans") == 3
-        already = (await f.business.get_current_plan()).id
-        version = (await f.business.get_profile()).version
+        already = (await f.business.plans.get_current_plan()).id
+        version = (await f.business.profile.get_profile()).version
         for name in NAMES:
             chain_saved = await saved_chain(f, await f.session(f"{name}保存链"), name,
-                {"base_profile_version": version, "base_plan_id": (await f.business.get_current_plan()).id,
+                {"base_profile_version": version, "base_plan_id": (await f.business.plans.get_current_plan()).id,
                  "payload": copy.deepcopy(INCOMPLETE)})
-            assert (await f.business.get_current_plan()).id == chain_saved["id"]
+            assert (await f.business.plans.get_current_plan()).id == chain_saved["id"]
             assert chain_saved["id"] != already
             already = chain_saved["id"]
         assert await count_rows(f.database, "plans") == 5
-        assert sum(item.is_current for item in await f.business.list_plans()) == 1
+        assert sum(item.is_current for item in await f.business.plans.list_plans()) == 1
         print("PASS: unified production registry declarations and bindings; frozen identity; real SQLite/catalog/messages; both kinds; complete JSON; strict fields/null/types/UUID; registrations shared with generation; sequential batch ordering; persist then display bind; confirm save and idempotent status; no-profile import save")
         print("Evidence:", ROOT)
     finally:

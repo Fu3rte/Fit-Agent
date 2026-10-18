@@ -169,24 +169,24 @@ async def seed(database: Database) -> dict:
     proposal = WorkoutProposal(proposal_id=pid, performed_on="2026-06-01", base_workout_id=None,
                                base_workout_version=None, payload=WorkoutContent.model_validate(CONTENT))
     now = stamp()
-    await service.append_entry(SessionMessageEntry(
+    await service.entries.append_entry(SessionMessageEntry(
         session_id=session_id, id=source_id, parent_id=run.request_entry_id, run_id=run.id,
         type="message", created_at=now,
         messages=[AssistantMessage(role="assistant", content=[ToolCall(type="toolCall", id="prepare-1", name="prepare_workout",
             arguments={key: value for key, value in proposal.model_dump().items() if key != "proposal_id"})],
             api="openai-completions", provider="example", model="model-1", usage=USAGE, stop_reason="toolUse", timestamp=now)],
     ))
-    await service.append_entry(SessionMessageEntry(
+    await service.entries.append_entry(SessionMessageEntry(
         session_id=session_id, id=display_id, parent_id=source_id, run_id=run.id, type="message", created_at=now + 1,
         messages=[ToolResultMessage(role="toolResult", tool_call_id="prepare-1", tool_name="prepare_workout",
             content=[TextContent(type="text", text=proposal.model_dump_json())], is_error=False, timestamp=now + 1)],
     ))
-    await service.finish_run(session_id, run.id, "completed")
+    await service.runs.finish_run(session_id, run.id, "completed")
     confirmed = await service.accept_send(
         SendCommand(operation_id=identifier(), session_id=session_id, request=SendRequest(text="确认保存")), system_message=SYSTEM,
     )
     assert confirmed.run is not None
-    await service.finish_run(session_id, confirmed.run.id, "completed")
+    await service.runs.finish_run(session_id, confirmed.run.id, "completed")
     return {"session": session_id, "request": run.request_entry_id, "source": source_id,
             "display": display_id, "confirmation": confirmed.run.request_entry_id, "proposal": pid}
 

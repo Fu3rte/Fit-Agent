@@ -13,11 +13,11 @@ from app.ai.messages import (
     ToolResultMessage,
     Usage,
 )
-from app.application.business.service import (
+from app.application.business.profile import (
     BUSINESS_TIMEZONE,
-    BusinessService,
     business_date,
 )
+from app.application.business.service import BusinessService
 from app.application.session.service import SessionService
 from app.domain.business.models import (
     BusinessContext,
@@ -87,14 +87,14 @@ class Live:
         self.service: SessionService = app.state.session_service
         self.business: BusinessService = app.state.business
         self.confirmations = app.state.confirmations
-        self.repository = self.business._repository
+        self.repository = app.state.business_repository
 
     def call(self, coro):
         return asyncio.run_coroutine_threadsafe(coro, self.loop).result()
 
     def reset(self) -> None:
         # 隔离各段：把上一段遗留的 running 运行标记中断，解除全局执行占用。
-        self.call(self.service.recover_interrupted())
+        self.call(self.service.runs.recover_interrupted())
 
     def session(self) -> str:
         async def create():
@@ -116,7 +116,7 @@ class Live:
             system_message=SYSTEM,
         )
         if finish:
-            await self.service.finish_run(session_id, outcome.run.id, "completed")
+            await self.service.runs.finish_run(session_id, outcome.run.id, "completed")
         return outcome.run
 
     def assistant(self, call_id, name, arguments):
@@ -131,7 +131,7 @@ class Live:
         run = await self.turn_async(session_id, "请整理待确认内容", finish=False)
         call_id = "call-" + uuid4().hex[:8]
         source = new_id()
-        await self.service.append_entry(SessionMessageEntry(
+        await self.service.entries.append_entry(SessionMessageEntry(
             session_id=session_id, id=source, parent_id=run.request_entry_id, run_id=run.id,
             type="message", messages=[self.assistant(call_id, tool_name, arguments)],
             created_at=now_ms(),
@@ -139,7 +139,7 @@ class Live:
         context = self.context(session_id, run.request_entry_id, source)
         proposal = await prepare(context, _proposal_args(kind, arguments))
         display = new_id()
-        await self.service.append_entry(SessionMessageEntry(
+        await self.service.entries.append_entry(SessionMessageEntry(
             session_id=session_id, id=display, parent_id=source, run_id=run.id,
             type="message", messages=[ToolResultMessage(
                 role="toolResult", tool_call_id=call_id, tool_name=tool_name,
@@ -148,7 +148,7 @@ class Live:
             )], created_at=now_ms(),
         ))
         await bind(proposal.proposal_id, display)
-        await self.service.finish_run(session_id, run.id, "completed")
+        await self.service.runs.finish_run(session_id, run.id, "completed")
         return {
             "session": session_id, "request": run.request_entry_id, "source": source,
             "display": display, "proposal": proposal.proposal_id,
@@ -162,7 +162,7 @@ class Live:
         return self.stage(
             session_id, "profile",
             {"profile_id": 1, "base_profile_version": base, "payload": PROFILE},
-            self.business.prepare_profile_update, self.business.bind_display_entry,
+            self.business.profile.prepare_profile_update, self.business.profile.bind_display_entry,
             "prepare_profile_update",
         )
 
@@ -170,7 +170,7 @@ class Live:
         return self.stage(
             session_id, "plan",
             {"base_profile_version": base_version, "base_plan_id": base_plan_id, "payload": payload},
-            self.business.prepare_plan_import, self.business.bind_plan_display_entry,
+            self.business.plans.prepare_plan_import, self.business.plans.bind_plan_display_entry,
             "prepare_plan_import",
         )
 
@@ -358,7 +358,7 @@ def seed_recovery_database(path: Path) -> tuple[str, str]:
                 system_message=SYSTEM,
             )
             run = outcome.run
-            await service.finish_run(session_id, run.id, "completed")
+            await service.runs.finish_run(session_id, run.id, "completed")
             # 请求用户节点即当前路径中的确认节点，供 history 过滤核对。
             entry_id = run.request_entry_id
             operation_id = new_id()

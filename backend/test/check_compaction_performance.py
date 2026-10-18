@@ -114,10 +114,10 @@ def verify_sources(session_id: str, ids: dict, fact_id: str) -> dict:
     # 核对原始记录：事实节点原文与待确认画像 payload 必须与测量输入一致。
     loop = app.state.loop
     service = app.state.session_service
-    fact_entry = call(service.get_entry(session_id, fact_id), loop)
+    fact_entry = call(service.queries.get_entry(session_id, fact_id), loop)
     fact_body = fact_entry.messages[0].content
     assert fact_body == FACT_TEXT, fact_body
-    display_entry = call(service.get_entry(session_id, ids["display"]), loop)
+    display_entry = call(service.queries.get_entry(session_id, ids["display"]), loop)
     body = json.loads(display_entry.messages[0].content[0].text)
     assert body["payload"] == payload(), body["payload"]
     assert body["proposal_id"] == ids["proposal"]
@@ -134,7 +134,7 @@ def measure(http, spec, settings, ids: dict, fact_id: str, filler_id: str) -> di
     service = app.state.session_service
     loop = app.state.loop
 
-    projection_pre = call(service.get_projection(session_id, filler_id), loop)
+    projection_pre = call(service.queries.get_projection(session_id, filler_id), loop)
     pre_messages_tokens = estimate_context_tokens(projection_pre.context.messages).tokens
     preparation = prepare_compaction(
         projection_pre.path, spec.context_window, spec.max_tokens, settings
@@ -153,7 +153,7 @@ def measure(http, spec, settings, ids: dict, fact_id: str, filler_id: str) -> di
     assert sum(name == "compaction_end" for name in names) == 1, names
 
     checkpoints = [
-        entry for entry in call(service.list_entries(session_id), loop)
+        entry for entry in call(service.queries.list_entries(session_id), loop)
         if isinstance(entry, CompactionEntry)
     ]
     assert len(checkpoints) == 1
@@ -161,7 +161,7 @@ def measure(http, spec, settings, ids: dict, fact_id: str, filler_id: str) -> di
     assert str(checkpoint.first_kept_entry_id) == filler_id
     assert checkpoint.usage.total_tokens > 0 and checkpoint.summary.strip()
 
-    projection_post = call(service.get_projection(session_id, checkpoint.id), loop)
+    projection_post = call(service.queries.get_projection(session_id, checkpoint.id), loop)
     post_messages_tokens = estimate_context_tokens(projection_post.context.messages).tokens
 
     answer = final_text(result)

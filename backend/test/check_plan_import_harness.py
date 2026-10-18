@@ -17,7 +17,7 @@ from app.agent.tool import (
     validate_arguments,
 )
 from app.ai.messages import TextContent, text_projection
-from app.interfaces.http import CredentialFilter
+from app.application.session.credentials import CredentialFilter
 from test.check_plan_import_tools import (
     DECLARED,
     INCOMPLETE,
@@ -46,7 +46,7 @@ async def check_boundaries(selected):
             await check_repeated_cancel(f, tool, args, registrations)
         else:
             raise ValueError("未知专项")
-        await f.service.finish_run(session, run.id, "completed")
+        await f.service.runs.finish_run(session, run.id, "completed")
         print(f"PASS: {selected} boundary; real SQLite preparation and controlled lifecycle")
         print("Evidence:", ROOT)
     finally:
@@ -522,7 +522,7 @@ async def check():
             tools={name: replace(tool, execute=nested_execute)}, declared=DECLARED,
             before_tool_call=nested_before, contains_credentials=GUARD)
         assert not message.is_error and nested_events == [name, adjustment.name]
-        await f.service.finish_run(session, run.id, "completed")
+        await f.service.runs.finish_run(session, run.id, "completed")
         print("PASS: real prepare/validate/before/execute/after; frozen context and argument isolation; denial/preparation/schema failures; actual execute and after exceptions; cancellation after committed preparation; full credentials; protocol invariants")
         print("Evidence:", ROOT)
     finally:

@@ -111,7 +111,7 @@ async def cancel_cases(root: Path, evidence: dict) -> None:
     try:
         runtime = ActionRetrievalRuntime()
         business = BusinessService(
-            fixture.repository, fixture.catalog, fixture.service, fixture.replacements, runtime
+            fixture.repository, fixture.catalog, fixture.service.queries, fixture.replacements, runtime
         )
         session_id = await fixture.session("取消桥接会话")
         context = fixture.context(session_id, session_id, session_id)

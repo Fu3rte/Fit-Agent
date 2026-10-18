@@ -662,8 +662,8 @@ async def scenario_real_path() -> None:
             system_message=system_message(),
         )
         run = send.run
-        request_entry = await service.get_entry(SESSION, run.request_entry_id)
-        await service.append_entry(
+        request_entry = await service.queries.get_entry(SESSION, run.request_entry_id)
+        await service.entries.append_entry(
             SessionMessageEntry(
                 session_id=SESSION,
                 id="a1",
@@ -674,7 +674,7 @@ async def scenario_real_path() -> None:
                 created_at=tick(),
             )
         )
-        entries = await service.list_entries(SESSION)
+        entries = await service.queries.list_entries(SESSION)
         path = build_session_path(SESSION, entries, "a1")
         preparation = C.prepare_compaction(
             path, 128000, 16384, C.CompactionSettings(reserve_tokens=16384, keep_recent_tokens=1)

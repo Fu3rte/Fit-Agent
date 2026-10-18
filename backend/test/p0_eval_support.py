@@ -13,11 +13,11 @@ from app import model_config
 from app.agent.usage import summarize_usage
 from app.ai.messages import AssistantMessage, ToolResultMessage
 from app.application.business.catalog import DEFAULT_ACTIONS_PATH
-from app.application.business.service import BUSINESS_TIMEZONE, business_date
+from app.application.business.profile import BUSINESS_TIMEZONE, business_date
 from app.domain.business.models import BusinessContext, WorkoutListArguments
 from app.domain.session.models import CompactionEntry, SessionMessageEntry
-from app.interfaces.http import app
 from app.infrastructure.persistence.sqlite import database as database_module
+from app.interfaces.http import app
 from test.check_http import create_session, events, validate_events, wait_idle
 from test.p0_contract import (
     CASE_CATEGORIES,
@@ -170,9 +170,9 @@ def experiment_env(
 
 def business_state() -> dict:
     business = app.state.business
-    profile = _call(business.get_profile())
-    plan = _call(business.get_current_plan())
-    workouts = _call(business.list_workouts(WorkoutListArguments(page_size=100)))
+    profile = _call(business.profile.get_profile())
+    plan = _call(business.plans.get_current_plan())
+    workouts = _call(business.workouts.list_workouts(WorkoutListArguments(page_size=100)))
     return {
         "profile": profile.model_dump(),
         "current_plan": plan.model_dump(),
@@ -300,7 +300,7 @@ def capture_turn(
             [event for event in events_list if not event["event"].startswith("compaction_")]
         )
     after_state = business_state()
-    history = _call(app.state.session_service.get_session_history(session_id))
+    history = _call(app.state.session_queries.get_session_history(session_id))
     usage, missing = summarize_run_usage(history.entries, run_id)
     observation = TurnObservation(
         case_id=case_id,

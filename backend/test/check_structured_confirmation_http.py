@@ -18,7 +18,8 @@ from app.ai.messages import (
 from app.application.business.catalog import Catalog
 from app.application.business.confirmation import ConfirmationService
 from app.application.business.coordination import ReplacementCoordinator
-from app.application.business.service import BusinessService, business_date
+from app.application.business.profile import business_date
+from app.application.business.service import BusinessService
 from app.application.session.service import SessionService
 from app.domain.business.models import (
     BusinessContext,
@@ -108,14 +109,14 @@ class Live:
         self.service: SessionService = app.state.session_service
         self.business: BusinessService = app.state.business
         self.confirmations: ConfirmationService = app.state.confirmations
-        self.repository = self.business._repository
+        self.repository = app.state.business_repository
 
     def call(self, coro):
         return asyncio.run_coroutine_threadsafe(coro, self.loop).result()
 
     def reset(self) -> None:
         # 将上一段遗留的 running 运行标记中断，解除全局运行占用。
-        self.call(self.service.recover_interrupted())
+        self.call(self.service.runs.recover_interrupted())
 
     def session(self) -> str:
         async def create():
@@ -137,7 +138,7 @@ class Live:
             system_message=SYSTEM,
         )
         if finish:
-            await self.service.finish_run(session_id, outcome.run.id, "completed")
+            await self.service.runs.finish_run(session_id, outcome.run.id, "completed")
         return outcome.run
 
     def turn(self, session_id, text, *, finish=True):
@@ -145,7 +146,7 @@ class Live:
 
     async def append_async(self, session_id, run_id, parent_id, message) -> str:
         node_id = new_id()
-        await self.service.append_entry(SessionMessageEntry(
+        await self.service.entries.append_entry(SessionMessageEntry(
             session_id=session_id, id=node_id, parent_id=parent_id, run_id=run_id,
             type="message", messages=[message], created_at=now_ms(),
         ))
@@ -177,7 +178,7 @@ class Live:
             is_error=False, timestamp=now_ms(),
         ))
         await bind(proposal.proposal_id, display)
-        await self.service.finish_run(session_id, run.id, "completed")
+        await self.service.runs.finish_run(session_id, run.id, "completed")
         return {
             "session": session_id, "request": run.request_entry_id, "source": source,
             "display": display, "proposal": proposal.proposal_id,
@@ -194,7 +195,7 @@ class Live:
         return self.stage(
             session_id, "profile",
             {"profile_id": 1, "base_profile_version": base_version, "payload": PROFILE},
-            self.business.prepare_profile_update, self.business.bind_display_entry,
+            self.business.profile.prepare_profile_update, self.business.profile.bind_display_entry,
             "prepare_profile_update",
         )
 
@@ -203,7 +204,7 @@ class Live:
             session_id, "workout",
             {"performed_on": day, "base_workout_id": base_id, "base_workout_version": base_version,
              "payload": payload or WORKOUT},
-            self.business.prepare_workout, self.business.bind_workout_display_entry,
+            self.business.workouts.prepare_workout, self.business.workouts.bind_workout_display_entry,
             "prepare_workout",
         )
 
@@ -211,7 +212,7 @@ class Live:
         return self.stage(
             session_id, "plan",
             {"base_profile_version": base_version, "base_plan_id": None, "payload": PLAN},
-            self.business.prepare_plan_import, self.business.bind_plan_display_entry,
+            self.business.plans.prepare_plan_import, self.business.plans.bind_plan_display_entry,
             "prepare_plan_import",
         )
 
@@ -262,7 +263,7 @@ def check_saved_get_and_history(live: Live) -> dict:
         assert operation["proposal_id"] == ids["proposal"]
         fetched = live.get_op(session, operation["operation_id"])
         assert fetched.status_code == 200 and fetched.json() == operation, fetched.text
-        entry = live.call(live.service.get_entry(session, operation["confirmation_entry_id"]))
+        entry = live.call(live.service.queries.get_entry(session, operation["confirmation_entry_id"]))
         assert entry.run_id is None and entry.confirmation is not None
         result[kind] = operation["operation_id"]
 
@@ -378,7 +379,7 @@ def check_occupancy_refuses_without_registering(live: Live) -> dict:
     assert live.count("save_confirmation_operations") == before
     snapshot = live.call(live.repository.get_snapshot(profile["proposal"]))
     assert snapshot.status == "pending" and snapshot.confirmation_entry_id is None
-    live.call(live.service.finish_run(session, busy.id, "completed"))
+    live.call(live.service.runs.finish_run(session, busy.id, "completed"))
     after = live.confirm(session, "profile", profile)
     assert after.status_code == 200, after.text
     assert live.count("save_confirmation_operations") == before + 1
@@ -406,7 +407,7 @@ def check_idempotency_conflict_and_expired(live: Live) -> dict:
         SendCommand(operation_id=chat_operation_id, session_id=session, request=SendRequest(text="旧操作")),
         system_message=SYSTEM,
     ))
-    live.call(live.service.finish_run(session, sent.run.id, "completed"))
+    live.call(live.service.runs.finish_run(session, sent.run.id, "completed"))
     live.call(live.service.accept_edit(
         EditCommand(operation_id=new_id(), session_id=session,
                     request=EditRequest(target_entry_id=sent.run.request_entry_id, text="改写旧操作")),
@@ -478,8 +479,8 @@ def _seed_processing_operation(path: Path) -> tuple[str, str, str]:
         database = await open_database(path)
         repository = SqliteBusinessRepository(database)
         service = SessionService(SqliteSessionRepository(database))
-        business = BusinessService(repository, Catalog.load(), service, ReplacementCoordinator())
-        service.attach_snapshots(business)
+        business = BusinessService(repository, Catalog.load(), service.queries, ReplacementCoordinator())
+        service.attach_snapshots(business.proposals)
         async with repository.transaction():
             await repository.replace_exercises(Catalog.load().all())
         created, session = await service.create_session_result(new_id(), "恢复会话")
@@ -492,7 +493,7 @@ def _seed_processing_operation(path: Path) -> tuple[str, str, str]:
         run = outcome.run
         call_id = "call-seed"
         source_id = new_id()
-        await service.append_entry(SessionMessageEntry(
+        await service.entries.append_entry(SessionMessageEntry(
             session_id=session_id, id=source_id, parent_id=run.request_entry_id, run_id=run.id,
             type="message", messages=[AssistantMessage(
                 role="assistant",
@@ -507,13 +508,13 @@ def _seed_processing_operation(path: Path) -> tuple[str, str, str]:
             session_id=session_id, run_id="", request_entry_id=run.request_entry_id,
             source_entry_id=source_id,
         )
-        proposal = await business.prepare_profile_update(
+        proposal = await business.profile.prepare_profile_update(
             context, ProfileProposalArguments.model_validate(
                 {"profile_id": 1, "base_profile_version": None, "payload": PROFILE}
             ),
         )
         display_id = new_id()
-        await service.append_entry(SessionMessageEntry(
+        await service.entries.append_entry(SessionMessageEntry(
             session_id=session_id, id=display_id, parent_id=source_id, run_id=run.id,
             type="message", messages=[ToolResultMessage(
                 role="toolResult", tool_call_id=call_id, tool_name="prepare_profile_update",
@@ -521,11 +522,11 @@ def _seed_processing_operation(path: Path) -> tuple[str, str, str]:
                 is_error=False, timestamp=now_ms(),
             )], created_at=now_ms(),
         ))
-        await business.bind_display_entry(proposal.proposal_id, display_id)
-        await service.finish_run(session_id, run.id, "completed")
+        await business.profile.bind_display_entry(proposal.proposal_id, display_id)
+        await service.runs.finish_run(session_id, run.id, "completed")
         operation_id = new_id()
         async with repository.transaction():
-            entry = await service.append_confirmation_entry(session_id, SaveConfirmation(
+            entry = await service.entries.append_confirmation_entry(session_id, SaveConfirmation(
                 business_kind="profile", proposal_id=proposal.proposal_id, display_entry_id=display_id,
             ))
             await repository.begin_save(proposal.proposal_id, entry.id)

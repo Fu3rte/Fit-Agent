@@ -65,7 +65,7 @@ async def positive(root: Path) -> None:
     accepted = await service.accept_send(command, system_message=SYSTEM)
     retry = await service.accept_send(command, system_message=SYSTEM)
     assert accepted.created and not retry.created and retry.run == accepted.run
-    history = await service.get_session_history(session)
+    history = await service.queries.get_session_history(session)
     user = history.entries[-1]
     assert user.messages[0].content == "  整理  "
     assert [item.attachment_id for item in user.attachments] == [first["attachment_id"], second["attachment_id"]]
@@ -74,15 +74,15 @@ async def positive(root: Path) -> None:
     for changed in ([second, first], [first], [upload(b"changed", identity=first["attachment_id"]), second]):
         with pytest.raises(OperationConflict):
             await service.accept_send(command.model_copy(update={"request": SendRequest(text="  整理  ", attachments=changed)}), system_message=SYSTEM)
-    await service.finish_run(session, accepted.run.id, "completed")
+    await service.runs.finish_run(session, accepted.run.id, "completed")
     pure = send_command(session, "", [reference(first["attachment_id"])])
     pure_outcome = await service.accept_send(pure, system_message=SYSTEM)
-    assert (await service.get_session_history(session)).entries[-1].messages[0].content == ""
-    await service.finish_run(session, pure_outcome.run.id, "completed")
+    assert (await service.queries.get_session_history(session)).entries[-1].messages[0].content == ""
+    await service.runs.finish_run(session, pure_outcome.run.id, "completed")
     old_edit = EditCommand(operation_id=uid(), session_id=session,
                            request=EditRequest(target_entry_id=pure_outcome.run.request_entry_id, text=" "))
     edited = await service.accept_edit(old_edit)
-    assert (await service.get_entry(session, edited.run.request_entry_id)).attachments[0].attachment_id == first["attachment_id"]
+    assert (await service.queries.get_entry(session, edited.run.request_entry_id)).attachments[0].attachment_id == first["attachment_id"]
     assert await repository.get_entry(session, pure_outcome.run.request_entry_id) is None
     assert not (await service.accept_edit(old_edit)).created
     with pytest.raises(OperationConflict):
@@ -90,33 +90,33 @@ async def positive(root: Path) -> None:
     assert edited.operation.request["accepted_attachments"][0]["attachment_id"] == first["attachment_id"]
     with pytest.raises(OperationExpired):
         await service.accept_send(pure, system_message=SYSTEM)
-    await service.finish_run(session, edited.run.id, "completed")
+    await service.runs.finish_run(session, edited.run.id, "completed")
     replacement = upload(b"replacement", "new.txt")
     replace = EditCommand(operation_id=uid(), session_id=session,
                           request=EditRequest(target_entry_id=edited.run.request_entry_id, text="", attachments=[reference(second["attachment_id"]), replacement]))
     replaced = await service.accept_edit(replace)
-    assert [item.attachment_id for item in (await service.get_entry(session, replaced.run.request_entry_id)).attachments] == [second["attachment_id"], replacement["attachment_id"]]
-    assert [item.attachment_id for item in (await service.get_session_history(session)).entries[-1].attachments] == [second["attachment_id"], replacement["attachment_id"]]
-    await service.finish_run(session, replaced.run.id, "completed")
+    assert [item.attachment_id for item in (await service.queries.get_entry(session, replaced.run.request_entry_id)).attachments] == [second["attachment_id"], replacement["attachment_id"]]
+    assert [item.attachment_id for item in (await service.queries.get_session_history(session)).entries[-1].attachments] == [second["attachment_id"], replacement["attachment_id"]]
+    await service.runs.finish_run(session, replaced.run.id, "completed")
     regen_command = RegenerateCommand(operation_id=uid(), session_id=session,
                                       request=RegenerateRequest(target_entry_id=replaced.run.request_entry_id))
     regenerated = await service.accept_regenerate(regen_command)
     assert regenerated.run.request_entry_id == replaced.run.request_entry_id
-    assert len((await service.get_entry(session, regenerated.run.request_entry_id)).attachments) == 2
-    assert [item.attachment_id for item in (await service.get_session_history(session)).entries[-1].attachments] == [second["attachment_id"], replacement["attachment_id"]]
+    assert len((await service.queries.get_entry(session, regenerated.run.request_entry_id)).attachments) == 2
+    assert [item.attachment_id for item in (await service.queries.get_session_history(session)).entries[-1].attachments] == [second["attachment_id"], replacement["attachment_id"]]
     assert not (await service.accept_regenerate(regen_command)).created
-    await service.finish_run(session, regenerated.run.id, "completed")
+    await service.runs.finish_run(session, regenerated.run.id, "completed")
     removed = await service.accept_edit(EditCommand(operation_id=uid(), session_id=session,
         request=EditRequest(target_entry_id=replaced.run.request_entry_id, text="移除", attachments=[])))
-    assert (await service.get_entry(session, removed.run.request_entry_id)).attachments == []
-    assert (await service.get_session_history(session)).entries[-1].attachments == []
-    await service.finish_run(session, removed.run.id, "completed")
+    assert (await service.queries.get_entry(session, removed.run.request_entry_id)).attachments == []
+    assert (await service.queries.get_session_history(session)).entries[-1].attachments == []
+    await service.runs.finish_run(session, removed.run.id, "completed")
     with pytest.raises(AttachmentError) as empty:
         await service.accept_edit(EditCommand(operation_id=uid(), session_id=session,
             request=EditRequest(target_entry_id=removed.run.request_entry_id, text=" ")))
     assert empty.value.code == "invalid_request"
-    assert (await service.get_entry(session, removed.run.request_entry_id)).messages[0].content == "移除"
-    original_metadata, original_text = await service.get_attachment_content(session, first["attachment_id"])
+    assert (await service.queries.get_entry(session, removed.run.request_entry_id)).messages[0].content == "移除"
+    original_metadata, original_text = await service.attachments.get_attachment_content(session, first["attachment_id"])
     assert original_text.encode() == base64.b64decode(first["data_base64"])
     original_path = root / original_metadata.storage_ref
     workspace = original_path.parent.parent / "workspace"
@@ -153,11 +153,11 @@ async def steering_checks(root: Path) -> None:
     assert len(messages) == 1 and messages[0].content == ""
     entry_id = await coordinator.consume(run.id, messages)
     assert len(events) == 1 and events[0]["entry_id"] == entry_id
-    consumed = await service.consume_steering(session, run.id, pending.id)
+    consumed = await service.runs.consume_steering(session, run.id, pending.id)
     assert not consumed.created and consumed.entry.attachments == consumed.steering.attachments == pending.attachments
-    history = await service.get_session_history(session)
+    history = await service.queries.get_session_history(session)
     assert history.entries[-1].attachments == history.steering[0].attachments
-    outcome = await service.get_operation_outcome(session, command.operation_id)
+    outcome = await service.operations.get_operation_outcome(session, command.operation_id)
     assert outcome.steering.attachments == pending.attachments
     withdrawn_command = SteeringCommand(operation_id=uid(), session_id=session,
         request=SteeringRequest(target_run_id=run.id, text="撤回", attachments=[reference(files[0]["attachment_id"])]))
@@ -181,20 +181,20 @@ async def steering_checks(root: Path) -> None:
     _, discarded = await coordinator.accept(run.id, SteeringCommand(operation_id=uid(), session_id=session,
         request=SteeringRequest(target_run_id=run.id, text="", attachments=[reference(files[1]["attachment_id"])])))
     await coordinator.finish(session, run.id, "cancelled")
-    assert (await service.get_steering(session, discarded.id)).status == "discarded"
-    assert len((await service.get_steering(session, discarded.id)).attachments) == 1
+    assert (await service.queries.get_steering(session, discarded.id)).status == "discarded"
+    assert len((await service.queries.get_steering(session, discarded.id)).attachments) == 1
     resumed = (await service.accept_send(send_command(session, "恢复"), system_message=SYSTEM)).run
     pending_restart = await service.accept_steering(SteeringCommand(operation_id=uid(), session_id=session,
         request=SteeringRequest(target_run_id=resumed.id, text="", attachments=[reference(files[0]["attachment_id"])])))
     await database.close()
     reopened = await open_database(root / "steering.db")
     restored = SessionService(SqliteSessionRepository(reopened), project_root=root)
-    await restored.recover_interrupted()
-    restored_history = await restored.get_session_history(session)
+    await restored.runs.recover_interrupted()
+    restored_history = await restored.queries.get_session_history(session)
     restored_entry = next(item for item in restored_history.entries if item.id == entry_id)
     restored_input = next(item for item in restored_history.steering if item.id == pending.id)
     assert restored_entry.attachments == restored_input.attachments == pending.attachments
-    restarted = await restored.get_steering(session, pending_restart.steering.id)
+    restarted = await restored.queries.get_steering(session, pending_restart.steering.id)
     assert restarted.status == "discarded" and restarted.reason == "interrupted" and len(restarted.attachments) == 1
     assert not (await restored.accept_steering(pending_restart.operation and SteeringCommand(operation_id=pending_restart.operation.operation_id, session_id=session,
         request=SteeringRequest(target_run_id=resumed.id, text="", attachments=[reference(files[0]["attachment_id"])])))).created
@@ -210,7 +210,7 @@ async def boundaries(root: Path) -> None:
     await service.create_session(other, "归属")
     exact = upload(b"x" * 100000)
     accepted = await service.accept_send(send_command(session, "", [exact]), system_message=SYSTEM)
-    await service.finish_run(session, accepted.run.id, "completed")
+    await service.runs.finish_run(session, accepted.run.id, "completed")
     for attachments, code in (([upload(b"x" * 100001)], "attachment_size_exceeded"),
         ([reference(exact["attachment_id"]), upload(b"x")], "attachment_size_exceeded"),
         ([reference(uid())], "attachment_not_found"),
@@ -235,7 +235,7 @@ async def boundaries(root: Path) -> None:
     path.chmod(stat.S_IWRITE | stat.S_IREAD)
     path.write_bytes(b"\xff" * 100000)
     with pytest.raises(UnicodeDecodeError):
-        await service.get_attachment_content(session, exact["attachment_id"])
+        await service.attachments.get_attachment_content(session, exact["attachment_id"])
     assert len(await repository.list_operations(session)) == 1
     await database.close()
 
@@ -257,7 +257,7 @@ async def transaction_facts(root: Path) -> None:
     assert await repository.get_operation(failed.operation_id) is None
     assert await repository.get_attachments([failed_upload["attachment_id"]]) == {}
     assert not list((root / "tmp/sessions" / session / "attachments").glob(failed_upload["attachment_id"] + ".*"))
-    assert (await service.get_session_history(session)).entries == []
+    assert (await service.queries.get_session_history(session)).entries == []
     await database.connection.execute("DROP TRIGGER fail_commit")
     loop = asyncio.get_running_loop()
     entered, release = asyncio.Event(), Event()
@@ -280,12 +280,12 @@ async def transaction_facts(root: Path) -> None:
     result = (await asyncio.gather(task, return_exceptions=True))[0]
     assert isinstance(result, asyncio.CancelledError)
     await database.connection.set_authorizer(None)
-    fact = await service.get_operation_outcome(session, committed.operation_id)
+    fact = await service.operations.get_operation_outcome(session, committed.operation_id)
     assert fact is not None and fact.run.status == "running"
     metadata = (await repository.get_attachments([committed_upload["attachment_id"]]))[committed_upload["attachment_id"]]
     assert (root / metadata.storage_ref).read_bytes() == b"committed despite cancelled await"
     assert not (await service.accept_send(committed, system_message=SYSTEM)).created
-    await service.finish_run(session, fact.run.id, "completed")
+    await service.runs.finish_run(session, fact.run.id, "completed")
     await database.connection.execute(failure_ddl)
     replacement = upload(b"failed replacement")
     failed_edit = EditCommand(operation_id=uid(), session_id=session,
@@ -293,7 +293,7 @@ async def transaction_facts(root: Path) -> None:
     with pytest.raises(sqlite3.IntegrityError):
         await service.accept_edit(failed_edit)
     await database.connection.execute("DROP TRIGGER fail_commit")
-    retained = await service.get_entry(session, fact.run.request_entry_id)
+    retained = await service.queries.get_entry(session, fact.run.request_entry_id)
     assert retained.attachments == [metadata]
     assert await repository.get_operation(committed.operation_id) is not None
     assert await repository.get_operation(failed_edit.operation_id) is None
@@ -337,7 +337,7 @@ async def legacy_operation(root: Path) -> None:
     await database.close()
     reopened = await open_database(root / "legacy-operation.db")
     restored = SessionService(SqliteSessionRepository(reopened), project_root=root)
-    await restored.recover_interrupted()
+    await restored.runs.recover_interrupted()
     retried = await restored.accept_send(command, system_message=SYSTEM)
     assert not retried.created and retried.run.id == accepted.run.id and retried.run.status == "interrupted"
     assert "accepted_attachments" not in retried.operation.request

@@ -11,7 +11,8 @@ from uuid import uuid4
 from app.agent.agent_loop import run_agent_loop
 from app.ai.messages import AssistantMessage, SystemMessage, text_projection
 from app.ai.stream import stream
-from app.application.business.service import business_date
+from app.application.business.profile import business_date
+from app.application.session import execution
 from app.domain.business.models import BusinessContext, PlanProposal, WorkoutRecord
 from app.infrastructure.persistence.sqlite import database as database_module
 from app.interfaces import http as interface
@@ -153,7 +154,7 @@ def prepared(outputs):
 def status(session, proposal):
     context = BusinessContext(timezone="Asia/Shanghai", business_date=date.today().isoformat(),
         session_id=session, run_id=str(uuid4()), request_entry_id=str(uuid4()), source_entry_id=str(uuid4()))
-    return call(interface.app.state.business.get_plan_save_status(context, proposal.proposal_id))
+    return call(interface.app.state.business.plans.get_plan_save_status(context, proposal.proposal_id))
 
 
 def current(http):
@@ -163,7 +164,7 @@ def current(http):
 
 
 async def seed_workouts(day):
-    repository = interface.app.state.business._repository
+    repository = interface.app.state.business_repository
     records = []
     async with repository.transaction():
         for offset in range(8):
@@ -195,8 +196,8 @@ def check(resume=None, database_path=None):
     else:
         database = patch_default_database("plan-integration")
     DATABASE = database
-    original = interface.run_agent_loop
-    interface.run_agent_loop = observed_loop
+    original = execution.run_agent_loop
+    execution.run_agent_loop = observed_loop
     try:
         with Server(interface.app) as server, client(server.base_url) as http:
             session = new_session(http)
@@ -213,7 +214,7 @@ def check(resume=None, database_path=None):
                     "display_entry_id": profile_target["display_entry_id"]})
                 assert profile_response.status_code == 200, profile_response.text
                 assert profile_response.json()["result"]["version"] == 1
-                branch = call(interface.app.state.session_service.get_current_branch(session))
+                branch = call(interface.app.state.session_queries.get_current_branch(session))
                 day = business_date(branch[-1].created_at)
                 workouts = call(seed_workouts(day))
             else:
@@ -307,7 +308,7 @@ def check(resume=None, database_path=None):
         print("Actual model requests:", len(REQUESTS), "Plan tool calls:", TOOL_COUNTS)
         print("Evidence:", ROOT)
     finally:
-        interface.run_agent_loop = original
+        execution.run_agent_loop = original
         evidence()
 
 
@@ -342,8 +343,8 @@ def continue_stage(resume, database_path, stage):
     initial_requests = len(REQUESTS)
     initial_usage = len(USAGE)
     initial_counts = dict(TOOL_COUNTS)
-    original = interface.run_agent_loop
-    interface.run_agent_loop = observed_loop
+    original = execution.run_agent_loop
+    execution.run_agent_loop = observed_loop
 
     def stop_round():
         with interface.runs_lock:
@@ -363,7 +364,7 @@ def continue_stage(resume, database_path, stage):
                 "source": "current read-only DB and HTTP (all 8 records, including outside-range 2026-10-01)",
                 "http": before, "database_rows": workout_rows, "save_records": workout_save_rows}, ensure_ascii=False, indent=2), encoding="utf-8")
             stored_before = history(http, session)
-            branch = call(interface.app.state.session_service.get_current_branch(session))
+            branch = call(interface.app.state.session_queries.get_current_branch(session))
             branch_ids = {entry.id for entry in branch}
             with sqlite3.connect(database) as db:
                 snapshots = db.execute("SELECT proposal_id,display_entry_id,payload,status FROM plan_snapshots WHERE session_id=? ORDER BY created_at", (session,)).fetchall()
@@ -387,12 +388,12 @@ def continue_stage(resume, database_path, stage):
                 assert status(session, proposal).status == "pending" and current(http)["id"] is None
                 assert not success(outputs, "save_plan")
                 assert not any(item["name"] in {"get_profile", "get_current_plan", "list_workouts", "search_exercises", "calculate_date"} for item in outputs)
-                updated_branch = call(interface.app.state.session_service.get_current_branch(session))
+                updated_branch = call(interface.app.state.session_queries.get_current_branch(session))
                 assert display in {entry.id for entry in updated_branch}
                 displayed = next(entry for entry in updated_branch if entry.id == display).messages[0]
                 assert displayed.role == "toolResult" and not displayed.is_error
                 assert PlanProposal.model_validate_json(text_projection(displayed.content)) == proposal
-                assert call(interface.app.state.business.list_plan_display_bindings(session))[display] == proposal.proposal_id
+                assert call(interface.app.state.business.plans.list_plan_display_bindings(session))[display] == proposal.proposal_id
             elif stage == "generate":
                 assert not records and current(http)["id"] is None
                 original_request = "06493cf4-173d-4d65-8cf3-9a8f776812ca"
@@ -426,7 +427,7 @@ def continue_stage(resume, database_path, stage):
                         exercise["sets"] = 3
                 assert [[exercise.model_dump() for exercise in day_content.exercises] for day_content in proposal.payload.days] == [day_content["exercises"] for day_content in expected["days"]]
                 assert current(http)["id"] is None and not success(outputs, "save_plan")
-                assert new_display in {entry.id for entry in call(interface.app.state.session_service.get_current_branch(session))}
+                assert new_display in {entry.id for entry in call(interface.app.state.session_queries.get_current_branch(session))}
             elif stage == "save":
                 assert proposal_status == "pending" and not records
                 assert all(exercise["sets"] == 3 for day_content in json.loads(payload)["days"] for exercise in day_content["exercises"])
@@ -503,7 +504,7 @@ def continue_stage(resume, database_path, stage):
         print("Evidence:", ROOT)
     finally:
         timer.cancel()
-        interface.run_agent_loop = original
+        execution.run_agent_loop = original
         evidence()
 
 

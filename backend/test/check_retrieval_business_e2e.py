@@ -14,7 +14,9 @@ from uuid import uuid4
 
 from pydantic import model_validator
 
+from app.agent.prompts import SYSTEM_PROMPT
 from app.agent.tool import AgentTool
+from app.agent.tools.business import business_tool_declarations
 from app.agent.tools.common import envelope, unbound
 from app.application.business.retrieval_embedding import EmbeddingClient
 from app.domain.business.models import BusinessModel
@@ -459,19 +461,23 @@ def legacy_search_tool(catalog) -> AgentTool:
     )
 
 
-def install_group(group: str) -> dict:
-    # 基线组替换检索工具面；优化组保持生产接线原样。
-    import app.interfaces.http as http
+_ORIGINAL: dict = {"declarations": None, "bind": None}
+_SURFACE: dict = {"declarations": None}
 
-    if not hasattr(http, "_fit_agent_original_declarations"):
-        http._fit_agent_original_declarations = http.business_tool_declarations
-        http._fit_agent_original_bind = http.bind_business_tools
-    original_declarations = http._fit_agent_original_declarations
-    original_bind = http._fit_agent_original_bind
+
+def install_group(group: str) -> dict:
+    # 基线组替换检索工具面；优化组保持生产接线原样。声明入口与工具绑定均指向真实定义模块。
+    from app.application.session import execution
+
+    if _ORIGINAL["declarations"] is None:
+        _ORIGINAL["declarations"] = business_tool_declarations
+        _ORIGINAL["bind"] = execution.bind_business_tools
+    original_declarations = _ORIGINAL["declarations"]
+    original_bind = _ORIGINAL["bind"]
 
     if group == "optimized":
-        http.business_tool_declarations = original_declarations
-        http.bind_business_tools = original_bind
+        _SURFACE["declarations"] = original_declarations
+        execution.bind_business_tools = original_bind
         return {"group": group, "surface": "production", "patched": False}
 
     def declarations():
@@ -490,9 +496,13 @@ def install_group(group: str) -> dict:
         tools["search_exercises"] = legacy_search_tool(service._catalog)
         return tools
 
-    http.business_tool_declarations = declarations
-    http.bind_business_tools = bind
+    _SURFACE["declarations"] = declarations
+    execution.bind_business_tools = bind
     return {"group": group, "surface": "reconstructed-legacy-catalog-search", "patched": True}
+
+
+def current_declarations() -> list:
+    return (_SURFACE["declarations"] or business_tool_declarations)()
 
 
 def legacy_search_tool_placeholder():
@@ -507,13 +517,13 @@ def legacy_search_tool_placeholder():
 
 
 def tool_surface_diff() -> dict:
-    import app.interfaces.http as http
-
-    production = {item.name: item for item in http._fit_agent_original_declarations()}
+    production = {
+        item.name: item for item in (_ORIGINAL["declarations"] or business_tool_declarations)()
+    }
     legacy = legacy_search_tool_placeholder().definition()
     search = production["search_exercises"]
     return {
-        "system_prompt_sha256": sha256_text(http.SYSTEM_PROMPT),
+        "system_prompt_sha256": sha256_text(SYSTEM_PROMPT),
         "production_search_description": search.description,
         "legacy_search_description": LEGACY_SEARCH_DESCRIPTION,
         "legacy_only_parameters": sorted(set(legacy.parameters.get("properties", {})) -
@@ -582,8 +592,8 @@ def discard_call(awaitable):
 
 def offline_service_gates(body_weight_plan: dict, barbell_plan: dict, profile_models: dict) -> dict:
     # 离线服务面核验：注册表与声明逐字段一致，真实保存校验对画像限制动作就地拒绝。
-    import app.interfaces.http as http
-    from app.application.business.service import BUSINESS_TIMEZONE, business_date
+    from app.application.business.profile import BUSINESS_TIMEZONE, business_date
+    from app.application.session import execution
     from app.domain.business.errors import BusinessError
     from app.domain.business.models import BusinessContext
     from test.check_structured_confirmation import Fixture
@@ -596,7 +606,7 @@ def offline_service_gates(body_weight_plan: dict, barbell_plan: dict, profile_mo
         request_entry_id="selfcheck",
         source_entry_id="selfcheck",
     )
-    declarations = http.business_tool_declarations()
+    declarations = current_declarations()
 
     async def collect() -> dict:
         database = ISOLATED / "selfcheck-service" / "gate.db"
@@ -605,12 +615,12 @@ def offline_service_gates(body_weight_plan: dict, barbell_plan: dict, profile_mo
         fixture = Fixture(database)
         await fixture.seeded()
         try:
-            registry = http.bind_business_tools(fixture.business, context, discard_call, {}, {}, None)
-            accepted = fixture.business._validate_plan(
+            registry = execution.bind_business_tools(fixture.business, context, discard_call, {}, {}, None)
+            accepted = fixture.business.plans._validate_plan(
                 body_weight_plan, profile_models["generate"], "generation"
             )
             try:
-                fixture.business._validate_plan(
+                fixture.business.plans._validate_plan(
                     barbell_plan, profile_models["generate"], "generation"
                 )
                 rejected = None
@@ -714,11 +724,11 @@ def selfcheck() -> dict:
     checks["legacy_blob_commit_is_head"] = blob_provenance["commit_matches_head"]
     details["legacy_blob"] = blob_provenance
 
-    import app.interfaces.http as http
+    from app.application.session import execution
 
-    production_declarations = http.business_tool_declarations()
+    production_declarations = current_declarations()
     install_group("baseline")
-    baseline_declarations = http.business_tool_declarations()
+    baseline_declarations = current_declarations()
     checks["baseline_drops_details_tool"] = not any(
         item.name == "get_exercise_details" for item in baseline_declarations
     )
@@ -777,9 +787,9 @@ def selfcheck() -> dict:
 
     install_group("optimized")
     checks["optimized_restore_is_identity"] = (
-        http.business_tool_declarations == http._fit_agent_original_declarations
-        and http.bind_business_tools == http._fit_agent_original_bind
-        and [item.name for item in http.business_tool_declarations()]
+        _SURFACE["declarations"] == _ORIGINAL["declarations"]
+        and execution.bind_business_tools == _ORIGINAL["bind"]
+        and [item.name for item in current_declarations()]
         == [item.name for item in production_declarations]
     )
     details["tool_surface_diff"] = tool_surface_diff()
@@ -1105,11 +1115,11 @@ def prepare_environment(
     regression_support.install_test_model_config(root=BATCH / landing["model_config_root"])
     # 文件工具的会话工作目录默认值在导入时绑定，必须在服务启动前改指到隔离目录。
     import app.agent.tools.files as file_tools
-    import app.interfaces.http as http
+    from app.interfaces.http_api.routes import agent as agent_routes
 
-    original_file_tools = http.create_file_tools
+    original_file_tools = agent_routes.create_file_tools
     workspace_root = BATCH / landing["attachment_root"]
-    http.create_file_tools = lambda session_id: original_file_tools(
+    agent_routes.create_file_tools = lambda session_id: original_file_tools(
         session_id, tmp_root=workspace_root
     )
     file_tools.TMP_ROOT = workspace_root
@@ -1117,7 +1127,7 @@ def prepare_environment(
         install_observation(counters)
     surface = install_group(group) if group is not None else None
     return {"landing": landing, "surface": surface,
-            "file_tools_patched": http.create_file_tools is not original_file_tools}
+            "file_tools_patched": agent_routes.create_file_tools is not original_file_tools}
 
 
 def open_client(server) -> object:
@@ -1752,7 +1762,7 @@ def stage_pending_snapshot(fixture, session_id: str, kind: str, arguments: dict,
     # 故障矩阵需要在无模型的隔离副本上登记待确认快照：走真实准备与绑定方法，助手节点由测试写入并如实标注。
     identifiers = asyncio.run(fixture.stage(session_id, kind, arguments, tool_name))
     pending = [
-        item for item in asyncio.run(fixture.business.list_pending_references(session_id))
+        item for item in asyncio.run(fixture.business.proposals.list_pending_references(session_id))
         if item.proposal_id == identifiers["proposal"]
     ]
     return {
@@ -1855,10 +1865,10 @@ async def expect_service_error(fixture, arguments: dict, tool_name: str) -> str 
 
     if tool_name == "prepare_profile_update":
         model = ProfileProposalArguments
-        method = fixture.business.prepare_profile_update
+        method = fixture.business.profile.prepare_profile_update
     else:
         model = PlanProposalArguments
-        method = fixture.business.prepare_plan
+        method = fixture.business.plans.prepare_plan
     session_id = await fixture.session("故障矩阵会话")
     run = await fixture.turn(session_id, "请整理待确认内容")
     context = fixture.context(session_id, run.request_entry_id, run.request_entry_id)
@@ -2358,8 +2368,8 @@ def observe_milvus_rpc(stats: dict):
 
 
 def preflight_mode() -> None:
-    from evaluation import retrieval_support as support
     from app.application.business.retrieval_index import MilvusConnection
+    from evaluation import retrieval_support as support
 
     require_source_identity("preflight")
     protected = require_protected_originals()

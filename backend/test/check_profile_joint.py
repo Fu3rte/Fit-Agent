@@ -68,7 +68,7 @@ def prepared(http, session: str) -> dict:
     items = [
         {**json.loads(e['message']['content']), 'display_entry_id': e['entry_id']}
         for e in history(http, session)['entries']
-        if e['message']['role'] == 'toolResult'
+        if e.get('message', {}).get('role') == 'toolResult'
         and e['message']['tool_name'] == 'prepare_profile_update'
         and not e['message']['is_error']
     ]
@@ -115,7 +115,7 @@ def status(session: str, proposal: dict):
     context = BusinessContext(timezone='Asia/Shanghai', business_date='2026-10-07',
                               session_id=session, run_id=str(uuid4()),
                               request_entry_id=str(uuid4()), source_entry_id=str(uuid4()))
-    return service_call(app.state.business.get_profile_update_status(context, proposal['proposal_id']))
+    return service_call(app.state.business.profile.get_profile_update_status(context, proposal['proposal_id']))
 
 
 def successful(outputs, name):
@@ -229,11 +229,12 @@ def check() -> None:
         record('重复确认及历史保存结果保留当前画像', version=4)
 
         before = history(http, other)
-        assert all('business_context' not in e['message'] for e in before['entries'])
+        assert all('business_context' not in e.get('message', {}) for e in before['entries'])
         with sqlite3.connect(path) as db:
             persisted = db.execute('SELECT messages FROM session_entries').fetchall()
+            # 压缩/业务资料隐藏节点不存消息列（NULL），只核对真实消息行。
             assert all('business_context' not in (message.get('sections') or {})
-                       for (raw,) in persisted for message in json.loads(raw))
+                       for (raw,) in persisted if raw for message in json.loads(raw))
             count = db.execute('SELECT COUNT(*) FROM profile_save_records').fetchone()[0]
         record('临时上下文不进入持久化', saved_record_count=count)
 

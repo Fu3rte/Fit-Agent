@@ -169,7 +169,7 @@ def compaction_checks(http, ids: dict) -> dict:
     session_id = ids["session"]
     service = app.state.session_service
     loop = app.state.loop
-    projection = call(service.get_projection(session_id, ids["user2"]), loop)
+    projection = call(service.queries.get_projection(session_id, ids["user2"]), loop)
     seeded = estimate_context_tokens(projection.context.messages).tokens
     os.environ["FIT_AGENT_COMPACTION_RESERVE_TOKENS"] = str(CONTEXT_WINDOW - seeded)
     os.environ["FIT_AGENT_COMPACTION_KEEP_RECENT_TOKENS"] = str(KEEP)
@@ -185,7 +185,7 @@ def compaction_checks(http, ids: dict) -> dict:
     assert end["data"]["parent_id"]
     assert kinds.index("compaction_start") < kinds.index("compaction_end") < kinds.index("message_start")
 
-    entries = call(service.list_entries(session_id), loop)
+    entries = call(service.queries.list_entries(session_id), loop)
     compactions = [entry for entry in entries if isinstance(entry, CompactionEntry)]
     assert len(compactions) == 1
     checkpoint = compactions[0]
@@ -195,7 +195,7 @@ def compaction_checks(http, ids: dict) -> dict:
     assert checkpoint.summary.strip() and checkpoint.tokens_before > 0
     assert checkpoint.usage.total_tokens > 0
     assert checkpoint.system_message.content == SYSTEM_PROMPT
-    run = call(service.list_runs(session_id), loop)[-1]
+    run = call(service.queries.list_runs(session_id), loop)[-1]
     assert run.status == "completed" and run.request_entry_id != ids["user2"]
     assert run.id == result[0]["data"]["run_id"]
 
@@ -204,7 +204,7 @@ def compaction_checks(http, ids: dict) -> dict:
     assert types.count("compaction") == 1
     assert history["session"]["active_leaf_id"] == history["entries"][-1]["entry_id"]
 
-    committed = call(service.get_current_branch(session_id), loop)
+    committed = call(service.queries.get_current_branch(session_id), loop)
     messages = [entry.messages[0] for entry in committed if isinstance(entry, SessionMessageEntry)]
     totals = summarize_usage(messages, compaction_usage=[checkpoint.usage])
     assert totals.total_tokens >= checkpoint.usage.total_tokens
@@ -234,7 +234,7 @@ def budget_exceeded_checks(http, session_id: str) -> dict:
     os.environ["FIT_AGENT_COMPACTION_RESERVE_TOKENS"] = "127000"
     os.environ["FIT_AGENT_COMPACTION_KEEP_RECENT_TOKENS"] = "500"
     before = [
-        entry for entry in call(service.list_entries(session_id), loop)
+        entry for entry in call(service.queries.list_entries(session_id), loop)
         if isinstance(entry, CompactionEntry)
     ]
     result = submit(http, session_id, "只回复完成。")
@@ -245,12 +245,12 @@ def budget_exceeded_checks(http, session_id: str) -> dict:
     assert final["data"]["status"] == "failed"
     assert final["data"]["code"] == "context_budget_exceeded"
     assert final["data"]["message"] == CONTEXT_BUDGET_EXCEEDED_MESSAGE
-    run = call(service.list_runs(session_id), loop)[-1]
+    run = call(service.queries.list_runs(session_id), loop)[-1]
     assert (run.status, run.error_code, run.error_message) == (
         "failed", "context_budget_exceeded", CONTEXT_BUDGET_EXCEEDED_MESSAGE,
     )
     after = [
-        entry for entry in call(service.list_entries(session_id), loop)
+        entry for entry in call(service.queries.list_entries(session_id), loop)
         if isinstance(entry, CompactionEntry)
     ]
     assert after == before
@@ -260,7 +260,7 @@ def budget_exceeded_checks(http, session_id: str) -> dict:
 def pending_reference_checks(session_id: str) -> dict:
     business = app.state.business
     loop = app.state.loop
-    references = call(business.list_pending_references(session_id), loop)
+    references = call(business.proposals.list_pending_references(session_id), loop)
     assert references == []
     return {"pending_references": len(references)}
 

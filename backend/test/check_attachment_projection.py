@@ -132,10 +132,10 @@ async def test_pure_attachment_projects_as_user_content() -> None:
         outcome = await service.accept_send(send(session, "", [item]), system_message=SYSTEM)
         run = outcome.run
 
-        raw = await service.get_entry(session, run.request_entry_id)
+        raw = await service.queries.get_entry(session, run.request_entry_id)
         assert raw.messages[0].content == ""
 
-        projection = await service.get_projection(session, run.request_entry_id)
+        projection = await service.queries.get_projection(session, run.request_entry_id)
         users = user_messages(projection.context.messages)
         assert len(users) == 1
         content = text_projection(users[0].content)
@@ -160,7 +160,7 @@ async def test_text_and_multiple_attachments_keep_order() -> None:
         outcome = await service.accept_send(
             send(session, "请录入这个计划", [first, second]), system_message=SYSTEM
         )
-        projection = await service.get_projection(session, outcome.run.request_entry_id)
+        projection = await service.queries.get_projection(session, outcome.run.request_entry_id)
         content = text_projection(user_messages(projection.context.messages)[0].content)
         assert content.startswith("请录入这个计划")
         assert content.index("notes.txt") < content.index("plan.md")
@@ -173,16 +173,16 @@ async def test_edit_regenerate_and_consumed_steering_project_attachments() -> No
         await service.create_session(session, "流程")
         item = upload("原始正文\n".encode("utf-8"), "plan.txt")
         outcome = await service.accept_send(send(session, "录入", [item]), system_message=SYSTEM)
-        await service.finish_run(session, outcome.run.id, "completed")
-        original = await service.get_entry(session, outcome.run.request_entry_id)
+        await service.runs.finish_run(session, outcome.run.id, "completed")
+        original = await service.queries.get_entry(session, outcome.run.request_entry_id)
         original_path = attachment_read_refs(original.attachments)[0][1]
 
         edit = await service.accept_edit(EditCommand(
             operation_id=uid(), session_id=session,
             request=EditRequest(target_entry_id=outcome.run.request_entry_id, text="编辑后"),
         ))
-        await service.finish_run(session, edit.run.id, "completed")
-        edit_projection = await service.get_projection(session, edit.run.request_entry_id)
+        await service.runs.finish_run(session, edit.run.id, "completed")
+        edit_projection = await service.queries.get_projection(session, edit.run.request_entry_id)
         edit_content = text_projection(
             user_messages(edit_projection.context.messages)[-1].content
         )
@@ -192,8 +192,8 @@ async def test_edit_regenerate_and_consumed_steering_project_attachments() -> No
             operation_id=uid(), session_id=session,
             request=RegenerateRequest(target_entry_id=edit.run.request_entry_id),
         ))
-        await service.finish_run(session, regenerated.run.id, "completed")
-        regenerate_projection = await service.get_projection(session, regenerated.run.request_entry_id)
+        await service.runs.finish_run(session, regenerated.run.id, "completed")
+        regenerate_projection = await service.queries.get_projection(session, regenerated.run.request_entry_id)
         assert original_path in text_projection(
             user_messages(regenerate_projection.context.messages)[-1].content
         )
@@ -208,18 +208,18 @@ async def test_edit_regenerate_and_consumed_steering_project_attachments() -> No
                 attachments=[upload("追加正文\n".encode("utf-8"), "steer.txt")],
             ),
         ))
-        pending_messages = (await service.get_projection(
+        pending_messages = (await service.queries.get_projection(
             steering_session, steer_run.run.request_entry_id
         )).context.messages
         assert "steer.txt" not in "".join(
             text_projection(message.content) for message in pending_messages
         )
 
-        consumed = await service.consume_steering(
+        consumed = await service.runs.consume_steering(
             steering_session, steer_run.run.id, pending.steering.id
         )
         consumed_path = attachment_read_refs(consumed.entry.attachments)[0][1]
-        consumed_projection = await service.get_projection(steering_session, consumed.entry.id)
+        consumed_projection = await service.queries.get_projection(steering_session, consumed.entry.id)
         assert consumed_path in text_projection(
             user_messages(consumed_projection.context.messages)[-1].content
         )
@@ -231,12 +231,12 @@ async def test_edit_regenerate_and_consumed_steering_project_attachments() -> No
                 attachments=[upload("撤回正文\n".encode("utf-8"), "withdrawn.txt")],
             ),
         ))
-        await service.withdraw_steering(steering_session, steer_run.run.id, withdrawn.steering.id)
-        after = await service.get_projection(steering_session, consumed.entry.id)
+        await service.runs.withdraw_steering(steering_session, steer_run.run.id, withdrawn.steering.id)
+        after = await service.queries.get_projection(steering_session, consumed.entry.id)
         assert "withdrawn.txt" not in "".join(
             text_projection(message.content) for message in after.context.messages
         )
-        await service.finish_run(steering_session, steer_run.run.id, "completed")
+        await service.runs.finish_run(steering_session, steer_run.run.id, "completed")
 
 
 async def test_budget_matches_sent_projection() -> None:
@@ -245,12 +245,12 @@ async def test_budget_matches_sent_projection() -> None:
         await service.create_session(session, "预算")
         item = upload("预算正文\n".encode("utf-8"), "budget.txt")
         outcome = await service.accept_send(send(session, "", [item]), system_message=SYSTEM)
-        projection = await service.get_projection(session, outcome.run.request_entry_id)
+        projection = await service.queries.get_projection(session, outcome.run.request_entry_id)
         messages = projection.context.messages
         assert estimate_context_tokens(messages).tokens == sum(
             estimate_tokens(message) for message in messages
         )
-        raw = await service.get_entry(session, outcome.run.request_entry_id)
+        raw = await service.queries.get_entry(session, outcome.run.request_entry_id)
         assert_turn_kept_offline(messages, attachment_read_refs(raw.attachments)[0][1])
 
 
@@ -304,7 +304,7 @@ async def test_steering_consumption_projects_attachments_into_request() -> None:
         )
         assert created is True
         expected_path = attachment_read_refs(
-            (await service.get_steering(session, steering.id)).attachments
+            (await service.queries.get_steering(session, steering.id)).attachments
         )[0][1]
 
         groups: dict[int, list] = {}
@@ -374,9 +374,9 @@ async def test_steering_consumption_projects_attachments_into_request() -> None:
         ), captured[0]
         assert_turn_kept_offline(captured[0], expected_path)
 
-        stored = await service.get_steering(session, steering.id)
+        stored = await service.queries.get_steering(session, steering.id)
         assert stored.status == "consumed" and stored.entry_id
-        entry = await service.get_entry(session, stored.entry_id)
+        entry = await service.queries.get_entry(session, stored.entry_id)
         assert entry.messages[0].content == ""
         assert [metadata.attachment_id for metadata in entry.attachments] == [
             item["attachment_id"]

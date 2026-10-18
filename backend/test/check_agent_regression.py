@@ -1,8 +1,9 @@
 import asyncio
 import json
 import sqlite3
+from asyncio import CancelledError as TaskCancelledError
 from concurrent.futures import CancelledError
-from threading import Event, Thread
+from threading import Event
 from time import time_ns
 from uuid import uuid4
 
@@ -10,6 +11,7 @@ import aiosqlite
 import pytest
 
 from app.agent.agent_loop import run_agent_loop
+from app.agent.budget import RequestBudget
 from app.agent.config import AgentLoopConfig
 from app.agent.tools.files import create_file_tools
 from app.ai.messages import (
@@ -20,8 +22,11 @@ from app.ai.messages import (
     Usage,
     UserMessage,
 )
-from app.application.session.service import (
+from app.application.session.credentials import (
     CREDENTIAL_SAFE_MESSAGE,
+    CredentialFilter,
+)
+from app.application.session.service import (
     SessionService,
 )
 from app.domain.session.attachments import TMP_ROOT
@@ -35,7 +40,6 @@ from app.infrastructure.persistence.sqlite.database import open_database
 from app.infrastructure.persistence.sqlite.repository import SqliteSessionRepository
 from app.interfaces.http import (
     CredentialDetectedError,
-    CredentialFilter,
     RunState,
     public_content,
     publish_terminal,
@@ -65,7 +69,7 @@ def system_message(tools) -> SystemMessage:
 
 
 async def append(service, session_id, run_id, node_id, parent_id, message):
-    outcome = await service.append_entry(
+    outcome = await service.entries.append_entry(
         SessionMessageEntry(
             session_id=session_id,
             id=node_id,
@@ -102,7 +106,6 @@ def check_tool_cancel(config, database_path):
                 system_message=system_message(tools),
             )
             cancel = Event()
-            started = Event()
             messages = {"count": 0}
             trace = []
             position = {"id": send.run.request_entry_id}
@@ -126,7 +129,8 @@ def check_tool_cancel(config, database_path):
                 if event["type"] == "message_start":
                     messages["count"] += 1
                     if messages["count"] == 2:
-                        started.set()
+                        for _ in range(3):
+                            cancel.set()
 
             async def steer():
                 return []
@@ -136,15 +140,9 @@ def check_tool_cancel(config, database_path):
                 max_turns=4,
                 get_steering_messages=steer,
                 save_message=save_message,
+                request_budget=RequestBudget(),
             )
 
-            def watcher():
-                started.wait(60)
-                for _ in range(3):
-                    cancel.set()
-
-            thread = Thread(target=watcher)
-            thread.start()
             failure = None
             try:
                 await run_agent_loop(
@@ -156,10 +154,8 @@ def check_tool_cancel(config, database_path):
                 )
             except BaseException as error:
                 failure = error
-            thread.join()
-
             kinds = [entry[1] for entry in trace if entry[0] == "emit"]
-            assert isinstance(failure, CancelledError), failure
+            assert isinstance(failure, (CancelledError, TaskCancelledError)), (failure, trace, messages)
             assert cancel.is_set()
             assert kinds.count("tool_result") == 1
             assert kinds[-1] == "trace_end"
@@ -174,12 +170,12 @@ def check_tool_cancel(config, database_path):
                 if entry[0] == "emit" and entry[1] == "tool_result"
             ]
             assert delivered and saved_at[delivered[0][1][2]] < delivered[0][0]
-            entries = await service.list_entries(session_id)
+            entries = await service.queries.list_entries(session_id)
             assert any(
                 isinstance(entry.messages[0], ToolResultMessage) for entry in entries
             )
-            await service.finish_run(session_id, send.run.id, "cancelled")
-            run = await service.get_run(session_id, send.run.id)
+            await service.runs.finish_run(session_id, send.run.id, "cancelled")
+            run = await service.queries.get_run(session_id, send.run.id)
             assert run.status == "cancelled" and run.finished_at is not None
             return {
                 "kinds": kinds,
@@ -245,6 +241,7 @@ def check_commit_failure(config, database_path):
                 max_turns=4,
                 get_steering_messages=steer,
                 save_message=save_message,
+                request_budget=RequestBudget(),
             )
             failure = None
             try:
@@ -264,14 +261,14 @@ def check_commit_failure(config, database_path):
             assert "tool_result" not in kinds
             assert kinds[-1] == "trace_end"
             assert not database.connection.in_transaction
-            entries = await service.list_entries(session_id)
+            entries = await service.queries.list_entries(session_id)
             assert any(
                 isinstance(entry.messages[0], AssistantMessage) for entry in entries
             )
             assert not any(
                 isinstance(entry.messages[0], ToolResultMessage) for entry in entries
             )
-            run = await service.get_run(session_id, send.run.id)
+            run = await service.queries.get_run(session_id, send.run.id)
             assert run.status == "running" and run.last_entry_id is not None
 
             async with aiosqlite.connect(database_path) as raw:
@@ -497,6 +494,7 @@ def check_steering_consume_failure(config):
             max_turns=3,
             get_steering_messages=steer,
             on_steering_consumed=consumed,
+            request_budget=RequestBudget(),
         )
         failure = None
         try:

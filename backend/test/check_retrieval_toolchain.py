@@ -73,7 +73,7 @@ async def toolchain_cases(root: Path) -> dict:
         context = fixture.context(session_id, session_id, session_id)
         runtime = ActionRetrievalRuntime()
         business = BusinessService(
-            fixture.repository, fixture.catalog, fixture.service, fixture.replacements, runtime
+            fixture.repository, fixture.catalog, fixture.service.queries, fixture.replacements, runtime
         )
         # 首次真实语义查询（generation）：走主循环检索资源。
         first = await tool_search(

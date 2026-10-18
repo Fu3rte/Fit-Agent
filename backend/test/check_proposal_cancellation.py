@@ -41,17 +41,17 @@ TABLES = (
 
 
 async def prepare(f, session, kind):
-    profile = await f.business.get_profile()
+    profile = await f.business.profile.get_profile()
     if kind == "profile":
         name, arguments, binder = "prepare_profile_update", {
             "profile_id": 1, "base_profile_version": profile.version, "payload": payload(),
-        }, f.business.bind_display_entry
+        }, f.business.profile.bind_display_entry
     elif kind == "plan":
-        current = await f.business.get_current_plan()
+        current = await f.business.plans.get_current_plan()
         name, arguments, binder = "prepare_plan_import", {
             "base_profile_version": profile.version,
             "base_plan_id": current.id, "payload": PLAN_CONTENT,
-        }, f.business.bind_plan_display_entry
+        }, f.business.plans.bind_plan_display_entry
     else:
         day = f.context(session, new_id(), new_id()).business_date
         current = await f.repository.get_workout_by_date(day)
@@ -59,7 +59,7 @@ async def prepare(f, session, kind):
             "performed_on": day, "base_workout_id": None if current is None else current.id,
             "base_workout_version": None if current is None else current.version,
             "payload": WORKOUT_CONTENT,
-        }, f.business.bind_workout_display_entry
+        }, f.business.workouts.bind_workout_display_entry
     return await prepare_via_tool(f, session, name, arguments, binder)
 
 
@@ -87,7 +87,7 @@ async def cancel(f, info, kind, *, signal=None, **kwargs):
     assert {name: tool.definition() for name, tool in tools.items()} == DECLARED
     result = await run_tool_call(call, tools=tools, declared=DECLARED, signal=signal)
     await f.append(context.session_id, run.id, context.source_entry_id, result)
-    await f.service.finish_run(context.session_id, run.id, "completed")
+    await f.service.runs.finish_run(context.session_id, run.id, "completed")
     return result, run
 
 
@@ -124,7 +124,7 @@ async def check_kind(kind):
         history = await f.confirmations.history(session)
         assert pending["proposal"] not in {item.proposal_id for item in history.pending_proposals}
         assert other["proposal"] in {item.proposal_id for item in history.pending_proposals}
-        assert await f.business.removed_proposal_reason(kind, pending["proposal"]) == "invalidated"
+        assert await f.business.proposals.removed_proposal_reason(kind, pending["proposal"]) == "invalidated"
         with pytest.raises(BusinessError) as rejected:
             await f.confirm(pending, business_kind=kind)
         assert rejected.value.code == f"{kind}_proposal_invalidated"
@@ -140,7 +140,7 @@ async def check_kind(kind):
             operation_id=new_id(), session_id=session,
             request=EditRequest(target_entry_id=run.request_entry_id, text="查询训练信息"),
         ))
-        await f.service.finish_run(session, edited.run.id, "completed")
+        await f.service.runs.finish_run(session, edited.run.id, "completed")
         assert (await snapshot(f, kind, pending["proposal"])).status == "invalidated"
         await f.restart()
         assert (await snapshot(f, kind, pending["proposal"])).status == "invalidated"
@@ -169,12 +169,12 @@ async def check_rejections():
         stale = f.context(session, info["request"], info["source"])
         arguments = PendingProposalArguments(business_kind="profile", proposal_id=info["proposal"])
         with pytest.raises(BusinessError) as rejected:
-            await f.business.cancel_pending_proposal(stale, arguments)
+            await f.business.proposals.cancel_pending_proposal(stale, arguments)
         assert rejected.value.code == "proposal_cancellation_invalid"
         signal = Event()
         signal.set()
         with pytest.raises(CancelledError):
-            await f.business.cancel_pending_proposal(stale, arguments, signal)
+            await f.business.proposals.cancel_pending_proposal(stale, arguments, signal)
         aborted, _ = await cancel(f, info, "profile", signal=signal)
         assert aborted.is_error and "Operation aborted" in message_text(aborted)
         assert await snapshot(f, "profile", info["proposal"]) == original

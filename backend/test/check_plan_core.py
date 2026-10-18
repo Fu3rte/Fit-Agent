@@ -152,14 +152,14 @@ async def prepare(f, session, *, content=None, base_profile_version=1, base_plan
                 request_entry_id=run.request_entry_id, source_entry_id=source, status="pending", created_at=now_ms())
             async with f.repository.transaction():
                 await f.repository.insert_plan_snapshot(snapshot)
-            proposal = f.business._plan_proposal(snapshot)
+            proposal = f.business.plans._plan_proposal(snapshot)
         else:
-            proposal = await f.business.prepare_plan(context, args)
+            proposal = await f.business.plans.prepare_plan(context, args)
         displayed = proposal.model_copy(update={"base_profile_version": 99}) if tamper else proposal
         display = await f.append(session, run.id, source, ToolResultMessage(role="toolResult", tool_name="prepare_plan",
             tool_call_id=call_id, content=[TextContent(type="text", text=displayed.model_dump_json())],
             is_error=False, timestamp=now_ms()))
-        await f.business.bind_plan_display_entry(proposal.proposal_id, display)
+        await f.business.plans.bind_plan_display_entry(proposal.proposal_id, display)
     except BusinessError as error:
         if display is None:
             await f.append(session, run.id, source, ToolResultMessage(role="toolResult", tool_name="prepare_plan",
@@ -167,7 +167,7 @@ async def prepare(f, session, *, content=None, base_profile_version=1, base_plan
                 is_error=True, timestamp=now_ms()))
         raise
     finally:
-        await f.service.finish_run(session, run.id, "completed")
+        await f.service.runs.finish_run(session, run.id, "completed")
     # 预受理真实结构化确认：登记确认节点与处理中操作，供随后直接业务保存核验授权。
     # 不做任何手工账本补写，受理走 ConfirmationService 的真实入口。
     operation, is_first = await f.confirmations._accept(session, SaveConfirmationRequest(
@@ -192,66 +192,66 @@ async def check_service():
     f = await Fixture(ROOT / "service.db").seeded()
     try:
         session = await f.session("计划生成")
-        assert (await f.business.get_current_plan()).model_dump() == {"id": None, "content": None}
-        assert await f.business.list_plans() == []
+        assert (await f.business.plans.get_current_plan()).model_dump() == {"id": None, "content": None}
+        assert await f.business.plans.list_plans() == []
         await assert_rejected("缺画像", prepare(f, session), "profile_required")
         p, saved_profile = await profile(f, session)
         c, a = await prepare(f, session)
-        assert (await f.business.get_plan_save_status(c, a.proposal_id)).status == "pending"
-        assert (await f.business.list_plan_display_bindings(session))[a.display_entry_id] == a.proposal_id
-        await assert_rejected("错误展示", f.business.save_plan(c, a.model_copy(update={"display_entry_id": new_id()})), "plan_confirmation_invalid")
-        await assert_rejected("错误角色", f.business.save_plan(c, a.model_copy(update={"confirmation_entry_id": c.source_entry_id})), "plan_confirmation_invalid")
-        await assert_rejected("错误时序", f.business.save_plan(c, a.model_copy(update={"confirmation_entry_id": (await f.repository.get_plan_snapshot(a.proposal_id)).request_entry_id})), "plan_confirmation_invalid")
+        assert (await f.business.plans.get_plan_save_status(c, a.proposal_id)).status == "pending"
+        assert (await f.business.plans.list_plan_display_bindings(session))[a.display_entry_id] == a.proposal_id
+        await assert_rejected("错误展示", f.business.plans.save_plan(c, a.model_copy(update={"display_entry_id": new_id()})), "plan_confirmation_invalid")
+        await assert_rejected("错误角色", f.business.plans.save_plan(c, a.model_copy(update={"confirmation_entry_id": c.source_entry_id})), "plan_confirmation_invalid")
+        await assert_rejected("错误时序", f.business.plans.save_plan(c, a.model_copy(update={"confirmation_entry_id": (await f.repository.get_plan_snapshot(a.proposal_id)).request_entry_id})), "plan_confirmation_invalid")
         signal = Event()
         signal.set()
         with pytest.raises(CancelledError):
-            await f.business.save_plan(c, a, signal)
-        first = await f.business.save_plan(c, a)
+            await f.business.plans.save_plan(c, a, signal)
+        first = await f.business.plans.save_plan(c, a)
         assert first.content == PlanContent.model_validate(CONTENT) and first.created_at == first.saved_at
-        assert await f.business.save_plan(c, a) == first
-        assert (await f.business.get_plan(first.id)).is_current
-        assert (await f.business.list_plan_confirmation_bindings(session))[a.confirmation_entry_id] == a.proposal_id
-        assert (await f.business.get_plan_save_status(c, a.proposal_id)).result == first
+        assert await f.business.plans.save_plan(c, a) == first
+        assert (await f.business.plans.get_plan(first.id)).is_current
+        assert (await f.business.plans.list_plan_confirmation_bindings(session))[a.confirmation_entry_id] == a.proposal_id
+        assert (await f.business.plans.get_plan_save_status(c, a.proposal_id)).result == first
         other = await f.session("其他会话")
         wrong = c.model_copy(update={"session_id": other})
-        await assert_rejected("归属", f.business.save_plan(wrong, a), "plan_access_denied")
-        await assert_rejected("归属状态", f.business.get_plan_save_status(wrong, a.proposal_id), "plan_access_denied")
-        await assert_rejected("未知版本", f.business.get_plan(new_id()), "plan_not_found")
-        await assert_rejected("未知快照", f.business.get_plan_save_status(c, new_id()), "plan_proposal_not_found")
+        await assert_rejected("归属", f.business.plans.save_plan(wrong, a), "plan_access_denied")
+        await assert_rejected("归属状态", f.business.plans.get_plan_save_status(wrong, a.proposal_id), "plan_access_denied")
+        await assert_rejected("未知版本", f.business.plans.get_plan(new_id()), "plan_not_found")
+        await assert_rejected("未知快照", f.business.plans.get_plan_save_status(c, new_id()), "plan_proposal_not_found")
         await assert_rejected("准备计划冲突", prepare(f, other), "plan_version_conflict")
         await assert_rejected("准备画像冲突", prepare(f, other, base_profile_version=2, base_plan_id=first.id), "profile_version_conflict")
         c2, a2 = await prepare(f, other, base_plan_id=first.id, content={**CONTENT, "notes": "新版本"})
         stale_session = await f.session("并发旧依据")
         cs, ass = await prepare(f, stale_session, base_plan_id=first.id)
-        outcomes = await asyncio.gather(f.business.save_plan(c2, a2), f.business.save_plan(c2, a2), return_exceptions=True)
-        second = await f.business.save_plan(c2, a2)
+        outcomes = await asyncio.gather(f.business.plans.save_plan(c2, a2), f.business.plans.save_plan(c2, a2), return_exceptions=True)
+        second = await f.business.plans.save_plan(c2, a2)
         for result in outcomes:
             if isinstance(result, Exception):
                 assert result.code == "plan_save_processing"
             else:
                 assert result == second
-        await assert_rejected("保存计划冲突", f.business.save_plan(cs, ass), "plan_version_conflict")
-        assert (await f.business.get_plan_save_status(cs, ass.proposal_id)).status == "conflicted"
-        assert not (await f.business.get_plan(first.id)).is_current
-        assert (await f.business.get_plan(second.id)).is_current
-        assert await f.business.save_plan(c, a) == first
-        plans = await f.business.list_plans()
+        await assert_rejected("保存计划冲突", f.business.plans.save_plan(cs, ass), "plan_version_conflict")
+        assert (await f.business.plans.get_plan_save_status(cs, ass.proposal_id)).status == "conflicted"
+        assert not (await f.business.plans.get_plan(first.id)).is_current
+        assert (await f.business.plans.get_plan(second.id)).is_current
+        assert await f.business.plans.save_plan(c, a) == first
+        plans = await f.business.plans.list_plans()
         assert len(plans) == 2 and sum(item.is_current for item in plans) == 1
         assert [(x.created_at, x.id) for x in plans] == sorted([(x.created_at, x.id) for x in plans], reverse=True)
-        assert (await f.business.get_profile()).version == 1
+        assert (await f.business.profile.get_profile()).version == 1
         cp, ap = await prepare(f, session, base_plan_id=second.id)
         await profile(f, session, 1, health_notes="补充信息")
-        await assert_rejected("保存画像冲突", f.business.save_plan(cp, ap), "profile_version_conflict")
-        assert (await f.business.get_plan_save_status(cp, ap.proposal_id)).status == "conflicted"
+        await assert_rejected("保存画像冲突", f.business.plans.save_plan(cp, ap), "profile_version_conflict")
+        assert (await f.business.plans.get_plan_save_status(cp, ap.proposal_id)).status == "conflicted"
         ci, ai = await prepare(f, session, base_profile_version=2, base_plan_id=second.id)
         cn, an = await prepare(f, session, base_profile_version=2, base_plan_id=second.id)
-        await assert_rejected("旧pending", f.business.save_plan(ci, ai), "plan_proposal_invalidated")
-        assert (await f.business.get_plan_save_status(cn, an.proposal_id)).status == "pending"
+        await assert_rejected("旧pending", f.business.plans.save_plan(ci, ai), "plan_proposal_invalidated")
+        assert (await f.business.plans.get_plan_save_status(cn, an.proposal_id)).status == "pending"
         with pytest.raises(PlanConfirmationInvalid):
             await prepare(f, session, base_profile_version=2, base_plan_id=second.id, tamper=True)
         await f.restart()
-        assert await f.business.save_plan(c, a) == first
-        assert (await f.business.get_plan_save_status(c2, a2.proposal_id)).result == second
+        assert await f.business.plans.save_plan(c, a) == first
+        assert (await f.business.plans.get_plan_save_status(c2, a2.proposal_id)).result == second
         return {"versions": 2, "current": second.id, "fixed_original": first.id, "profile_conflict": True,
                 "ownership": True, "invalidation": True, "strict_display": True, "concurrent_single_save": True}
     finally:
@@ -283,43 +283,43 @@ async def check_constraints_and_cross_business():
         valid_duration = copy.deepcopy(real)
         valid_duration["days"][0]["exercises"][0].update(reps=None, duration_seconds=30)
         c, a = await prepare(f, session, content=valid_duration)
-        await assert_rejected("画像确认授权计划", f.business.save_plan(c, a.model_copy(update={"confirmation_entry_id": p["confirmation"]})), "plan_confirmation_invalid")
+        await assert_rejected("画像确认授权计划", f.business.plans.save_plan(c, a.model_copy(update={"confirmation_entry_id": p["confirmation"]})), "plan_confirmation_invalid")
         day = c.business_date
         wc, wa, _ = await prepare_workout(f, session, day)
-        wr = await f.business.save_workout(wc, wa)
-        await assert_rejected("训练确认授权计划", f.business.save_plan(c, a.model_copy(update={"confirmation_entry_id": wa.confirmation_entry_id})), "plan_confirmation_invalid")
-        result = await f.business.save_plan(c, a)
+        wr = await f.business.workouts.save_workout(wc, wa)
+        await assert_rejected("训练确认授权计划", f.business.plans.save_plan(c, a.model_copy(update={"confirmation_entry_id": wa.confirmation_entry_id})), "plan_confirmation_invalid")
+        result = await f.business.plans.save_plan(c, a)
         pp = await propose(f, session, {"profile_id": 1, "base_profile_version": 1, "payload": payload()})
         await assert_rejected("计划确认授权画像", f.service_save(pp, confirmation=a.confirmation_entry_id), "profile_confirmation_invalid")
         # 合法画像保存走独立确认入口：真实准备、展示绑定与结构化确认一致后直接提交。
         saved_operation = await f.confirm(pp)
         assert saved_operation.status == "saved", saved_operation
         wc2, wa2, _ = await prepare_workout(f, session, day, wr)
-        await assert_rejected("计划确认授权训练", f.business.update_workout(wc2, wa2.model_copy(update={"confirmation_entry_id": a.confirmation_entry_id})), "workout_confirmation_invalid")
+        await assert_rejected("计划确认授权训练", f.business.workouts.update_workout(wc2, wa2.model_copy(update={"confirmation_entry_id": a.confirmation_entry_id})), "workout_confirmation_invalid")
         # pending/processing 的跨业务确认关联在共享事务内检查。
         pc, pa = await prepare(f, session, base_profile_version=2, base_plan_id=result.id, content=real)
         async with f.repository.transaction():
-            await f.business._begin_plan_save(pc, pa)
-        await assert_rejected("processing", f.business.save_plan(pc, pa), "plan_save_processing")
-        await assert_rejected("processing计划确认授权训练", f.business.update_workout(wc2, wa2.model_copy(update={"confirmation_entry_id": pa.confirmation_entry_id})), "workout_confirmation_invalid")
+            await f.business.plans._begin_plan_save(pc, pa)
+        await assert_rejected("processing", f.business.plans.save_plan(pc, pa), "plan_save_processing")
+        await assert_rejected("processing计划确认授权训练", f.business.workouts.update_workout(wc2, wa2.model_copy(update={"confirmation_entry_id": pa.confirmation_entry_id})), "workout_confirmation_invalid")
         await f.restart()
         assert await f.repository.recover_interrupted_plan_saves() == 1
         assert await f.repository.recover_interrupted_plan_saves() == 0
-        recovered = await f.business.save_plan(pc, pa)
+        recovered = await f.business.plans.save_plan(pc, pa)
         await profile(f, session, 2, forbidden_exercise_ids=[exercise.id])
         error = await assert_rejected("禁用动作", prepare(f, session, base_profile_version=3, base_plan_id=recovered.id, content=real), "invalid_business_payload")
         assert error["errors"][0]["path"] == "/payload/days/0/exercises/0/exercise_id"
         await profile(f, session, 3, unavailable_equipment=[exercise.equipment])
         await assert_rejected("不可用器械", prepare(f, session, base_profile_version=4, base_plan_id=recovered.id, content=real), "invalid_business_payload")
-        assert await f.business.get_workout(wr.id) == await f.repository.get_workout(wr.id)
+        assert await f.business.workouts.get_workout(wr.id) == await f.repository.get_workout(wr.id)
         assert (await f.repository.get_workout_save_record(wa.proposal_id)).result == wr
         # 首次保存重新校验目录与完整度，使用当前库中不可修改快照的真实内容。
         for content, expected_path in [*invalids, (real, "/payload/days/0/exercises/0/exercise_id")]:
             bc, ba = await prepare(f, session, base_profile_version=4, base_plan_id=recovered.id,
                                    content=content, direct_snapshot=True)
-            error = await assert_rejected("首次保存重验", f.business.save_plan(bc, ba), "invalid_business_payload")
+            error = await assert_rejected("首次保存重验", f.business.plans.save_plan(bc, ba), "invalid_business_payload")
             assert expected_path in [item["path"] for item in error["errors"]]
-            assert (await f.business.get_current_plan()).id == recovered.id
+            assert (await f.business.plans.get_current_plan()).id == recovered.id
             assert await f.repository.get_plan_save_record(ba.proposal_id) is None
         return {"real_catalog_id": exercise.id, "equipment": exercise.equipment, "cross_business_directions": 4,
                 "processing_binding_protected": True, "recovered_once": True, "workout_preserved": wr.id}
@@ -345,9 +345,16 @@ async def check_migration_and_store():
         await repo.replace_exercises(Catalog.load().all())
     tables = ["profile", "workouts", "exercises", "sessions", "session_entries", "session_runs", "profile_snapshots", "profile_save_records", "workout_snapshots", "workout_save_records"]
     async def rows(database, table):
-        # 压缩能力为 session_entries 增列；迁移保真只比对原有消息列。
-        columns = ("session_id, id, parent_id, run_id, type, messages, created_at"
-                   if table == "session_entries" else "*")
+        # 压缩能力为 session_entries 增列，运行治理为 session_runs 增列；迁移保真只比对原有列。
+        columns = {
+            "session_entries": (
+                "session_id, id, parent_id, run_id, type, messages, created_at"
+            ),
+            "session_runs": (
+                "session_id, id, request_entry_id, last_entry_id, status, started_at, "
+                "finished_at, error_code, error_message"
+            ),
+        }.get(table, "*")
         cursor = await database.connection.execute(f"SELECT {columns} FROM {table} ORDER BY 1")
         values = [tuple(row) for row in await cursor.fetchall()]
         await cursor.close()
@@ -443,32 +450,32 @@ async def check_replacement_and_delete():
         c, a = await prepare(f, session)
         snap = await f.repository.get_plan_snapshot(a.proposal_id)
         sync = _StatementSync("COMMIT", nth=2)
-        async with _paused_save(f, sync, lambda: f.business.save_plan(c, a)) as task:
+        async with _paused_save(f, sync, lambda: f.business.plans.save_plan(c, a)) as task:
             async with f.replacements.register(session):
                 replacement = asyncio.create_task(_regenerate(f, session, snap.request_entry_id))
                 sync.release.set()
                 outcome = await replacement
-                await f.service.finish_run(session, outcome.run.id, "completed")
+                await f.service.runs.finish_run(session, outcome.run.id, "completed")
         await assert_rejected("替换优先", task, "plan_proposal_not_found")
-        assert await f.business.list_plans() == []
+        assert await f.business.plans.list_plans() == []
         c, a = await prepare(f, session)
-        first = await f.business.save_plan(c, a)
+        first = await f.business.plans.save_plan(c, a)
         # 结构化确认节点不接受模型重新生成：拒绝且不启动新运行，已保存固定结果与确认绑定保持原值。
         with pytest.raises(InvalidTargetEntry):
             await _regenerate(f, session, a.confirmation_entry_id)
-        assert await f.business.save_plan(c, a) == first
-        assert (await f.business.list_plan_confirmation_bindings(session))[a.confirmation_entry_id] == a.proposal_id
+        assert await f.business.plans.save_plan(c, a) == first
+        assert (await f.business.plans.list_plan_confirmation_bindings(session))[a.confirmation_entry_id] == a.proposal_id
         snap = await f.repository.get_plan_snapshot(a.proposal_id)
         async with f.replacements.register(session):
             outcome = await _regenerate(f, session, snap.request_entry_id)
-            await f.service.finish_run(session, outcome.run.id, "completed")
+            await f.service.runs.finish_run(session, outcome.run.id, "completed")
         assert await f.repository.get_plan_snapshot(a.proposal_id) is None
-        assert await f.business.save_plan(c, a) == first
-        assert (await f.business.get_plan_save_status(c, a.proposal_id)).result == first
+        assert await f.business.plans.save_plan(c, a) == first
+        assert (await f.business.plans.get_plan_save_status(c, a.proposal_id)).result == first
         await f.service.delete_session(session)
         assert await f.repository.get_plan_save_record(a.proposal_id) is not None
-        assert (await f.business.get_current_plan()).id == first.id
-        await assert_rejected("删除后", f.business.get_plan_save_status(c, a.proposal_id), "session_not_found")
+        assert (await f.business.plans.get_current_plan()).id == first.id
+        await assert_rejected("删除后", f.business.plans.get_plan_save_status(c, a.proposal_id), "session_not_found")
         return {"replacement_first": "plan_proposal_not_found", "commit_first_retained": True,
                 "regenerated_confirmation_locates_original": True, "session_delete_retains_plan_and_fixed_result": True}
     finally:
@@ -507,33 +514,33 @@ async def check_preservation_and_cancellation():
         for offset in range(3):
             performed = (date.fromisoformat(day) - timedelta(days=offset)).isoformat()
             workout_context, workout_arguments, _ = await prepare_workout(f, session, performed)
-            workouts.append((await f.business.save_workout(workout_context, workout_arguments)).model_dump(
+            workouts.append((await f.business.workouts.save_workout(workout_context, workout_arguments)).model_dump(
                 exclude={"proposal_id", "saved_at"}))
         baseline = await read_tables(f.database, preserved)
         c, a = await prepare(f, session)
         signal = Event()
         signal.set()
         with pytest.raises(CancelledError):
-            await f.business.save_plan(c, a, signal)
+            await f.business.plans.save_plan(c, a, signal)
         assert await count_rows(f.database, "plans") == 0
         assert await count_rows(f.database, "plan_save_records") == 0
         assert (await f.repository.get_plan_snapshot(a.proposal_id)).status == "pending"
-        first = await f.business.save_plan(c, a)
+        first = await f.business.plans.save_plan(c, a)
         assert await count_rows(f.database, "plans") == 1
         assert await read_tables(f.database, preserved) == baseline
 
         c2, a2 = await prepare(f, session, base_plan_id=first.id, content={**CONTENT, "notes": "第二版"})
         c3, a3 = await prepare(f, session, base_plan_id=first.id, content={**CONTENT, "notes": "第三版"})
         assert (await f.repository.get_plan_snapshot(a2.proposal_id)).status == "invalidated"
-        second = await f.business.save_plan(c3, a3)
-        assert (await f.business.get_current_plan()).id == second.id
-        assert len(await f.business.list_plans()) == 2
-        assert sum(item.is_current for item in await f.business.list_plans()) == 1
+        second = await f.business.plans.save_plan(c3, a3)
+        assert (await f.business.plans.get_current_plan()).id == second.id
+        assert len(await f.business.plans.list_plans()) == 2
+        assert sum(item.is_current for item in await f.business.plans.list_plans()) == 1
         assert await read_tables(f.database, preserved) == baseline
         displays = {
-            "profile": await f.business.list_display_bindings(session),
-            "workout": await f.business.list_workout_display_bindings(session),
-            "plan": await f.business.list_plan_display_bindings(session),
+            "profile": await f.business.profile.list_display_bindings(session),
+            "workout": await f.business.workouts.list_workout_display_bindings(session),
+            "plan": await f.business.plans.list_plan_display_bindings(session),
         }
         keys = [set(item) for item in displays.values()]
         assert not keys[0] & keys[1] and not keys[0] & keys[2] and not keys[1] & keys[2]
@@ -541,23 +548,23 @@ async def check_preservation_and_cancellation():
         invalidated_display = (await f.repository.get_plan_snapshot(a2.proposal_id)).display_entry_id
         assert invalidated_display not in displays["plan"]
         confirmations = {
-            "profile": await f.business.list_confirmation_bindings(session),
-            "workout": await f.business.list_workout_confirmation_bindings(session),
-            "plan": await f.business.list_plan_confirmation_bindings(session),
+            "profile": await f.business.profile.list_confirmation_bindings(session),
+            "workout": await f.business.workouts.list_workout_confirmation_bindings(session),
+            "plan": await f.business.plans.list_plan_confirmation_bindings(session),
         }
         shared = [set(item) for item in confirmations.values()]
         assert not shared[0] & shared[1] and not shared[0] & shared[2] and not shared[1] & shared[2]
         assert confirmations["plan"][a3.confirmation_entry_id] == a3.proposal_id
 
         f = await f.restart()
-        assert await f.business.save_plan(c, a) == first
-        assert (await f.business.get_plan_save_status(c, a.proposal_id)).result == first
-        await assert_rejected("失效快照重放", f.business.save_plan(c2, a2), "plan_proposal_invalidated")
-        assert (await f.business.get_plan_save_status(c2, a2.proposal_id)).status == "invalidated"
+        assert await f.business.plans.save_plan(c, a) == first
+        assert (await f.business.plans.get_plan_save_status(c, a.proposal_id)).result == first
+        await assert_rejected("失效快照重放", f.business.plans.save_plan(c2, a2), "plan_proposal_invalidated")
+        assert (await f.business.plans.get_plan_save_status(c2, a2.proposal_id)).status == "invalidated"
         assert await read_tables(f.database, preserved) == baseline
         assert (await f.repository.get_plan_save_record(a.proposal_id)).result == first
         assert (await f.repository.get_plan_save_record(a3.proposal_id)).result == second
-        stored = await f.business.list_workouts(WorkoutListArguments(page_size=100))
+        stored = await f.business.workouts.list_workouts(WorkoutListArguments(page_size=100))
         assert {item.model_dump()["id"]: item.model_dump() for item in stored.items} == {item["id"]: item for item in workouts}
         assert stored.total == len(workouts)
         async with f.database.connection.execute("PRAGMA foreign_key_check") as cursor:

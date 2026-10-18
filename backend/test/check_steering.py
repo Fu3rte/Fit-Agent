@@ -66,7 +66,7 @@ async def scenario_accept_consume(service: SessionService) -> None:
     command = steering_command(session_id, run_id, "第一段")
     created, first = await coordinator.accept(run_id, command)
     assert created is True and first.status == "pending" and first.entry_id is None
-    assert (await service.get_steering(session_id, first.id)).status == "pending"
+    assert (await service.queries.get_steering(session_id, first.id)).status == "pending"
 
     repeat_created, repeat = await coordinator.accept(run_id, command)
     assert repeat_created is False and repeat.id == first.id and repeat.status == "pending"
@@ -77,14 +77,14 @@ async def scenario_accept_consume(service: SessionService) -> None:
 
     entry_id = await coordinator.consume(run_id, taken)
     assert entry_id is not None
-    consumed = await service.get_steering(session_id, first.id)
+    consumed = await service.queries.get_steering(session_id, first.id)
     assert consumed.status == "consumed" and consumed.entry_id == entry_id
-    entry = await service.get_entry(session_id, entry_id)
+    entry = await service.queries.get_entry(session_id, entry_id)
     assert entry.run_id == run_id and entry.messages[0] == first.message
     assert entry.messages[0].timestamp == first.message.timestamp
-    run = await service.get_run(session_id, run_id)
+    run = await service.queries.get_run(session_id, run_id)
     assert entry.parent_id == run.request_entry_id and run.last_entry_id == entry_id
-    assert (await service.get_current_branch(session_id))[-1].id == entry_id
+    assert (await service.queries.get_current_branch(session_id))[-1].id == entry_id
     assert notified == [
         {"steering_id": first.id, "status": "consumed", "entry_id": entry_id, "reason": None}
     ]
@@ -106,7 +106,7 @@ async def scenario_accept_consume(service: SessionService) -> None:
         pass
 
     await coordinator.finish(session_id, run_id, "completed")
-    assert (await service.get_run(session_id, run_id)).status == "completed"
+    assert (await service.queries.get_run(session_id, run_id)).status == "completed"
 
 
 async def scenario_withdraw_race(service: SessionService) -> None:
@@ -125,7 +125,7 @@ async def scenario_withdraw_race(service: SessionService) -> None:
         raise AssertionError("消费占用期间撤回必须返回消费冲突")
     except SteeringConsumptionConflict:
         pass
-    assert (await service.get_steering(session_id, first.id)).status == "pending"
+    assert (await service.queries.get_steering(session_id, first.id)).status == "pending"
 
     await coordinator.consume(run_id, taken)
     try:
@@ -139,7 +139,7 @@ async def scenario_withdraw_race(service: SessionService) -> None:
     )
     withdrawal = await coordinator.withdraw(run_id, session_id, second.id)
     assert withdrawal.changed is True and withdrawal.steering.status == "withdrawn"
-    assert (await service.get_steering(session_id, second.id)).status == "withdrawn"
+    assert (await service.queries.get_steering(session_id, second.id)).status == "withdrawn"
     assert await coordinator.take(run_id) == []
 
     repeat = await coordinator.withdraw(run_id, session_id, second.id)
@@ -170,9 +170,9 @@ async def scenario_close_and_finish(service: SessionService) -> None:
     command = steering_command(session_id, run_id, "落单")
     _, pending = await coordinator.accept(run_id, command)
     await coordinator.finish(session_id, run_id, "failed")
-    run = await service.get_run(session_id, run_id)
+    run = await service.queries.get_run(session_id, run_id)
     assert run.status == "failed" and run.finished_at is not None
-    discarded = await service.get_steering(session_id, pending.id)
+    discarded = await service.queries.get_steering(session_id, pending.id)
     assert discarded.status == "discarded" and discarded.reason == "failed"
     assert notified == [
         {
@@ -208,7 +208,7 @@ async def scenario_close_and_finish(service: SessionService) -> None:
 async def scenario_run_ownership(service: SessionService) -> None:
     session_id = "s-steering-owner"
     abandoned = await start_run(service, session_id)
-    await service.finish_run(session_id, abandoned, "completed")
+    await service.runs.finish_run(session_id, abandoned, "completed")
     outcome = await service.accept_send(
         SendCommand(
             operation_id=str(uuid4()),
@@ -270,7 +270,7 @@ async def scenario_occupied_conflict(service, database, path) -> None:
     await consume_task
     assert len(notified) == 1 and notified[0]["status"] == "consumed"
     assert notified[0]["entry_id"] is not None
-    assert (await service.get_steering(session_id, first.id)).status == "consumed"
+    assert (await service.queries.get_steering(session_id, first.id)).status == "consumed"
     await coordinator.finish(session_id, run_id, "completed")
 
 
@@ -359,9 +359,9 @@ async def scenario_consume_failure(service, path) -> None:
         failure = error
     assert failure is not None
     assert notified == []
-    steering = await service.get_steering(session_id, first.id)
+    steering = await service.queries.get_steering(session_id, first.id)
     assert steering.status == "pending" and steering.entry_id is None
-    run = await service.get_run(session_id, run_id)
+    run = await service.queries.get_run(session_id, run_id)
     assert run.status == "running" and run.last_entry_id is None
 
     raw = await aiosqlite.connect(path, isolation_level=None)

@@ -16,6 +16,22 @@ PROFILE = {
 }
 
 
+def usage_chunk() -> dict:
+    return {
+        "id": "chatcmpl-task5",
+        "object": "chat.completion.chunk",
+        "created": int(time.time()),
+        "model": "test-model",
+        "choices": [],
+        "usage": {
+            "prompt_tokens": 10,
+            "completion_tokens": 5,
+            "total_tokens": 15,
+            "prompt_tokens_details": {"cached_tokens": 0},
+        },
+    }
+
+
 class State:
     def __init__(self) -> None:
         self.lock = threading.Lock()
@@ -110,6 +126,31 @@ class Handler(BaseHTTPRequestHandler):
             with STATE.lock:
                 STATE.held += 1
             STATE.release.wait(60)
+        if mode == "hold_after_start":
+            # 先真实下发首帧增量再停滞：用于取证 SSE 正文流建立之后的断连取消。
+            # 正文长度须超过凭据尾部保留窗口，否则 message_update 的 tail_safe 文本为空。
+            with STATE.lock:
+                STATE.held += 1
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.end_headers()
+            self._sse(
+                "data: "
+                + json.dumps(chunk(content="正在流式输出的第一段正文用于取证运行中的界面渲染"),
+                             ensure_ascii=False) + "\n\n"
+            )
+            STATE.release.wait(60)
+            try:
+                self._sse(
+                    "data: "
+                    + json.dumps(chunk(finish_reason="stop"), ensure_ascii=False) + "\n\n"
+                )
+                self._sse("data: " + json.dumps(usage_chunk(), ensure_ascii=False) + "\n\n")
+                self._sse("data: [DONE]\n\n")
+            except OSError:
+                # 客户端已断开：流关闭后无法再写，保持已受理计数即可。
+                pass
+            return
         if mode in {"tool_profile", "tool_profile_v1"} and not has_tool_result:
             version = base_version
             arguments = json.dumps({

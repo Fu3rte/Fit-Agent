@@ -87,6 +87,7 @@ def main():
     from app.application.session import service as session_service
     from app.infrastructure.persistence.sqlite import database
     from app.interfaces import http
+    from app.interfaces.http_api.routes import agent as agent_routes
     from test import p0_business_cases
     from test import run_v2_eval as runner
     from test.v2_eval_support import exception_type, load_cases
@@ -101,7 +102,7 @@ def main():
     manifest = runner.read_record(root / 'manifest.json')
     instance = os.environ['FIT_AGENT_B6_TEST_INSTANCE']
     event = install_local_hook(root, mode, kind, instance)
-    originals = (session_service.PROJECT_ROOT, http.create_file_tools,
+    originals = (session_service.PROJECT_ROOT, agent_routes.create_file_tools,
                  database.default_database_path, telemetry.trace_database_path,
                  cache_observation.observation_directory, model_config.DATA_ROOT, p0_business_cases.TMP_ROOT)
     args = runner.parse_args(['--experiment-root', str(root.parent), '--experiment-id', root.name,
@@ -128,7 +129,7 @@ def main():
         result.update(error_type=exception_type(error), error=str(error))
         raise
     finally:
-        current = (session_service.PROJECT_ROOT, http.create_file_tools,
+        current = (session_service.PROJECT_ROOT, agent_routes.create_file_tools,
                    database.default_database_path, telemetry.trace_database_path,
                    cache_observation.observation_directory, model_config.DATA_ROOT, p0_business_cases.TMP_ROOT)
         result.update(event=event, restored=[left == right for left, right in zip(originals, current)])

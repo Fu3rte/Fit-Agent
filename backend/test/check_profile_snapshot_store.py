@@ -133,7 +133,7 @@ async def seed(service: SessionService, session_id: str) -> dict:
     request_id = first.run.request_entry_id
     now = stamp()
     source_id = str(uuid4())
-    await service.append_entry(
+    await service.entries.append_entry(
         SessionMessageEntry(
             session_id=session_id,
             id=source_id,
@@ -145,7 +145,7 @@ async def seed(service: SessionService, session_id: str) -> dict:
         )
     )
     display_id = str(uuid4())
-    await service.append_entry(
+    await service.entries.append_entry(
         SessionMessageEntry(
             session_id=session_id,
             id=display_id,
@@ -156,7 +156,7 @@ async def seed(service: SessionService, session_id: str) -> dict:
             created_at=now + 1,
         )
     )
-    await service.finish_run(session_id, first.run.id, "completed")
+    await service.runs.finish_run(session_id, first.run.id, "completed")
     second = await service.accept_send(
         SendCommand(
             operation_id=str(uuid4()),
@@ -166,7 +166,7 @@ async def seed(service: SessionService, session_id: str) -> dict:
         system_message=SYSTEM,
     )
     assert second.run is not None
-    await service.finish_run(session_id, second.run.id, "completed")
+    await service.runs.finish_run(session_id, second.run.id, "completed")
     return {
         "request": request_id,
         "source": source_id,

@@ -20,7 +20,7 @@ import aiosqlite
 
 from app import model_config
 from app.application.business.catalog import DEFAULT_ACTIONS_PATH
-from app.application.business.service import BUSINESS_TIMEZONE, business_date
+from app.application.business.profile import BUSINESS_TIMEZONE, business_date
 from app.domain.business.models import BusinessContext, WorkoutListArguments
 from app.infrastructure.persistence.sqlite import database as database_module
 from app.interfaces.http import app
@@ -448,9 +448,9 @@ def experiment_env(
 
 def business_state() -> dict:
     business = app.state.business
-    profile = _call(business.get_profile())
-    plan = _call(business.get_current_plan())
-    workouts = _call(business.list_workouts(WorkoutListArguments(page_size=100)))
+    profile = _call(business.profile.get_profile())
+    plan = _call(business.plans.get_current_plan())
+    workouts = _call(business.workouts.list_workouts(WorkoutListArguments(page_size=100)))
     return {
         "profile": profile.model_dump(),
         "current_plan": plan.model_dump(),
@@ -572,7 +572,7 @@ def capture_turn(http, session_id, *, case_id, round_index, step_index, request_
     usage = None
     usage_sources = None
     if run_id:
-        history = _call(app.state.session_service.get_session_history(session_id))
+        history = _call(app.state.session_queries.get_session_history(session_id))
         usage, _missing = summarize_run_usage(history.entries, run_id)
         usage_sources = _usage_sources(history.entries, run_id)
     return TurnObservation(
@@ -1132,17 +1132,17 @@ def slot_file_roots(env: ExperimentEnv):
 @contextmanager
 def file_roots(directory):
     from app.application.session import service as session_service
-    from app.interfaces import http as http_interface
+    from app.interfaces.http_api.routes import agent as agent_routes
 
     directory = Path(directory)
     original_root = session_service.PROJECT_ROOT
-    original_factory = http_interface.create_file_tools
+    original_factory = agent_routes.create_file_tools
     session_service.PROJECT_ROOT = directory
-    http_interface.create_file_tools = partial(original_factory, tmp_root=directory / "tmp")
+    agent_routes.create_file_tools = partial(original_factory, tmp_root=directory / "tmp")
     try:
         yield directory
     finally:
-        http_interface.create_file_tools = original_factory
+        agent_routes.create_file_tools = original_factory
         session_service.PROJECT_ROOT = original_root
 
 

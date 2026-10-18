@@ -272,7 +272,7 @@ def _send_text(live: Live, session_id: str, text: str, attachments: list[dict] |
             ),
             system_message=SYSTEM,
         )
-        await live.service.finish_run(session_id, outcome.run.id, "completed")
+        await live.service.runs.finish_run(session_id, outcome.run.id, "completed")
         return outcome.run
 
     return live.call(run())
@@ -283,8 +283,8 @@ def _stage_profile(live: Live, session_id: str, base_version, payload: dict) -> 
         session_id,
         "profile",
         {"profile_id": 1, "base_profile_version": base_version, "payload": payload},
-        live.business.prepare_profile_update,
-        live.business.bind_display_entry,
+        live.business.profile.prepare_profile_update,
+        live.business.profile.bind_display_entry,
         "prepare_profile_update",
     )
 
@@ -354,7 +354,7 @@ def check_untrusted_instruction_channels(live: Live) -> dict:
             content=[TextContent(type="text", text=wire)], is_error=False, timestamp=now_ms(),
         ),
     )
-    live.call(live.service.finish_run(session, run.id, "completed"))
+    live.call(live.service.runs.finish_run(session, run.id, "completed"))
     declared = {item.name for item in business_tool_declarations()}
     assert SAVE_TOOL_NAMES.isdisjoint(declared), sorted(SAVE_TOOL_NAMES & declared)
     forged = live.confirm(session, "profile", profile, display=new_id())

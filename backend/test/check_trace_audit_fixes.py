@@ -48,7 +48,7 @@ from app.ai.messages import (
 )
 from app.ai.stream import AssistantResponse, _observed, stream
 from app.ai.types import ModelSpec
-from app.interfaces.http import CredentialFilter
+from app.application.session.credentials import CredentialFilter
 from app.model_config import ModelConfig
 
 BACKEND = Path(__file__).resolve().parents[1]

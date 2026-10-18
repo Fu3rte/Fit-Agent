@@ -28,11 +28,12 @@ from app.application.business import confirmation as confirmation_module
 from app.application.business.catalog import Catalog
 from app.application.business.confirmation import ConfirmationService
 from app.application.business.coordination import ReplacementCoordinator
-from app.application.business.service import (
+from app.application.business.profile import (
     BUSINESS_TIMEZONE,
-    BusinessService,
     business_date,
 )
+from app.application.business.service import BusinessService
+from app.application.session.credentials import CredentialFilter
 from app.application.session.service import SessionService
 from app.domain.business.errors import BusinessError
 from app.domain.business.models import (
@@ -54,7 +55,7 @@ from app.infrastructure.persistence.sqlite.business_repository import (
 )
 from app.infrastructure.persistence.sqlite.database import open_database
 from app.infrastructure.persistence.sqlite.repository import SqliteSessionRepository
-from app.interfaces.http import CredentialFilter, active, app
+from app.interfaces.http import active, app
 from test.regression_support import (
     Server,
     client,
@@ -210,10 +211,12 @@ class Fixture:
         self.catalog = Catalog.load()
         service = SessionService(SqliteSessionRepository(self.database))
         replacements = ReplacementCoordinator()
-        self.business = BusinessService(self.repository, self.catalog, service, replacements)
-        service.attach_snapshots(self.business)
+        self.business = BusinessService(self.repository, self.catalog, service.queries, replacements)
+        service.attach_snapshots(self.business.proposals)
         self.service = service
-        self.confirmations = ConfirmationService(self.repository, service, self.business)
+        self.confirmations = ConfirmationService(
+            self.repository, service.queries, service.operations, service.entries, self.business
+        )
         self.store = await open_trace_store(self.trace_path)
         async with self.repository.transaction():
             await self.repository.replace_exercises(self.catalog.all())
@@ -249,7 +252,7 @@ class Fixture:
 
     async def append(self, session_id: str, run_id: str, parent_id: str, message) -> str:
         node_id = new_id()
-        await self.service.append_entry(SessionMessageEntry(
+        await self.service.entries.append_entry(SessionMessageEntry(
             session_id=session_id, id=node_id, parent_id=parent_id, run_id=run_id,
             type="message", messages=[message], created_at=now_ms(),
         ))
@@ -271,13 +274,13 @@ class Fixture:
         )
         context = self.context(session_id, run.request_entry_id, source)
         if kind == "profile":
-            proposal = await self.business.prepare_profile_update(
+            proposal = await self.business.profile.prepare_profile_update(
                 context, ProfileProposalArguments.model_validate(arguments))
         elif kind == "plan_import":
-            proposal = await self.business.prepare_plan_import(
+            proposal = await self.business.plans.prepare_plan_import(
                 context, PlanImportArguments.model_validate(arguments))
         else:
-            proposal = await self.business.prepare_workout(
+            proposal = await self.business.workouts.prepare_workout(
                 context, WorkoutProposalArguments.model_validate(arguments))
         message = ToolResultMessage(
             role="toolResult", tool_call_id=call_id, tool_name=tool_name,
@@ -286,12 +289,12 @@ class Fixture:
         )
         display = await self.append(session_id, run.id, source, message)
         if kind == "profile":
-            await self.business.bind_display_entry(proposal.proposal_id, display)
+            await self.business.profile.bind_display_entry(proposal.proposal_id, display)
         elif kind == "plan_import":
-            await self.business.bind_plan_display_entry(proposal.proposal_id, display)
+            await self.business.plans.bind_plan_display_entry(proposal.proposal_id, display)
         else:
-            await self.business.bind_workout_display_entry(proposal.proposal_id, display)
-        await self.service.finish_run(session_id, run.id, "completed")
+            await self.business.workouts.bind_workout_display_entry(proposal.proposal_id, display)
+        await self.service.runs.finish_run(session_id, run.id, "completed")
         return {
             "session": session_id, "request": run.request_entry_id, "source": source,
             "display": display, "proposal": proposal.proposal_id,
@@ -464,7 +467,7 @@ async def check_saved_snapshot_reuse(root: Path) -> dict:
             session, f.request(session, "profile", ids), trace_store=f.store)
         assert first.status == "saved"
         traces = await f.store.trace_count()
-        nodes = len(await f.service.list_entries(session))
+        nodes = len(await f.service.queries.list_entries(session))
 
         # 已保存快照复用：新操作 ID 关联原确认节点与固定结果，不新增节点、版本或根记录。
         again = await f.confirmations.confirm(
@@ -474,7 +477,7 @@ async def check_saved_snapshot_reuse(root: Path) -> dict:
         assert again.confirmation_entry_id == first.confirmation_entry_id
         assert await spans_for(f.store, again.operation_id) == []
         assert await f.store.trace_count() == traces
-        assert len(await f.service.list_entries(session)) == nodes
+        assert len(await f.service.queries.list_entries(session)) == nodes
         assert (await f.repository.get_profile()).version == 1
         return {
             "same_result": again.result.model_dump() == first.result.model_dump(),
@@ -506,7 +509,7 @@ async def check_authorization_zero_commit(root: Path) -> dict:
         sent = await f.service.accept_send(
             SendCommand(operation_id=chat_id, session_id=session, request=SendRequest(text="普通消息")),
             system_message=SYSTEM)
-        await f.service.finish_run(session, sent.run.id, "completed")
+        await f.service.runs.finish_run(session, sent.run.id, "completed")
         results["cross_entry"] = (await rejection(f.confirmations.confirm(
             session, f.request(session, "profile", ids, operation_id=chat_id),
             trace_store=f.store))).code
@@ -591,7 +594,7 @@ async def check_observation_and_business_faults(root: Path) -> dict:
             {"profile_id": 1, "base_profile_version": 9, "payload": {**PROFILE, "goal": "减脂"}},
             "prepare_profile_update")
         broken3 = await _drop_spans(root / "faults-broken3.db")
-        original_save = f.business.save_profile_update
+        original_save = f.business.profile.save_profile_update
         error = RuntimeError("业务原始异常正文")
         spy3 = RunTraceSpy()
         spy3.__enter__()
@@ -599,7 +602,7 @@ async def check_observation_and_business_faults(root: Path) -> dict:
         async def boom(context, arguments, signal=None, *, on_committed=None):
             raise error
 
-        f.business.save_profile_update = boom
+        f.business.profile.save_profile_update = boom
         raised = None
         try:
             await f.confirmations.confirm(
@@ -607,7 +610,7 @@ async def check_observation_and_business_faults(root: Path) -> dict:
         except RuntimeError as caught:
             raised = caught
         finally:
-            f.business.save_profile_update = original_save
+            f.business.profile.save_profile_update = original_save
             spy3.__exit__(None, None, None)
             await broken3.close()
         assert raised is error
@@ -629,14 +632,14 @@ async def check_cancellation_and_recovery(root: Path) -> dict:
         request = f.request(session, "profile", ids)
         entered = asyncio.Event()
         unblock = asyncio.Event()
-        original_save = f.business.save_profile_update
+        original_save = f.business.profile.save_profile_update
 
         async def slow(context, arguments, signal=None, *, on_committed=None):
             entered.set()
             await unblock.wait()
             return await original_save(context, arguments, signal, on_committed=on_committed)
 
-        f.business.save_profile_update = slow
+        f.business.profile.save_profile_update = slow
         spy = RunTraceSpy()
         spy.__enter__()
         task = asyncio.create_task(
@@ -650,7 +653,7 @@ async def check_cancellation_and_recovery(root: Path) -> dict:
             cancelled = True
         finally:
             spy.__exit__(None, None, None)
-            f.business.save_profile_update = original_save
+            f.business.profile.save_profile_update = original_save
             unblock.set()
         assert cancelled
 
@@ -716,7 +719,7 @@ class Live:
         self.loop = app.state.loop
         self.service: SessionService = app.state.session_service
         self.business: BusinessService = app.state.business
-        self.repository = self.business._repository
+        self.repository = app.state.business_repository
 
     def call(self, coro):
         return asyncio.run_coroutine_threadsafe(coro, self.loop).result()
@@ -740,7 +743,7 @@ class Live:
         run = outcome.run
         call_id = "call-" + uuid4().hex[:8]
         source = new_id()
-        await self.service.append_entry(SessionMessageEntry(
+        await self.service.entries.append_entry(SessionMessageEntry(
             session_id=session_id, id=source, parent_id=run.request_entry_id, run_id=run.id,
             type="message", messages=[AssistantMessage(
                 role="assistant",
@@ -752,17 +755,17 @@ class Live:
             timezone=BUSINESS_TIMEZONE, business_date=business_date(now_ms()),
             session_id=session_id, run_id="", request_entry_id=run.request_entry_id,
             source_entry_id=source)
-        proposal = await self.business.prepare_profile_update(
+        proposal = await self.business.profile.prepare_profile_update(
             context, ProfileProposalArguments.model_validate(arguments))
         display = new_id()
-        await self.service.append_entry(SessionMessageEntry(
+        await self.service.entries.append_entry(SessionMessageEntry(
             session_id=session_id, id=display, parent_id=source, run_id=run.id,
             type="message", messages=[ToolResultMessage(
                 role="toolResult", tool_call_id=call_id, tool_name="prepare_profile_update",
                 content=[TextContent(type="text", text=proposal.model_dump_json())],
                 is_error=False, timestamp=now_ms())], created_at=now_ms()))
-        await self.business.bind_display_entry(proposal.proposal_id, display)
-        await self.service.finish_run(session_id, run.id, "completed")
+        await self.business.profile.bind_display_entry(proposal.proposal_id, display)
+        await self.service.runs.finish_run(session_id, run.id, "completed")
         return {"proposal": proposal.proposal_id, "display": display, "source": source}
 
     def stage_profile(self, session_id: str) -> dict:
@@ -812,13 +815,13 @@ def check_http_disconnect(live: Live) -> dict:
     ids = live.stage_profile(session)
     operation_id = new_id()
     unblock = threading.Event()
-    original_save = live.business.save_profile_update
+    original_save = live.business.profile.save_profile_update
 
     async def slow_save(context, arguments, signal=None, *, on_committed=None):
         await asyncio.get_running_loop().run_in_executor(None, unblock.wait, 30)
         return await original_save(context, arguments, signal, on_committed=on_committed)
 
-    live.business.save_profile_update = slow_save
+    live.business.profile.save_profile_update = slow_save
     aborted = False
     try:
         short = httpx.Client(
@@ -856,7 +859,7 @@ def check_http_disconnect(live: Live) -> dict:
             "active_free": not active.locked(), "span": record["name"],
         }
     finally:
-        live.business.save_profile_update = original_save
+        live.business.profile.save_profile_update = original_save
         unblock.set()
 
 

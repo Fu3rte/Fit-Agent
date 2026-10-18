@@ -11,7 +11,7 @@ import uvicorn
 from openai._streaming import SSEDecoder
 from pydantic import TypeAdapter
 
-from app.agent.prompts import SYSTEM_PROMPT
+from app.agent.prompts import build_system_prompt
 from app.agent.usage import summarize_usage
 from app.ai.messages import (
     AssistantMessage,
@@ -33,14 +33,14 @@ def stored_messages(session_id: str) -> list:
     service = app.state.session_service
     try:
         session = asyncio.run_coroutine_threadsafe(
-            service.get_session(session_id), app.state.loop
+            service.queries.get_session(session_id), app.state.loop
         ).result()
     except SessionNotFound:
         return []
     if session is None:
         return []
     entries = asyncio.run_coroutine_threadsafe(
-        service.get_current_branch(session_id), app.state.loop
+        service.queries.get_current_branch(session_id), app.state.loop
     ).result()
     return [entry.messages[0] for entry in entries]
 
@@ -56,7 +56,7 @@ def create_session(client, session_id: str, title: str = "只回答完成") -> N
 def last_run(session_id: str):
     service = app.state.session_service
     runs_list = asyncio.run_coroutine_threadsafe(
-        service.list_runs(session_id), app.state.loop
+        service.queries.list_runs(session_id), app.state.loop
     ).result()
     return runs_list[-1] if runs_list else None
 
@@ -181,7 +181,7 @@ async def check_duplicate_host() -> None:
 
 
 def check_credential_filter() -> None:
-    from app.interfaces.http import CredentialFilter
+    from app.application.session.credentials import CredentialFilter
 
     secret = "sk-" + "a" * 61
     guard = CredentialFilter((secret,))
@@ -354,7 +354,7 @@ def check() -> None:
             assert isinstance(history[0], SystemMessage) and isinstance(
                 history[1], UserMessage
             )
-            assert history[0].content == SYSTEM_PROMPT
+            assert history[0].content == build_system_prompt()
             assert {tool.name for tool in history[0].tools_added} == {
                 "read",
                 "write",

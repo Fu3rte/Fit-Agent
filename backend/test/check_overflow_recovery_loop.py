@@ -17,7 +17,7 @@ from app.ai.stream import stream
 from app.domain.session.models import CompactionEntry, Session, SessionMessageEntry
 from app.infrastructure.persistence.sqlite import database as database_module
 from app.infrastructure.persistence.sqlite.repository import SqliteSessionRepository
-from app.interfaces import http as http_module
+from app.application.session import execution as http_module
 from app.interfaces.http import CONTEXT_OVERFLOW_MESSAGE, active, app
 from app.model_config import load_model_config
 from test.regression_support import (
@@ -183,7 +183,7 @@ def success_scenario(http, ids: dict, trigger: str) -> dict:
     assert kinds[-1] == "done", result[-1]
     assert kinds.index("compaction_start") < kinds.index("compaction_end")
 
-    entries = call(service.list_entries(session_id), loop)
+    entries = call(service.queries.list_entries(session_id), loop)
     failed_entry = next(
         entry for entry in entries
         if isinstance(entry, SessionMessageEntry)
@@ -203,12 +203,12 @@ def success_scenario(http, ids: dict, trigger: str) -> dict:
     assert str(checkpoint.first_kept_entry_id) == ids["user2"]
     assert checkpoint.usage.total_tokens > 0
 
-    run = call(service.list_runs(session_id), loop)[-1]
+    run = call(service.queries.list_runs(session_id), loop)[-1]
     assert run.status == "completed", (run.status, run.error_code, run.error_message)
     assert str(run.request_entry_id) == request_entry_id
     assert run.id == result[0]["data"]["run_id"]
 
-    projection = call(service.get_projection(session_id, run.last_entry_id), loop)
+    projection = call(service.queries.get_projection(session_id, run.last_entry_id), loop)
     assert str(failed_entry.id) not in [str(item) for item in projection.context.source_entry_ids]
     return {
         "run_id": run.id,
@@ -244,7 +244,7 @@ def second_overflow_scenario(http, ids: dict, trigger: str) -> dict:
     assert final["data"]["code"] == "context_overflow"
     assert final["data"]["message"] == CONTEXT_OVERFLOW_MESSAGE
 
-    entries = call(service.list_entries(session_id), loop)
+    entries = call(service.queries.list_entries(session_id), loop)
     omitted = [
         entry for entry in entries
         if isinstance(entry, SessionMessageEntry) and entry.model_omitted
@@ -254,7 +254,7 @@ def second_overflow_scenario(http, ids: dict, trigger: str) -> dict:
     checkpoints = [entry for entry in entries if isinstance(entry, CompactionEntry)]
     assert len(checkpoints) == 1
 
-    run = call(service.list_runs(session_id), loop)[-1]
+    run = call(service.queries.list_runs(session_id), loop)[-1]
     assert (run.status, run.error_code, run.error_message) == (
         "failed", "context_overflow", CONTEXT_OVERFLOW_MESSAGE,
     )

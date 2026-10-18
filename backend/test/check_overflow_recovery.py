@@ -351,7 +351,7 @@ async def scenario_persistence_and_restart() -> None:
 
     database, repository = await open_store(path)
     service = SessionService(repository)
-    projection = await service.get_projection(SID, "u2")
+    projection = await service.queries.get_projection(SID, "u2")
     assert "fail" not in projection.context.source_entry_ids
     stored = await repository.get_entry(SID, "fail")
     assert stored is not None and stored.model_omitted is True
@@ -359,7 +359,7 @@ async def scenario_persistence_and_restart() -> None:
 
     database, repository = await open_store(path)
     service = SessionService(repository)
-    projection = await service.get_projection(SID, "u2")
+    projection = await service.queries.get_projection(SID, "u2")
     assert "fail" not in projection.context.source_entry_ids
     stored = await repository.get_entry(SID, "fail")
     assert stored is not None and stored.model_omitted is True
@@ -377,8 +377,8 @@ async def scenario_branch_isolation() -> None:
 
     database, repository = await open_store(path)
     service = SessionService(repository)
-    with_fail = await service.get_projection(SID, "u2")
-    other = await service.get_projection(SID, "u3")
+    with_fail = await service.queries.get_projection(SID, "u2")
+    other = await service.queries.get_projection(SID, "u3")
     assert "fail" not in with_fail.context.source_entry_ids
     assert "fail" not in other.context.source_entry_ids
     assert "u3" in other.context.source_entry_ids
@@ -425,7 +425,7 @@ async def scenario_edit_replaces() -> None:
     )
     assert outcome.created is True
     # 编辑目标 u2 的父链仍包含省略节点；省略语义保持，投影继续跳过。
-    projection = await service.get_projection(SID, outcome.run.request_entry_id)
+    projection = await service.queries.get_projection(SID, outcome.run.request_entry_id)
     assert "fail" not in projection.context.source_entry_ids
     await database.close()
     print("PASS: 编辑后省略语义一致")
@@ -466,7 +466,7 @@ async def scenario_budget_recheck() -> None:
         committed: list[str] = []
 
         async def compact(compaction_id, signal, span):
-            projection = await service.get_projection(SID, position["id"])
+            projection = await service.queries.get_projection(SID, position["id"])
             preparation = C.prepare_compaction(
                 projection.path, spec.context_window, spec.max_tokens, settings
             )
@@ -502,13 +502,13 @@ async def scenario_budget_recheck() -> None:
                 ),
                 created_at=tick(),
             )
-            outcome = await service.commit_compaction(
+            outcome = await service.entries.commit_compaction(
                 checkpoint, baseline, prepared_position=checkpoint.parent_id, credentials=()
             )
             assert outcome.credential_detected is False
             position["id"] = outcome.entry.id
             committed.append(outcome.entry.id)
-            refreshed = await service.get_projection(SID, outcome.entry.id)
+            refreshed = await service.queries.get_projection(SID, outcome.entry.id)
             return LoopCompactionResult(
                 entry_id=outcome.entry.id,
                 parent_id=outcome.entry.parent_id,
@@ -516,7 +516,7 @@ async def scenario_budget_recheck() -> None:
             )
 
         async def estimate_request() -> int:
-            projection = await service.get_projection(SID, position["id"])
+            projection = await service.queries.get_projection(SID, position["id"])
             return C.estimate_context_tokens([*projection.context.messages, dynamic]).tokens
 
         hooks = CompactionHooks(

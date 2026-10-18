@@ -22,8 +22,9 @@ from app.ai.messages import (
     Usage,
     UserMessage,
 )
+from app.application.session.credentials import CredentialFilter
+from app.application.session.runtime import coordination
 from app.interfaces.http import (
-    CredentialFilter,
     active,
     app,
     public_content,
@@ -514,7 +515,7 @@ def check_cancel_before_text(http) -> dict:
 
 
 def check_model_failure(http, config) -> dict:
-    import app.interfaces.http as http_module
+    from app.interfaces.http_api.routes import agent as http_module
 
     original = http_module.load_model_config
     bad = config.model_copy(update={"base_url": "http://127.0.0.1:1/v1"})
@@ -594,7 +595,7 @@ def check_shutdown(store) -> dict:
     except Exception as error:
         closed = "no active connection" in str(error)
     assert closed
-    assert len(app.state.coordination) == 0
+    assert len(coordination) == 0
     return {"connection_closed": closed, "coordination": 0}
 
 

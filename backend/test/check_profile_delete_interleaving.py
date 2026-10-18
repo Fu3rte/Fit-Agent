@@ -71,7 +71,7 @@ def save(ids):
     arguments = ProfileSaveArguments(proposal_id=ids['proposal'], display_entry_id=ids['display'],
                                      confirmation_entry_id=ids['confirmation'])
     try:
-        result = call(app.state.business.save_profile_update(context, arguments))
+        result = call(app.state.business.profile.save_profile_update(context, arguments))
     except BusinessError as error:
         return ToolResultMessage(
             role='toolResult', tool_call_id=new_id(), tool_name='confirm_save',

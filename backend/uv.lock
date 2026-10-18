@@ -94,6 +94,7 @@ dependencies = [
     { name = "openai" },
     { name = "pydantic" },
     { name = "pymilvus" },
+    { name = "pyyaml" },
     { name = "uvicorn" },
 ]
 
@@ -118,6 +119,7 @@ requires-dist = [
     { name = "openai", specifier = ">=3,<4" },
     { name = "pydantic", specifier = ">=2,<3" },
     { name = "pymilvus", specifier = ">=3.0.2,<3.1" },
+    { name = "pyyaml", specifier = ">=6,<7" },
     { name = "uvicorn", specifier = ">=0.30" },
 ]
 

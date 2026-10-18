@@ -12,6 +12,7 @@ from app.application.session import service as session_service
 from app.domain.session.models import SendCommand, SendRequest
 from app.infrastructure.persistence.sqlite import database as database_module
 from app.interfaces import http as http_interface
+from app.interfaces.http_api.routes import agent as agent_routes
 from test.regression_support import Server, client, run_tool
 from test.v2_attempts import claim_slot, read_record, slot_attachment_root
 from test.v2_eval_support import (
@@ -49,7 +50,7 @@ def test_windows_long_attachment_and_tool_paths(monkeypatch, additional):
     environments = [env_for(root, cases[name], slot) for slot, name in enumerate(("L05", "L06"))]
     session_id = str(uuid4())
     previous_attachment = None
-    original_factory = http_interface.create_file_tools
+    original_factory = agent_routes.create_file_tools
     original_root = session_service.PROJECT_ROOT
     unchanged = [env.model_dump() for env in environments]
     for env in environments:
@@ -78,9 +79,9 @@ def test_windows_long_attachment_and_tool_paths(monkeypatch, additional):
                     session_id=session_id, operation_id=str(uuid4()),
                     request=SendRequest(text="读取附件", attachments=inputs),
                 ), system_message=SYSTEM))
-                tools = http_interface.create_file_tools(session_id)
+                tools = agent_routes.create_file_tools(session_id)
                 for item in inputs:
-                    metadata, text = _call(service.get_attachment_content(session_id, item["attachment_id"]))
+                    metadata, text = _call(service.attachments.get_attachment_content(session_id, item["attachment_id"]))
                     relative = metadata.storage_ref.removeprefix("tmp/")
                     ordinary = Path(env.attachment_root) / metadata.storage_ref
                     assert len(str(ordinary)) >= 260
@@ -100,7 +101,7 @@ def test_windows_long_attachment_and_tool_paths(monkeypatch, additional):
                 assert denied.is_error
                 assert "只允许访问当前会话" in denied.content[0].text
                 previous_attachment = metadata.storage_ref.removeprefix("tmp/")
-                files = service._files(())
+                files = service.attachments.files(())
                 disposable = {**inputs[0], "attachment_id": str(uuid4())}
                 prepared = files.prepare(session_id, [disposable], existing={})[0]
                 created = []
@@ -108,12 +109,12 @@ def test_windows_long_attachment_and_tool_paths(monkeypatch, additional):
                 assert files.read(session_id, metadata)
                 files.remove_created(created[0])
                 assert not (directory / metadata.storage_ref).exists()
-                _call(service.finish_run(session_id, outcome.run.id, "completed"))
+                _call(service.runs.finish_run(session_id, outcome.run.id, "completed"))
             with pytest.raises(FileExistsError, match="槽位已有证据"):
                 claim_slot(env)
             claim = root / "claims" / f"{env.case_id}-r0.json"
             assert read_record(claim)["status"] == "rejected_existing_artifacts"
-        assert http_interface.create_file_tools is original_factory
+        assert agent_routes.create_file_tools is original_factory
         assert session_service.PROJECT_ROOT == original_root
     assert [env.model_dump() for env in environments] == unchanged
     for env in environments:
@@ -124,14 +125,14 @@ def test_windows_long_attachment_and_tool_paths(monkeypatch, additional):
 def test_slot_file_roots_restore_on_exception(tmp_path):
     case = load_cases(BACKEND / "test/v2_cases.json")[0]
     env = env_for(tmp_path, case, 0)
-    original_factory = http_interface.create_file_tools
+    original_factory = agent_routes.create_file_tools
     original_root = session_service.PROJECT_ROOT
     with pytest.raises(RuntimeError, match="结束槽位检查"):
         with slot_file_roots(env):
             with slot_file_roots(env):
                 assert session_service.PROJECT_ROOT == slot_attachment_root(env)
             raise RuntimeError("结束槽位检查")
-    assert http_interface.create_file_tools is original_factory
+    assert agent_routes.create_file_tools is original_factory
     assert session_service.PROJECT_ROOT == original_root
 
 

@@ -25,12 +25,12 @@ async def seed(path):
         session = await f.session("计划HTTP查询")
         await profile(f, session)
         context, arguments = await prepare(f, session)
-        first = await f.business.save_plan(context, arguments)
+        first = await f.business.plans.save_plan(context, arguments)
         context2, arguments2 = await prepare(f, session, base_plan_id=first.id)
-        second = await f.business.save_plan(context2, arguments2)
+        second = await f.business.plans.save_plan(context2, arguments2)
         interrupted, pending = await prepare(f, session, base_plan_id=second.id)
         async with f.repository.transaction():
-            await f.business._begin_plan_save(interrupted, pending)
+            await f.business.plans._begin_plan_save(interrupted, pending)
         assert (await f.repository.get_plan_snapshot(pending.proposal_id)).status == "processing"
         return first, second, interrupted, pending
     finally:
@@ -96,14 +96,14 @@ def check():
         assert len(records) == 2 and records[0]["id"] == second.id
         assert sum(record["is_current"] for record in records) == 1
         # HTTP 查询与业务服务读取保持同一形状与顺序。
-        assert records == [item.model_dump() for item in call(app.state.business.list_plans())]
-        assert query(http, "/api/plans/current") == call(app.state.business.get_current_plan()).model_dump()
-        assert query(http, "/api/plans/" + first.id) == call(app.state.business.get_plan(first.id)).model_dump()
+        assert records == [item.model_dump() for item in call(app.state.business.plans.list_plans())]
+        assert query(http, "/api/plans/current") == call(app.state.business.plans.get_current_plan()).model_dump()
+        assert query(http, "/api/plans/" + first.id) == call(app.state.business.plans.get_plan(first.id)).model_dump()
         missing = query(http, "/api/plans/" + str(uuid4()), 404)
         assert set(missing["detail"]) == {"code", "message"} and missing["detail"]["code"] == "plan_not_found"
         assert query(http, "/api/plans/" + first.id)["is_current"] is False
         assert query(http, "/api/plans/" + second.id)["is_current"] is True
-        status = call(app.state.business.get_plan_save_status(context, pending.proposal_id))
+        status = call(app.state.business.plans.get_plan_save_status(context, pending.proposal_id))
         assert status.status == "pending" and status.result is None
 
         def confirmation() -> SaveConfirmationRequest:
@@ -127,7 +127,7 @@ def check():
             sensitive = PlanRecord(id=str(uuid4()), is_current=True, created_at=saved.created_at + 1, content=content)
 
             async def insert():
-                await app.state.business._repository.insert_plan(sensitive)
+                await app.state.business_repository.insert_plan(sensitive)
 
             call(insert())
             for endpoint in ("/api/plans", "/api/plans/current", "/api/plans/" + sensitive.id):
@@ -136,7 +136,7 @@ def check():
                 assert token not in json.dumps(body)
 
             async def remove_sensitive():
-                repository = app.state.business._repository
+                repository = app.state.business_repository
                 async with repository.transaction():
                     await repository._write("DELETE FROM plans WHERE id = ?", (sensitive.id,))
                     await repository._write("UPDATE plans SET is_current = 1 WHERE id = ?", (saved.id,))

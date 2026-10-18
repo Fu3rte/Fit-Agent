@@ -360,7 +360,7 @@ async def business_cases() -> None:
         assert payload["items"][0] == fixture.catalog.get("0001").model_dump()
         assert set(payload) == {"items", "has_more", "remaining_ids"}
         assert message_payload(success) == payload
-        assert (await fixture.business.get_profile()).version is None
+        assert (await fixture.business.profile.get_profile()).version is None
     finally:
         await fixture.close()
 

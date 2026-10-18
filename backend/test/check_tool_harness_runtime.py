@@ -26,7 +26,7 @@ from app.ai.messages import (
     UserMessage,
     text_projection,
 )
-from app.interfaces.http import CredentialFilter
+from app.application.session.credentials import CredentialFilter
 from test.check_tool_scheduling import single, usage
 from test.regression_support import TEST_SESSION, session_workspace
 

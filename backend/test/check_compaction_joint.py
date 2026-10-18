@@ -90,7 +90,7 @@ async def seed(path: Path, session_id: str, parts: int) -> dict:
         assert message.is_error is False, message_text(message)
         proposal = envelope(message)["proposal_id"]
         display = await fixture.append(session_id, run.id, source, message)
-        await fixture.business.bind_display_entry(proposal, display)
+        await fixture.business.profile.bind_display_entry(proposal, display)
         # 长历史 filler 用户节点直接经 repository 写入：append_entry 只接受助手/工具结果节点。
         sessions = SqliteSessionRepository(fixture.database)
         filler_ids = []
@@ -110,7 +110,7 @@ async def seed(path: Path, session_id: str, parts: int) -> dict:
             await sessions.update_session(
                 stored.model_copy(update={"active_leaf_id": parent, "updated_at": now_ms()})
             )
-        await fixture.service.finish_run(session_id, run.id, "completed")
+        await fixture.service.runs.finish_run(session_id, run.id, "completed")
         ids.update(
             request=request_id, source=source, call=call_id, display=display,
             proposal=proposal, fillers=filler_ids, leaf=parent,
@@ -195,12 +195,12 @@ def scenario_read_and_save(http, ids: dict) -> dict:
     assert body["payload"] == payload()
 
     # 展示节点已被总结：模型投影来源不再包含展示/来源节点，但原始路径仍保留。
-    run = call(service.list_runs(session_id), loop)[-1]
-    projection = call(service.get_projection(session_id, run.last_entry_id), loop)
+    run = call(service.queries.list_runs(session_id), loop)[-1]
+    projection = call(service.queries.get_projection(session_id, run.last_entry_id), loop)
     sources = [str(item) for item in projection.context.source_entry_ids]
     assert ids["display"] not in sources and ids["source"] not in sources
     checkpoints = [
-        e for e in call(service.list_entries(session_id), loop) if isinstance(e, CompactionEntry)
+        e for e in call(service.queries.list_entries(session_id), loop) if isinstance(e, CompactionEntry)
     ]
     assert len(checkpoints) == 1
     checkpoint = checkpoints[0]
@@ -236,10 +236,10 @@ def scenario_read_and_save(http, ids: dict) -> dict:
     confirmation_id = operation["confirmation_entry_id"]
     assert result_body["proposal_id"] == ids["proposal"]
     assert result_body["version"] == 1 and result_body["content"] == payload()
-    profile = call(app.state.business.get_profile(), loop)
+    profile = call(app.state.business.profile.get_profile(), loop)
     assert profile.version == 1 and profile.content.model_dump() == payload()
     # 确认节点为后端生成的用户节点，run_id 为空且不创建 session_runs。
-    confirmation_entry = call(service.get_entry(session_id, confirmation_id), loop)
+    confirmation_entry = call(service.queries.get_entry(session_id, confirmation_id), loop)
     assert confirmation_entry.run_id is None
     assert confirmation_entry.messages[0].role == "user"
     return {
@@ -282,7 +282,7 @@ def scenario_repeated_compaction(http, ids: dict) -> dict:
     service = app.state.session_service
     loop = app.state.loop
     before = [
-        e for e in call(service.list_entries(session_id), loop) if isinstance(e, CompactionEntry)
+        e for e in call(service.queries.list_entries(session_id), loop) if isinstance(e, CompactionEntry)
     ]
     appended = [append_part(session_id, part_text()) for _ in range(EXTRA_PARTS)]
     _, result = turn(http, session_id, "只回复：继续。")
@@ -290,7 +290,7 @@ def scenario_repeated_compaction(http, ids: dict) -> dict:
     reasons = [item["data"]["reason"] for item in starts]
     assert reasons and reasons[0] == "threshold" and len(ends) == len(starts), reasons
     after = [
-        e for e in call(service.list_entries(session_id), loop) if isinstance(e, CompactionEntry)
+        e for e in call(service.queries.list_entries(session_id), loop) if isinstance(e, CompactionEntry)
     ]
     assert len(after) > len(before), (len(before), len(after))
     checkpoint = after[-1]
@@ -321,7 +321,7 @@ def scenario_rejections(ids: dict) -> dict:
     declared = {item.name: item for item in business_tool_declarations()}
 
     async def build_context(session_id: str):
-        entries = await service.list_entries(session_id)
+        entries = await service.queries.list_entries(session_id)
         request = next(
             (e.id for e in entries if e.messages and e.messages[0].role == "user"), new_id()
         )

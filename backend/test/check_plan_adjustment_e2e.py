@@ -77,7 +77,7 @@ def stage_setup(root: Path, state: dict, http) -> None:
         page=1,
         page_size=10,
     )
-    result = support.call(support.interface.app.state.business.list_workouts(arguments))
+    result = support.call(support.interface.app.state.business.workouts.list_workouts(arguments))
     items = [record.model_dump() for record in result.items]
     assert result.total == 12 and result.page == 1 and result.page_size == 10, result
     assert len(items) == 10, items
@@ -145,7 +145,7 @@ def display_message(session: str, entry_id: str):
 
 
 def entry_message(session: str, entry_id: str):
-    entries = support.call(support.interface.app.state.session_service.get_current_branch(session))
+    entries = support.call(support.interface.app.state.session_queries.get_current_branch(session))
     matched = [entry for entry in entries if entry.id == entry_id]
     assert len(matched) == 1, entry_id
     return matched[0].messages[0]
@@ -161,12 +161,12 @@ def plan_status(session: str, proposal_id: str) -> dict:
         source_entry_id=str(uuid4()),
     )
     return support.call(
-        support.interface.app.state.business.get_plan_save_status(context, proposal_id)
+        support.interface.app.state.business.plans.get_plan_save_status(context, proposal_id)
     ).model_dump()
 
 
 def display_for(session: str, proposal_id: str) -> str:
-    bindings = support.call(support.interface.app.state.business.list_plan_display_bindings(session))
+    bindings = support.call(support.interface.app.state.business.plans.list_plan_display_bindings(session))
     matches = [entry for entry, value in bindings.items() if value == proposal_id]
     assert len(matches) == 1, bindings
     return matches[0]
@@ -259,7 +259,7 @@ def stage_A(root: Path, state: dict, http) -> None:
     assert not success_named(run, "prepare_plan") and not success_named(run, "prepare_plan_import")
 
     display = prepare_item["entry_id"]
-    bindings = support.call(support.interface.app.state.business.list_plan_display_bindings(session))
+    bindings = support.call(support.interface.app.state.business.plans.list_plan_display_bindings(session))
     matches = [entry for entry, proposal_id in bindings.items() if proposal_id == proposal["proposal_id"]]
     assert len(matches) == 1, bindings
     assert matches[0] == display, (matches[0], display)
@@ -344,7 +344,7 @@ def stage_B(root: Path, state: dict, http) -> None:
     status = plan_status(session, proposal["proposal_id"])
     assert status["status"] == "saved" and status["result"] == saved, status
 
-    entries = support.call(support.interface.app.state.session_service.get_current_branch(session))
+    entries = support.call(support.interface.app.state.session_queries.get_current_branch(session))
     ids = [entry.id for entry in entries]
     confirmation = operation["confirmation_entry_id"]
     assert display in ids and confirmation in ids, (display, confirmation)

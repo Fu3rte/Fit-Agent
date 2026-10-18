@@ -5,6 +5,8 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 
 from app.ai.messages import UserMessage
+from app.application.session.operations import SessionOperations
+from app.application.session.runs import SessionRuns
 from app.application.session.service import SessionService
 from app.domain.session.attachments import AttachmentMetadata
 from app.domain.session.errors import RunClosed, SteeringConsumptionConflict
@@ -68,8 +70,15 @@ class RunSteeringBoundary:
 
 
 class SteeringCoordinator:
-    def __init__(self, service: SessionService) -> None:
+    def __init__(
+        self,
+        service: SessionService,
+        operations: SessionOperations | None = None,
+        runs: SessionRuns | None = None,
+    ) -> None:
         self._service = service
+        self._operations = operations if operations is not None else service.operations
+        self._runs = runs if runs is not None else service.runs
         self._boundaries: dict[str, RunSteeringBoundary] = {}
 
     def open(
@@ -90,7 +99,7 @@ class SteeringCoordinator:
         credentials: Sequence[str] = (),
     ) -> tuple[bool, SteeringInput]:
         # 重复查重先于目标运行是否仍接受输入的检查。
-        if await self._service.get_operation(command.operation_id) is not None:
+        if await self._operations.get_operation(command.operation_id) is not None:
             outcome = await self._service.accept_steering(
                 command, credentials=credentials
             )
@@ -98,7 +107,7 @@ class SteeringCoordinator:
         boundary = self._boundaries.get(run_id)
         if boundary is None:
             # 无内存边界：以数据库为操作身份权威，已提交重复返回原身份。
-            if await self._service.get_operation(command.operation_id) is None:
+            if await self._operations.get_operation(command.operation_id) is None:
                 raise RunClosed("目标运行已关闭接受入口")
             outcome = await self._service.accept_steering(
                 command, credentials=credentials
@@ -108,7 +117,7 @@ class SteeringCoordinator:
             boundary = self._boundaries.get(run_id)
             closed = boundary is None or not boundary.accepting
             if closed and (
-                await self._service.get_operation(command.operation_id) is None
+                await self._operations.get_operation(command.operation_id) is None
             ):
                 # 入口关闭后新操作被拒绝；并发已提交的重复操作仍返回原身份。
                 raise RunClosed("目标运行已关闭接受入口")
@@ -126,14 +135,14 @@ class SteeringCoordinator:
         if boundary is not None and steering_id in boundary.occupied.values():
             raise SteeringConsumptionConflict("目标输入正在被消费")
         if boundary is None:
-            return await self._service.withdraw_steering(
+            return await self._runs.withdraw_steering(
                 session_id, run_id, steering_id
             )
         async with boundary.gate.exclusive():
             boundary = self._boundaries.get(run_id)
             if boundary is not None and steering_id in boundary.occupied.values():
                 raise SteeringConsumptionConflict("目标输入正在被消费")
-            withdrawal = await self._service.withdraw_steering(
+            withdrawal = await self._runs.withdraw_steering(
                 session_id, run_id, steering_id
             )
             if boundary is not None and withdrawal.changed:
@@ -177,7 +186,7 @@ class SteeringCoordinator:
                 if steering_id is None:
                     continue
                 # 提交前保持占用；单条事务成功后立即解除占用并发布该条确认。
-                result = await self._service.consume_steering(
+                result = await self._runs.consume_steering(
                     boundary.session_id, run_id, steering_id
                 )
                 boundary.occupied.pop(id(message), None)
@@ -205,7 +214,7 @@ class SteeringCoordinator:
     ) -> RunOutcome:
         boundary = self._boundaries.get(run_id)
         if boundary is None:
-            return await self._service.finish_run(
+            return await self._runs.finish_run(
                 session_id,
                 run_id,
                 status,
@@ -215,8 +224,8 @@ class SteeringCoordinator:
             )
         async with boundary.gate.exclusive():
             boundary = self._boundaries.get(run_id)
-            pending = await self._service.list_pending_steering(session_id, run_id)
-            outcome = await self._service.finish_run(
+            pending = await self._runs.list_pending_steering(session_id, run_id)
+            outcome = await self._runs.finish_run(
                 session_id,
                 run_id,
                 status,

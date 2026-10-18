@@ -15,6 +15,7 @@ from app.ai.messages import (
     text_projection,
 )
 from app.ai.stream import AssistantResponse
+from app.application.session import execution
 from app.infrastructure.persistence.sqlite import database as database_module
 from app.interfaces import http as interface
 from test.check_http import events, validate_events, wait_idle
@@ -258,7 +259,7 @@ async def seed_state(database: Path, chain: dict) -> dict:
     try:
         session = await f.session("装配层真实生成链")
         await profile(f, session)
-        saved = await f.business.get_profile()
+        saved = await f.business.profile.get_profile()
         ranges = [call for call in chain["calls"] if call["name"] == "list_workouts"]
         records = []
         if ranges:
@@ -266,7 +267,7 @@ async def seed_state(database: Path, chain: dict) -> dict:
             for offset in range(3):
                 performed = (anchor - timedelta(days=offset)).isoformat()
                 context, arguments, _ = await prepare_workout(f, session, performed)
-                records.append(await f.business.save_workout(context, arguments))
+                records.append(await f.business.workouts.save_workout(context, arguments))
         return {"profile": saved.model_dump(), "workouts": [record.model_dump() for record in records]}
     finally:
         await f.close()
@@ -298,8 +299,8 @@ def check(source: str) -> dict:
     import_calls = [call for call in chain["calls"] if call["name"] == PLAN_IMPORT]
     expected_names = [call["name"] for call in chain["calls"]]
     database_module.default_database_path = lambda: database
-    original = interface.run_agent_loop
-    interface.run_agent_loop = replay_loop
+    original = execution.run_agent_loop
+    execution.run_agent_loop = replay_loop
     before = preserved_rows(database)
     evidence: dict = {"level": LEVEL, "source": str(Path(source).resolve()), "database": str(database)}
     try:
@@ -422,7 +423,7 @@ def check(source: str) -> dict:
                        "sqlite fk and integrity"]})
         return evidence
     finally:
-        interface.run_agent_loop = original
+        execution.run_agent_loop = original
         STRICT_FAILURES.clear()
         COUNTED.clear()
         (ROOT / "evidence.json").write_text(json.dumps(evidence, ensure_ascii=False, indent=2, default=str),

@@ -101,7 +101,7 @@ async def attachments_and_tools(root: Path) -> dict:
             run = await service.accept_send(
                 send(session, "", [item]), system_message=SYSTEM
             )
-            await service.finish_run(session, run.run.id, "completed")
+            await service.runs.finish_run(session, run.run.id, "completed")
             return f"sessions/{session}/attachments/{item['attachment_id']}.txt"
 
         # 文字加文件、纯文件均进入同一分支并按真实节点投影。
@@ -111,16 +111,16 @@ async def attachments_and_tools(root: Path) -> dict:
         first_run = await service.accept_send(
             send(session, "录入这个计划", [plan, notes]), system_message=SYSTEM
         )
-        await service.finish_run(session, first_run.run.id, "completed")
+        await service.runs.finish_run(session, first_run.run.id, "completed")
         pure_body = "纯文件正文\n第二行\n"
         pure = upload(pure_body.encode("utf-8"), "pure.txt")
         pure_run = await service.accept_send(
             send(session, "", [pure]), system_message=SYSTEM
         )
-        await service.finish_run(session, pure_run.run.id, "completed")
+        await service.runs.finish_run(session, pure_run.run.id, "completed")
 
-        leaf = (await service.get_session(session)).active_leaf_id
-        entries = await service.get_branch(session, leaf)
+        leaf = (await service.queries.get_session(session)).active_leaf_id
+        entries = await service.queries.get_branch(session, leaf)
         users = [entry for entry in entries if entry.messages[0].role == "user"]
         projected = project(entries)
         assert len(projected) == 2, projected
@@ -144,7 +144,7 @@ async def attachments_and_tools(root: Path) -> dict:
         long_run = await service.accept_send(
             send(session, "", [long_upload]), system_message=SYSTEM
         )
-        await service.finish_run(session, long_run.run.id, "completed")
+        await service.runs.finish_run(session, long_run.run.id, "completed")
         long_path = f"sessions/{session}/attachments/{long_upload['attachment_id']}.txt"
         window = await tool_result(reader, {"path": long_path, "offset": 1, "limit": 2})
         window_text = text(window)
@@ -211,7 +211,7 @@ async def attachments_and_tools(root: Path) -> dict:
         other_run = await service.accept_send(
             send(other, "", [other_plan]), system_message=SYSTEM
         )
-        await service.finish_run(other, other_run.run.id, "completed")
+        await service.runs.finish_run(other, other_run.run.id, "completed")
         cross = f"sessions/{other}/attachments/{other_plan['attachment_id']}.md"
         assert "当前会话" in text(await tool_result(reader, {"path": cross}))
         assert "只允许 tmp" in text(await tool_result(reader, {"path": "../escape.txt"}))
@@ -238,10 +238,10 @@ async def attachments_and_tools(root: Path) -> dict:
             ),
         )
         edited = await service.accept_edit(edit)
-        await service.finish_run(session, edited.run.id, "completed")
-        edited_entry = await service.get_entry(session, edited.run.request_entry_id)
+        await service.runs.finish_run(session, edited.run.id, "completed")
+        edited_entry = await service.queries.get_entry(session, edited.run.request_entry_id)
         assert [item.attachment_id for item in edited_entry.attachments] == [pure["attachment_id"]]
-        assert project(await service.get_branch(session, edited.run.request_entry_id))[-1][0][1] == projected[1][0][1]
+        assert project(await service.queries.get_branch(session, edited.run.request_entry_id))[-1][0][1] == projected[1][0][1]
 
         replacement = upload("替换正文\n".encode("utf-8"), "new.txt")
         replace = EditCommand(
@@ -252,14 +252,14 @@ async def attachments_and_tools(root: Path) -> dict:
             ),
         )
         replaced = await service.accept_edit(replace)
-        await service.finish_run(session, replaced.run.id, "completed")
+        await service.runs.finish_run(session, replaced.run.id, "completed")
         regenerated = await service.accept_regenerate(
             RegenerateCommand(operation_id=uid(), session_id=session,
                               request=RegenerateRequest(target_entry_id=replaced.run.request_entry_id))
         )
-        await service.finish_run(session, regenerated.run.id, "completed")
+        await service.runs.finish_run(session, regenerated.run.id, "completed")
         regenerated_projection = project(
-            await service.get_branch(session, regenerated.run.request_entry_id)
+            await service.queries.get_branch(session, regenerated.run.request_entry_id)
         )[-1]
         assert [path for _, path in regenerated_projection] == [
             f"sessions/{session}/attachments/{pure['attachment_id']}.txt",
@@ -281,13 +281,13 @@ async def attachments_and_tools(root: Path) -> dict:
             ),
         ))).steering
         pending_branch = project(
-            await service.get_branch(steer_session, (await service.get_session(steer_session)).active_leaf_id)
+            await service.queries.get_branch(steer_session, (await service.queries.get_session(steer_session)).active_leaf_id)
         )
         pending_paths = [path for group in pending_branch for _, path in group]
         assert all(pending_upload["attachment_id"] not in path for path in pending_paths), pending_branch
-        consumed = await service.consume_steering(steer_session, steer_run.run.id, steering.id)
+        consumed = await service.runs.consume_steering(steer_session, steer_run.run.id, steering.id)
         after_consumption = project(
-            await service.get_branch(steer_session, consumed.entry.id)
+            await service.queries.get_branch(steer_session, consumed.entry.id)
         )
         consumed_projection = after_consumption[-1]
         assert consumed_projection[0][1] == (
@@ -301,12 +301,12 @@ async def attachments_and_tools(root: Path) -> dict:
                 attachments=[withdrawn_upload],
             ),
         ))).steering
-        await service.withdraw_steering(steer_session, steer_run.run.id, withdrawn.id)
+        await service.runs.withdraw_steering(steer_session, steer_run.run.id, withdrawn.id)
         assert (
-            project(await service.get_branch(steer_session, consumed.entry.id))
+            project(await service.queries.get_branch(steer_session, consumed.entry.id))
             == after_consumption
         )
-        await service.finish_run(steer_session, steer_run.run.id, "completed")
+        await service.runs.finish_run(steer_session, steer_run.run.id, "completed")
 
         return {
             "tmp_root": str(tmp_root),

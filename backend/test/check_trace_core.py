@@ -22,7 +22,7 @@ from app.agent.telemetry import (
     trace_database_path,
     uuid4_canonical,
 )
-from app.interfaces.http import CredentialFilter
+from app.application.session.credentials import CredentialFilter
 
 BACKEND = Path(__file__).resolve().parents[1]
 ROOT = BACKEND / "temp" / "trace" / "core"

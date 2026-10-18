@@ -53,7 +53,7 @@ async def check(source):
         session = await fixture.session("真实生成链新契约")
         # 新契约：真实模型消息里的空依据字符串经参数预处理归一为 null，需要已保存画像作为生成依据。
         await profile(fixture, session)
-        assert (await fixture.business.get_profile()).version == 1
+        assert (await fixture.business.profile.get_profile()).version == 1
         declared = {tool.name: tool for tool in business_tool_declarations()}
         registered: dict[str, str] = {}
         proposals = []
@@ -81,15 +81,15 @@ async def check(source):
             assert snapshot.preparation_kind == "generation" and snapshot.base_plan_id is None
             assert snapshot.payload.model_dump() == detail["payload"]
             result_id = await fixture.append(session, outcome.run.id, source_id, result)
-            persisted = await fixture.service.get_entry(session, result_id)
+            persisted = await fixture.service.queries.get_entry(session, result_id)
             assert persisted.messages[0] == result
-            await fixture.service.finish_run(session, outcome.run.id, "completed")
+            await fixture.service.runs.finish_run(session, outcome.run.id, "completed")
             proposals.append(detail["proposal_id"])
         # 后一次真实生成使前一次 pending 失效，历史快照保留。
         assert len(proposals) == 2 and proposals[0] != proposals[1]
         assert (await fixture.repository.get_plan_snapshot(proposals[0])).status == "invalidated"
         assert (await fixture.repository.get_plan_snapshot(proposals[1])).status == "pending"
-        current = await fixture.business.get_current_plan()
+        current = await fixture.business.plans.get_current_plan()
         assert current.id is None and current.content is None
 
         # 守卫直测：连续两次相同真实严格失败文本必须停止下一模型请求，守卫实现保持不变。
@@ -103,11 +103,11 @@ async def check(source):
             raise AssertionError("连续相同计划参数失败未触发请求预算守卫")
         integration.STRICT_FAILURES.clear()
         assert not integration.REQUESTS
-        branch = await fixture.service.get_current_branch(session)
+        branch = await fixture.service.queries.get_current_branch(session)
         assert not branch[-1].messages[0].is_error
-        assert not await fixture.business.list_plans()
+        assert not await fixture.business.plans.list_plans()
         await fixture.restart()
-        assert not (await fixture.service.get_current_branch(session))[-1].messages[0].is_error
+        assert not (await fixture.service.queries.get_current_branch(session))[-1].messages[0].is_error
         print("PASS: real persisted model arguments, harness empty-basis normalization to JSON null, "
               "generation snapshots, next-request guard direct trip, restart; zero model requests")
         print("Historical strict failure text sample:", history_text[:60], "...")

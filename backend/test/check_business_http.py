@@ -3,7 +3,8 @@ import json
 from uuid import uuid4
 
 from app.ai.messages import SystemMessage, TextContent, ToolResultMessage
-from app.application.business.service import BusinessService, business_date
+from app.application.business.profile import business_date
+from app.application.business.service import BusinessService
 from app.application.session.service import SessionService
 from app.domain.business.models import (
     BusinessContext,
@@ -34,7 +35,7 @@ async def build_pending(
     service: SessionService, business: BusinessService, data: dict, title: str
 ) -> dict:
     # 真实服务链路：助手工具调用节点 -> 待确认快照 -> 结果节点持久化 -> 展示绑定 -> 用户确认节点。
-    profile = await business.get_profile()
+    profile = await business.profile.get_profile()
     session_id = str(uuid4())
     created, _ = await service.create_session_result(session_id, title)
     assert created
@@ -50,7 +51,7 @@ async def build_pending(
     request_id = run.request_entry_id
     arguments = prepare_arguments(profile.version, data)
     source_id = str(uuid4())
-    await service.append_entry(
+    await service.entries.append_entry(
         SessionMessageEntry(
             session_id=session_id,
             id=source_id,
@@ -69,11 +70,11 @@ async def build_pending(
         request_entry_id=request_id,
         source_entry_id=source_id,
     )
-    proposal = await business.prepare_profile_update(
+    proposal = await business.profile.prepare_profile_update(
         context, ProfileProposalArguments.model_validate(arguments)
     )
     display_id = str(uuid4())
-    await service.append_entry(
+    await service.entries.append_entry(
         SessionMessageEntry(
             session_id=session_id,
             id=display_id,
@@ -98,8 +99,8 @@ async def build_pending(
             created_at=201,
         )
     )
-    await business.bind_display_entry(proposal.proposal_id, display_id)
-    await service.finish_run(session_id, run.id, "completed")
+    await business.profile.bind_display_entry(proposal.proposal_id, display_id)
+    await service.runs.finish_run(session_id, run.id, "completed")
     return {
         "session": session_id,
         "request": request_id,

@@ -5,7 +5,7 @@ from app.agent.tools.common import (
     business_result,
     unbound,
 )
-from app.application.business.service import BusinessService
+from app.application.business.proposals import PendingProposalService
 from app.domain.business.models import (
     BusinessContext,
     PendingProposalArguments,
@@ -62,7 +62,7 @@ def pending_proposal_tool_declarations() -> list[ToolDeclaration]:
 
 
 def bind_pending_proposal_tools(
-    service: BusinessService,
+    service: PendingProposalService,
     context: BusinessContext,
     call: MainLoopCall,
 ) -> dict[str, AgentTool]:

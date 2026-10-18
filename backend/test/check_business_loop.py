@@ -6,6 +6,7 @@ from time import time_ns
 from uuid import uuid4
 
 from app.agent.agent_loop import run_agent_loop
+from app.agent.budget import RequestBudget
 from app.agent.config import AgentLoopConfig
 from app.agent.prompts import SYSTEM_PROMPT
 from app.agent.tool import AgentTool
@@ -27,7 +28,8 @@ from app.ai.messages import (
 from app.ai.stream import AssistantResponse
 from app.application.business.catalog import Catalog
 from app.application.business.coordination import ReplacementCoordinator
-from app.application.business.service import BusinessService, business_date
+from app.application.business.profile import business_date
+from app.application.business.service import BusinessService
 from app.application.session.service import SessionService
 from app.domain.business.models import BusinessContext
 from app.domain.session.models import SendCommand, SendRequest, SessionMessageEntry
@@ -97,8 +99,8 @@ async def check_loop(directory: Path) -> dict:
         repository = SqliteBusinessRepository(database)
         catalog = Catalog.load()
         replacements = ReplacementCoordinator()
-        business = BusinessService(repository, catalog, service, replacements)
-        service.attach_snapshots(business)
+        business = BusinessService(repository, catalog, service.queries, replacements)
+        service.attach_snapshots(business.proposals)
         async with repository.transaction():
             await repository.replace_exercises(catalog.all())
 
@@ -119,8 +121,8 @@ async def check_loop(directory: Path) -> dict:
             system_message=system_message,
         )
         run = outcome.run
-        branch = await service.get_context(session_id, run.request_entry_id)
-        request_entry = await service.get_entry(session_id, run.request_entry_id)
+        branch = await service.queries.get_context(session_id, run.request_entry_id)
+        request_entry = await service.queries.get_entry(session_id, run.request_entry_id)
 
         loop = asyncio.get_running_loop()
         saved: list[str] = []
@@ -133,7 +135,7 @@ async def check_loop(directory: Path) -> dict:
 
         async def save_message(node_id: str, message: Model) -> None:
             saved.append(node_id)
-            await service.append_entry(
+            await service.entries.append_entry(
                 SessionMessageEntry(
                     session_id=session_id,
                     id=node_id,
@@ -152,11 +154,11 @@ async def check_loop(directory: Path) -> dict:
             ):
                 proposal_id = prepared.get(message.tool_call_id)
                 if proposal_id is not None:
-                    await business.bind_display_entry(proposal_id, node_id)
+                    await business.profile.bind_display_entry(proposal_id, node_id)
 
         async def message_nodes(leaf_id: str) -> list[dict]:
             nodes = []
-            for entry in await service.get_branch(session_id, leaf_id):
+            for entry in await service.queries.get_branch(session_id, leaf_id):
                 node = entry.messages[0]
                 if isinstance(node, ToolResultMessage):
                     nodes.append(
@@ -231,6 +233,7 @@ async def check_loop(directory: Path) -> dict:
         config = AgentLoopConfig(
             model=install_test_model_config(),
             max_turns=8,
+            request_budget=RequestBudget(),
             transform_context=transform_context,
             save_message=save_message,
             bind_tools=bind_tools,
@@ -278,7 +281,7 @@ async def check_loop(directory: Path) -> dict:
         assert snapshot.display_entry_id == display_entry_id
         assert snapshot.confirmation_entry_id is None
         assert snapshot.status == "pending"
-        assert (await business.get_profile()).version is None
+        assert (await business.profile.get_profile()).version is None
 
         # 临时日期与消息节点引用进入模型请求投影，保持原系统提示词完整。
         prompt = get_current_system_prompt(captured[0])
@@ -294,7 +297,7 @@ async def check_loop(directory: Path) -> dict:
         assert display_entry_id in second_prompt
         assert '"prepare_profile_update"' in second_prompt
 
-        history = await service.get_session_history(session_id)
+        history = await service.queries.get_session_history(session_id)
         assert set(history.model_dump()) == {"session", "entries", "runs", "steering"}
         assert [entry.messages[0].role for entry in history.entries][1:] == [
             "user",

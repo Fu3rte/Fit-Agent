@@ -300,7 +300,7 @@ async def persist(results: list[ToolResultMessage], calls: list[ToolCall], read,
             timestamp=0,
         )
         node = str(uuid4())
-        await service.append_entry(
+        await service.entries.append_entry(
             SessionMessageEntry(
                 session_id=session_id,
                 id=node,
@@ -315,7 +315,7 @@ async def persist(results: list[ToolResultMessage], calls: list[ToolCall], read,
         started = perf_counter()
         for message in results:
             child = str(uuid4())
-            outcome = await service.append_entry(
+            outcome = await service.entries.append_entry(
                 SessionMessageEntry(
                     session_id=session_id,
                     id=child,

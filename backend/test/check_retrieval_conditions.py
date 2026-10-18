@@ -181,7 +181,7 @@ async def unavailable_case(root: Path) -> dict:
         assert fetched.is_error is True
         assert json.loads(message_text(fetched))["code"] == "tool_execution_failed"
         # 画像读取与已保存内容不受影响，检索未产生任何长期写入。
-        profile = await fixture.business.get_profile()
+        profile = await fixture.business.profile.get_profile()
         assert profile.version == 1 and profile.content.model_dump() == PROFILE
         return {"error": message_text(fetched)[:80], "profile_version": profile.version}
     finally:

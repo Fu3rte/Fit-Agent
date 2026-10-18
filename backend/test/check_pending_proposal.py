@@ -10,7 +10,7 @@ import pytest
 from app.agent.tool import run_tool_batch, run_tool_call
 from app.agent.tools.business import bind_business_tools, business_tool_declarations
 from app.ai.messages import AssistantMessage, TextContent, ToolCall, ToolResultMessage
-from app.application.business.service import business_date
+from app.application.business.profile import business_date
 from app.domain.business.models import (
     PendingProposalArguments,
     PlanContent,
@@ -96,7 +96,7 @@ async def prepare_via_tool(f, session, tool_name, arguments, binder):
     proposal = envelope(message)
     display = await f.append(session, run.id, source, message)
     await binder(proposal["proposal_id"], display)
-    await f.service.finish_run(session, run.id, "completed")
+    await f.service.runs.finish_run(session, run.id, "completed")
     return {"session": session, "run": run.id, "request": run.request_entry_id,
             "source": source, "call": call_id, "display": display,
             "proposal": proposal["proposal_id"], "body": proposal}
@@ -167,7 +167,7 @@ async def check_plan_reads(f, version):
     long_payload = dict(PLAN_CONTENT, notes=LONG_NOTES)
     info = await prepare_via_tool(f, session, "prepare_plan_import",
         {"base_profile_version": version, "base_plan_id": None, "payload": long_payload},
-        f.business.bind_plan_display_entry)
+        f.business.plans.bind_plan_display_entry)
     snapshot = await f.repository.get_plan_snapshot(info["proposal"])
     assert snapshot.status == "pending" and snapshot.display_entry_id == info["display"]
     assert snapshot.base_profile_version == version and snapshot.base_plan_id is None
@@ -195,7 +195,7 @@ async def check_workout_reads(f):
     day = business_date(now_ms())
     info = await prepare_via_tool(f, session, "prepare_workout",
         {"performed_on": day, "base_workout_id": None, "base_workout_version": None,
-         "payload": WORKOUT_CONTENT}, f.business.bind_workout_display_entry)
+         "payload": WORKOUT_CONTENT}, f.business.workouts.bind_workout_display_entry)
     snapshot = await f.repository.get_workout_snapshot(info["proposal"])
     assert snapshot.status == "pending" and snapshot.display_entry_id == info["display"]
 
@@ -277,7 +277,7 @@ async def check_path_and_binding_rejections(f):
                                     payload=PlanContent.model_validate(PLAN_CONTENT))
     source = await f.append(session, run.id, run.request_entry_id,
                             assistant("prepare_plan_import", call_id, arguments.model_dump()))
-    proposal = await f.business.prepare_plan_import(
+    proposal = await f.business.plans.prepare_plan_import(
         f.context(session, run.request_entry_id, source), arguments)
     tampered_body = dict(proposal.model_dump(), payload=dict(PLAN_CONTENT, notes="篡改内容"))
     tampered = ToolResultMessage(role="toolResult", tool_call_id=call_id,
@@ -286,7 +286,7 @@ async def check_path_and_binding_rejections(f):
     display = await f.append(session, run.id, source, tampered)
     async with f.repository.transaction():
         await f.repository.bind_plan_display_entry(proposal.proposal_id, display)
-    await f.service.finish_run(session, run.id, "completed")
+    await f.service.runs.finish_run(session, run.id, "completed")
     assert code_of(await read(f, session, "plan", proposal.proposal_id)) == "plan_confirmation_invalid"
 
 
@@ -318,7 +318,7 @@ async def check_status_rejections(f):
     result = await save_profile(f, saved)
     assert result.version >= 1
     assert code_of(await read(f, session, "profile", saved["proposal"])) == "proposal_already_saved"
-    status = await f.business.get_profile_update_status(
+    status = await f.business.profile.get_profile_update_status(
         f.save_context({"session": session, "request": saved["confirmation"],
                         "source": saved["source"]}), saved["proposal"])
     assert status.status == "saved" and status.result == result
@@ -326,9 +326,9 @@ async def check_status_rejections(f):
     plan_session = await f.session("计划已保存拒绝")
     plan = await prepare_via_tool(f, plan_session, "prepare_plan_import",
         {"base_profile_version": result.version, "base_plan_id": None,
-         "payload": dict(PLAN_CONTENT)}, f.business.bind_plan_display_entry)
+         "payload": dict(PLAN_CONTENT)}, f.business.plans.bind_plan_display_entry)
     _, plan_arguments, plan_result = await save_plan(f, plan_session, plan)
-    repeated = await f.business.save_plan(
+    repeated = await f.business.plans.save_plan(
         f.context(plan_session, new_id(), new_id()), plan_arguments)
     assert repeated == plan_result
     assert code_of(await read(f, plan_session, "plan", plan["proposal"])) == "proposal_already_saved"
@@ -337,7 +337,7 @@ async def check_status_rejections(f):
     day = business_date(now_ms())
     workout = await prepare_via_tool(f, workout_session, "prepare_workout",
         {"performed_on": day, "base_workout_id": None, "base_workout_version": None,
-         "payload": WORKOUT_CONTENT}, f.business.bind_workout_display_entry)
+         "payload": WORKOUT_CONTENT}, f.business.workouts.bind_workout_display_entry)
     await save_workout(f, workout_session, workout)
     assert code_of(await read(f, workout_session, "workout", workout["proposal"])) == "proposal_already_saved"
     return plan_session, plan
@@ -345,18 +345,18 @@ async def check_status_rejections(f):
 
 async def check_cancellation(f):
     session = await f.session("取消传播")
-    version = (await f.business.get_profile()).version
+    version = (await f.business.profile.get_profile()).version
     info = await propose(f, session, {"profile_id": 1, "base_profile_version": version,
                                       "payload": payload()}, confirmation_text=None)
     arguments = PendingProposalArguments(business_kind="profile", proposal_id=info["proposal"])
     cancelled = Event()
     cancelled.set()
     with pytest.raises(CancelledError):
-        await f.business.get_pending_proposal(
+        await f.business.proposals.get_pending_proposal(
             f.context(session, new_id(), new_id()), arguments, signal=cancelled)
     # 取消先于读取：会话不存在时也以取消收尾。
     with pytest.raises(CancelledError):
-        await f.business.get_pending_proposal(
+        await f.business.proposals.get_pending_proposal(
             f.context(new_id(), new_id(), new_id()), arguments, signal=cancelled)
     aborted = await read(f, session, "profile", info["proposal"], signal=cancelled)
     assert aborted.is_error and "Operation aborted" in message_text(aborted)
@@ -364,7 +364,7 @@ async def check_cancellation(f):
 
 async def check_readonly_invariant(f):
     session = await f.session("只读不变量")
-    version = (await f.business.get_profile()).version
+    version = (await f.business.profile.get_profile()).version
     info = await propose(f, session, {"profile_id": 1, "base_profile_version": version,
                                       "payload": payload()}, confirmation_text=None)
     tables = ("profile_snapshots", "plan_snapshots", "workout_snapshots", "profile",
@@ -389,7 +389,7 @@ async def check():
         check_declarations_and_binding()
         await check_argument_rejections(f)
         profile_session, _ = await check_profile_reads(f)
-        plan_session, _ = await check_plan_reads(f, (await f.business.get_profile()).version)
+        plan_session, _ = await check_plan_reads(f, (await f.business.profile.get_profile()).version)
         workout_session, _ = await check_workout_reads(f)
         await check_unknown_and_cross_session(f)
         await check_path_and_binding_rejections(f)

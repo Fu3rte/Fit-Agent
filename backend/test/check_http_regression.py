@@ -205,7 +205,7 @@ def check_concurrent_acceptance(server, http, evidence):
     else:
         assert status == 409 and json.loads(payload)["detail"]["code"] == "run_busy"
     wait_idle()
-    assert len(service_call(app.state.session_service.list_runs(session_id))) == 1
+    assert len(service_call(app.state.session_queries.list_runs(session_id))) == 1
     accepted = http.get(f"/api/sessions/{session_id}/operations/{operation_id}")
     assert accepted.json()["accepted"] is True
     assert accepted.json()["run"]["run_id"] == winner
@@ -383,7 +383,7 @@ def service_entries(session_id):
     service = app.state.session_service
 
     async def load():
-        return await service.list_entries(session_id)
+        return await service.queries.list_entries(session_id)
 
     return service_call(load())
 
@@ -458,9 +458,9 @@ def check_shutdown_finalization(path, evidence):
         database = await open_database(path)
         try:
             service = SessionService(SqliteSessionRepository(database))
-            return await service.get_run(
+            return await service.queries.get_run(
                 shutdown["session_id"], shutdown["run_id"]
-            ), await service.list_steering(
+            ), await service.queries.list_steering(
                 shutdown["session_id"], shutdown["run_id"]
             )
         finally:
@@ -546,7 +546,7 @@ def check_terminal_commit_failure(path, http, evidence):
         raw.commit()
         raw.close()
     service = app.state.session_service
-    service_call(service.finish_run(session_id, run_id, "failed"))
+    service_call(service.runs.finish_run(session_id, run_id, "failed"))
     retire(runs[UUID(run_id)])
 
 

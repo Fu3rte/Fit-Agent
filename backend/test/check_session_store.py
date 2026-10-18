@@ -9,8 +9,8 @@ from uuid import uuid4
 from pydantic import TypeAdapter, ValidationError
 
 from app.ai.messages import Message, SystemMessage, serialize_message
+from app.application.session.credentials import CREDENTIAL_SAFE_MESSAGE
 from app.application.session.service import (
-    CREDENTIAL_SAFE_MESSAGE,
     SessionService,
 )
 from app.domain.session.errors import (
@@ -247,13 +247,13 @@ async def open_store(path: Path):
 async def scenario_session(service, repository) -> None:
     session = await service.create_session("s-basic", "基础会话")
     assert session.active_leaf_id is None and session.created_at == session.updated_at
-    assert (await service.get_session("s-basic")).title == "基础会话"
-    assert [item.id for item in await service.list_sessions()] == ["s-basic"]
+    assert (await service.queries.get_session("s-basic")).title == "基础会话"
+    assert [item.id for item in await service.queries.list_sessions()] == ["s-basic"]
 
     # 同 ID 同标题重试保持幂等，返回原会话且不新增记录
     repeat = await service.create_session("s-basic", "基础会话")
     assert repeat.model_dump() == session.model_dump()
-    assert [item.id for item in await service.list_sessions()] == ["s-basic"]
+    assert [item.id for item in await service.queries.list_sessions()] == ["s-basic"]
 
     try:
         await service.create_session("s-basic", "重复")
@@ -262,7 +262,7 @@ async def scenario_session(service, repository) -> None:
     else:
         raise AssertionError("重复会话 ID 未冲突")
     try:
-        await service.get_session("missing")
+        await service.queries.get_session("missing")
     except SessionNotFound:
         pass
     else:
@@ -270,7 +270,7 @@ async def scenario_session(service, repository) -> None:
     assert await repository.get_session("missing") is None
 
     await service.create_session("s-basic-2", "第二个会话")
-    ids = [item.id for item in await service.list_sessions()]
+    ids = [item.id for item in await service.queries.list_sessions()]
     assert ids == ["s-basic", "s-basic-2"]
 
     # 并发同 ID 同标题只产生一条会话
@@ -283,7 +283,7 @@ async def scenario_session(service, repository) -> None:
         len(
             [
                 item
-                for item in await service.list_sessions()
+                for item in await service.queries.list_sessions()
                 if item.id == "s-conc-create"
             ]
         )
@@ -305,20 +305,20 @@ async def scenario_send(service, repository) -> None:
     run = outcome.run
     assert run is not None and run.status == "running" and run.last_entry_id is None
 
-    user = await service.get_entry("s-send", run.request_entry_id)
+    user = await service.queries.get_entry("s-send", run.request_entry_id)
     assert _UUID_PATTERN.fullmatch(run.id) is not None
     assert _UUID_PATTERN.fullmatch(user.id) is not None
     assert user.messages[0].role == "user" and user.messages[0].content == "你好"
     assert user.parent_id is not None and user.run_id is None
-    system_entry = await service.get_entry("s-send", user.parent_id)
+    system_entry = await service.queries.get_entry("s-send", user.parent_id)
     assert system_entry.parent_id is None
     assert serialize_message(system_entry.messages[0]) == serialize_message(
         system_message()
     )
-    session = await service.get_session("s-send")
+    session = await service.queries.get_session("s-send")
     assert session.active_leaf_id == user.id
 
-    operation = await service.get_operation(SEND_OP)
+    operation = await service.operations.get_operation(SEND_OP)
     assert operation is not None and operation.kind == "send"
     assert operation.run_id == run.id and operation.request == {"text": "你好", "accepted_attachments": []}
     assert operation.session_id == "s-send"
@@ -333,8 +333,8 @@ async def scenario_send(service, repository) -> None:
         system_message=system_message(),
     )
     assert duplicate.created is False and duplicate.run.id == run.id
-    assert len(await service.list_entries("s-send")) == 2
-    assert len(await service.list_runs("s-send")) == 1
+    assert len(await service.queries.list_entries("s-send")) == 2
+    assert len(await service.queries.list_runs("s-send")) == 1
 
     # 同键不同请求冲突，已有数据完整
     try:
@@ -350,27 +350,27 @@ async def scenario_send(service, repository) -> None:
         pass
     else:
         raise AssertionError("同键不同请求未冲突")
-    assert len(await service.list_entries("s-send")) == 2
+    assert len(await service.queries.list_entries("s-send")) == 2
 
     # 追加助手消息：节点、指针、last_entry_id 一并推进
-    appended = await service.append_entry(
+    appended = await service.entries.append_entry(
         entry("s-send", "sd-a1", user.id, run.id, message(ASSISTANT_FINAL_SOURCE), 500)
     )
     assert appended.created is True and appended.entry.id == "sd-a1"
-    assert (await service.get_session("s-send")).active_leaf_id == "sd-a1"
-    assert (await service.get_run("s-send", run.id)).last_entry_id == "sd-a1"
+    assert (await service.queries.get_session("s-send")).active_leaf_id == "sd-a1"
+    assert (await service.queries.get_run("s-send", run.id)).last_entry_id == "sd-a1"
 
     # 重复节点追加保持原位置与进度
-    repeat = await service.append_entry(
+    repeat = await service.entries.append_entry(
         entry("s-send", "sd-a1", user.id, run.id, message(ASSISTANT_FINAL_SOURCE), 999)
     )
     assert repeat.created is False and repeat.entry.id == "sd-a1"
-    assert (await service.get_session("s-send")).active_leaf_id == "sd-a1"
-    assert (await service.get_run("s-send", run.id)).last_entry_id == "sd-a1"
+    assert (await service.queries.get_session("s-send")).active_leaf_id == "sd-a1"
+    assert (await service.queries.get_run("s-send", run.id)).last_entry_id == "sd-a1"
 
     # 同键冲突：节点身份一致但内容不同
     try:
-        await service.append_entry(
+        await service.entries.append_entry(
             entry(
                 "s-send",
                 "sd-a1",
@@ -385,18 +385,18 @@ async def scenario_send(service, repository) -> None:
     else:
         raise AssertionError("节点内容不一致未冲突")
 
-    added = await service.append_entry(
+    added = await service.entries.append_entry(
         entry("s-send", "sd-a2", "sd-a1", run.id, message(ASSISTANT_FINAL_SOURCE), 502)
     )
     assert added.created is True
 
-    finished = await service.finish_run("s-send", run.id, "completed")
+    finished = await service.runs.finish_run("s-send", run.id, "completed")
     assert finished.changed is True and finished.run.status == "completed"
     assert finished.run.finished_at is not None
-    repeat_finish = await service.finish_run("s-send", run.id, "completed")
+    repeat_finish = await service.runs.finish_run("s-send", run.id, "completed")
     assert repeat_finish.changed is False
     try:
-        await service.finish_run("s-send", run.id, "failed")
+        await service.runs.finish_run("s-send", run.id, "failed")
     except SessionConflict:
         pass
     else:
@@ -416,11 +416,11 @@ async def scenario_branching(service) -> None:
     )
     run = send.run
     user1 = run.request_entry_id
-    system_id = (await service.get_entry("s-branch", user1)).parent_id
-    await service.append_entry(
+    system_id = (await service.queries.get_entry("s-branch", user1)).parent_id
+    await service.entries.append_entry(
         entry("s-branch", "br-a1", user1, run.id, message(ASSISTANT_FINAL_SOURCE), 600)
     )
-    await service.finish_run("s-branch", run.id, "completed")
+    await service.runs.finish_run("s-branch", run.id, "completed")
 
     # 编辑：删除目标用户消息及全部后续内容，保存修改后的用户节点。
     edit_op = str(uuid4())
@@ -432,25 +432,25 @@ async def scenario_branching(service) -> None:
         )
     )
     assert edit.created is True
-    edited = await service.get_entry("s-branch", edit.run.request_entry_id)
+    edited = await service.queries.get_entry("s-branch", edit.run.request_entry_id)
     assert edited.parent_id == system_id
     assert edited.messages[0].content == "修改后"
     for removed in (user1, "br-a1"):
         try:
-            await service.get_entry("s-branch", removed)
+            await service.queries.get_entry("s-branch", removed)
         except EntryNotFound:
             pass
         else:
             raise AssertionError("编辑未删除被替换内容")
-    assert [item.id for item in await service.get_current_branch("s-branch")] == [
+    assert [item.id for item in await service.queries.get_current_branch("s-branch")] == [
         system_id,
         edited.id,
     ]
-    assert [item.id for item in await service.list_runs("s-branch")] == [edit.run.id]
-    assert await service.get_operation(send_op) is None
-    assert await service.get_operation_invalidation(send_op) == "s-branch"
+    assert [item.id for item in await service.queries.list_runs("s-branch")] == [edit.run.id]
+    assert await service.operations.get_operation(send_op) is None
+    assert await service.operations.get_operation_invalidation(send_op) == "s-branch"
     try:
-        await service.resolve_operation(
+        await service.operations.resolve_operation(
             send_op, "s-branch", "send", SendRequest(text="初始")
         )
     except OperationExpired:
@@ -458,7 +458,7 @@ async def scenario_branching(service) -> None:
     else:
         raise AssertionError("失效编号未拒绝重试")
 
-    await service.append_entry(
+    await service.entries.append_entry(
         entry(
             "s-branch",
             "br-a2",
@@ -468,7 +468,7 @@ async def scenario_branching(service) -> None:
             601,
         )
     )
-    await service.finish_run("s-branch", edit.run.id, "completed")
+    await service.runs.finish_run("s-branch", edit.run.id, "completed")
 
     # 重新生成：保留目标及其祖先，删除目标之后的全部内容。
     regenerate = await service.accept_regenerate(
@@ -479,32 +479,32 @@ async def scenario_branching(service) -> None:
         )
     )
     assert regenerate.created is True
-    assert (await service.get_session("s-branch")).active_leaf_id == edited.id
+    assert (await service.queries.get_session("s-branch")).active_leaf_id == edited.id
     assert regenerate.run.request_entry_id == edited.id
     try:
-        await service.get_entry("s-branch", "br-a2")
+        await service.queries.get_entry("s-branch", "br-a2")
     except EntryNotFound:
         pass
     else:
         raise AssertionError("重新生成未删除目标之后的回答")
     # 目标之后的内容删除后已无留存节点引用原编辑运行：运行及其操作记录一并清理并失效。
-    assert [item.id for item in await service.list_runs("s-branch")] == [
+    assert [item.id for item in await service.queries.list_runs("s-branch")] == [
         regenerate.run.id
     ]
-    assert await service.get_operation(edit_op) is None
-    assert await service.get_operation_invalidation(edit_op) == "s-branch"
+    assert await service.operations.get_operation(edit_op) is None
+    assert await service.operations.get_operation_invalidation(edit_op) == "s-branch"
     try:
-        await service.get_run("s-branch", edit.run.id)
+        await service.queries.get_run("s-branch", edit.run.id)
     except SessionNotFound:
         pass
     else:
         raise AssertionError("无留存节点的旧运行未清理")
-    assert [item.id for item in await service.get_current_branch("s-branch")] == [
+    assert [item.id for item in await service.queries.get_current_branch("s-branch")] == [
         system_id,
         edited.id,
     ]
 
-    await service.append_entry(
+    await service.entries.append_entry(
         entry(
             "s-branch",
             "br-a3",
@@ -514,12 +514,12 @@ async def scenario_branching(service) -> None:
             602,
         )
     )
-    assert [item.id for item in await service.get_current_branch("s-branch")] == [
+    assert [item.id for item in await service.queries.get_current_branch("s-branch")] == [
         system_id,
         edited.id,
         "br-a3",
     ]
-    await service.finish_run("s-branch", regenerate.run.id, "completed")
+    await service.runs.finish_run("s-branch", regenerate.run.id, "completed")
 
     # 目标节点校验：非用户消息拒绝，缺失节点明确报错。
     try:
@@ -562,7 +562,7 @@ async def scenario_steering_target(service) -> None:
         system_message=system_message(),
     )
     run = send.run
-    await service.append_entry(
+    await service.entries.append_entry(
         entry(
             "s-steer-target",
             "st-a1",
@@ -579,12 +579,12 @@ async def scenario_steering_target(service) -> None:
             request=SteeringRequest(target_run_id=run.id, text="追加"),
         )
     )
-    consumed = await service.consume_steering(
+    consumed = await service.runs.consume_steering(
         "s-steer-target", run.id, steering.steering.id
     )
     assert consumed.created is True and consumed.entry is not None
     steering_user = consumed.entry.id
-    await service.append_entry(
+    await service.entries.append_entry(
         entry(
             "s-steer-target",
             "st-a2",
@@ -594,7 +594,7 @@ async def scenario_steering_target(service) -> None:
             701,
         )
     )
-    await service.finish_run("s-steer-target", run.id, "completed")
+    await service.runs.finish_run("s-steer-target", run.id, "completed")
 
     regenerate = await service.accept_regenerate(
         RegenerateCommand(
@@ -606,16 +606,16 @@ async def scenario_steering_target(service) -> None:
     assert regenerate.created is True
     assert regenerate.run.request_entry_id == steering_user
     # 目标保留；目标之后的助手节点删除；同运行的祖先助手节点保留，运行进度回退。
-    assert (await service.get_entry("s-steer-target", steering_user)).messages[0].content == "追加"
+    assert (await service.queries.get_entry("s-steer-target", steering_user)).messages[0].content == "追加"
     try:
-        await service.get_entry("s-steer-target", "st-a2")
+        await service.queries.get_entry("s-steer-target", "st-a2")
     except EntryNotFound:
         pass
     else:
         raise AssertionError("转向目标之后的回答未删除")
-    retained = await service.get_run("s-steer-target", run.id)
+    retained = await service.queries.get_run("s-steer-target", run.id)
     assert retained.last_entry_id == steering_user
-    await service.finish_run("s-steer-target", regenerate.run.id, "completed")
+    await service.runs.finish_run("s-steer-target", regenerate.run.id, "completed")
 
 
 async def scenario_unpaired(service, repository) -> None:
@@ -629,7 +629,7 @@ async def scenario_unpaired(service, repository) -> None:
         system_message=system_message(),
     )
     run = send.run
-    await service.append_entry(
+    await service.entries.append_entry(
         entry(
             "s-unpaired",
             "up-a1",
@@ -640,12 +640,12 @@ async def scenario_unpaired(service, repository) -> None:
         )
     )
     # 历史读取允许工具调用暂缺结果
-    leaf = (await service.get_session("s-unpaired")).active_leaf_id
-    context = await service.get_context("s-unpaired", leaf)
+    leaf = (await service.queries.get_session("s-unpaired")).active_leaf_id
+    context = await service.queries.get_context("s-unpaired", leaf)
     assert len(context) == 3
-    await service.finish_run("s-unpaired", run.id, "cancelled")
+    await service.runs.finish_run("s-unpaired", run.id, "cancelled")
 
-    before = len(await service.list_entries("s-unpaired"))
+    before = len(await service.queries.list_entries("s-unpaired"))
     try:
         await service.accept_send(
             SendCommand(
@@ -659,10 +659,10 @@ async def scenario_unpaired(service, repository) -> None:
         pass
     else:
         raise AssertionError("未配对分支未拒绝新执行")
-    assert len(await service.list_entries("s-unpaired")) == before
-    assert await service.get_operation(BLOCKED_OP) is None
-    assert len(await service.list_runs("s-unpaired")) == 1
-    assert (await service.get_session("s-unpaired")).active_leaf_id == "up-a1"
+    assert len(await service.queries.list_entries("s-unpaired")) == before
+    assert await service.operations.get_operation(BLOCKED_OP) is None
+    assert len(await service.queries.list_runs("s-unpaired")) == 1
+    assert (await service.queries.get_session("s-unpaired")).active_leaf_id == "up-a1"
 
 
 async def scenario_steering(service, repository) -> None:
@@ -701,33 +701,33 @@ async def scenario_steering(service, repository) -> None:
         )
     )
     assert duplicate.created is False and duplicate.steering.id == recv1.steering.id
-    assert len(await service.list_steering("s-steer", run.id)) == 2
+    assert len(await service.queries.list_steering("s-steer", run.id)) == 2
     # 接收不推进位置
-    assert (await service.get_session("s-steer")).active_leaf_id == run.request_entry_id
-    assert (await service.get_run("s-steer", run.id)).last_entry_id is None
+    assert (await service.queries.get_session("s-steer")).active_leaf_id == run.request_entry_id
+    assert (await service.queries.get_run("s-steer", run.id)).last_entry_id is None
 
-    consumed = await service.consume_steering("s-steer", run.id, recv1.steering.id)
+    consumed = await service.runs.consume_steering("s-steer", run.id, recv1.steering.id)
     assert consumed.created is True and consumed.steering.status == "consumed"
     assert consumed.entry.messages[0].content == "补充一"
     assert (
         consumed.entry.messages[0].timestamp
         == recv1.steering.message.timestamp
     )
-    assert (await service.get_session("s-steer")).active_leaf_id == consumed.entry.id
-    assert (await service.get_run("s-steer", run.id)).last_entry_id == consumed.entry.id
-    again = await service.consume_steering("s-steer", run.id, recv1.steering.id)
+    assert (await service.queries.get_session("s-steer")).active_leaf_id == consumed.entry.id
+    assert (await service.queries.get_run("s-steer", run.id)).last_entry_id == consumed.entry.id
+    again = await service.runs.consume_steering("s-steer", run.id, recv1.steering.id)
     assert again.created is False and again.entry.id == consumed.entry.id
 
-    withdrawn = await service.withdraw_steering("s-steer", run.id, recv2.steering.id)
+    withdrawn = await service.runs.withdraw_steering("s-steer", run.id, recv2.steering.id)
     assert withdrawn.changed is True and withdrawn.steering.status == "withdrawn"
     assert (
-        await service.withdraw_steering("s-steer", run.id, recv2.steering.id)
+        await service.runs.withdraw_steering("s-steer", run.id, recv2.steering.id)
     ).changed is False
     assert (
-        await service.consume_steering("s-steer", run.id, recv2.steering.id)
+        await service.runs.consume_steering("s-steer", run.id, recv2.steering.id)
     ).entry is None
     try:
-        await service.withdraw_steering("s-steer", run.id, recv1.steering.id)
+        await service.runs.withdraw_steering("s-steer", run.id, recv1.steering.id)
     except SessionConflict:
         pass
     else:
@@ -736,7 +736,7 @@ async def scenario_steering(service, repository) -> None:
     # 每条输入最多生成一个节点
     steering_nodes = [
         item
-        for item in await service.list_entries("s-steer")
+        for item in await service.queries.list_entries("s-steer")
         if item.run_id == run.id and item.messages[0].role == "user"
     ]
     assert [item.id for item in steering_nodes] == [consumed.entry.id]
@@ -748,8 +748,8 @@ async def scenario_steering(service, repository) -> None:
             request=SteeringRequest(target_run_id=run.id, text="补充三"),
         )
     )
-    await service.finish_run("s-steer", run.id, "completed")
-    discarded = await service.get_steering("s-steer", recv3.steering.id)
+    await service.runs.finish_run("s-steer", run.id, "completed")
+    discarded = await service.queries.get_steering("s-steer", recv3.steering.id)
     assert discarded.status == "discarded" and discarded.reason == "completed"
 
     send2 = await service.accept_send(
@@ -768,13 +768,13 @@ async def scenario_steering(service, repository) -> None:
             request=SteeringRequest(target_run_id=run2.id, text="中断前"),
         )
     )
-    recovered = await service.recover_interrupted()
+    recovered = await service.runs.recover_interrupted()
     assert [item.id for item in recovered] == [run2.id]
-    interrupted = await service.get_run("s-steer", run2.id)
+    interrupted = await service.queries.get_run("s-steer", run2.id)
     assert interrupted.status == "interrupted" and interrupted.finished_at is None
-    dropped = await service.get_steering("s-steer", recv4.steering.id)
+    dropped = await service.queries.get_steering("s-steer", recv4.steering.id)
     assert dropped.status == "discarded" and dropped.reason == "interrupted"
-    assert await service.recover_interrupted() == []
+    assert await service.runs.recover_interrupted() == []
 
 
 async def scenario_roundtrip(service) -> None:
@@ -788,19 +788,19 @@ async def scenario_roundtrip(service) -> None:
         system_message=system_message(),
     )
     run = send.run
-    user = await service.get_entry("s-rt", run.request_entry_id)
+    user = await service.queries.get_entry("s-rt", run.request_entry_id)
     system_id = user.parent_id
-    await service.append_entry(
+    await service.entries.append_entry(
         entry("s-rt", "rt-a1", user.id, run.id, message(ASSISTANT_SOURCE), 800)
     )
-    await service.append_entry(
+    await service.entries.append_entry(
         entry("s-rt", "rt-t1", "rt-a1", run.id, message(TOOL_RESULT_SOURCE), 801)
     )
-    await service.append_entry(
+    await service.entries.append_entry(
         entry("s-rt", "rt-a2", "rt-t1", run.id, message(ASSISTANT_FINAL_SOURCE), 802)
     )
 
-    stored = {item.id: item for item in await service.list_entries("s-rt")}
+    stored = {item.id: item for item in await service.queries.list_entries("s-rt")}
     expected = {
         system_id: system_message(),
         user.id: message(
@@ -826,7 +826,7 @@ async def scenario_roundtrip(service) -> None:
     system = stored[system_id].messages[0]
     assert system.sections == {"active": "指令片段", "removed": None}
     assert system.tools_removed[0].name == "old-tool"
-    await service.finish_run("s-rt", run.id, "completed")
+    await service.runs.finish_run("s-rt", run.id, "completed")
 
 
 async def scenario_credentials(service, repository) -> None:
@@ -846,8 +846,8 @@ async def scenario_credentials(service, repository) -> None:
         pass
     else:
         raise AssertionError("用户请求凭据未拒绝")
-    assert await service.get_operation(REJECTED_OP) is None
-    assert await service.list_entries("s-cred") == []
+    assert await service.operations.get_operation(REJECTED_OP) is None
+    assert await service.queries.list_entries("s-cred") == []
 
     send = await service.accept_send(
         SendCommand(
@@ -873,8 +873,8 @@ async def scenario_credentials(service, repository) -> None:
         pass
     else:
         raise AssertionError("Steering 凭据未拒绝")
-    assert await service.list_steering("s-cred", run.id) == []
-    assert (await service.get_run("s-cred", run.id)).status == "running"
+    assert await service.queries.list_steering("s-cred", run.id) == []
+    assert (await service.queries.get_run("s-cred", run.id)).status == "running"
 
     pending = await service.accept_steering(
         SteeringCommand(
@@ -884,7 +884,7 @@ async def scenario_credentials(service, repository) -> None:
         )
     )
     # 模型输出命中：消息不入库，运行保存安全失败，pending 被丢弃
-    outcome = await service.append_entry(
+    outcome = await service.entries.append_entry(
         entry(
             "s-cred",
             "cr-a1",
@@ -897,11 +897,11 @@ async def scenario_credentials(service, repository) -> None:
     )
     assert outcome.credential_detected is True and outcome.entry is None
     assert await repository.get_entry("s-cred", "cr-a1") is None
-    failed = await service.get_run("s-cred", run.id)
+    failed = await service.queries.get_run("s-cred", run.id)
     assert failed.status == "failed"
     assert failed.error_code == "credential_detected"
     assert failed.error_message == CREDENTIAL_SAFE_MESSAGE
-    dropped = await service.get_steering("s-cred", pending.steering.id)
+    dropped = await service.queries.get_steering("s-cred", pending.steering.id)
     assert dropped.status == "discarded" and dropped.reason == "failed"
 
 
@@ -982,7 +982,7 @@ async def scenario_transaction(service, repository, database) -> None:
         system_message=system_message(),
     )
     run = send.run
-    leaf = (await service.get_session("tx-ok")).active_leaf_id
+    leaf = (await service.queries.get_session("tx-ok")).active_leaf_id
     payload = entry(
         "tx-ok", "at-a1", run.request_entry_id, run.id, message(ASSISTANT_FINAL_SOURCE), 1000
     )
@@ -1002,19 +1002,19 @@ async def scenario_transaction(service, repository, database) -> None:
     else:
         raise AssertionError("追加失败未传播")
     assert await repository.get_entry("tx-ok", "at-a1") is None
-    assert (await service.get_session("tx-ok")).active_leaf_id == leaf
-    assert (await service.get_run("tx-ok", run.id)).last_entry_id is None
+    assert (await service.queries.get_session("tx-ok")).active_leaf_id == leaf
+    assert (await service.queries.get_run("tx-ok", run.id)).last_entry_id is None
 
     # 成功后重复写入保持原值
-    first = await service.append_entry(payload)
+    first = await service.entries.append_entry(payload)
     assert first.created is True
-    kept_leaf = (await service.get_session("tx-ok")).active_leaf_id
-    kept_run = (await service.get_run("tx-ok", run.id)).last_entry_id
-    second = await service.append_entry(payload)
+    kept_leaf = (await service.queries.get_session("tx-ok")).active_leaf_id
+    kept_run = (await service.queries.get_run("tx-ok", run.id)).last_entry_id
+    second = await service.entries.append_entry(payload)
     assert second.created is False and second.entry.id == "at-a1"
-    assert (await service.get_session("tx-ok")).active_leaf_id == kept_leaf
-    assert (await service.get_run("tx-ok", run.id)).last_entry_id == kept_run
-    await service.finish_run("tx-ok", run.id, "cancelled")
+    assert (await service.queries.get_session("tx-ok")).active_leaf_id == kept_leaf
+    assert (await service.queries.get_run("tx-ok", run.id)).last_entry_id == kept_run
+    await service.runs.finish_run("tx-ok", run.id, "cancelled")
 
 
 async def scenario_concurrency(service) -> None:
@@ -1030,8 +1030,8 @@ async def scenario_concurrency(service) -> None:
     )
     assert first.run.id == second.run.id
     assert sorted([first.created, second.created]) == [False, True]
-    assert len(await service.list_entries("s-conc")) == 2
-    assert len(await service.list_runs("s-conc")) == 1
+    assert len(await service.queries.list_entries("s-conc")) == 2
+    assert len(await service.queries.list_runs("s-conc")) == 1
 
     try:
         await service.accept_send(
@@ -1046,14 +1046,25 @@ async def scenario_concurrency(service) -> None:
         pass
     else:
         raise AssertionError("并发同键不同请求未冲突")
-    await service.finish_run("s-conc", first.run.id, "completed")
+    await service.runs.finish_run("s-conc", first.run.id, "completed")
+
+
+async def _main_database_file(connection) -> Path:
+    cursor = await connection.execute("PRAGMA database_list")
+    rows = await cursor.fetchall()
+    await cursor.close()
+    files = [Path(row[2]).resolve() for row in rows if row[1] == "main"]
+    assert len(files) == 1
+    return files[0]
 
 
 async def scenario_lifespan_recovery(root: Path) -> None:
+    from app.agent import telemetry as telemetry_module
     from app.infrastructure.persistence.sqlite import database as database_module
     from app.interfaces import http as http_module
 
     path = root / "lifespan.db"
+    trace_path = root / "lifespan-trace.db"
     database, _, service = await open_store(path)
     await service.create_session("s-life", "生命周期")
     send = await service.accept_send(
@@ -1074,19 +1085,32 @@ async def scenario_lifespan_recovery(root: Path) -> None:
     )
     await database.close()
 
-    original = database_module.default_database_path
+    original_database_path = database_module.default_database_path
+    original_trace_path = telemetry_module.trace_database_path
     database_module.default_database_path = lambda: path
+    telemetry_module.trace_database_path = lambda: trace_path
     try:
         async with http_module.lifespan(http_module.app):
-            pass
+            database_file = await _main_database_file(http_module.app.state.database.connection)
+            trace_store = http_module.app.state.trace_store
+            assert trace_store is not None
+            trace_file = await _main_database_file(trace_store._connection)
+            assert database_file == path.resolve()
+            assert trace_file == trace_path.resolve()
+            assert database_file.is_relative_to(root.resolve())
+            assert trace_file.is_relative_to(root.resolve())
     finally:
-        database_module.default_database_path = original
+        database_module.default_database_path = original_database_path
+        telemetry_module.trace_database_path = original_trace_path
+
+    assert database_module.default_database_path is original_database_path
+    assert telemetry_module.trace_database_path is original_trace_path
 
     reopened, _, reopened_service = await open_store(path)
     try:
-        interrupted = await reopened_service.get_run("s-life", run.id)
+        interrupted = await reopened_service.queries.get_run("s-life", run.id)
         assert interrupted.status == "interrupted" and interrupted.finished_at is None
-        dropped = await reopened_service.get_steering("s-life", pending.steering.id)
+        dropped = await reopened_service.queries.get_steering("s-life", pending.steering.id)
         assert dropped.status == "discarded" and dropped.reason == "interrupted"
     finally:
         await reopened.close()
@@ -1105,8 +1129,8 @@ async def scenario_restore(path: Path) -> None:
     )
     run = send.run
     user_id = run.request_entry_id
-    system_id = (await service.get_entry("s-restore", user_id)).parent_id
-    await service.append_entry(
+    system_id = (await service.queries.get_entry("s-restore", user_id)).parent_id
+    await service.entries.append_entry(
         entry(
             "s-restore",
             "rs-a1",
@@ -1116,16 +1140,16 @@ async def scenario_restore(path: Path) -> None:
             1100,
         )
     )
-    await service.finish_run("s-restore", run.id, "completed")
+    await service.runs.finish_run("s-restore", run.id, "completed")
     await database.close()
 
     reopened, _, reopened_service = await open_store(path)
     try:
-        session = await reopened_service.get_session("s-restore")
+        session = await reopened_service.queries.get_session("s-restore")
         assert session.active_leaf_id == "rs-a1"
-        branch = await reopened_service.get_current_branch("s-restore")
+        branch = await reopened_service.queries.get_current_branch("s-restore")
         assert [item.id for item in branch] == [system_id, user_id, "rs-a1"]
-        assert await reopened_service.get_context("s-restore", "rs-a1") is not None
+        assert await reopened_service.queries.get_context("s-restore", "rs-a1") is not None
         duplicate = await reopened_service.accept_send(
             SendCommand(
                 operation_id=RESTORE_OP,
@@ -1135,9 +1159,9 @@ async def scenario_restore(path: Path) -> None:
             system_message=system_message(),
         )
         assert duplicate.created is False and duplicate.run.id == run.id
-        operation = await reopened_service.get_operation(RESTORE_OP)
+        operation = await reopened_service.operations.get_operation(RESTORE_OP)
         assert operation is not None and operation.run_id == run.id
-        assert len(await reopened_service.list_entries("s-restore")) == 3
+        assert len(await reopened_service.queries.list_entries("s-restore")) == 3
         await assert_foreign_keys(reopened)
     finally:
         await reopened.close()
@@ -1221,14 +1245,14 @@ async def scenario_append_roles(service, repository) -> None:
     ]
     for payload in payloads:
         try:
-            await service.append_entry(payload)
+            await service.entries.append_entry(payload)
         except SessionConflict:
             continue
         raise AssertionError("非助手/工具消息被追加入口接受")
     assert await repository.get_entry("s-roles", "role-u") is None
     assert await repository.get_entry("s-roles", "role-s") is None
-    assert (await service.get_run("s-roles", run.id)).last_entry_id is None
-    await service.finish_run("s-roles", run.id, "cancelled")
+    assert (await service.queries.get_run("s-roles", run.id)).last_entry_id is None
+    await service.runs.finish_run("s-roles", run.id, "cancelled")
 
 
 async def scenario_identity_credentials(service, repository) -> None:
@@ -1268,9 +1292,9 @@ async def scenario_identity_credentials(service, repository) -> None:
         pass
     else:
         raise AssertionError("系统消息凭据未拒绝")
-    assert (await service.get_run("s-ident", run.id)).status == "running"
+    assert (await service.queries.get_run("s-ident", run.id)).status == "running"
 
-    outcome = await service.append_entry(
+    outcome = await service.entries.append_entry(
         entry(
             "s-ident",
             "entry-" + secret,
@@ -1283,7 +1307,7 @@ async def scenario_identity_credentials(service, repository) -> None:
     )
     assert outcome.credential_detected is True and outcome.entry is None
     assert await repository.get_entry("s-ident", "entry-" + secret) is None
-    assert (await service.get_run("s-ident", run.id)).status == "failed"
+    assert (await service.queries.get_run("s-ident", run.id)).status == "failed"
 
 
 async def scenario_task_isolation(service, repository) -> None:

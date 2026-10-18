@@ -6,6 +6,9 @@ import sqlite3
 from uuid import UUID, uuid4
 
 from app.ai.messages import SystemMessage
+from app.application.session.coordination import logger
+from app.application.session.runtime import accepting_runs, reset_fault_closure
+from app.application.session.runtime import logger as runtime_logger
 from app.application.session.service import SessionService
 from app.domain.session.models import (
     SendCommand,
@@ -15,7 +18,7 @@ from app.domain.session.models import (
 )
 from app.infrastructure.persistence.sqlite.database import open_database
 from app.infrastructure.persistence.sqlite.repository import SqliteSessionRepository
-from app.interfaces.http import active, app, logger, retire, runs, runs_lock
+from app.interfaces.http import active, app, retire, runs, runs_lock
 from test.check_http import create_session, events, last_run, wait_idle
 from test.regression_support import (
     Server,
@@ -37,7 +40,10 @@ def call(coro):
 
 
 async def set_accepting(value: bool) -> None:
-    app.state.accepting_runs = value
+    if value:
+        accepting_runs.set()
+    else:
+        accepting_runs.clear()
 
 
 async def seed_restart(path):
@@ -54,7 +60,7 @@ async def seed_restart(path):
             ),
             system_message=SYSTEM_MESSAGE,
         )
-        await service.finish_run(session_id, first.run.id, "completed")
+        await service.runs.finish_run(session_id, first.run.id, "completed")
         second = await service.accept_send(
             SendCommand(
                 operation_id=str(uuid4()),
@@ -80,7 +86,7 @@ async def seed_restart(path):
                 request=SteeringRequest(target_run_id=run_id, text="已消费"),
             )
         )
-        consumption = await service.consume_steering(
+        consumption = await service.runs.consume_steering(
             session_id, run_id, consumed.steering.id
         )
         assert consumption.created and consumption.entry is not None
@@ -176,7 +182,7 @@ def check_steering_restart(evidence):
             f"/api/agent/runs/{uuid4()}/steering",
             json={
                 "session_id": session_id,
-                "operation_id": seed["pending_op"],
+                "operation_id": str(uuid4()),
                 "message": "待消费",
             },
         )
@@ -191,7 +197,7 @@ def check_steering_restart(evidence):
         assert missing_steering.json()["detail"]["code"] == "steering_not_found"
 
         service = app.state.session_service
-        remaining = call(service.list_steering(session_id, run_id))
+        remaining = call(service.queries.list_steering(session_id, run_id))
         assert sorted(item.id for item in remaining) == sorted(
             [seed["pending_id"], seed["consumed_id"]]
         )
@@ -213,10 +219,12 @@ def check_log_protection(path, http, evidence):
     create_session(http, session_id, "收尾日志保护")
     output = io.StringIO()
     handler = logging.StreamHandler(output)
-    original = (logger.handlers[:], logger.propagate, logger.level)
-    logger.handlers = [handler]
-    logger.propagate = False
-    logger.setLevel(logging.ERROR)
+    loggers = (logger, runtime_logger)
+    original = [(item.handlers[:], item.propagate, item.level) for item in loggers]
+    for item in loggers:
+        item.handlers = [handler]
+        item.propagate = False
+        item.setLevel(logging.ERROR)
     raw = sqlite3.connect(path, isolation_level=None, timeout=30)
     raw.execute(
         "CREATE TRIGGER review_canary_finalize BEFORE UPDATE ON session_runs "
@@ -239,7 +247,8 @@ def check_log_protection(path, http, evidence):
             collected = list(events(response))
         text = output.getvalue()
         assert CANARY not in text
-        assert "运行收尾任务异常" in text and "IntegrityError" in text
+        assert f"运行进入故障封闭（{run_id}/terminal_persist_failed）" in text
+        assert runs[UUID(run_id)].fault_reason == "terminal_persist_failed"
         assert all(event["event"] not in {"done", "error"} for event in collected)
         assert active.locked()
         run = http.get(f"/api/sessions/{session_id}/runs/{run_id}").json()
@@ -247,20 +256,22 @@ def check_log_protection(path, http, evidence):
         evidence["log_protection"] = {
             "events": len(collected),
             "log_has_canary": CANARY in text,
-            "log_controlled": "IntegrityError" in text,
+            "log_controlled": "terminal_persist_failed" in text,
             "status": run["status"],
         }
     finally:
         raw.execute("DROP TRIGGER review_canary_finalize")
         raw.commit()
         raw.close()
-        logger.handlers = original[0]
-        logger.propagate = original[1]
-        logger.setLevel(original[2])
+        for item, (handlers, propagate, level) in zip(loggers, original, strict=True):
+            item.handlers = handlers
+            item.propagate = propagate
+            item.setLevel(level)
         handler.close()
         if run_id is not None:
             call(app.state.steering.finish(session_id, run_id, "failed"))
             retire(runs[UUID(run_id)])
+            reset_fault_closure()
 
 
 def check_finalization_read_failure(path, http, evidence):
@@ -301,6 +312,7 @@ def check_finalization_read_failure(path, http, evidence):
             with runs_lock:
                 runs.pop(UUID(run_id), None)
             active.release()
+            reset_fault_closure()
 
 
 def check_duplicate_while_closing(http, evidence):

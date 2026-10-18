@@ -6,7 +6,8 @@ from tempfile import TemporaryDirectory
 from uuid import UUID, uuid4
 
 from app.ai.messages import AssistantMessage, SystemMessage, TextContent, Usage
-from app.application.session.service import CREDENTIAL_SAFE_MESSAGE, SessionService
+from app.application.session.credentials import CREDENTIAL_SAFE_MESSAGE
+from app.application.session.service import SessionService
 from app.application.session.steering import SteeringCoordinator
 from app.domain.session.errors import RunNotFound
 from app.domain.session.models import (
@@ -44,12 +45,14 @@ RUN_FIELDS = {
     "finished_at",
     "error_code",
     "error_message",
+    "stop_reason",
 }
 STEERING_FIELDS = {
     "session_id",
     "run_id",
     "steering_id",
     "text",
+    "attachments",
     "timestamp",
     "status",
     "entry_id",
@@ -107,7 +110,7 @@ async def send(service: SessionService, session_id: str, text: str):
 async def answer(
     service: SessionService, session_id: str, run, node_id: str, value: str
 ) -> None:
-    outcome = await service.append_entry(
+    outcome = await service.entries.append_entry(
         SessionMessageEntry(
             session_id=session_id,
             id=node_id,
@@ -222,7 +225,7 @@ def assert_steering_fields(item: dict, session_id: str, run_id: str) -> None:
 
 async def scenario_empty(service: SessionService) -> dict:
     await service.create_session("rl-empty", "空会话")
-    assert await service.list_runs("rl-empty") == []
+    assert await service.queries.list_runs("rl-empty") == []
     return {"runs": 0}
 
 
@@ -231,9 +234,9 @@ async def scenario_run_order(service: SessionService, path: Path) -> dict:
     await service.create_session(session_id, "运行排序")
     first = await send(service, session_id, "问题一")
     await answer(service, session_id, first, "rs-a1", "回答一")
-    await service.finish_run(session_id, first.id, "completed")
+    await service.runs.finish_run(session_id, first.id, "completed")
     failed = await send(service, session_id, "问题二")
-    await service.finish_run(
+    await service.runs.finish_run(
         session_id,
         failed.id,
         "failed",
@@ -242,16 +245,16 @@ async def scenario_run_order(service: SessionService, path: Path) -> dict:
     )
     cancelled = await send(service, session_id, "问题三")
     await answer(service, session_id, cancelled, "rs-a3", "回答三")
-    await service.finish_run(session_id, cancelled.id, "cancelled")
+    await service.runs.finish_run(session_id, cancelled.id, "cancelled")
     latest = await send(service, session_id, "问题四")
-    await service.finish_run(session_id, latest.id, "completed")
+    await service.runs.finish_run(session_id, latest.id, "completed")
 
     # 打乱插入顺序并制造相同 started_at，验证 (started_at, run_id) 排序键。
     started = {first.id: 40, failed.id: 10, cancelled.id: 30, latest.id: 10}
     for run_id, value in started.items():
         set_started_at(path, run_id, value)
 
-    runs = await service.list_runs(session_id)
+    runs = await service.queries.list_runs(session_id)
     assert [(run.started_at, run.id) for run in runs] == order(
         [(value, run_id) for run_id, value in started.items()]
     )
@@ -272,30 +275,30 @@ async def scenario_steering(service: SessionService, path: Path) -> dict:
     await service.create_session(session_id, "输入状态")
     target = await send(service, session_id, "运行一")
     consumed = await steer(service, session_id, target.id, "补充一")
-    await service.consume_steering(session_id, target.id, consumed.id)
+    await service.runs.consume_steering(session_id, target.id, consumed.id)
     withdrawn = await steer(service, session_id, target.id, "补充二")
-    await service.withdraw_steering(session_id, target.id, withdrawn.id)
+    await service.runs.withdraw_steering(session_id, target.id, withdrawn.id)
     discarded = await steer(service, session_id, target.id, "补充三")
-    await service.finish_run(session_id, target.id, "cancelled")
+    await service.runs.finish_run(session_id, target.id, "cancelled")
 
     idle = await send(service, session_id, "运行二")
     await answer(service, session_id, idle, "st-a2", "回答二")
-    await service.finish_run(session_id, idle.id, "completed")
+    await service.runs.finish_run(session_id, idle.id, "completed")
 
     pending_run = await send(service, session_id, "运行三")
     pending = await steer(service, session_id, pending_run.id, "补充四")
-    items = await service.list_steering(session_id, pending_run.id)
+    items = await service.queries.list_steering(session_id, pending_run.id)
     assert [item.id for item in items] == [pending.id]
     assert items[0].status == "pending"
     assert items[0].entry_id is None and items[0].reason is None
-    await service.consume_steering(session_id, pending_run.id, pending.id)
-    await service.finish_run(session_id, pending_run.id, "failed")
+    await service.runs.consume_steering(session_id, pending_run.id, pending.id)
+    await service.runs.finish_run(session_id, pending_run.id, "failed")
 
     created = {consumed.id: 50, withdrawn.id: 20, discarded.id: 20}
     for steering_id, value in created.items():
         set_created_at(path, steering_id, value)
 
-    items = await service.list_steering(session_id, target.id)
+    items = await service.queries.list_steering(session_id, target.id)
     assert [(item.created_at, item.id) for item in items] == order(
         [(value, steering_id) for steering_id, value in created.items()]
     )
@@ -312,7 +315,7 @@ async def scenario_steering(service: SessionService, path: Path) -> dict:
     # 文本与原始消息时间戳保持接收时原值。
     assert by_id[consumed.id].message.content == "补充一"
     assert by_id[consumed.id].message.timestamp == consumed.message.timestamp
-    assert await service.list_steering(session_id, idle.id) == []
+    assert await service.queries.list_steering(session_id, idle.id) == []
     return {"statuses": [item.status for item in items], "idle": 0}
 
 
@@ -338,9 +341,9 @@ async def scenario_queue(service: SessionService) -> dict:
     before = [(item.created_at, item.updated_at) for item in queued]
 
     for _ in range(5):
-        items = await service.list_steering(session_id, run.id)
+        items = await service.queries.list_steering(session_id, run.id)
         assert [item.status for item in items] == ["pending", "pending"]
-        runs = await service.list_runs(session_id)
+        runs = await service.queries.list_runs(session_id)
         assert [item.status for item in runs if item.id == run.id] == ["running"]
 
     assert [(item.created_at, item.updated_at) for item in queued] == before
@@ -348,10 +351,10 @@ async def scenario_queue(service: SessionService) -> dict:
     assert [message.content for message in messages] == ["队列一", "队列二"]
     await coordinator.consume(run.id, messages)
     assert [event["status"] for event in events] == ["consumed", "consumed"]
-    items = await service.list_steering(session_id, run.id)
+    items = await service.queries.list_steering(session_id, run.id)
     assert [item.status for item in items] == ["consumed", "consumed"]
     assert all(item.entry_id is not None for item in items)
-    await service.finish_run(session_id, run.id, "completed")
+    await service.runs.finish_run(session_id, run.id, "completed")
     return {"queued": len(queued), "consumed_events": len(events)}
 
 
@@ -360,11 +363,11 @@ async def scenario_deleted(service: SessionService) -> dict:
     await service.create_session(session_id, "编辑及重新生成")
     original = await send(service, session_id, "原始问题")
     await answer(service, session_id, original, "dl-a1", "原回答")
-    await service.finish_run(session_id, original.id, "completed")
+    await service.runs.finish_run(session_id, original.id, "completed")
     later = await send(service, session_id, "后续问题")
     removed = await steer(service, session_id, later.id, "后续输入")
-    await service.withdraw_steering(session_id, later.id, removed.id)
-    await service.finish_run(session_id, later.id, "cancelled")
+    await service.runs.withdraw_steering(session_id, later.id, removed.id)
+    await service.runs.finish_run(session_id, later.id, "cancelled")
 
     edited = await service.accept_edit(
         EditCommand(
@@ -375,17 +378,17 @@ async def scenario_deleted(service: SessionService) -> dict:
             ),
         )
     )
-    assert [run.id for run in await service.list_runs(session_id)] == [edited.run.id]
+    assert [run.id for run in await service.queries.list_runs(session_id)] == [edited.run.id]
     for gone in (original.id, later.id):
         try:
-            await service.list_steering(session_id, gone)
+            await service.queries.list_steering(session_id, gone)
         except RunNotFound:
             pass
         else:
             raise AssertionError("已删除运行仍可查询")
 
     await answer(service, session_id, edited.run, "dl-a2", "修改后回答")
-    await service.finish_run(session_id, edited.run.id, "completed")
+    await service.runs.finish_run(session_id, edited.run.id, "completed")
     regenerated = await service.accept_regenerate(
         RegenerateCommand(
             operation_id=str(uuid4()),
@@ -393,11 +396,11 @@ async def scenario_deleted(service: SessionService) -> dict:
             request=RegenerateRequest(target_entry_id=edited.run.request_entry_id),
         )
     )
-    runs = await service.list_runs(session_id)
+    runs = await service.queries.list_runs(session_id)
     assert [run.id for run in runs] == [regenerated.run.id]
     assert regenerated.run.request_entry_id == edited.run.request_entry_id
-    assert await service.list_steering(session_id, regenerated.run.id) == []
-    await service.finish_run(session_id, regenerated.run.id, "completed")
+    assert await service.queries.list_steering(session_id, regenerated.run.id) == []
+    await service.runs.finish_run(session_id, regenerated.run.id, "completed")
     return {"retained": regenerated.run.id, "runs": len(runs)}
 
 
@@ -409,11 +412,11 @@ async def scenario_concurrency(service: SessionService) -> dict:
         for index in range(3):
             run = await send(service, session_id, f"问题 {index}")
             await answer(service, session_id, run, f"cc-{index}", f"回答 {index}")
-            await service.finish_run(session_id, run.id, "completed")
+            await service.runs.finish_run(session_id, run.id, "completed")
 
     async def reader() -> int:
         for _ in range(20):
-            runs = await service.list_runs(session_id)
+            runs = await service.queries.list_runs(session_id)
             pairs = [(run.started_at, run.id) for run in runs]
             assert pairs == order(pairs)
             assert len({run.id for run in runs}) == len(runs)
@@ -425,7 +428,7 @@ async def scenario_concurrency(service: SessionService) -> dict:
 
     results = await asyncio.gather(writer(), reader(), reader())
     assert results[1:] == [1, 1]
-    assert len(await service.list_runs(session_id)) == 3
+    assert len(await service.queries.list_runs(session_id)) == 3
     return {"runs": 3}
 
 
@@ -440,11 +443,11 @@ async def scenario_interrupted(root: Path) -> dict:
 
     reopened, recovered = await open_service(path)
     try:
-        await recovered.recover_interrupted()
-        runs = await recovered.list_runs(session_id)
+        await recovered.runs.recover_interrupted()
+        runs = await recovered.queries.list_runs(session_id)
         assert [item.status for item in runs] == ["interrupted"]
         assert runs[0].finished_at is None
-        items = await recovered.list_steering(session_id, run.id)
+        items = await recovered.queries.list_steering(session_id, run.id)
         assert [item.id for item in items] == [pending.id]
         assert items[0].status == "discarded"
         assert items[0].reason == "interrupted"
@@ -482,9 +485,9 @@ async def seed_http(path: Path) -> dict:
         await service.create_session(deleted_session, "编辑后删除")
         removed_run = await send(service, deleted_session, "原始问题")
         removed_input = await steer(service, deleted_session, removed_run.id, "原始输入")
-        await service.withdraw_steering(deleted_session, removed_run.id, removed_input.id)
+        await service.runs.withdraw_steering(deleted_session, removed_run.id, removed_input.id)
         await answer(service, deleted_session, removed_run, str(uuid4()), "原回答")
-        await service.finish_run(deleted_session, removed_run.id, "completed")
+        await service.runs.finish_run(deleted_session, removed_run.id, "completed")
         edited = await service.accept_edit(
             EditCommand(
                 operation_id=str(uuid4()),
@@ -494,20 +497,20 @@ async def seed_http(path: Path) -> dict:
                 ),
             )
         )
-        await service.finish_run(deleted_session, edited.run.id, "completed")
+        await service.runs.finish_run(deleted_session, edited.run.id, "completed")
 
         session_id = str(uuid4())
         await service.create_session(session_id, "运行及输入")
         cancelled = await send(service, session_id, "运行一")
         consumed = await steer(service, session_id, cancelled.id, "补充一")
-        await service.consume_steering(session_id, cancelled.id, consumed.id)
+        await service.runs.consume_steering(session_id, cancelled.id, consumed.id)
         withdrawn = await steer(service, session_id, cancelled.id, "补充二")
-        await service.withdraw_steering(session_id, cancelled.id, withdrawn.id)
+        await service.runs.withdraw_steering(session_id, cancelled.id, withdrawn.id)
         discarded = await steer(service, session_id, cancelled.id, "补充三")
-        await service.finish_run(session_id, cancelled.id, "cancelled")
+        await service.runs.finish_run(session_id, cancelled.id, "cancelled")
 
         failed = await send(service, session_id, "运行二")
-        await service.finish_run(
+        await service.runs.finish_run(
             session_id,
             failed.id,
             "failed",
@@ -517,7 +520,7 @@ async def seed_http(path: Path) -> dict:
 
         completed = await send(service, session_id, "运行三")
         await answer(service, session_id, completed, str(uuid4()), "回答三")
-        await service.finish_run(session_id, completed.id, "completed")
+        await service.runs.finish_run(session_id, completed.id, "completed")
 
         # 运行四保持 running 且输入保持 pending：服务启动恢复改为 interrupted 及 discarded。
         running = await send(service, session_id, "运行四")
@@ -877,7 +880,7 @@ def http_checks(evidence: dict) -> None:
     async def persisted() -> list[str]:
         database, service = await open_service(path)
         try:
-            return [run.id for run in await service.list_runs(seed["session_id"])]
+            return [run.id for run in await service.queries.list_runs(seed["session_id"])]
         finally:
             await database.close()
 

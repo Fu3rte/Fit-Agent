@@ -115,17 +115,21 @@ def install_in_memory_model_config() -> dict:
         provider=snapshot.provider,
         api_key=snapshot.api_key,
     )
-    original_load = http.load_model_config
-    original_status = http.load_provider_status
+    from app.interfaces.http_api.routes import provider as provider_routes
+
+    from app.interfaces.http_api.routes import agent as agent_routes
+
+    original_load = agent_routes.load_model_config
+    original_status = provider_routes.load_provider_status
     original_key = http.saved_api_key
-    # http.py 以 from-import 绑定这些名字，必须替换其实际查找位置，仅改 model_config 模块属性不生效。
-    http.load_model_config = lambda: snapshot
-    http.load_provider_status = lambda: status
+    # from-import 绑定在实际使用模块，替换各自的查找位置。
+    agent_routes.load_model_config = lambda: snapshot
+    provider_routes.load_provider_status = lambda: status
     http.saved_api_key = lambda: snapshot.api_key
 
     def restore() -> None:
-        http.load_model_config = original_load
-        http.load_provider_status = original_status
+        agent_routes.load_model_config = original_load
+        provider_routes.load_provider_status = original_status
         http.saved_api_key = original_key
 
     _RESTORERS.append(restore)
@@ -143,18 +147,18 @@ def prepare_environment(namespace: str, database_path: Path | None = None) -> di
     landing = install_isolation(namespace, database_path)
     model = install_in_memory_model_config()
     import app.agent.tools.files as file_tools
-    import app.interfaces.http as http
+    from app.interfaces.http_api.routes import agent as agent_routes
 
-    original_file_tools = http.create_file_tools
+    original_file_tools = agent_routes.create_file_tools
     workspace_root = run_directory() / landing["attachment_root"]
-    http.create_file_tools = lambda session_id: original_file_tools(
+    agent_routes.create_file_tools = lambda session_id: original_file_tools(
         session_id, tmp_root=workspace_root
     )
     file_tools.TMP_ROOT = workspace_root
     return {
         "landing": landing,
         "model_config": model,
-        "file_tools_patched": http.create_file_tools is not original_file_tools,
+        "file_tools_patched": agent_routes.create_file_tools is not original_file_tools,
     }
 
 
@@ -298,9 +302,11 @@ def selfcheck_mode(run: Path) -> tuple[list[dict], dict]:
 
     import app.interfaces.http as http
     from app import model_config
-    from app.interfaces.http import CredentialFilter
+    from app.application.session.credentials import CredentialFilter
     injection = install_in_memory_model_config()
-    snapshot = http.load_model_config()
+    from app.interfaces.http_api.routes import agent as agent_routes
+
+    snapshot = agent_routes.load_model_config()
     live_key = os.environ.get("FIT_AGENT_TEST_MODEL_API_KEY")
     detected = CredentialFilter(http.active_secrets()).contains("pre" + live_key + "post") \
         if live_key else False

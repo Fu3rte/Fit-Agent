@@ -5,6 +5,7 @@ from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from app.agent.skills import SKILLS_ROOT, is_skill_path, resolve_skill_path
 from app.agent.tool import (
     AgentTool,
     AgentToolResult,
@@ -172,12 +173,16 @@ def iter_files(workspace: Workspace, path: str, signal=None):
 
 
 def create_file_tools(
-    session_id: str, *, tmp_root: Path = TMP_ROOT
+    session_id: str, *, tmp_root: Path = TMP_ROOT, skills_root: Path = SKILLS_ROOT
 ) -> dict[str, AgentTool]:
     workspace = Workspace(session_id, tmp_root)
 
     def read(tool_call_id, params: ReadArguments, signal, on_update) -> AgentToolResult:
-        target = workspace.read_path(params.path)
+        target = (
+            resolve_skill_path(params.path, skills_root)
+            if is_skill_path(params.path)
+            else workspace.read_path(params.path)
+        )
         collected: list[tuple[int, str]] = []
         following = False
         with target.open(encoding="utf-8") as stream:
@@ -271,7 +276,8 @@ def create_file_tools(
         AgentTool(
             "read",
             "读取 UTF-8 文本；offset 从 1 开始，输出带行号并提示是否仍有后续内容。"
-            "相对路径以项目根目录 tmp 为根，只允许读取当前会话的附件与工作文件。",
+            "相对路径以项目根目录 tmp 为根，只允许读取当前会话的附件与工作文件；"
+            "固定只读命名空间 skills/ 可读取 Skill 入口与其 Markdown 引用文件。",
             ReadArguments,
             read,
             execution_mode="parallel",

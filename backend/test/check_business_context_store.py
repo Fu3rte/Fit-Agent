@@ -11,6 +11,7 @@ from pydantic import TypeAdapter, ValidationError
 
 from app.agent.message_context import AgentMessage
 from app.ai.messages import AssistantMessage, Message, SystemMessage, TextContent, Usage
+from app.application.session.execution import model_visible_entries
 from app.application.session.service import SessionService
 from app.domain.session import models as models_module
 from app.domain.session.branch import build_session_path
@@ -44,7 +45,7 @@ from app.infrastructure.persistence.sqlite.database import (
     open_database,
 )
 from app.infrastructure.persistence.sqlite.repository import SqliteSessionRepository
-from app.interfaces.http import app, model_visible_entries
+from app.interfaces.http import app
 from test.regression_support import (
     Server,
     client,
@@ -878,7 +879,7 @@ async def check_write_and_restore(root: Path) -> dict:
         system_message=system_message(),
     )
     run = send.run
-    await service.append_entry(
+    await service.entries.append_entry(
         SessionMessageEntry(
             session_id=session_id,
             id=uid(),
@@ -889,7 +890,7 @@ async def check_write_and_restore(root: Path) -> dict:
             created_at=2,
         )
     )
-    entries = await service.list_entries(session_id)
+    entries = await service.queries.list_entries(session_id)
     system_id = role_entry_id(entries, "system")
     assistant_id = role_entry_id(entries, "assistant")
 
@@ -902,13 +903,13 @@ async def check_write_and_restore(root: Path) -> dict:
         details=details,
         created_at=CREATED_AT,
     )
-    outcome = await service.append_business_context(node)
+    outcome = await service.entries.append_business_context(node)
     assert outcome.created and not outcome.credential_detected
     assert outcome.run.last_entry_id == node.id
-    session = await service.get_session(session_id)
+    session = await service.queries.get_session(session_id)
     assert session.active_leaf_id == node.id
 
-    repeated = await service.append_business_context(node)
+    repeated = await service.entries.append_business_context(node)
     assert not repeated.created and repeated.entry == node
 
     conflicting = build_business_context_entry(
@@ -920,7 +921,7 @@ async def check_write_and_restore(root: Path) -> dict:
         created_at=CREATED_AT + 1,
     )
     try:
-        await service.append_business_context(conflicting)
+        await service.entries.append_business_context(conflicting)
     except SessionConflict as error:
         assert node.id in str(error)
     else:
@@ -944,17 +945,17 @@ async def check_write_and_restore(root: Path) -> dict:
         created_at=CREATED_AT + 2,
     )
     try:
-        await service.append_business_context(forged)
+        await service.entries.append_business_context(forged)
     except ValueError as error:
         assert "content 必须为 details 的固定序列化投影" in str(error)
     else:
         raise AssertionError("写入处未核对固定投影")
-    stored_ids = [entry.id for entry in await service.list_entries(session_id)]
+    stored_ids = [entry.id for entry in await service.queries.list_entries(session_id)]
     assert forged.id not in stored_ids
-    assert (await service.get_session(session_id)).active_leaf_id == node.id
-    assert (await service.get_run(session_id, run.id)).last_entry_id == node.id
+    assert (await service.queries.get_session(session_id)).active_leaf_id == node.id
+    assert (await service.queries.get_run(session_id, run.id)).last_entry_id == node.id
 
-    history = await service.get_session_history(session_id)
+    history = await service.queries.get_session_history(session_id)
     assert [entry.id for entry in history.entries] == [
         system_id,
         run.request_entry_id,
@@ -1013,7 +1014,7 @@ async def check_branch_isolation(root: Path) -> dict:
     )
     run_one = first.run
     user_id = run_one.request_entry_id
-    await service.append_entry(
+    await service.entries.append_entry(
         SessionMessageEntry(
             session_id=session_id,
             id=uid(),
@@ -1024,7 +1025,7 @@ async def check_branch_isolation(root: Path) -> dict:
             created_at=2,
         )
     )
-    entries = await service.list_entries(session_id)
+    entries = await service.queries.list_entries(session_id)
     system_id = role_entry_id(entries, "system")
     assistant_one = role_entry_id(entries, "assistant")
     old_details = snapshot_details(user_id)
@@ -1036,8 +1037,8 @@ async def check_branch_isolation(root: Path) -> dict:
         details=old_details,
         created_at=CREATED_AT,
     )
-    await service.append_business_context(old_node)
-    await service.finish_run(session_id, run_one.id, "completed")
+    await service.entries.append_business_context(old_node)
+    await service.runs.finish_run(session_id, run_one.id, "completed")
 
     regenerated = await service.accept_regenerate(
         RegenerateCommand(
@@ -1047,13 +1048,13 @@ async def check_branch_isolation(root: Path) -> dict:
     run_two = regenerated.run
     assert run_two.request_entry_id == user_id
     try:
-        await service.get_entry(session_id, old_node.id)
+        await service.queries.get_entry(session_id, old_node.id)
     except EntryNotFound:
         pass
     else:
         raise AssertionError("被移除分支的资料节点仍可读取")
 
-    await service.append_entry(
+    await service.entries.append_entry(
         SessionMessageEntry(
             session_id=session_id,
             id=uid(),
@@ -1064,7 +1065,7 @@ async def check_branch_isolation(root: Path) -> dict:
             created_at=3,
         )
     )
-    entries = await service.list_entries(session_id)
+    entries = await service.queries.list_entries(session_id)
     assistant_two = role_entry_id(entries, "assistant", run_two.id)
     new_node = build_business_context_entry(
         session_id=session_id,
@@ -1074,9 +1075,9 @@ async def check_branch_isolation(root: Path) -> dict:
         details=delta_details(assistant_two, uid(), user_id, assistant_two),
         created_at=CREATED_AT + 10,
     )
-    await service.append_business_context(new_node)
+    await service.entries.append_business_context(new_node)
 
-    history = await service.get_session_history(session_id)
+    history = await service.queries.get_session_history(session_id)
     ids = [entry.id for entry in history.entries]
     assert ids == [system_id, user_id, assistant_two, new_node.id]
     assert old_node.id not in ids
@@ -1088,7 +1089,7 @@ async def check_branch_isolation(root: Path) -> dict:
     assert custom[0].message.details.mode == "delta"
 
     # 祖先链读取：以被移除节点为叶子的路径必须失败，资料节点不跨分支泄漏。
-    all_entries = await service.list_entries(session_id)
+    all_entries = await service.queries.list_entries(session_id)
     path = build_session_path(session_id, all_entries, new_node.id)
     assert [entry.id for entry in path] == [system_id, user_id, assistant_two, new_node.id]
     try:
@@ -1099,7 +1100,7 @@ async def check_branch_isolation(root: Path) -> dict:
         raise AssertionError("已移除分支仍可构建路径")
 
     # 既有消息、压缩与确认路径不受新节点类型影响：当前分支读取仍只返回真实消息节点。
-    branch = await service.get_current_branch(session_id)
+    branch = await service.queries.get_current_branch(session_id)
     assert [entry.id for entry in branch] == [system_id, user_id, assistant_two]
     await database.close()
     return {"kept": new_node.id, "removed": old_node.id}
@@ -1120,7 +1121,7 @@ async def check_message_nodes_boundary(root: Path) -> None:
             system_message=system_message(),
         )
         run = send.run
-        await service.append_entry(
+        await service.entries.append_entry(
             SessionMessageEntry(
                 session_id=session_id,
                 id=uid(),
@@ -1131,7 +1132,7 @@ async def check_message_nodes_boundary(root: Path) -> None:
                 created_at=2,
             )
         )
-        entries = await service.list_entries(session_id)
+        entries = await service.queries.list_entries(session_id)
         assistant_id = role_entry_id(entries, "assistant")
         node = build_business_context_entry(
             session_id=session_id,
@@ -1141,10 +1142,10 @@ async def check_message_nodes_boundary(root: Path) -> None:
             details=snapshot_details(run.request_entry_id),
             created_at=CREATED_AT,
         )
-        await service.append_business_context(node)
+        await service.entries.append_business_context(node)
 
         # 资料节点是当前分支的叶子，真实参与祖先链读取，并在模型投影中按原位置贡献 user 消息。
-        projection = await service.get_projection(session_id, node.id)
+        projection = await service.queries.get_projection(session_id, node.id)
         assert [entry.id for entry in projection.path][-1] == node.id
         assert isinstance(projection.path[-1], BusinessContextEntry)
         assert len(projection.context.messages) == len(projection.context.source_entry_ids)
@@ -1179,7 +1180,7 @@ async def check_template_update(root: Path) -> None:
         system_message=system_message(),
     )
     run = send.run
-    await service.append_entry(
+    await service.entries.append_entry(
         SessionMessageEntry(
             session_id=session_id,
             id=uid(),
@@ -1190,7 +1191,7 @@ async def check_template_update(root: Path) -> None:
             created_at=2,
         )
     )
-    entries = await service.list_entries(session_id)
+    entries = await service.queries.list_entries(session_id)
     assistant_id = role_entry_id(entries, "assistant")
     details = snapshot_details(run.request_entry_id)
     node = build_business_context_entry(
@@ -1201,7 +1202,7 @@ async def check_template_update(root: Path) -> None:
         details=details,
         created_at=CREATED_AT,
     )
-    await service.append_business_context(node)
+    await service.entries.append_business_context(node)
     original = node.message.content
     await database.close()
 
@@ -1396,7 +1397,7 @@ async def seed_http_history(path: Path) -> dict:
             system_message=system_message(),
         )
         run = send.run
-        await service.append_entry(
+        await service.entries.append_entry(
             SessionMessageEntry(
                 session_id=session_id,
                 id=uid(),
@@ -1407,7 +1408,7 @@ async def seed_http_history(path: Path) -> dict:
                 created_at=2,
             )
         )
-        entries = await service.list_entries(session_id)
+        entries = await service.queries.list_entries(session_id)
         assistant_id = role_entry_id(entries, "assistant")
         details = snapshot_details(run.request_entry_id)
         node = build_business_context_entry(
@@ -1418,7 +1419,7 @@ async def seed_http_history(path: Path) -> dict:
             details=details,
             created_at=CREATED_AT,
         )
-        await service.append_business_context(node)
+        await service.entries.append_business_context(node)
         return {
             "session_id": session_id,
             "entry_id": node.id,

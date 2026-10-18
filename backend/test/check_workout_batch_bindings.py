@@ -62,22 +62,22 @@ async def batch(f, order, mutation=None):
     parent = source
     for index, call in enumerate(calls):
         if call.name == "prepare_profile_update":
-            proposal = await f.business.prepare_profile_update(context,
+            proposal = await f.business.profile.prepare_profile_update(context,
                 ProfileProposalArguments(profile_id=1, base_profile_version=None, payload=payload()))
             proposals[call.name] = proposal
             message = result(call, proposal.model_dump())
         elif call.name == "prepare_workout":
-            proposal = await f.business.prepare_workout(context, WorkoutProposalArguments(
+            proposal = await f.business.workouts.prepare_workout(context, WorkoutProposalArguments(
                 performed_on=context.business_date, base_workout_id=None, base_workout_version=None,
                 payload=WorkoutContent.model_validate(CONTENT)))
             proposals[call.name] = proposal
             message = result(call, proposal.model_dump())
         elif call.name == "get_workout":
             with pytest.raises(BusinessError) as caught:
-                await f.business.get_workout(new_id())
+                await f.business.workouts.get_workout(new_id())
             message = result(call, caught.value.detail(), True)
         else:
-            message = result(call, (await f.business.get_profile()).model_dump())
+            message = result(call, (await f.business.profile.get_profile()).model_dump())
         if mutation == "failed_prepare" and call.name in {"prepare_workout", "prepare_profile_update"}:
             message = message.model_copy(update={"is_error": True})
         if index == 1 and mutation is not None:
@@ -96,7 +96,7 @@ async def batch(f, order, mutation=None):
         parent = await f.append(session, run.id, parent, message)
         displays[call.name] = parent
         if call.name == "prepare_profile_update":
-            await f.business.bind_display_entry(proposal.proposal_id, parent)
+            await f.business.profile.bind_display_entry(proposal.proposal_id, parent)
     return session, run, context, proposals, displays
 
 
@@ -105,8 +105,8 @@ async def valid(order):
     try:
         session, run, context, proposals, displays = await batch(f, order)
         workout = proposals["prepare_workout"]
-        await f.business.bind_workout_display_entry(workout.proposal_id, displays["prepare_workout"])
-        await f.service.finish_run(session, run.id, "completed")
+        await f.business.workouts.bind_workout_display_entry(workout.proposal_id, displays["prepare_workout"])
+        await f.service.runs.finish_run(session, run.id, "completed")
         # 合法保存只经独立确认入口：同一批次的两份快照分别由各自按钮确认。
         workout_op = await f.confirm(
             {"session": session, "proposal": workout.proposal_id,
@@ -134,7 +134,7 @@ async def invalid(mutation):
         order = ["get_profile", "get_workout", "prepare_workout", "prepare_profile_update"]
         with pytest.raises((ProfileConfirmationInvalid, WorkoutConfirmationInvalid)):
             session, run, context, proposals, displays = await batch(f, order, mutation)
-            await f.business.bind_workout_display_entry(
+            await f.business.workouts.bind_workout_display_entry(
                 proposals["prepare_workout"].proposal_id, displays["prepare_workout"])
         assert await count_rows(f.database, "workout_save_records") == 0
         assert await count_rows(f.database, "profile_save_records") == 0

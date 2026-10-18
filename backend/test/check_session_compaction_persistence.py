@@ -344,7 +344,7 @@ async def scenario_migration(root: Path) -> None:
         )
         async with repository.transaction():
             await repository.insert_entry(node)
-        stored = await service.get_entry(MIG_SESSION, "m-c")
+        stored = await service.queries.get_entry(MIG_SESSION, "m-c")
         assert isinstance(stored, CompactionEntry)
         assert stored.model_dump() == node.model_dump()
 
@@ -367,7 +367,7 @@ async def scenario_migration(root: Path) -> None:
         )
         async with repository.transaction():
             await repository.insert_entry(omitted)
-        stored_omitted = await service.get_entry(MIG_SESSION, "m-omit")
+        stored_omitted = await service.queries.get_entry(MIG_SESSION, "m-omit")
         assert stored_omitted.model_omitted is True
         assert stored_omitted.messages[0].context_overflow is True
         assert (
@@ -400,7 +400,7 @@ async def scenario_compaction(database, repository, service) -> None:
         system_message=system_message(),
     )
     run = send.run
-    user = await service.get_entry(COMP_SESSION, run.request_entry_id)
+    user = await service.queries.get_entry(COMP_SESSION, run.request_entry_id)
     system_id = user.parent_id
     assistant = SessionMessageEntry(
         session_id=COMP_SESSION,
@@ -411,7 +411,7 @@ async def scenario_compaction(database, repository, service) -> None:
         messages=[assistant_message()],
         created_at=200,
     )
-    await service.append_entry(assistant)
+    await service.entries.append_entry(assistant)
 
     details = CompactionDetails.model_validate(
         {"attachments": [attachment_reference(COMP_SESSION)]}
@@ -422,24 +422,24 @@ async def scenario_compaction(database, repository, service) -> None:
     async with repository.transaction():
         await repository.insert_entry(compaction)
 
-    stored = await service.get_entry(COMP_SESSION, "cp-c1")
+    stored = await service.queries.get_entry(COMP_SESSION, "cp-c1")
     assert isinstance(stored, CompactionEntry)
     assert stored.model_dump() == compaction.model_dump()
     assert stored.details.attachments[0].path == attachment_reference(COMP_SESSION)["path"]
 
     # 完整原始路径包含压缩节点，且顺序保持父子链；业务读取过滤为真实消息节点。
-    entries = await service.list_entries(COMP_SESSION)
+    entries = await service.queries.list_entries(COMP_SESSION)
     path = build_session_path(COMP_SESSION, entries, "cp-c1")
     assert [entry.id for entry in path] == [system_id, user.id, "cp-a1", "cp-c1"]
     assert [entry.id for entry in message_entries(path)] == [system_id, user.id, "cp-a1"]
-    assert [entry.id for entry in await service.get_branch(COMP_SESSION, "cp-c1")] == [
+    assert [entry.id for entry in await service.queries.get_branch(COMP_SESSION, "cp-c1")] == [
         system_id,
         user.id,
         "cp-a1",
     ]
     context = build_session_context(COMP_SESSION, entries, "cp-c1")
     assert [message.role for message in context] == ["system", "user", "assistant"]
-    assert await service.get_context(COMP_SESSION, "cp-c1") is not None
+    assert await service.queries.get_context(COMP_SESSION, "cp-c1") is not None
 
 
 async def scenario_roundtrip(root: Path) -> None:
@@ -453,19 +453,19 @@ async def scenario_roundtrip(root: Path) -> None:
 
     reopened, repository, service = await open_store(path)
     try:
-        session = await service.get_session(COMP_SESSION)
+        session = await service.queries.get_session(COMP_SESSION)
         assert session.active_leaf_id == "cp-a1"
-        run = await service.get_run(COMP_SESSION, (await service.list_runs(COMP_SESSION))[0].id)
-        user = await service.get_entry(COMP_SESSION, run.request_entry_id)
-        stored = await service.get_entry(COMP_SESSION, "cp-c1")
+        run = await service.queries.get_run(COMP_SESSION, (await service.queries.list_runs(COMP_SESSION))[0].id)
+        user = await service.queries.get_entry(COMP_SESSION, run.request_entry_id)
+        stored = await service.queries.get_entry(COMP_SESSION, "cp-c1")
         assert isinstance(stored, CompactionEntry) and stored.summary == "历史摘要"
         assert stored.details.attachments[0].attachment_id == MIG_ATTACH
-        assert [entry.id for entry in await service.get_branch(COMP_SESSION, "cp-c1")] == [
+        assert [entry.id for entry in await service.queries.get_branch(COMP_SESSION, "cp-c1")] == [
             user.parent_id,
             user.id,
             "cp-a1",
         ]
-        assert (await service.get_entry(COMP_SESSION, "cp-c1")).type == "compaction"
+        assert (await service.queries.get_entry(COMP_SESSION, "cp-c1")).type == "compaction"
         await assert_foreign_keys(reopened)
     finally:
         await reopened.close()
@@ -596,8 +596,8 @@ async def scenario_db_guards(database, repository, service) -> None:
         system_message=system_message(),
     )
     run = send.run
-    user = await service.get_entry("s-guards", run.request_entry_id)
-    await service.append_entry(
+    user = await service.queries.get_entry("s-guards", run.request_entry_id)
+    await service.entries.append_entry(
         SessionMessageEntry(
             session_id="s-guards", id="g-a1", parent_id=user.id, run_id=run.id,
             type="message", messages=[assistant_message()], created_at=300,
@@ -650,7 +650,7 @@ async def scenario_db_guards(database, repository, service) -> None:
         "跨会话父节点",
     )
     assert (await one(connection, "SELECT count(*) FROM session_entries WHERE id LIKE 'g-c%'"))[0] == 0
-    await service.finish_run("s-guards", run.id, "completed")
+    await service.runs.finish_run("s-guards", run.id, "completed")
 
 
 async def scenario_transaction_rollback(database, repository, service) -> None:
@@ -664,9 +664,9 @@ async def scenario_transaction_rollback(database, repository, service) -> None:
         system_message=system_message(),
     )
     run = send.run
-    user = await service.get_entry("s-tx", run.request_entry_id)
-    leaf = (await service.get_session("s-tx")).active_leaf_id
-    before = len(await service.list_entries("s-tx"))
+    user = await service.queries.get_entry("s-tx", run.request_entry_id)
+    leaf = (await service.queries.get_session("s-tx")).active_leaf_id
+    before = len(await service.queries.list_entries("s-tx"))
 
     async def failing() -> None:
         async with repository.transaction():
@@ -688,11 +688,11 @@ async def scenario_transaction_rollback(database, repository, service) -> None:
     else:
         raise AssertionError("事务内异常未传播")
 
-    assert len(await service.list_entries("s-tx")) == before
+    assert len(await service.queries.list_entries("s-tx")) == before
     assert await repository.get_entry("s-tx", "tx-a") is None
     assert await repository.get_entry("s-tx", "tx-c") is None
-    assert (await service.get_session("s-tx")).active_leaf_id == leaf
-    await service.finish_run("s-tx", run.id, "completed")
+    assert (await service.queries.get_session("s-tx")).active_leaf_id == leaf
+    await service.runs.finish_run("s-tx", run.id, "completed")
 
 
 async def check_conversion() -> None:

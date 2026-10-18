@@ -10,7 +10,7 @@ import pytest
 from pydantic import ValidationError
 
 from app.application.session.attachment_files import AttachmentFiles, PreparedUpload
-from app.application.session.service import _reject_credentials
+from app.application.session.credentials import reject_credentials
 from app.domain.session.attachments import (
     AttachmentError,
     AttachmentMetadata,
@@ -39,7 +39,7 @@ def expect_code(code: str, action) -> None:
 def main(*, fixture_root: Path | None = None) -> None:
     root = (fixture_root or ROOT / "tmp" / "attachment-check") / str(uuid4())
     root.mkdir(parents=True)
-    check = partial(_reject_credentials, credentials=("protected-test-credential",))
+    check = partial(reject_credentials, credentials=("protected-test-credential",))
     files = AttachmentFiles(root, check_credentials=check)
     session = str(uuid4())
     original = "# 训练\r\n深蹲\n\ufeff".encode("utf-8")

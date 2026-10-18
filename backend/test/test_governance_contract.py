@@ -404,7 +404,7 @@ async def test_finish_run_persists_first_stop_reason_and_keeps_terminal(tmp_path
         await _seed_running_run(database.connection)
         service = SessionService(SqliteSessionRepository(database))
 
-        outcome = await service.finish_run(
+        outcome = await service.runs.finish_run(
             "s-1",
             "r-1",
             "failed",
@@ -415,7 +415,7 @@ async def test_finish_run_persists_first_stop_reason_and_keeps_terminal(tmp_path
         assert outcome.changed is True
         assert outcome.run.stop_reason == "model_timeout"
 
-        stored = await service.get_run("s-1", "r-1")
+        stored = await service.queries.get_run("s-1", "r-1")
         assert (stored.status, stored.error_code, stored.stop_reason) == (
             "failed",
             "model_timeout",
@@ -424,18 +424,18 @@ async def test_finish_run_persists_first_stop_reason_and_keeps_terminal(tmp_path
 
         # 已提交终态保持原值：不同终态被拒绝，同终态幂等返回且不改写停止原因。
         with pytest.raises(SessionConflict):
-            await service.finish_run(
+            await service.runs.finish_run(
                 "s-1",
                 "r-1",
                 "cancelled",
                 error_code="slow_consumer",
                 stop_reason="slow_consumer",
             )
-        replay = await service.finish_run(
+        replay = await service.runs.finish_run(
             "s-1", "r-1", "failed", error_code="tool_timeout", stop_reason="tool_timeout"
         )
         assert replay.changed is False
-        final = await service.get_run("s-1", "r-1")
+        final = await service.queries.get_run("s-1", "r-1")
         assert (final.status, final.error_code, final.stop_reason) == (
             "failed",
             "model_timeout",
@@ -484,14 +484,14 @@ async def test_migration_v14_upgrade_adds_stop_reason_and_keeps_old_rows(tmp_pat
         assert upgraded["stop_diagnostic"] is None
         # 升级记录可参与首次终态提交并写入停止原因。
         service = SessionService(SqliteSessionRepository(migrated))
-        await service.finish_run(
+        await service.runs.finish_run(
             "s-1",
             "r-1",
             "cancelled",
             error_code="slow_consumer",
             stop_reason="slow_consumer",
         )
-        finished = await service.get_run("s-1", "r-1")
+        finished = await service.queries.get_run("s-1", "r-1")
         assert (finished.status, finished.stop_reason) == ("cancelled", "slow_consumer")
     finally:
         await migrated.close()
@@ -546,11 +546,11 @@ async def test_run_diagnostic_roundtrip_survives_real_reopen(tmp_path: Path) -> 
     try:
         await _seed_running_run(database.connection)
         service = SessionService(SqliteSessionRepository(database))
-        recorded = await service.record_run_diagnostic("s-1", "r-1", "worker_stuck")
+        recorded = await service.runs.record_run_diagnostic("s-1", "r-1", "worker_stuck")
         assert recorded.status == "running"
         assert recorded.stop_diagnostic == "worker_stuck"
         # 诊断槽位保留首个已记录证据。
-        again = await service.record_run_diagnostic("s-1", "r-1", "terminal_persist_failed")
+        again = await service.runs.record_run_diagnostic("s-1", "r-1", "terminal_persist_failed")
         assert again.stop_diagnostic == "worker_stuck"
     finally:
         await database.close()
@@ -558,13 +558,13 @@ async def test_run_diagnostic_roundtrip_survives_real_reopen(tmp_path: Path) -> 
     reopened = await open_database(path)
     try:
         service = SessionService(SqliteSessionRepository(reopened))
-        stored = await service.get_run("s-1", "r-1")
+        stored = await service.queries.get_run("s-1", "r-1")
         assert stored.status == "running"
         assert stored.stop_diagnostic == "worker_stuck"
         assert stored.stop_reason is None
         with pytest.raises(ValueError):
-            await service.record_run_diagnostic("s-1", "r-1", "not_registered")
-        assert (await service.get_run("s-1", "r-1")).stop_diagnostic == "worker_stuck"
+            await service.runs.record_run_diagnostic("s-1", "r-1", "not_registered")
+        assert (await service.queries.get_run("s-1", "r-1")).stop_diagnostic == "worker_stuck"
     finally:
         await reopened.close()
 

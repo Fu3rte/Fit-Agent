@@ -105,8 +105,8 @@ async def scenario_both_consumed(service: SessionService) -> dict:
     assert [message.content for message in messages] == ["第一条", "第二条"]
 
     last_entry_id = await coordinator.consume(run_id, messages)
-    first_stored = await service.get_steering(session_id, first.id)
-    second_stored = await service.get_steering(session_id, second.id)
+    first_stored = await service.queries.get_steering(session_id, first.id)
+    second_stored = await service.queries.get_steering(session_id, second.id)
     assert first_stored.status == "consumed" and first_stored.entry_id
     assert second_stored.status == "consumed" and second_stored.entry_id
     assert last_entry_id == second_stored.entry_id
@@ -118,16 +118,16 @@ async def scenario_both_consumed(service: SessionService) -> dict:
         second_stored.entry_id,
     ]
 
-    first_entry = await service.get_entry(session_id, first_stored.entry_id)
-    second_entry = await service.get_entry(session_id, second_stored.entry_id)
-    run = await service.get_run(session_id, run_id)
+    first_entry = await service.queries.get_entry(session_id, first_stored.entry_id)
+    second_entry = await service.queries.get_entry(session_id, second_stored.entry_id)
+    run = await service.queries.get_run(session_id, run_id)
     assert first_entry.parent_id == run.request_entry_id
     assert second_entry.parent_id == first_entry.id
     assert run.last_entry_id == second_entry.id
-    assert (await service.get_current_branch(session_id))[-1].id == second_entry.id
+    assert (await service.queries.get_current_branch(session_id))[-1].id == second_entry.id
     assert first_entry.messages[0] == first.message
     assert second_entry.messages[0] == second.message
-    assert len(await service.list_entries(session_id)) == 4
+    assert len(await service.queries.list_entries(session_id)) == 4
 
     evidence = {
         "last_entry_id": last_entry_id,
@@ -144,17 +144,17 @@ async def scenario_partial_failure(service: SessionService, path: Path) -> dict:
         service, path, session_id
     )
 
-    first_stored = await service.get_steering(session_id, first.id)
-    second_stored = await service.get_steering(session_id, second.id)
+    first_stored = await service.queries.get_steering(session_id, first.id)
+    second_stored = await service.queries.get_steering(session_id, second.id)
     assert first_stored.status == "consumed" and first_stored.entry_id
     assert second_stored.status == "pending" and second_stored.entry_id is None
     assert [item["status"] for item in notified] == ["consumed"]
     assert notified[0]["steering_id"] == first.id
     assert notified[0]["entry_id"] == first_stored.entry_id
 
-    first_entry = await service.get_entry(session_id, first_stored.entry_id)
+    first_entry = await service.queries.get_entry(session_id, first_stored.entry_id)
     assert first_entry.messages[0] == first.message
-    run = await service.get_run(session_id, run_id)
+    run = await service.queries.get_run(session_id, run_id)
     assert run.status == "running" and run.last_entry_id == first_stored.entry_id
 
     evidence = {
@@ -174,9 +174,9 @@ async def scenario_failure_finalize(service: SessionService, path: Path) -> dict
     )
 
     await coordinator.finish(session_id, run_id, "failed")
-    run = await service.get_run(session_id, run_id)
-    first_stored = await service.get_steering(session_id, first.id)
-    second_stored = await service.get_steering(session_id, second.id)
+    run = await service.queries.get_run(session_id, run_id)
+    first_stored = await service.queries.get_steering(session_id, first.id)
+    second_stored = await service.queries.get_steering(session_id, second.id)
     assert run.status == "failed" and run.finished_at is not None
     assert first_stored.status == "consumed"
     assert second_stored.status == "discarded" and second_stored.reason == "failed"
@@ -275,17 +275,17 @@ async def scenario_repeated_consume(service: SessionService) -> dict:
     run_id, coordinator, notified, first, second = await seed_two(service, session_id)
     messages = await coordinator.take(run_id)
     last_entry_id = await coordinator.consume(run_id, messages)
-    entries_once = len(await service.list_entries(session_id))
+    entries_once = len(await service.queries.list_entries(session_id))
 
     repeat = await coordinator.consume(run_id, messages)
-    entries_repeat = len(await service.list_entries(session_id))
+    entries_repeat = len(await service.queries.list_entries(session_id))
     assert repeat is None
     assert entries_repeat == entries_once
     assert [item["status"] for item in notified] == ["consumed", "consumed"]
 
-    again = await service.consume_steering(session_id, run_id, first.id)
+    again = await service.runs.consume_steering(session_id, run_id, first.id)
     assert again.created is False and again.steering.status == "consumed"
-    assert len(await service.list_entries(session_id)) == entries_once
+    assert len(await service.queries.list_entries(session_id)) == entries_once
 
     evidence = {
         "last_entry_id": last_entry_id,

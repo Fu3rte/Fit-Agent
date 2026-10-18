@@ -150,7 +150,7 @@ async def tool_cases(root: Path) -> dict:
         for arguments in ({"name": "卧推"}, {"purpose": "lookup"}):
             message = await fixture.invoke(SEARCH_EXERCISES, arguments, context)
             assert message.is_error is True
-        assert (await fixture.business.get_profile()).version is None
+        assert (await fixture.business.profile.get_profile()).version is None
         return {"detail": envelope(detailed)["items"][0]["id"], "unknown": "exercise_not_found"}
     finally:
         await fixture.close()

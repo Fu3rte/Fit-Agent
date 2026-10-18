@@ -33,7 +33,8 @@ from app.application.session.service import SessionService
 from app.domain.session.models import SendCommand, SendRequest, SessionMessageEntry
 from app.infrastructure.persistence.sqlite.database import open_database
 from app.infrastructure.persistence.sqlite.repository import SqliteSessionRepository
-from app.interfaces.http import CredentialDetectedError, CredentialFilter
+from app.application.session.credentials import CredentialFilter
+from app.interfaces.http import CredentialDetectedError
 from test.regression_support import (
     TEST_SESSION,
     session_workspace,
@@ -606,7 +607,7 @@ def check_credential_stops_scheduling() -> None:
                 position = {"id": send.run.request_entry_id}
 
                 async def save_message(node_id, message):
-                    outcome = await service.append_entry(
+                    outcome = await service.entries.append_entry(
                         SessionMessageEntry(
                             session_id=session_id,
                             id=node_id,
@@ -667,7 +668,7 @@ def check_credential_stops_scheduling() -> None:
                     )
                 except BaseException as error:
                     failure = error
-                branch = await service.get_current_branch(session_id)
+                branch = await service.queries.get_current_branch(session_id)
                 return {
                     "failure": type(failure).__name__,
                     "executed": executed,
@@ -732,7 +733,7 @@ def check_database_ordering() -> None:
 
                 async def save_message(node_id, message):
                     parent_id = position["id"]
-                    outcome = await service.append_entry(
+                    outcome = await service.entries.append_entry(
                         SessionMessageEntry(
                             session_id=session_id,
                             id=node_id,
@@ -807,7 +808,7 @@ def check_database_ordering() -> None:
                     emit,
                     stream_fn=stream_fn,
                 )
-                branch = await service.get_current_branch(session_id)
+                branch = await service.queries.get_current_branch(session_id)
                 stored = [entry.messages[0] for entry in branch]
                 results = [message for message in stored if isinstance(message, ToolResultMessage)]
                 assert [message.tool_call_id for message in results] == ["slow", "fast"]

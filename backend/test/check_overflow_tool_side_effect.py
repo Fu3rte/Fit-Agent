@@ -12,7 +12,7 @@ from app.infrastructure.persistence.sqlite.business_repository import (
 )
 from app.infrastructure.persistence.sqlite.database import open_database
 from app.infrastructure.persistence.sqlite.repository import SqliteSessionRepository
-from app.interfaces import http as http_module
+from app.application.session import execution as http_module
 from app.interfaces.http import active, app
 from app.model_config import load_model_config
 from test.check_overflow_recovery_loop import (
@@ -115,7 +115,7 @@ async def diagnose(path: Path, ids: dict) -> dict:
     database = await open_database(path)
     try:
         service = SessionService(SqliteSessionRepository(database))
-        projection = await service.get_projection(ids["session"], ids["retained"])
+        projection = await service.queries.get_projection(ids["session"], ids["retained"])
         return {
             "messages": len(projection.context.messages),
             "sources": len(projection.context.source_entry_ids),

@@ -101,7 +101,7 @@ async def check():
         assert baseline_snapshot.confirmation_entry_id is None
 
         before_tables = await plan_tables(f.database)
-        before_bindings = await f.business.list_plan_display_bindings(session)
+        before_bindings = await f.business.plans.list_plan_display_bindings(session)
         assert len(before_tables["plans"]) == 1 and len(before_tables["plan_save_records"]) == 1
         assert len(before_bindings) == 2 and baseline_snapshot.display_entry_id in before_bindings
 
@@ -119,7 +119,7 @@ async def check():
             with pytest.raises(ValidationError):
                 PlanContent.model_validate(pointer_content(payload, fields))
         assert await plan_tables(f.database) == before_tables
-        assert await f.business.list_plan_display_bindings(session) == before_bindings
+        assert await f.business.plans.list_plan_display_bindings(session) == before_bindings
         assert await f.repository.get_plan_snapshot(pending["proposal_id"]) == baseline_snapshot
         return {"level": LEVEL, "legal_pointers": LEGAL, "escaped_pointers": ESCAPE_LEGAL,
                 "boundary_legal": BOUNDARY_LEGAL, "illegal_paths": ILLEGAL,

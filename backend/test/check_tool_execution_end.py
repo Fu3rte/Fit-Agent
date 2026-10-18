@@ -23,15 +23,15 @@ from app.ai.messages import (
     ToolResultMessage,
     text_projection,
 )
+from app.application.session.credentials import CredentialFilter
 from app.interfaces.http import (
     CredentialDetectedError,
-    CredentialFilter,
     RunState,
-    encode,
     public_message,
     public_tool_execution_end,
     public_tool_execution_update,
 )
+from app.interfaces.http_api.stream import encode
 from test.regression_support import TEST_SESSION, session_workspace
 
 

@@ -12,7 +12,7 @@ from pydantic import ValidationError
 
 from app.ai.messages import UserMessage
 from app.application.session.attachment_files import AttachmentFiles
-from app.application.session.service import _reject_credentials
+from app.application.session.credentials import reject_credentials
 from app.domain.session.attachments import (
     AttachmentError,
     AttachmentMetadata,
@@ -240,7 +240,7 @@ async def check_migration_and_files():
     db = Database(connection)
     business = SqliteBusinessRepository(db)
     repo = SqliteSessionRepository(db)
-    files = AttachmentFiles(ROOT, check_credentials=partial(_reject_credentials, credentials=()))
+    files = AttachmentFiles(ROOT, check_credentials=partial(reject_credentials, credentials=()))
     try:
         ids = await business_seed(db)
         async with business.transaction():
@@ -282,12 +282,17 @@ async def check_migration_and_files():
                             confirmation_entry_id=snapshot.confirmation_entry_id, result=result, saved_at=1000))
         tables = [row[0] for row in await rows(db, "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")]
 
-        # 压缩能力为 session_entries 增列；迁移保真只比对原有消息列。
+        # 压缩能力为 session_entries 增列，运行治理为 session_runs 增列；迁移保真只比对原有列。
         def snapshot_sql(table: str) -> str:
             columns = (
                 "session_id, id, parent_id, run_id, type, messages, created_at"
                 if table == "session_entries"
-                else "*"
+                else (
+                    "session_id, id, request_entry_id, last_entry_id, status, "
+                    "started_at, finished_at, error_code, error_message"
+                    if table == "session_runs"
+                    else "*"
+                )
             )
             return f"SELECT {columns} FROM {table} ORDER BY 1, 2"
 

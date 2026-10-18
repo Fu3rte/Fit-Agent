@@ -10,7 +10,9 @@ from uuid import UUID, uuid4
 import httpx
 import uvicorn
 
+from app.agent import agent_loop
 from app.agent.agent_loop import run_agent_loop
+from app.agent.budget import RequestBudget
 from app.agent.config import AgentLoopConfig
 from app.ai.messages import AssistantMessage, UserMessage
 from app.domain.session.attachments import TMP_ROOT
@@ -46,6 +48,7 @@ def check_turn_limit() -> None:
     config = AgentLoopConfig(
         model=load_model_config(),
         max_turns=1,
+        request_budget=RequestBudget(),
         get_steering_messages=steering,
         get_steering_messages_or_close=steering,
     )
@@ -200,6 +203,8 @@ def check() -> None:
 
             cancelled_session = str(uuid4())
             create_session(client, cancelled_session)
+            capacity_session = str(uuid4())
+            create_session(client, capacity_session)
             with client.stream("POST", "/api/agent/run", json={
                 "session_id": cancelled_session,
                 "operation_id": str(uuid4()),
@@ -213,7 +218,7 @@ def check() -> None:
                         reply = client.post(f"/api/agent/runs/{cancelled_run}/steering", json={"session_id": cancelled_session, "operation_id": str(uuid4()), "message": "只回复 LATE"})
                         assert reply.status_code == 200
                         assert active.locked()
-                        capacity = client.post("/api/agent/run", json={"session_id": str(uuid4()), "operation_id": str(uuid4()), "request": "OK"})
+                        capacity = client.post("/api/agent/run", json={"session_id": capacity_session, "operation_id": str(uuid4()), "request": "OK"})
                         assert capacity.status_code == 503
                         assert capacity.json()["detail"]["code"] == "capacity_exceeded"
                         break
@@ -242,31 +247,66 @@ def check() -> None:
                         runs[UUID(aborted_run)].disconnect()
                         stopped = True
             wait_idle()
+            (EVIDENCE / "aborted-metadata.json").write_text(json.dumps([
+                {"event": item["event"], "stop_reason": item["data"].get("stop_reason"),
+                 "status": item["data"].get("status"), "code": item["data"].get("code")}
+                for item in aborted
+            ]), encoding="utf-8")
             validate_events(aborted)
             assert stopped and aborted[-1]["event"] == "error"
             assert aborted[-1]["data"]["status"] == "cancelled"
-            assert any(item["event"] == "message_end" and item["data"]["stop_reason"] == "aborted" for item in aborted)
+            assert aborted[-1]["data"]["code"] == "cancelled"
+            assert not any(item["event"] == "done" for item in aborted)
+            # 取消可在读取等待中抛出；仅真实完成并提交的模型终态产生 message_end。
+            ended = [item for item in aborted if item["event"] == "message_end"]
+            committed = [message for message in stored_messages(aborted_session) if isinstance(message, AssistantMessage)]
+            assert [item["data"]["stop_reason"] for item in ended] == [message.stop_reason for message in committed]
+            assert all(message.stop_reason == "aborted" for message in committed)
             assert aborted[-2]["event"] == "steering_status" and aborted[-2]["data"]["status"] == "discarded"
             assert last_run(aborted_session).status == "cancelled"
+            assert UUID(aborted_run) not in runs and not active.locked()
             evidence["aborted"] = aborted
 
             length_session = str(uuid4())
             create_session(client, length_session)
             large_text = "".join(uuid4().hex for _ in range(970))
             length_path = f"sessions/{length_session}/workspace/length-{uuid4().hex}.txt"
-            with client.stream("POST", "/api/agent/run", json={
-                "session_id": length_session,
-                "operation_id": str(uuid4()),
-                "request": f"仅调用 write，在 {length_path} 写入以下完整原文。直接将原文作为 content 参数，不要计算、改写、解释或省略：{large_text}",
-            }) as response:
-                limited = list(events(response))
-            wait_idle()
+            assert not runs and not active.locked()
+            original_output_limit = agent_loop.DEFAULT_MAX_OUTPUT_TOKENS
+            try:
+                agent_loop.DEFAULT_MAX_OUTPUT_TOKENS = 128
+                with client.stream("POST", "/api/agent/run", json={
+                    "session_id": length_session,
+                    "operation_id": str(uuid4()),
+                    "request": f"仅调用 write，在 {length_path} 写入以下完整原文。直接将原文作为 content 参数，不要计算、改写、解释或省略：{large_text}",
+                }) as response:
+                    limited = list(events(response))
+            finally:
+                try:
+                    wait_idle()
+                finally:
+                    agent_loop.DEFAULT_MAX_OUTPUT_TOKENS = original_output_limit
+            (EVIDENCE / "length-metadata.json").write_text(json.dumps([
+                {"event": item["event"], "stop_reason": item["data"].get("stop_reason"),
+                 "status": item["data"].get("status"), "code": item["data"].get("code")}
+                for item in limited
+            ]), encoding="utf-8")
             validate_events(limited)
-            assert limited[-1]["event"] == "done" and limited[-1]["data"]["stop_reason"] == "length"
+            assert limited[-1]["event"] == "error" and limited[-1]["data"]["code"] == "model_output_limit_exceeded", {
+                "event": limited[-1]["event"],
+                "stop_reason": limited[-1]["data"].get("stop_reason"),
+                "code": limited[-1]["data"].get("code"),
+            }
             assert any(item["event"] == "message_end" and item["data"]["stop_reason"] == "length" for item in limited)
             assert stored_messages(length_session)
             last_assistant = next(message for message in reversed(stored_messages(length_session)) if isinstance(message, AssistantMessage))
-            assert last_assistant.usage is not None and last_assistant.usage.output > 0
+            assert last_assistant.stop_reason == "length"
+            assert last_assistant.usage is not None and 0 < last_assistant.usage.output <= 128
+            assert limited[-1]["data"]["status"] == "failed"
+            assert last_run(length_session).status == "failed"
+            assert not runs and not active.locked()
+            assert agent_loop.DEFAULT_MAX_OUTPUT_TOKENS == original_output_limit
+            print(f"length metadata: budget=128 stop_reason=length code=model_output_limit_exceeded output_tokens={last_assistant.usage.output}")
             assert not any(item["event"] in {"tool_start", "tool_result"} for item in limited)
             assert not (TMP_ROOT / length_path).exists()
             evidence["length"] = limited

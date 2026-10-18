@@ -1,4 +1,4 @@
-﻿param(
+param(
     [Parameter(Mandatory = $true)][ValidateSet("snapshot", "stop")]
     [string]$Command,
     [int]$RootPid = 0,
@@ -28,11 +28,15 @@ function Get-DescendantProcesses {
         $current = [int]$queue.Dequeue()
         if ($seen.ContainsKey($current)) { continue }
         $seen[$current] = $true
+        $parent = $Table[$current]
+        # 父进程已退出时其 PID 可能被复用；不能按残留 ParentProcessId 认领其他进程树。
+        if ($null -eq $parent) { continue }
         foreach ($item in $Table.Values) {
-            if ([int]$item.ParentProcessId -eq $current) {
-                $found += $item
-                $queue.Enqueue([int]$item.ProcessId)
-            }
+            if ([int]$item.ParentProcessId -ne $current) { continue }
+            # 子进程创建时间必须不早于父进程，PID 复用形成的假父子关系在此排除。
+            if ($null -eq $item.CreationDate -or $item.CreationDate -lt $parent.CreationDate) { continue }
+            $found += $item
+            $queue.Enqueue([int]$item.ProcessId)
         }
     }
     return $found
@@ -122,6 +126,12 @@ if ($Command -eq "stop") {
         @{ Expression = { Get-StopRank $_ }; Ascending = $true }, `
         @{ Expression = { [int]$_.pid }; Ascending = $false }
 
+    # 关键系统进程拒绝终止：快照误判时由断言失败暴露，不得影响当前用户会话。
+    $criticalSystemNames = @(
+        "smss.exe", "csrss.exe", "wininit.exe", "winlogon.exe",
+        "services.exe", "lsass.exe", "dwm.exe", "fontdrvhost.exe", "explorer.exe"
+    )
+
     foreach ($item in $ordered) {
         $pidValue = [int]$item.pid
         $live = Get-CimInstance Win32_Process -Filter "ProcessId=$pidValue" -ErrorAction SilentlyContinue
@@ -132,6 +142,14 @@ if ($Command -eq "stop") {
         $liveCreation = $live.CreationDate.ToString("o")
         if ($liveCreation -ne [string]$item.creation_date -or $live.ExecutablePath -ne [string]$item.executable_path) {
             $results += [ordered]@{ pid = $pidValue; outcome = "identity_mismatch"; live_creation = $liveCreation; live_path = $live.ExecutablePath }
+            continue
+        }
+        $executableName = ""
+        if (-not [string]::IsNullOrEmpty($live.ExecutablePath)) {
+            $executableName = [System.IO.Path]::GetFileName($live.ExecutablePath)
+        }
+        if ($criticalSystemNames -contains $executableName) {
+            $results += [ordered]@{ pid = $pidValue; outcome = "protected_skipped"; executable = $executableName }
             continue
         }
         try {

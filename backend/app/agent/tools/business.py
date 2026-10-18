@@ -33,15 +33,15 @@ def bind_business_tools(
     workout_prepared: dict[str, str],
     plan_prepared: dict[str, str] | None = None,
 ) -> dict[str, AgentTool]:
-    profile = bind_profile_tools(service, context, call, prepared)
+    profile = bind_profile_tools(service.profile, context, call, prepared)
     plan_registry = {} if plan_prepared is None else plan_prepared
     return {
         "get_profile": profile["get_profile"],
         **bind_exercise_tools(service, call),
         **bind_date_tools(context),
         **profile,
-        **bind_pending_proposal_tools(service, context, call),
-        **bind_workout_tools(service, context, call, workout_prepared),
-        **bind_plan_tools(service, context, call, plan_registry),
-        **bind_plan_import_tools(service, context, call, plan_registry),
+        **bind_pending_proposal_tools(service.proposals, context, call),
+        **bind_workout_tools(service.workouts, context, call, workout_prepared),
+        **bind_plan_tools(service.plans, context, call, plan_registry),
+        **bind_plan_import_tools(service.plans, context, call, plan_registry),
     }

@@ -16,6 +16,7 @@ from app.application.session import service as session_service
 from app.domain.session.models import SendCommand, SendRequest
 from app.infrastructure.persistence.sqlite import database as database_module
 from app.interfaces import http as http_interface
+from app.interfaces.http_api.routes import agent as agent_routes
 from test import run_v2_eval as runner
 from test.check_save_confirmation_benchmark import (
     GROUP_PROTOCOL,
@@ -125,7 +126,7 @@ def assert_no_provider_usage(manifest):
 def test_nested_roots_real_attachment_tool_observation_restoration(tmp_path, configured, exit_kind):
     from app.ai.model_capabilities import resolve_model_spec
 
-    before = (session_service.PROJECT_ROOT, http_interface.create_file_tools,
+    before = (session_service.PROJECT_ROOT, agent_routes.create_file_tools,
               database_module.default_database_path, telemetry.trace_database_path,
               cache_observation.observation_directory)
     root = SuiteRoot(tmp_path, 'protocol')
@@ -143,10 +144,10 @@ def test_nested_roots_real_attachment_tool_observation_restoration(tmp_path, con
                     'data_base64': base64.b64encode(text.encode()).decode(),
                 }]),
             ), system_message=SystemMessage(role='system', content='本地协议', tools_added=[], timestamp=100)))
-            metadata, content = _call(service.get_attachment_content(session, attachment))
+            metadata, content = _call(service.attachments.get_attachment_content(session, attachment))
             assert content == text
             assert http.get(f'/api/sessions/{session}/attachments/{attachment}').json()['text'] == text
-            tools = http_interface.create_file_tools(session)
+            tools = agent_routes.create_file_tools(session)
             relative = metadata.storage_ref.removeprefix('tmp/')
             assert text.strip() in run_tool(tools['read'], {'path': relative}).content[0].text
             assert run_tool(tools['read'], {'path': f'sessions/{uuid4()}/attachments/x.md'}).is_error
@@ -161,7 +162,7 @@ def test_nested_roots_real_attachment_tool_observation_restoration(tmp_path, con
             assert observations[0].session_id == session and observations[0].status == 'aborted'
             assert observations[0].input_tokens is None
             assert (root.base / 'observations' / f'{session}.jsonl').is_file()
-            _call(service.finish_run(session, outcome.run.id, 'completed'))
+            _call(service.runs.finish_run(session, outcome.run.id, 'completed'))
             nested = SuiteRoot(tmp_path, 'att')
             with nested.bind():
                 assert session_service.PROJECT_ROOT == nested.attachment_root
@@ -179,7 +180,7 @@ def test_nested_roots_real_attachment_tool_observation_restoration(tmp_path, con
                 raise asyncio.CancelledError('协议取消')
     except (RuntimeError, asyncio.CancelledError) as error:
         assert str(error) in ('协议退出', '协议取消')
-    after = (session_service.PROJECT_ROOT, http_interface.create_file_tools,
+    after = (session_service.PROJECT_ROOT, agent_routes.create_file_tools,
              database_module.default_database_path, telemetry.trace_database_path,
              cache_observation.observation_directory)
     assert after == before

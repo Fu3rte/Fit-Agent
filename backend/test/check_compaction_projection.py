@@ -244,8 +244,8 @@ async def test_real_sqlite_path_retains_and_rolls_over() -> None:
             system_message=T.system_message(),
         )
         run = send.run
-        request_entry = await service.get_entry(session_id, run.request_entry_id)
-        await service.append_entry(
+        request_entry = await service.queries.get_entry(session_id, run.request_entry_id)
+        await service.entries.append_entry(
             SessionMessageEntry(
                 session_id=session_id,
                 id="a1",
@@ -271,7 +271,7 @@ async def test_real_sqlite_path_retains_and_rolls_over() -> None:
         async with repository.transaction():
             await repository.insert_entry(compaction)
             await repository.insert_entry(new_user)
-        entries = await service.list_entries(session_id)
+        entries = await service.queries.list_entries(session_id)
         path = build_session_path(session_id, entries, "u4")
         context = C.build_effective_context(path)
         assert context.source_entry_ids == ["c1", "c1", request_entry.id, "a1", "u4"]

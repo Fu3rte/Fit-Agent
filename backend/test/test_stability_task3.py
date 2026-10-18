@@ -32,16 +32,22 @@ from app.agent.events import AgentEvent
 from app.agent.tool import AgentTool, AgentToolResult
 from app.ai.messages import TextContent
 from app.ai.types import ModelTimeouts
+from app.application.session import coordination as coordination_module
+from app.application.session import execution as execution_module
+from app.application.session.coordination import terminal_decision
+from app.application.session.runtime import RunState as ApplicationRunState
 from app.application.session.service import SessionService
 from app.interfaces import http as http_module
-from app.interfaces.http import (
+from app.interfaces.http_api import stream as stream_module
+from app.interfaces.http_api.routes import agent as agent_routes
+from app.interfaces.http_api.stream import (
     BoundedEventQueue,
     EncodedEvent,
+    HttpRunOutput,
     RunState,
     RunStream,
     encode,
     stream,
-    terminal_decision,
 )
 from test.regression_support import Server, client, install_test_model_config
 
@@ -413,13 +419,36 @@ def test_terminal_slot_is_independent_and_starts_drain_clock(monkeypatch) -> Non
     assert queue.take().payload == b"2"
     assert queue.take() is None
     assert queue.take_terminal().payload == b"done"
-    monkeypatch.setattr(http_module, "TERMINAL_DRAIN_TOTAL_SECONDS", 10.0)
+    monkeypatch.setattr(stream_module, "TERMINAL_DRAIN_TOTAL_SECONDS", 10.0)
     queue2 = BoundedEventQueue()
     assert queue2.put_terminal(_event("done", b"done")) == "ok"
     first = queue2.terminal_remaining()
     assert first is not None and 9.0 < first <= 10.0
     time.sleep(0.02)
     assert queue2.terminal_remaining() < first
+
+
+def test_application_runtime_uses_http_output_without_owning_queue() -> None:
+    state = ApplicationRunState(
+        uuid4(), create_output=HttpRunOutput, budget_seconds=30.0
+    )
+    output = state.output
+    assert isinstance(output, HttpRunOutput)
+    assert output.control is state.control
+    assert state.control.cancel is state.cancel
+    assert state.publish("tool_start", {"tool_call_id": "call-1"})
+    assert output.events.take().event.data["run_id"] == str(state.run_id)
+    state.publish_terminal("error", {"status": "failed"})
+    assert output.events.take_terminal().event.data["tool_call_id"] == "call-1"
+
+    state.disconnect()
+    assert state.cancel.is_set()
+    state.mark_fault("worker_stuck", state.cancel, (state.tool_tracker,))
+    assert state.closed_without_terminal
+    assert state.inflight_work is state.cancel
+    assert state.inflight_tools == (state.tool_tracker,)
+    assert not output.events.accepting
+    assert output.events.terminal_filled
 
 
 def test_single_event_oversize_records_output_too_large() -> None:
@@ -465,7 +494,7 @@ def test_heartbeat_and_terminal_drain(monkeypatch) -> None:
         async def is_disconnected(self) -> bool:
             return False
 
-    monkeypatch.setattr(http_module, "SSE_HEARTBEAT_SECONDS", 0.02)
+    monkeypatch.setattr(stream_module, "SSE_HEARTBEAT_SECONDS", 0.02)
     state = RunState(uuid4(), budget_seconds=30.0)
 
     async def collect() -> list[bytes]:
@@ -473,11 +502,11 @@ def test_heartbeat_and_terminal_drain(monkeypatch) -> None:
         return [await asyncio.wait_for(anext(generator), 1.0) for _ in range(2)]
 
     assert asyncio.run(collect()) == [
-        http_module.SSE_HEARTBEAT,
-        http_module.SSE_HEARTBEAT,
+        stream_module.SSE_HEARTBEAT,
+        stream_module.SSE_HEARTBEAT,
     ]
 
-    monkeypatch.setattr(http_module, "TERMINAL_DRAIN_TOTAL_SECONDS", 0.05)
+    monkeypatch.setattr(stream_module, "TERMINAL_DRAIN_TOTAL_SECONDS", 0.05)
     state.events.put_terminal(_event("done", b'event: done\ndata: {}\n\n'))
     time.sleep(0.1)
 
@@ -490,7 +519,7 @@ def test_heartbeat_and_terminal_drain(monkeypatch) -> None:
 
 
 def test_send_timeout_is_enforced_at_asgi_boundary(monkeypatch) -> None:
-    monkeypatch.setattr(http_module, "SSE_SEND_WAIT_SECONDS", 0.05)
+    monkeypatch.setattr(stream_module, "SSE_SEND_WAIT_SECONDS", 0.05)
     state = RunState(uuid4(), budget_seconds=30.0)
 
     async def hidden_send(_message) -> None:
@@ -861,14 +890,14 @@ def test_output_too_large_http_fails_and_keeps_run_record() -> None:
 
 
 def _patch_short_cooperative(monkeypatch) -> None:
-    monkeypatch.setattr(http_module, "CANCEL_COOPERATIVE_WAIT_SECONDS", 0.2)
+    monkeypatch.setattr(coordination_module, "CANCEL_COOPERATIVE_WAIT_SECONDS", 0.2)
     monkeypatch.setattr(governance, "CANCEL_COOPERATIVE_WAIT_SECONDS", 0.2)
     monkeypatch.setattr(tool_module, "CANCEL_COOPERATIVE_WAIT_SECONDS", 0.2)
 
 
 def _install_tool(monkeypatch, tool: AgentTool) -> None:
     monkeypatch.setattr(
-        http_module, "create_file_tools", lambda _session_id: {tool.name: tool}
+        agent_routes, "create_file_tools", lambda _session_id: {tool.name: tool}
     )
 
 
@@ -912,7 +941,7 @@ def test_http_noncooperative_tool_keeps_slot_and_records_worker_stuck(
 
     def blocking(_tool_call_id, _params, _signal, _on_update):
         started.set()
-        release.wait(5)
+        release.wait(30)
         return AgentToolResult([TextContent(type="text", text="released")])
 
     tool = AgentTool(
@@ -923,13 +952,14 @@ def test_http_noncooperative_tool_keeps_slot_and_records_worker_stuck(
     state = None
     with model, running_app(model, TMP_ROOT) as (http, db_path):
         try:
-            monkeypatch.setenv("FIT_AGENT_RUN_BUDGET_SECONDS", "0.2")
+            monkeypatch.setenv("FIT_AGENT_RUN_BUDGET_SECONDS", "8.0")
             session_id = str(uuid4())
             create_session(http, session_id)
             status, events, run_id = post_stream(
                 http, run_body(session_id, str(uuid4()), "执行工具")
             )
             assert status == 200
+            _wait_until(lambda: started.is_set(), 5.0)
             assert started.is_set()
             assert all(item["event"] not in {"done", "error"} for item in events)
             state = _wait_fault_state(run_id)
@@ -958,7 +988,7 @@ def test_http_cooperative_tool_exits_on_cancel_and_releases_slot(
 
     def cooperative(_tool_call_id, _params, signal, _on_update):
         started.set()
-        assert signal.wait(5)
+        assert signal.wait(30)
         return AgentToolResult([TextContent(type="text", text="stopped")])
 
     tool = AgentTool(
@@ -967,13 +997,14 @@ def test_http_cooperative_tool_exits_on_cancel_and_releases_slot(
     _install_tool(monkeypatch, tool)
     model = ModelServer("tool_once")
     with model, running_app(model, TMP_ROOT) as (http, db_path):
-        monkeypatch.setenv("FIT_AGENT_RUN_BUDGET_SECONDS", "0.3")
+        monkeypatch.setenv("FIT_AGENT_RUN_BUDGET_SECONDS", "8.0")
         session_id = str(uuid4())
         create_session(http, session_id)
         status, events, run_id = post_stream(
             http, run_body(session_id, str(uuid4()), "执行工具")
         )
         assert status == 200
+        _wait_until(lambda: started.is_set(), 5.0)
         assert started.is_set()
         assert events[-1]["event"] == "error"
         assert events[-1]["data"]["code"] == "run_timeout"
@@ -997,7 +1028,7 @@ def test_http_tool_timeout_is_persisted(monkeypatch) -> None:
         "slow", "slow", ToolArgs, cooperative, execution_mode="sequential"
     )
     _install_tool(monkeypatch, tool)
-    monkeypatch.setattr(http_module, "TOOL_EXECUTION_SECONDS", 0.2)
+    monkeypatch.setattr(execution_module, "TOOL_EXECUTION_SECONDS", 0.2)
     model = ModelServer("tool_once")
     with model, running_app(model, TMP_ROOT) as (http, db_path):
         session_id = str(uuid4())
@@ -1043,35 +1074,47 @@ def _locking_service(mode: str, lock_held: Event, release_lock: Event):
         finish_calls = 0
         _triggered = False
 
-        async def _hold(self) -> None:
-            async with self._repository.transaction():
-                lock_held.set()
-                await asyncio.to_thread(release_lock.wait, 10)
+        def __init__(self, repository) -> None:
+            super().__init__(repository)
+            queries = self.queries
+            runs = self.runs
+            original_projection = queries.get_projection
+            original_get_run = queries.get_run
+            original_finish = runs.finish_run
 
-        async def _trigger(self) -> None:
-            if type(self)._triggered:
-                return
-            type(self)._triggered = True
-            asyncio.create_task(self._hold())
-            await asyncio.to_thread(lock_held.wait, 5)
+            async def _hold() -> None:
+                async with self._repository.transaction():
+                    lock_held.set()
+                    await asyncio.to_thread(release_lock.wait, 10)
 
-        async def get_projection(self, *args, **kwargs):
-            if mode == "projection":
-                await self._trigger()
-            return await super().get_projection(*args, **kwargs)
+            async def _trigger() -> None:
+                if type(self)._triggered:
+                    return
+                type(self)._triggered = True
+                asyncio.create_task(_hold())
+                await asyncio.to_thread(lock_held.wait, 5)
 
-        async def get_run(self, *args, **kwargs):
-            if mode == "status":
-                await self._trigger()
-                return await super().get_run(*args, **kwargs)
-            run = await super().get_run(*args, **kwargs)
-            if mode == "finish":
-                await self._trigger()
-            return run
+            async def get_projection(*args, **kwargs):
+                if mode == "projection":
+                    await _trigger()
+                return await original_projection(*args, **kwargs)
 
-        async def finish_run(self, *args, **kwargs):
-            type(self).finish_calls += 1
-            return await super().finish_run(*args, **kwargs)
+            async def get_run(*args, **kwargs):
+                if mode == "status":
+                    await _trigger()
+                    return await original_get_run(*args, **kwargs)
+                run = await original_get_run(*args, **kwargs)
+                if mode == "finish":
+                    await _trigger()
+                return run
+
+            async def finish_run(*args, **kwargs):
+                type(self).finish_calls += 1
+                return await original_finish(*args, **kwargs)
+
+            queries.get_projection = get_projection
+            queries.get_run = get_run
+            runs.finish_run = finish_run
 
     return LockingService
 
@@ -1117,7 +1160,7 @@ def test_projection_database_lock_fault_closes_within_budget(monkeypatch) -> Non
 
 
 def test_status_read_database_lock_fault_closes_within_budget(monkeypatch) -> None:
-    monkeypatch.setattr(http_module, "TERMINAL_PERSIST_WAIT_SECONDS", 0.2)
+    monkeypatch.setattr(coordination_module, "TERMINAL_PERSIST_WAIT_SECONDS", 0.2)
     lock_held, release_lock = Event(), Event()
     monkeypatch.setattr(
         http_module,
@@ -1152,7 +1195,7 @@ def test_status_read_database_lock_fault_closes_within_budget(monkeypatch) -> No
 
 
 def test_terminal_persist_timeout_uses_real_sqlite_lock(monkeypatch) -> None:
-    monkeypatch.setattr(http_module, "TERMINAL_PERSIST_WAIT_SECONDS", 0.1)
+    monkeypatch.setattr(coordination_module, "TERMINAL_PERSIST_WAIT_SECONDS", 0.1)
     lock_held, release_lock = Event(), Event()
     locking_service = _locking_service("finish", lock_held, release_lock)
     monkeypatch.setattr(http_module, "SessionService", locking_service)

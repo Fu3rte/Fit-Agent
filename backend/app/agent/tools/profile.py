@@ -10,7 +10,7 @@ from app.agent.tools.common import (
     unbound,
 )
 from app.ai.messages import JsonObject
-from app.application.business.service import BusinessService
+from app.application.business.profile import ProfileService
 from app.domain.business.models import (
     BusinessContext,
     BusinessModel,
@@ -89,7 +89,7 @@ def profile_tool_declarations() -> list[ToolDeclaration]:
 
 
 def bind_profile_tools(
-    service: BusinessService,
+    service: ProfileService,
     context: BusinessContext,
     call: MainLoopCall,
     prepared: dict[str, str],

@@ -116,7 +116,7 @@ async def check_queries_and_prepare(f: Fixture, trusted) -> dict:
     arguments = {"profile_id": 1, "base_profile_version": None, "payload": dict(PROFILE)}
     source = await f.append(session, run.id, run.request_entry_id,
                             assistant([call("prepare_profile_update", arguments)], "toolUse"))
-    await f.service.finish_run(session, run.id, "completed")
+    await f.service.runs.finish_run(session, run.id, "completed")
     prepared: dict[str, str] = {}
     registry = bind_business_tools(
         f.business, f.context(session, run.request_entry_id, source), trusted, prepared, {}, {})
@@ -170,7 +170,7 @@ async def check_old_declaration(f: Fixture, trusted) -> dict:
     assert len(results) == 1, results
     assert results[0].is_error and "工具不存在" in text(results[0]), text(results[0])
     assert f.database.connection.total_changes == before
-    assert (await f.business.get_profile()).version is None
+    assert (await f.business.profile.get_profile()).version is None
     return {"rejected": text(results[0]), "unchanged": True}
 
 

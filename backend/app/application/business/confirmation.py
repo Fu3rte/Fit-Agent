@@ -7,12 +7,11 @@ from time import perf_counter
 
 from app.agent.telemetry import RunTrace, TraceSpan, TraceStore
 from app.ai.types import check_cancelled
-from app.application.business.service import (
-    BUSINESS_TIMEZONE,
-    PendingProposalReference,
-    business_date,
-)
-from app.application.session.service import RunBusy, SessionNotFound, SessionService
+from app.application.business.profile import BUSINESS_TIMEZONE, business_date
+from app.application.business.proposals import PendingProposalReference
+from app.application.session.entries import SessionEntries
+from app.application.session.operations import SessionOperations
+from app.application.session.queries import SessionQueries
 from app.domain.business.errors import (
     BusinessError,
     ConfirmationBusy,
@@ -48,6 +47,7 @@ from app.domain.business.models import (
     WorkoutSaveArguments,
 )
 from app.domain.business.repository import BusinessRepository
+from app.domain.session.errors import RunBusy, SessionNotFound
 from app.domain.session.models import SaveConfirmation
 
 # 每个业务类型的错误映射：确认受理与保存执行共用，语义与既有业务错误码保持一致。
@@ -99,11 +99,15 @@ class ConfirmationService:
     def __init__(
         self,
         repository: BusinessRepository,
-        sessions: SessionService,
+        queries: SessionQueries,
+        operations: SessionOperations,
+        entries: SessionEntries,
         business,
     ) -> None:
         self._repository = repository
-        self._sessions = sessions
+        self._queries = queries
+        self._operations = operations
+        self._entries = entries
         self._business = business
 
     async def confirm(
@@ -132,7 +136,7 @@ class ConfirmationService:
     async def history(self, session_id: str) -> ConfirmationHistory:
         async with self._repository.transaction():
             await self._require_session(session_id)
-            branch = await self._sessions.get_current_branch(session_id)
+            branch = await self._queries.get_current_branch(session_id)
             order = {entry.id: index for index, entry in enumerate(branch)}
             operations = await self._repository.list_confirmation_operations(session_id)
             confirmations = [item for item in operations if item.confirmation_entry_id in order]
@@ -141,7 +145,7 @@ class ConfirmationService:
             )
             references = [
                 item
-                for item in await self._business.list_pending_references(session_id)
+                for item in await self._business.proposals.list_pending_references(session_id)
                 if item.display_entry_id is not None and item.display_entry_id in order
             ]
             return ConfirmationHistory(
@@ -183,11 +187,11 @@ class ConfirmationService:
     ) -> tuple[SaveConfirmationOperation, bool]:
         async with self._repository.transaction():
             await self._require_session(session_id)
-            if await self._sessions.get_operation(request.operation_id) is not None:
+            if await self._operations.get_operation(request.operation_id) is not None:
                 raise ConfirmationOperationConflict("该操作 ID 已用于聊天操作。")
             # 聊天与确认共用操作 ID 命名空间：现存操作之外，编辑清除的原操作只留失效标记，
             # 该标记同样禁止跨入口复用编号。
-            invalidated_session = await self._sessions.get_operation_invalidation(
+            invalidated_session = await self._operations.get_operation_invalidation(
                 request.operation_id
             )
             if invalidated_session is not None:
@@ -203,7 +207,7 @@ class ConfirmationService:
                     raise ConfirmationOperationConflict("该操作 ID 已用于其他确认请求。")
                 return stored, False
             try:
-                await self._sessions.ensure_idle()
+                await self._queries.ensure_idle()
             except RunBusy as error:
                 raise ConfirmationBusy() from error
             snapshot, record = await self._load(request.business_kind, request.proposal_id)
@@ -230,7 +234,7 @@ class ConfirmationService:
                 raise _CONFIRMATION_INVALID[request.business_kind](
                     "展示节点与后端绑定不一致。"
                 )
-            entry = await self._sessions.append_confirmation_entry(
+            entry = await self._entries.append_confirmation_entry(
                 session_id,
                 SaveConfirmation(
                     business_kind=request.business_kind,
@@ -321,14 +325,14 @@ class ConfirmationService:
                 display_entry_id=request.display_entry_id,
                 confirmation_entry_id=operation.confirmation_entry_id,
             )
-            save = self._business.save_profile_update
+            save = self._business.profile.save_profile_update
         elif request.business_kind == "plan":
             arguments = PlanSaveArguments(
                 proposal_id=request.proposal_id,
                 display_entry_id=request.display_entry_id,
                 confirmation_entry_id=operation.confirmation_entry_id,
             )
-            save = self._business.save_plan
+            save = self._business.plans.save_plan
         else:
             arguments = WorkoutSaveArguments(
                 proposal_id=request.proposal_id,
@@ -336,9 +340,9 @@ class ConfirmationService:
                 confirmation_entry_id=operation.confirmation_entry_id,
             )
             save = (
-                self._business.save_workout
+                self._business.workouts.save_workout
                 if snapshot.base_workout_id is None
-                else self._business.update_workout
+                else self._business.workouts.update_workout
             )
         try:
             await save(context, arguments, signal, on_committed=on_committed)
@@ -351,7 +355,7 @@ class ConfirmationService:
 
     async def _check_authorization(self, business_kind, context, snapshot, request) -> None:
         if business_kind == "profile":
-            await self._business.check_profile_save_authorization(
+            await self._business.profile.check_profile_save_authorization(
                 context, ProfileSaveArguments(
                     proposal_id=request.proposal_id,
                     display_entry_id=request.display_entry_id,
@@ -359,7 +363,7 @@ class ConfirmationService:
                 ),
             )
         elif business_kind == "plan":
-            await self._business.check_plan_save_authorization(
+            await self._business.plans.check_plan_save_authorization(
                 context, PlanSaveArguments(
                     proposal_id=request.proposal_id,
                     display_entry_id=request.display_entry_id,
@@ -367,7 +371,7 @@ class ConfirmationService:
                 ),
             )
         else:
-            await self._business.check_workout_save_authorization(
+            await self._business.workouts.check_workout_save_authorization(
                 context, WorkoutSaveArguments(
                     proposal_id=request.proposal_id,
                     display_entry_id=request.display_entry_id,
@@ -437,7 +441,7 @@ class ConfirmationService:
 
     async def _require_session(self, session_id: str) -> None:
         try:
-            await self._sessions.get_session(session_id)
+            await self._queries.get_session(session_id)
         except SessionNotFound as error:
             raise ConfirmationSessionNotFound() from error
 

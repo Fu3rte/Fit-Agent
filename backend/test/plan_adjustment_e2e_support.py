@@ -57,6 +57,7 @@ from app.domain.business.models import (
 )
 from app.infrastructure.persistence.sqlite import database as database_module
 from app.interfaces import http as interface
+from app.application.session import execution
 
 REPO = Path(__file__).resolve().parents[2]
 BACKEND = REPO / "backend"
@@ -170,7 +171,7 @@ def install_observer(state: dict) -> None:
 
         return runner()
 
-    interface.run_agent_loop = observed_loop
+    execution.run_agent_loop = observed_loop
 
 
 class Server:
@@ -531,7 +532,7 @@ def baseline_profile() -> ProfileContent:
 
 
 async def _seed() -> dict:
-    repository = interface.app.state.business._repository
+    repository = interface.app.state.business_repository
     today = business_today()
     plan = baseline_plan()
     workouts = workload_records(today)

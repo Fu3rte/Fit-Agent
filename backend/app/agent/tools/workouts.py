@@ -6,7 +6,7 @@ from app.agent.tools.common import (
     unbound,
 )
 from app.ai.messages import JsonObject
-from app.application.business.service import BusinessService
+from app.application.business.workouts import WorkoutService
 from app.domain.business.models import (
     BusinessContext,
     WorkoutGetArguments,
@@ -73,7 +73,7 @@ def workout_tool_declarations() -> list[ToolDeclaration]:
 
 
 def bind_workout_tools(
-    service: BusinessService,
+    service: WorkoutService,
     context: BusinessContext,
     call: MainLoopCall,
     prepared: dict[str, str],

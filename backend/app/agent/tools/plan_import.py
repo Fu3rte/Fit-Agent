@@ -6,7 +6,7 @@ from app.agent.tools.common import (
     unbound,
 )
 from app.ai.messages import JsonObject
-from app.application.business.service import BusinessService
+from app.application.business.plans import PlanService
 from app.domain.business.models import (
     BusinessContext,
     PlanAdjustmentArguments,
@@ -90,7 +90,7 @@ def plan_import_tool_declarations() -> list[ToolDeclaration]:
 
 
 def bind_plan_import_tools(
-    service: BusinessService,
+    service: PlanService,
     context: BusinessContext,
     call: MainLoopCall,
     prepared: dict[str, str],

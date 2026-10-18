@@ -14,7 +14,8 @@ from app.ai.messages import (
     ToolResultMessage,
     Usage,
 )
-from app.application.session.service import CREDENTIAL_SAFE_MESSAGE, SessionService
+from app.application.session.credentials import CREDENTIAL_SAFE_MESSAGE
+from app.application.session.service import SessionService
 from app.domain.session.errors import IncompleteToolChain
 from app.domain.session.models import (
     SendCommand,
@@ -81,7 +82,7 @@ async def open_service(path: Path):
 
 
 async def append(service, session_id, run_id, node_id, parent_id, message, created_at):
-    outcome = await service.append_entry(
+    outcome = await service.entries.append_entry(
         entry(session_id, node_id, parent_id, run_id, message, created_at)
     )
     assert outcome.created and not outcome.credential_detected
@@ -124,7 +125,7 @@ def assert_consistent(history) -> None:
 async def scenario_empty(service: SessionService) -> dict:
     session_id = "hist-empty"
     await service.create_session(session_id, "空会话")
-    history = await service.get_session_history(session_id)
+    history = await service.queries.get_session_history(session_id)
     assert history.session.id == session_id
     assert history.session.active_leaf_id is None
     assert history.entries == [] and history.runs == [] and history.steering == []
@@ -145,7 +146,7 @@ async def scenario_full_branch(service: SessionService) -> dict:
     )
     run = send.run
     user_id = run.request_entry_id
-    system_id = (await service.get_entry(session_id, user_id)).parent_id
+    system_id = (await service.queries.get_entry(session_id, user_id)).parent_id
 
     tool_call = assistant(
         [
@@ -193,15 +194,15 @@ async def scenario_full_branch(service: SessionService) -> dict:
         )
     )
     steering = accepted.steering
-    consumed = await service.consume_steering(session_id, run.id, steering.id)
+    consumed = await service.runs.consume_steering(session_id, run.id, steering.id)
     assert consumed.created and consumed.entry is not None
     steering_id = consumed.entry.id
 
     final = assistant([text("最终回答")], "stop", 300)
     await append(service, session_id, run.id, "a-final", steering_id, final, 310)
-    await service.finish_run(session_id, run.id, "completed")
+    await service.runs.finish_run(session_id, run.id, "completed")
 
-    history = await service.get_session_history(session_id)
+    history = await service.queries.get_session_history(session_id)
     assert [item.id for item in history.entries] == [
         system_id,
         user_id,
@@ -227,7 +228,7 @@ async def scenario_full_branch(service: SessionService) -> dict:
     assert stored_steering.message.content == "补充输入"
     assert (
         stored_steering.message.timestamp
-        == (await service.get_entry(session_id, steering_id)).messages[0].timestamp
+        == (await service.queries.get_entry(session_id, steering_id)).messages[0].timestamp
     )
     return {
         "entry_ids": [item.id for item in history.entries],
@@ -250,14 +251,14 @@ async def scenario_failed_without_assistant(service: SessionService) -> dict:
         system_message=SYSTEM_MESSAGE,
     )
     run = send.run
-    await service.finish_run(
+    await service.runs.finish_run(
         session_id,
         run.id,
         "failed",
         error_code="execution_failed",
         error_message="执行失败，请重新发起请求。",
     )
-    history = await service.get_session_history(session_id)
+    history = await service.queries.get_session_history(session_id)
     assert_consistent(history)
     stored = next(item for item in history.runs if item.id == run.id)
     assert stored.status == "failed"
@@ -301,9 +302,9 @@ async def scenario_unpaired(service: SessionService) -> dict:
         ),
         410,
     )
-    await service.finish_run(session_id, run.id, "cancelled")
+    await service.runs.finish_run(session_id, run.id, "cancelled")
 
-    history = await service.get_session_history(session_id)
+    history = await service.queries.get_session_history(session_id)
     assert [item.id for item in history.entries][-1] == "up-a1"
     assert history.runs[0].status == "cancelled"
     assert history.runs[0].last_entry_id == "up-a1"
@@ -328,13 +329,13 @@ async def scenario_unpaired(service: SessionService) -> dict:
     else:
         raise AssertionError("未配对工具链未拒绝续聊")
 
-    after = await service.get_session_history(session_id)
+    after = await service.queries.get_session_history(session_id)
     assert (
         len(after.entries),
         len(after.runs),
         after.session.active_leaf_id,
     ) == before
-    assert await service.get_operation(blocked_op) is None
+    assert await service.operations.get_operation(blocked_op) is None
     assert_consistent(after)
     return {"blocked": True, "entries": len(after.entries)}
 
@@ -365,8 +366,8 @@ async def scenario_interrupted_recovery(root: Path) -> dict:
 
     reopened, recovered = await open_service(path)
     try:
-        await recovered.recover_interrupted()
-        history = await recovered.get_session_history(session_id)
+        await recovered.runs.recover_interrupted()
+        history = await recovered.queries.get_session_history(session_id)
         assert_consistent(history)
         stored = next(item for item in history.runs if item.id == run.id)
         assert stored.status == "interrupted"
@@ -407,7 +408,7 @@ async def scenario_concurrency(service: SessionService) -> dict:
         assistant([text("回答 0")], "stop", 500),
         510,
     )
-    await service.finish_run(session_id, first.run.id, "completed")
+    await service.runs.finish_run(session_id, first.run.id, "completed")
 
     async def writer() -> None:
         for index in range(3):
@@ -428,17 +429,17 @@ async def scenario_concurrency(service: SessionService) -> dict:
                 assistant([text(f"回答 {index + 1}")], "stop", 600 + index),
                 610 + index,
             )
-            await service.finish_run(session_id, send.run.id, "completed")
+            await service.runs.finish_run(session_id, send.run.id, "completed")
 
     async def reader() -> int:
         for _ in range(20):
-            history = await service.get_session_history(session_id)
+            history = await service.queries.get_session_history(session_id)
             assert_consistent(history)
         return 1
 
     results = await asyncio.gather(writer(), reader(), reader())
     assert results[1:] == [1, 1]
-    final = await service.get_session_history(session_id)
+    final = await service.queries.get_session_history(session_id)
     assert_consistent(final)
     assert len(final.entries) == 9 and len(final.runs) == 4
     return {"entries": len(final.entries), "runs": len(final.runs)}
@@ -505,7 +506,7 @@ async def seed_http_history(path: Path) -> dict:
         )
         run = send.run
         user_id = run.request_entry_id
-        system_id = (await service.get_entry(session_id, user_id)).parent_id
+        system_id = (await service.queries.get_entry(session_id, user_id)).parent_id
         await append(
             service,
             session_id,
@@ -558,7 +559,7 @@ async def seed_http_history(path: Path) -> dict:
             assistant([text("最终回答")], "stop", 300),
             310,
         )
-        await service.finish_run(session_id, run.id, "completed")
+        await service.runs.finish_run(session_id, run.id, "completed")
         return {
             "session_id": session_id,
             "run_id": run.id,
@@ -918,6 +919,7 @@ def http_checks(evidence: dict) -> None:
             "finished_at",
             "error_code",
             "error_message",
+            "stop_reason",
         }
         assert run["run_id"] == seed["run_id"]
         assert run["request_entry_id"] == seed["user_id"]

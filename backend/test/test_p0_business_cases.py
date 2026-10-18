@@ -9,7 +9,8 @@ from uuid import uuid4
 
 from app.application.business.catalog import Catalog
 from app.application.business.coordination import ReplacementCoordinator
-from app.application.business.service import BusinessService, business_date
+from app.application.business.profile import business_date
+from app.application.business.service import BusinessService
 from app.application.session.service import SessionService
 from app.domain.business.models import BusinessContext, ProfileContent
 from app.domain.session.attachments import TMP_ROOT
@@ -73,9 +74,9 @@ def isolated_business(directory: Path):
     repository = SqliteBusinessRepository(database)
     sessions = SessionService(SqliteSessionRepository(database))
     business = BusinessService(
-        repository, Catalog.load(), sessions, ReplacementCoordinator()
+        repository, Catalog.load(), sessions.queries, ReplacementCoordinator()
     )
-    sessions.attach_snapshots(business)
+    sessions.attach_snapshots(business.proposals)
     try:
         yield path, business, loop, repository
     finally:

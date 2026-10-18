@@ -17,11 +17,11 @@ from app.ai.messages import (
 from app.application.business.catalog import Catalog
 from app.application.business.confirmation import ConfirmationService
 from app.application.business.coordination import ReplacementCoordinator
-from app.application.business.service import (
+from app.application.business.profile import (
     BUSINESS_TIMEZONE,
-    BusinessService,
     business_date,
 )
+from app.application.business.service import BusinessService
 from app.application.session.service import SessionService
 from app.domain.business.errors import BusinessError
 from app.domain.business.models import (
@@ -132,14 +132,16 @@ class Fixture:
         self.catalog = Catalog.load()
         service = SessionService(SqliteSessionRepository(self.database))
         if recovered:
-            await service.recover_interrupted()
+            await service.runs.recover_interrupted()
         self.replacements = ReplacementCoordinator()
         self.business = BusinessService(
-            self.repository, self.catalog, service, self.replacements
+            self.repository, self.catalog, service.queries, self.replacements
         )
-        service.attach_snapshots(self.business)
+        service.attach_snapshots(self.business.proposals)
         self.service = service
-        self.confirmations = ConfirmationService(self.repository, service, self.business)
+        self.confirmations = ConfirmationService(
+            self.repository, service.queries, service.operations, service.entries, self.business
+        )
         if recovered:
             await self.confirmations.recover_interrupted()
         return self
@@ -179,12 +181,12 @@ class Fixture:
             system_message=SYSTEM,
         )
         if finish:
-            await self.service.finish_run(session_id, outcome.run.id, "completed")
+            await self.service.runs.finish_run(session_id, outcome.run.id, "completed")
         return outcome.run
 
     async def append(self, session_id: str, run_id: str, parent_id: str, message) -> str:
         node_id = new_id()
-        await self.service.append_entry(
+        await self.service.entries.append_entry(
             SessionMessageEntry(
                 session_id=session_id, id=node_id, parent_id=parent_id, run_id=run_id,
                 type="message", messages=[message], created_at=now_ms(),
@@ -210,19 +212,19 @@ class Fixture:
         )
         context = self.context(session_id, request_id, source_id)
         if kind == "profile":
-            proposal = await self.business.prepare_profile_update(
+            proposal = await self.business.profile.prepare_profile_update(
                 context, ProfileProposalArguments.model_validate(arguments)
             )
         elif kind == "plan_generation":
-            proposal = await self.business.prepare_plan(
+            proposal = await self.business.plans.prepare_plan(
                 context, PlanProposalArguments.model_validate(arguments)
             )
         elif kind == "plan_import":
-            proposal = await self.business.prepare_plan_import(
+            proposal = await self.business.plans.prepare_plan_import(
                 context, PlanImportArguments.model_validate(arguments)
             )
         else:
-            proposal = await self.business.prepare_workout(
+            proposal = await self.business.workouts.prepare_workout(
                 context, WorkoutProposalArguments.model_validate(arguments)
             )
         message = ToolResultMessage(
@@ -235,12 +237,12 @@ class Fixture:
         )
         display_id = await self.append(session_id, run.id, source_id, message)
         if kind == "profile":
-            await self.business.bind_display_entry(proposal.proposal_id, display_id)
+            await self.business.profile.bind_display_entry(proposal.proposal_id, display_id)
         elif kind.startswith("plan"):
-            await self.business.bind_plan_display_entry(proposal.proposal_id, display_id)
+            await self.business.plans.bind_plan_display_entry(proposal.proposal_id, display_id)
         else:
-            await self.business.bind_workout_display_entry(proposal.proposal_id, display_id)
-        await self.service.finish_run(session_id, run.id, "completed")
+            await self.business.workouts.bind_workout_display_entry(proposal.proposal_id, display_id)
+        await self.service.runs.finish_run(session_id, run.id, "completed")
         return {
             "session": session_id, "request": request_id, "source": source_id,
             "display": display_id, "proposal": proposal.proposal_id,
@@ -287,7 +289,7 @@ async def check_saves_and_ambiguity(root: Path) -> dict:
         run = await fixture.turn(session, "确认。")
         before = await fixture.state()
         detail = await rejection(
-            fixture.business.save_profile_update(
+            fixture.business.profile.save_profile_update(
                 fixture.context(session, run.request_entry_id, profile_ids["source"]),
                 ProfileSaveArguments(
                     proposal_id=profile_ids["proposal"], display_entry_id=profile_ids["display"],
@@ -320,9 +322,9 @@ async def check_saves_and_ambiguity(root: Path) -> dict:
         assert state["workouts"] == 1 and state["workout_records"] == 1
         assert state["operations"] == 2
         # 确认节点 run_id 为空、无运行、无助手工具调用节点。
-        entry = await fixture.service.get_entry(session, profile_op.confirmation_entry_id)
+        entry = await fixture.service.queries.get_entry(session, profile_op.confirmation_entry_id)
         assert entry.run_id is None and entry.confirmation is not None
-        runs = await fixture.service.list_runs(session)
+        runs = await fixture.service.queries.list_runs(session)
         assert len(runs) == 3  # 两次准备运行 + 普通“确认。”发送运行
         return {
             "plain_text": detail.code,
@@ -445,7 +447,7 @@ async def check_rejections(root: Path) -> dict:
             EditCommand(operation_id=new_id(), session_id=session,
                         request=EditRequest(target_entry_id=replacement["request"], text="换个说法")),
         )
-        await fixture.service.finish_run(session, edited.run.id, "completed")
+        await fixture.service.runs.finish_run(session, edited.run.id, "completed")
         before_path = await fixture.state()
         results["path"] = (await rejection(fixture.confirmations.confirm(
             session, await fixture.request(session, "profile", replacement)
@@ -488,14 +490,14 @@ async def check_idempotency_and_conflict(root: Path) -> dict:
         assert conflict == "operation_conflict", conflict
 
         # 已保存快照重复确认：新操作 ID 关联原确认节点与固定结果，不新增消息或业务版本。
-        messages_before = len(await fixture.service.list_entries(session))
+        messages_before = len(await fixture.service.queries.list_entries(session))
         again = await fixture.confirmations.confirm(
             session, await fixture.request(session, "profile", profile_ids)
         )
         assert again.status == "saved"
         assert again.result.model_dump() == first.result.model_dump()
         assert again.confirmation_entry_id == first.confirmation_entry_id
-        assert len(await fixture.service.list_entries(session)) == messages_before
+        assert len(await fixture.service.queries.list_entries(session)) == messages_before
         assert (await fixture.repository.get_profile()).version == 1
 
         # 跨入口 ID 冲突：确认操作 ID 与聊天操作 ID 互为占用则拒绝。
@@ -505,7 +507,7 @@ async def check_idempotency_and_conflict(root: Path) -> dict:
                         request=SendRequest(text="普通消息")),
             system_message=SYSTEM,
         )
-        await fixture.service.finish_run(session, outcome.run.id, "completed")
+        await fixture.service.runs.finish_run(session, outcome.run.id, "completed")
         chat_conflict = await rejection(
             fixture.service.accept_send(
                 SendCommand(operation_id=again.operation_id, session_id=session,
@@ -566,7 +568,7 @@ async def check_failure_and_recovery(root: Path) -> dict:
         )
         op_id = new_id()
         async with fixture.repository.transaction():
-            entry = await fixture.service.append_confirmation_entry(
+            entry = await fixture.service.entries.append_confirmation_entry(
                 session, SaveConfirmation(
                     business_kind="profile", proposal_id=pending["proposal"],
                     display_entry_id=pending["display"],
@@ -619,7 +621,7 @@ async def check_edit_and_delete(root: Path) -> dict:
                         request=EditRequest(target_entry_id=op.confirmation_entry_id,
                                             text="改成普通消息")),
         )
-        await fixture.service.finish_run(session, edited.run.id, "completed")
+        await fixture.service.runs.finish_run(session, edited.run.id, "completed")
         assert (await fixture.confirmations.get(session, op.operation_id)).status == "saved"
         assert await fixture.repository.get_save_record(profile_ids["proposal"]) is not None
 
@@ -631,7 +633,7 @@ async def check_edit_and_delete(root: Path) -> dict:
         )
         before = await fixture.state()
         detail = await rejection(
-            fixture.business.save_profile_update(
+            fixture.business.profile.save_profile_update(
                 fixture.context(session, edited.run.request_entry_id, pending["source"]),
                 ProfileSaveArguments(
                     proposal_id=pending["proposal"], display_entry_id=pending["display"],
@@ -718,6 +720,8 @@ async def check_storage_constraints(root: Path) -> dict:
             await fixture.repository.save_profile(ProfileContent.model_validate(PROFILE), 3, now_ms())
         async with fixture.database.transaction_scope():
             await fixture.database.connection.execute("DROP TABLE save_confirmation_operations")
+            await fixture.database.connection.execute("ALTER TABLE session_runs DROP COLUMN stop_diagnostic")
+            await fixture.database.connection.execute("ALTER TABLE session_runs DROP COLUMN stop_reason")
             await fixture.database.connection.execute("PRAGMA user_version = 12")
         await fixture.database.close()
         fixture = await Fixture(root / "storage.db").open()
@@ -786,9 +790,9 @@ def save_arguments(kind: str, ids: dict, confirmation: str):
 def business_save(f: Fixture, kind: str, confirmation: str, ids: dict, session: str,
                   *, updating: bool = False):
     save = {
-        "profile": f.business.save_profile_update,
-        "plan": f.business.save_plan,
-        "workout": f.business.update_workout if updating else f.business.save_workout,
+        "profile": f.business.profile.save_profile_update,
+        "plan": f.business.plans.save_plan,
+        "workout": f.business.workouts.update_workout if updating else f.business.workouts.save_workout,
     }[kind]
     return save(
         f.context(session, confirmation, ids["source"]),
@@ -808,11 +812,11 @@ async def interrupt_after_accept(f: Fixture, session: str, kind: str, ids: dict,
     arguments = save_arguments(kind, ids, confirmation)
     async with f.repository.transaction():
         if kind == "profile":
-            await f.business._begin_save(context, arguments)
+            await f.business.profile._begin_save(context, arguments)
         elif kind == "plan":
-            await f.business._begin_plan_save(context, arguments)
+            await f.business.plans._begin_plan_save(context, arguments)
         else:
-            await f.business._begin_workout_save(context, arguments, updating=updating)
+            await f.business.workouts._begin_workout_save(context, arguments, updating=updating)
     return operation
 
 
@@ -824,13 +828,13 @@ async def expire_and_recheck(f: Fixture, session: str, kind: str, ids: dict,
     failed = await f.confirmations.get(session, interrupted.operation_id)
     assert failed.status == "failed" and failed.error.code == "confirmation_interrupted"
     baseline = await f.state()
-    nodes = len(await f.service.list_entries(session))
+    nodes = len(await f.service.queries.list_entries(session))
     detail = await rejection(
         business_save(f, kind, failed.confirmation_entry_id, ids, session, updating=updating)
     )
     assert detail.code == f"{kind}_confirmation_invalid", detail.code
     assert await f.state() == baseline
-    assert len(await f.service.list_entries(session)) == nodes
+    assert len(await f.service.queries.list_entries(session)) == nodes
     kept = await f.confirmations.get(session, interrupted.operation_id)
     assert kept.model_dump() == failed.model_dump()
     fresh = await f.confirmations.confirm(session, await f.request(session, kind, ids))
@@ -860,9 +864,9 @@ async def check_display_snapshot_binding(root: Path) -> dict:
         ))
         source = await f.append(session, run.id, run.request_entry_id, assistant)
         context = f.context(session, run.request_entry_id, source)
-        first = await f.business.prepare_profile_update(
+        first = await f.business.profile.prepare_profile_update(
             context, ProfileProposalArguments.model_validate(first_args))
-        second = await f.business.prepare_profile_update(
+        second = await f.business.profile.prepare_profile_update(
             context, ProfileProposalArguments.model_validate(second_args))
         first_display = await f.append(session, run.id, source, ToolResultMessage(
             role="toolResult", tool_call_id="call-a", tool_name="prepare_profile_update",
@@ -872,22 +876,22 @@ async def check_display_snapshot_binding(root: Path) -> dict:
             role="toolResult", tool_call_id="call-b", tool_name="prepare_profile_update",
             content=[TextContent(type="text", text=second.model_dump_json())],
             is_error=False, timestamp=now_ms()))
-        await f.service.finish_run(session, run.id, "completed")
+        await f.service.runs.finish_run(session, run.id, "completed")
         baseline = await f.state()
-        nodes = len(await f.service.list_entries(session))
+        nodes = len(await f.service.queries.list_entries(session))
 
         # 同批次错绑：第二份快照绑定第一份展示节点，绑定入口按完整内容核验拒绝。
         crossed = await rejection(
-            f.business.bind_display_entry(second.proposal_id, first_display)
+            f.business.profile.bind_display_entry(second.proposal_id, first_display)
         )
         assert crossed.code == "profile_confirmation_invalid", crossed.code
         assert (await f.repository.get_snapshot(second.proposal_id)).display_entry_id is None
         assert await f.state() == baseline
-        assert len(await f.service.list_entries(session)) == nodes
+        assert len(await f.service.queries.list_entries(session)) == nodes
 
         # 正确绑定后确认保存：展示内容与保存结果一致。
-        await f.business.bind_display_entry(first.proposal_id, first_display)
-        await f.business.bind_display_entry(second.proposal_id, second_display)
+        await f.business.profile.bind_display_entry(first.proposal_id, first_display)
+        await f.business.profile.bind_display_entry(second.proposal_id, second_display)
         saved = await f.confirmations.confirm(session, await f.request(session, "profile", {
             "proposal": second.proposal_id, "display": second_display, "source": source}))
         assert saved.status == "saved", saved
@@ -895,7 +899,7 @@ async def check_display_snapshot_binding(root: Path) -> dict:
 
         # 数据库层强制错绑的快照：保存授权核验拒绝，零提交且账本无残留。
         state = await f.state()
-        after_nodes = len(await f.service.list_entries(session))
+        after_nodes = len(await f.service.queries.list_entries(session))
         mismatched = {}
         for label, updates in (
             ("proposal_id", {"proposal_id": new_id()}),
@@ -919,7 +923,7 @@ async def check_display_snapshot_binding(root: Path) -> dict:
             mismatched[label] = detail.code
             assert detail.code == "profile_confirmation_invalid", (label, detail.code)
             assert await f.state() == state
-            assert len(await f.service.list_entries(session)) == after_nodes
+            assert len(await f.service.queries.list_entries(session)) == after_nodes
         assert (await f.repository.get_snapshot(second.proposal_id)).confirmation_entry_id == (
             saved.confirmation_entry_id
         )
@@ -937,7 +941,7 @@ async def check_display_snapshot_binding(root: Path) -> dict:
             {"base_profile_version": 1, "base_plan_id": None, "payload": PLAN},
         ))
         plan_context = f.context(session, plan_run.request_entry_id, plan_source)
-        other_plan = await f.business.prepare_plan_import(
+        other_plan = await f.business.plans.prepare_plan_import(
             plan_context, PlanImportArguments.model_validate(
                 {"base_profile_version": 1, "base_plan_id": None,
                  "payload": {**PLAN, "notes": "另一份计划"}}))
@@ -945,12 +949,12 @@ async def check_display_snapshot_binding(root: Path) -> dict:
             role="toolResult", tool_call_id=plan_call, tool_name="prepare_plan_import",
             content=[TextContent(type="text", text=other_plan.model_dump_json())],
             is_error=False, timestamp=now_ms()))
-        await f.service.finish_run(session, plan_run.id, "completed")
+        await f.service.runs.finish_run(session, plan_run.id, "completed")
         plan_crossed = await rejection(
-            f.business.bind_plan_display_entry(other_plan.proposal_id, plan_ids["display"])
+            f.business.plans.bind_plan_display_entry(other_plan.proposal_id, plan_ids["display"])
         )
         assert plan_crossed.code == "plan_confirmation_invalid", plan_crossed.code
-        await f.business.bind_plan_display_entry(other_plan.proposal_id, other_display)
+        await f.business.plans.bind_plan_display_entry(other_plan.proposal_id, other_display)
         plan_saved = await f.confirmations.confirm(
             session, await f.request(session, "plan", {"proposal": other_plan.proposal_id,
                                                        "display": other_display,
@@ -1036,7 +1040,7 @@ async def check_processing_retry(root: Path) -> dict:
         )
         operation_id = new_id()
         request = await f.request(session, "profile", ids, operation_id=operation_id)
-        nodes = len(await f.service.list_entries(session))
+        nodes = len(await f.service.queries.list_entries(session))
 
         # 受理后、执行前到达：两个真实并发任务共用同一受理事务边界，仅一方执行保存。
         concurrent = await asyncio.gather(
@@ -1047,7 +1051,7 @@ async def check_processing_retry(root: Path) -> dict:
         assert statuses == ["processing", "saved"], statuses
         assert all(item.operation_id == operation_id for item in concurrent)
         assert len({item.confirmation_entry_id for item in concurrent}) == 1
-        assert len(await f.service.list_entries(session)) == nodes + 1
+        assert len(await f.service.queries.list_entries(session)) == nodes + 1
         state = await f.state()
         assert state["profile"] == 1 and state["profile_records"] == 1
         assert state["operations"] == 1
@@ -1064,11 +1068,11 @@ async def check_processing_retry(root: Path) -> dict:
         operation, is_first = await f.confirmations._accept(session, second_request, now_ms())
         assert is_first
         before = await f.state()
-        nodes_before = len(await f.service.list_entries(session))
+        nodes_before = len(await f.service.queries.list_entries(session))
         retry = await f.confirmations.confirm(session, second_request)
         assert retry.model_dump() == operation.model_dump() and retry.status == "processing"
         assert await f.state() == before
-        assert len(await f.service.list_entries(session)) == nodes_before
+        assert len(await f.service.queries.list_entries(session)) == nodes_before
 
         # 原执行负责人完成后：同键请求返回固定 saved 结果，无新增版本。
         done = await f.confirmations._execute(operation, second_request, None)
@@ -1090,7 +1094,7 @@ async def check_processing_retry(root: Path) -> dict:
         third, third_first = await f.confirmations._accept(session, third_request, now_ms())
         assert third_first
         async with f.repository.transaction():
-            await f.business._begin_save(
+            await f.business.profile._begin_save(
                 f.context(session, third.confirmation_entry_id, third_ids["source"]),
                 save_arguments("profile", third_ids, third.confirmation_entry_id),
             )
@@ -1148,27 +1152,27 @@ async def check_operation_id_namespace(root: Path) -> dict:
         turn = await f.service.accept_send(
             SendCommand(operation_id=chat_id, session_id=session,
                         request=SendRequest(text="旧请求")), system_message=SYSTEM)
-        await f.service.finish_run(session, turn.run.id, "completed")
+        await f.service.runs.finish_run(session, turn.run.id, "completed")
         edited = await f.service.accept_edit(
             EditCommand(operation_id=new_id(), session_id=session,
                         request=EditRequest(target_entry_id=turn.run.request_entry_id,
                                             text="新请求")))
-        await f.service.finish_run(session, edited.run.id, "completed")
-        assert await f.service.get_operation(chat_id) is None
-        assert await f.service.get_operation_invalidation(chat_id) == session
+        await f.service.runs.finish_run(session, edited.run.id, "completed")
+        assert await f.service.operations.get_operation(chat_id) is None
+        assert await f.service.operations.get_operation_invalidation(chat_id) == session
         ids = await f.stage(
             session, "profile",
             {"profile_id": 1, "base_profile_version": None, "payload": PROFILE},
             "prepare_profile_update",
         )
         baseline = await f.state()
-        nodes = len(await f.service.list_entries(session))
+        nodes = len(await f.service.queries.list_entries(session))
         expired = await rejection(f.confirmations.confirm(
             session, await f.request(session, "profile", ids, operation_id=chat_id)))
         assert expired.code == "operation_conflict", expired.code
         assert expired.detail().get("reason") == "operation_expired", expired.detail()
         assert await f.state() == baseline
-        assert len(await f.service.list_entries(session)) == nodes
+        assert len(await f.service.queries.list_entries(session)) == nodes
         assert (await f.repository.get_snapshot(ids["proposal"])).status == "pending"
         results["expired_chat_id"] = expired.detail()
 
@@ -1187,7 +1191,7 @@ async def check_operation_id_namespace(root: Path) -> dict:
         assert cross.code == "operation_conflict", cross.code
         assert "reason" not in cross.detail(), cross.detail()
         assert await f.state() == committed
-        assert len(await f.service.list_entries(other)) == 0
+        assert len(await f.service.queries.list_entries(other)) == 0
         results["cross_session"] = cross.code
 
         # 编辑未保存的确认节点：原操作连同编号失效，编号不可重新授权或复用。
@@ -1205,9 +1209,9 @@ async def check_operation_id_namespace(root: Path) -> dict:
             EditCommand(operation_id=new_id(), session_id=session,
                         request=EditRequest(target_entry_id=operation.confirmation_entry_id,
                                             text="改成普通消息")))
-        await f.service.finish_run(session, moved.run.id, "completed")
+        await f.service.runs.finish_run(session, moved.run.id, "completed")
         assert await f.repository.get_confirmation_operation(pending_id) is None
-        assert await f.service.get_operation_invalidation(pending_id) == session
+        assert await f.service.operations.get_operation_invalidation(pending_id) == session
         before = await f.state()
         reuse = await rejection(f.confirmations.confirm(
             session, await f.request(session, "profile", pending_ids, operation_id=pending_id)))
@@ -1280,18 +1284,21 @@ async def check_replacement_and_migration(root: Path) -> dict:
         await f.restart()
         recovered = await f.confirmations.get(session, second_request.operation_id)
         assert recovered.model_dump() == done.model_dump()
-        nodes = len(await f.service.list_entries(session))
+        nodes = len(await f.service.queries.list_entries(session))
         records = without_ledger(await f.state())
 
         # 迁移 12→13 保真：已有业务数据、消息节点与固定结果全部保留。
+        # 后续运行治理新增列先回退，使模拟库保持真实 v12 结构。
         async with f.database.transaction_scope():
             await f.database.connection.execute("DROP TABLE save_confirmation_operations")
+            await f.database.connection.execute("ALTER TABLE session_runs DROP COLUMN stop_diagnostic")
+            await f.database.connection.execute("ALTER TABLE session_runs DROP COLUMN stop_reason")
             await f.database.connection.execute("PRAGMA user_version = 12")
         await f.database.close()
         f = await Fixture(path).open()
         assert (await f.repository.get_profile()).version == 2
         assert without_ledger(await f.state()) == records
-        assert len(await f.service.list_entries(session)) == nodes
+        assert len(await f.service.queries.list_entries(session)) == nodes
         replay = await f.confirmations.confirm(session, second_request)
         assert replay.status == "saved" and replay.result.model_dump() == done.result.model_dump()
         assert (await f.repository.get_profile()).version == 2

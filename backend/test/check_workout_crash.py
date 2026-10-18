@@ -8,7 +8,11 @@ from pathlib import Path
 from threading import Event
 from uuid import uuid4
 
-from app.domain.business.models import BusinessContext, WorkoutListArguments, WorkoutSaveArguments
+from app.domain.business.models import (
+    BusinessContext,
+    WorkoutListArguments,
+    WorkoutSaveArguments,
+)
 from test.check_profile_confirmation import Fixture, new_id
 from test.check_profile_crash import terminate_owned
 from test.check_workout_service_http import prepare
@@ -36,7 +40,7 @@ async def worker(root: Path, phase: str):
                 blocked.wait(60)
 
     await f.database.connection.set_trace_callback(trace)
-    saved = await f.business.save_workout(context, arguments)
+    saved = await f.business.workouts.save_workout(context, arguments)
     assert phase == "after_commit"
     (root / "saved.json").write_text(saved.model_dump_json(), encoding="utf-8")
     (root / "ready.json").write_text(json.dumps({"phase": phase, "pid": os.getpid()}), encoding="utf-8")
@@ -51,14 +55,14 @@ async def recover(root: Path, phase: str):
     try:
         await f.repository.recover_interrupted_workout_saves()
         expected = "pending" if phase == "before_commit" else "saved"
-        assert (await f.business.get_workout_save_status(context, arguments.proposal_id)).status == expected
-        before = await f.business.list_workouts(WorkoutListArguments())
+        assert (await f.business.workouts.get_workout_save_status(context, arguments.proposal_id)).status == expected
+        before = await f.business.workouts.list_workouts(WorkoutListArguments())
         assert before.total == (0 if phase == "before_commit" else 1)
-        result = await f.business.save_workout(context, arguments)
+        result = await f.business.workouts.save_workout(context, arguments)
         assert result.version == 1
-        assert await f.business.save_workout(context, arguments) == result
-        assert (await f.business.list_workouts(WorkoutListArguments())).total == 1
-        assert (await f.business.get_workout_save_status(context, arguments.proposal_id)).result == result
+        assert await f.business.workouts.save_workout(context, arguments) == result
+        assert (await f.business.workouts.list_workouts(WorkoutListArguments())).total == 1
+        assert (await f.business.workouts.get_workout_save_status(context, arguments.proposal_id)).result == result
         if phase == "after_commit":
             assert result.model_dump() == json.loads((root / "saved.json").read_text(encoding="utf-8"))
         return {"phase": phase, "recovered": expected, "result": result.model_dump()}
