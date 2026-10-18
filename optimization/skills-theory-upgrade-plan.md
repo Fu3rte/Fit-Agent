@@ -2,23 +2,28 @@
 
 ## 0. 实施状态
 
-已按本方案实施完毕，校验通过：`backend/skills` 共 36 个 Markdown、75 条相对链接，断链 0、空文件 0、
-过时架构表述 0、生物学禁用词 0（禁用词仅出现在禁用清单本身）。校验按链接可达性、空文件、架构表述与禁用词
-四类口径逐文件扫描执行。
+知识内容、Skills 加载器与运行时按需读取接入已实现；D 部分离线修复已完成，真实模型完整验收待完成。
 
-修正一处前期误判：`workout-planning/references/` 的六个文件一直存在且内容完整，此前判断为断链是列
-目录时被截断造成的，因此没有「空引用」可删。
+- 知识资产：现有 8 个 Skill 入口；`evidence-grading.md` 保留证据强度表达，维护者来源登记已删除，相关自述已同步。研究来源保留于本方案第 9 节。
+- B 部分：固定目录加载器、元数据校验、`skills/` 只读命名空间已实现；缺入口报错与只读目录绑定已补测试。
+- C 部分：`build_system_prompt()` 运行时注入目录元数据，已接入真实运行入口；新会话、继续发送、编辑、重新生成与压缩恢复的确定性验证已有执行回报。
+- D 部分：真实模型验收脚本、证据归档、人工核对绑定和离线回归已实现。最新交付回报为 ruff 退出码 0，40 项离线测试通过，退出码 0，耗时 6.11 秒；本次文档同步未独立复跑。
+- 真实模型：按用户要求暂停运行。C2 与 E-workout 修复后的行为未验证；C3 与 E-plan 保留历史波动记录。其他场景保留已有运行证据，本轮未复跑，不作为当前版本全部通过的证明。
+- 完整验收：待真实模型场景完成，并将逐场景人工语义核对绑定到本次运行后确认。不得登记为全项通过。
+
+当前知识文件数量、相对链接、空文件及用词扫描未在本次文档同步中重新执行。HTTP 与 service 拆分由另一个 Agent 负责，本任务不介入。
 
 ## 1. 架构核对结论
 
 | 核对项 | 结果 |
 | --- | --- |
 | 运行时 Agent 形态 | 单一 Agent loop（`backend/app/agent/agent_loop.py`，含 `prompts.py`、`tools/`、`permissions.py`）。`app/application/agent/` 下的 `plan_nodes.py`、`evaluator_agent` 已不存在，无 Intent 路由分发多 Agent |
-| 代码中是否加载 skills | `backend/app` 全量检索无 `skill`／`SKILL`／`GENERAL_SKILL_NAMES` 命中；`frontend/src` 同样无。`backend/skills/` 是仓库内的指令与知识资产，无运行时消费者 |
-| `GENERAL_SKILL_NAMES` | 仅出现在 `exercise-guidance` 与 `workout-logging` 的正文里，是文档自述，无对应代码 |
-| 后果 | `workout-planning` 六个 `references/` 链接断链无人发现，`skills/` 的改动不影响运行时行为，也不被任何测试覆盖 |
+| Skills 加载 | `backend/app/agent/skills.py` 的 `load_skills()` 扫描固定 `backend/skills/*/SKILL.md`，使用 PyYAML 解析 frontmatter，校验必需字段、重名与路径，按名称稳定排序 |
+| 系统提示 | `backend/app/agent/prompts.py` 的 `build_system_prompt()` 追加名称、描述与读取位置；`format_skills_prompt()` 对元数据做 XML 转义，正文与 references 不拼入系统提示 |
+| 文件读取 | 现有 `read` 支持固定 `skills/` 只读命名空间；模型按任务读取入口，再读取相关引用，路径受根目录、Markdown 类型及链接检查约束 |
+| 回归覆盖 | `test_skills.py`、`test_skills_prompt.py`、`test_skills_acceptance_evidence.py` 覆盖加载、权限、提示组装、生命周期与验收状态契约；真实模型证据由 `check_skills_acceptance.py` 记录 |
 
-因此新增的 theory Skill 按**单一 Agent 的共享知识层**设计：不按 Intent 分流、无 Tool、无写权、不进入计划与评审流程；其余 Skill 用相对路径引用它的 `references/`。现有 Skill 正文中「General 分支／Planner／Evaluator／`intent=`」等过时表述的处理见 §7 待确认项。
+training-theory 是**单一 Agent 的共享知识层**：通过相对引用提供解释口径，不取得工具权限与写权。业务规则与工具契约优先；知识层能力限制仅作用于自身职责，计划生成与调整继续按各自工具契约提交具体安排。
 
 ## 2. 内容取舍原则：只给方法论与世界观
 
@@ -32,7 +37,7 @@
 | 三个观察节点（首次发酸／首次掉速／最后一个合格动作） | 保留，定位为「你自己能记的三个数字」，明确不能当能力评分 |
 | RIR、RPE、VL、速度损失、1RM、周期化 | **术语保留**，健身专业名词不属于本次禁用范围；只在解释概念时使用，并说明本系统不由它判定负荷 |
 | 组结构分类（Rest-pause、Cluster、EMOM、GTG、AMRAP、金字塔） | **术语保留**，只讲「它改变了什么」，英文写法与中文说法并列 |
-| 证据分级与溯源（R1—R13） | 内部登记保留；面向用户改为三类自然语句，不出编号与链接 |
+| 证据分级与溯源（R1—R13） | 研究来源保留于本方案第 9 节；运行时知识文件保留三类自然表达，不输出编号与链接 |
 | 证伪表 | 保留，13 条全部改写为通俗命题 |
 | 停训与复训 | 保留结论，去掉机制细节 |
 | 个人训练记录（4×8、24 次、停练两个月） | 不入库 |
@@ -62,7 +67,7 @@ frontmatter `description` 写明：单一 Agent 的共享训练方法论知识�
 | 文件 | 内容要点 | 预期行数 |
 | --- | --- | --- |
 | `methodology.md` | 世界观五条 + 六步推理协议：先定一个可测的终点 → 列出可能限制它的原因 → 选定你自己能观察的信号 → 说清某个安排改变的是哪个变量 → 说明证据强度 → 写明还不能确认什么。含四条反直觉跳跃禁令 | 70 |
-| `evidence-grading.md` | 两部分：A 维护者用的证据登记（三档分级、来源登记、冲突与过期处理，含可追溯编号，注明不进回答、不进 prompt）；B 面向用户的三类表达句式（有研究支持／推断与经验，缺专项验证／只是便于自观察的指标） | 60 |
+| `evidence-grading.md` | 面向用户的三类表达句式（有研究支持／推断与经验，缺专项验证／只是便于自观察的指标）及表达边界；来源依据见本方案第 9 节 | 以实际内容为准 |
 | `performance-factors.md` | 限制表现的几类原因（力量储备、动作熟练与经济性、连续输出维持、组间恢复、当天状态与测试条件）；刺激／即时反应／长期适应三层分离；急性表现好不等于长期涨得多 | 70 |
 | `effort-and-fatigue.md` | RIR、RPE、速度损失、力竭、练后酸胀各自的含义与边界：互相不能换算、动作变慢不等于临近力竭、力竭不是必需条件、酸胀不能当作某项指标的读数；本系统不由这些刻度判定负荷 | 55 |
 | `training-variables.md` | 训练量、组数、次数、频率、密度、组间与组内休息；七种常见安排结构各改变什么、各自的代价；同总次数不等于同疲劳 | 80 |
@@ -89,7 +94,7 @@ frontmatter `description` 写明：单一 Agent 的共享训练方法论知识�
 
 ### 5.3 溯源信息不进回答
 
-文献编号、PMID、DOI、作者名、书名不出现在面向用户的回答中；证据强度只说「有研究支持」「更多是经验推断，缺少专项验证」「只是便于你自己观察的指标」。编号与链接只留在维护者区的来源登记文件。
+文献编号、PMID、DOI、作者名、书名不出现在面向用户的回答中；证据强度只说「有研究支持」「更多是经验推断，缺少专项验证」「只是便于你自己观察的指标」。研究来源登记保留于本方案第 9 节。
 
 回答结构模板：结论 → 为什么（停在行为与训练变量层）→ 这件事的证据强度 → 你可以自己观察什么 → 还说不清什么。涉及「我」的部分只取本次 Tool 返回值。
 
@@ -99,16 +104,35 @@ frontmatter `description` 写明：单一 Agent 的共享训练方法论知识�
 | --- | --- |
 | `fitness-knowledge` | `knowledge-boundaries.md` §4 换为通俗方法论清单并引用 theory 的三个文件；`few-shots.md` 增 3 条（概念解释、流行说法纠正、自观察指标）；SKILL.md 增回答结构与用词约束各一段 |
 | `strength-training` | `progression-rules.md` 增「§0 渐进的依据」：为何负荷只取最近一次有效正式组、为何要连续两次、为何单次波动不改处方、停练回归为何先减量不加重量。只讲训练变量层面的因果，不引生物学机制 |
-| `workout-planning` | 补齐断链的六个 reference，内容改为定性口径 + 变量理由，沿用 `EXPERT_SOURCES.md` 的「本链路不适用」清单；`training-principles.md` 增用词约束（§5）与「组数次数是可被记录推翻的起点」 |
+| `workout-planning` | 六个 reference 提供定性口径与变量理由，沿用 `EXPERT_SOURCES.md` 的「本链路不适用」清单；`training-principles.md` 包含用词约束（§5）与「组数次数是可被记录推翻的起点」 |
 | `plan-adjustment` | `adjustment-rules.md` 增「§6 回归期的依据」：力量回来得快，连续次数与组间恢复回来得慢，故不加重量且首动作减一组；「一次只改一个变量」补归因理由 |
 | `plan-evaluation` | `evaluation-rubric.md` 的 `explanation_quality` 增核查项：是否说清适用前提与仍缺的证据；仍是布尔 + reason |
 | `exercise-guidance` | `guidance-rules.md` 增解释口径：动作模式差异、器械稳定性与疲劳代价、活动范围；动作身份仍严格取 `search_exercises` 返回值 |
 | `workout-logging` | `logging-contract.md` 增「记录即长期证据」：三态 `set_type` 与口径一致是可比记录与渐进判定的前提；主观感受字段只作自观察，不参与判定 |
 
-## 7. 待确认
+## 7. 装载约定与执行归属
 
-1. **过时架构表述的处理范围**：现有 7 个 Skill 正文大量引用 `intent=` 路由、`GENERAL_SKILL_NAMES` 固定矩阵、`app/application/agent/plan_nodes.py`（该文件已不存在）、Planner／Evaluator 两个角色。本方案不动这些表述，只新增与改造知识内容。可选择：(a) 保持不动；(b) 本次一并把 7 个 Skill 的架构自述对齐为单一 Agent 现状。推荐 (a)，把架构对齐单独开一次改动，避免与内容升级混在一起。请定。
-2. **theory Skill 的装载**：因 `backend/skills/` 无运行时消费者，theory Skill 与其他 Skill 一样按目录约定生效。若存在我未检索到的装载路径（CI、IDE、外部 runner），请告知，装载段落按该路径写。
+### 7.1 按需装载
+
+1. `load_skills()` 固定定位 `backend/skills`，返回每个入口的 `name`、`description`、`path`，不依赖进程工作目录。
+2. `build_system_prompt()` 在运行时组装业务规则与 `<available_skills>` 目录，不在模块导入时生成静态目录，不全量注入正文与 references。
+3. 模型匹配任务后使用 `read` 读取 `skills/<目录>/SKILL.md`，再按任务读取相关引用。
+4. 相对引用以当前 Markdown 文件所在目录解析，归一化到 `skills/` 命名空间；不得向 read 传入含未解析 `..` 的路径。例如 `workout-planning/SKILL.md` 的 `../training-theory/references/methodology.md` 对应 `skills/training-theory/references/methodology.md`。
+5. read 保留分页与续读提示。`grep`、`find`、`ls` 保持会话文件作用域；`write`、`edit` 仅操作当前会话 workspace，不能修改 Skills。
+6. 新会话保存组装后的系统消息，继续发送、编辑、重新生成与压缩恢复沿用系统状态，目录不重复追加。升级前旧会话不迁移系统消息，需要新建会话获得目录。
+7. 元数据与固定根目录异常直接报错；工具权限与按钮确认授权继续由后端决定。
+
+### 7.2 执行归属
+
+- 主实现 Agent 连贯完成实现、测试文件编写、修复与文档同步。
+- 实现代码与业务功能测试的实际运行交给 subagent；单次命令超时上限 10 分钟。
+- 测试回报必须包含执行目录、完整命令、退出码与关键输出。
+- 主 Agent 依据真实回报核对结果，未运行或未回报的项目不登记为通过。
+- HTTP 与 service 拆分由独立 Agent 负责，本任务保持相关拆分改动完整。
+
+### 7.3 证据状态
+
+`check_skills_acceptance.py` 保留每次运行证据。异常或机器检查失败记为 `fail`；机器检查通过且缺少人工语义核对记为 `pending_review`。人工核对必须绑定当前 `run_ids` 与 `answer_sha256`，通过 `--apply-review` 应用后才可登记为 `pass`。本轮真实模型运行暂停，已有历史证据与当前未验证项分别保留。
 
 ## 8. 验收清单
 
@@ -120,7 +144,26 @@ frontmatter `description` 写明：单一 Agent 的共享训练方法论知识�
   1. 「练完第二天酸，是不是乳酸没排掉」→ 纠正为通俗结论，不出现化学名词，标证据强度。
   2. 「是不是每组都要做到做不动才有效」→ 给出证据结论并说明本系统不以此判定负荷。
   3. 「我想提高一组能做的次数，怎么练」→ 给出终点定义、可能限制原因、自观察指标与单变量对照建议，不给具体组次处方数值。
-- 既有测试无回归（skills 无代码消费者，此项为确认 `backend/app` 未改动）。
+- 加载器与文件边界：元数据、缺入口报错、路径归一化、跨 Skill 读取、链接与越界拒绝、Skills 写入拒绝、会话文件访问回归。
+- 提示与生命周期：目录元数据完整且无正文全量注入，转义正确；继续发送、编辑、重新生成及压缩恢复保留目录和 read 声明。
+- 业务回归：计划生成、调整、训练记录继续遵守工具契约；普通文字不保存，独立按钮确认与重复确认幂等保持有效。
+- 证据契约：异常不能标为通过；人工语义核对绑定实际运行与回答；保存一致性对照实际确认的 proposal 固定载荷。
+
+### 当前已执行结果
+
+- 主会话委派的离线复跑：37 项通过，退出码 0，7.90 秒。该结果对应 D 部分后续修复前版本。
+- 最新修复交付的 subagent 回报：`uv run --no-sync --frozen ruff check app/agent/skills.py app/agent/prompts.py test/test_skills.py test/test_skills_prompt.py test/check_skills_acceptance.py test/test_skills_acceptance_evidence.py`，退出码 0，`All checks passed!`。
+- 同轮离线命令：`uv run --no-sync --frozen python -m pytest test/test_skills.py test/test_skills_prompt.py test/test_skills_acceptance_evidence.py -q --basetemp=temp/skills-d-review-pytest-final`，退出码 0，`40 passed in 6.11s`。执行目录为 `D:/repository/fit-agent/backend`，依据实现 Agent 提供的 subagent 回报，本次文档同步未独立复跑。
+- C 部分已有新会话、继续发送、编辑、重新生成与压缩恢复的测试回报；当前并发拆分后的 HTTP/SSE 与业务全链路未复验。
+
+### 待完成的真实模型验收
+
+- C2：修复后重新验证系统负荷判定边界表达。
+- E-workout：修复后验证日期换算、首轮准备快照与独立保存链路。
+- C3、E-plan：保留历史波动，当前修复版本未复跑。
+- C1、D1–D3、E-adjust、permissions：保留已保存证据，当前修复版本未复跑。
+- 最新真实运行在场景检查前受到并发拆分相关 SSE run_id 不一致阻断；对应证据已归档，该运行不计为通过。
+- 按用户要求暂停真实模型测试。D 部分完整验收状态为待完成。
 
 ## 9. 参考来源
 

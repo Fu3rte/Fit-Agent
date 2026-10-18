@@ -4,20 +4,24 @@
 
 ## 验收状态
 
-当前开发环境为 WSL。任务五实现文件已落地，WSL/Linux 边界回归记录为 83 项通过；Windows 剩余测试延期至 Windows 专项验收时执行，任务五整体保持待验收状态。
+Windows 进程级验收完成。独占副本 `C:\Users\Ericcc\fit-agent-task5`、独占端口 8000/15173/18081、证据目录 `D:\Repository\Fit-Agent\tmp\stability-task5\`。全部取证命令退出码为 0，读数登记在 `tmp/stability-task-5-report.md`。
 
-Windows 独占副本已删除，相关测试进程已停止，8000、15173、18081 已无监听。本文件中的路径和命令用于后续重建独占环境，执行前须重新确认资源授权与端口空闲。
+已实测通过：
 
-Windows 待验收项：
-- 故障封闭下的 503 最终断言、原运行查询与停止诊断。
-- 故障停机的完整进程残留与端口释放证据。
-- 重启准入阻断、数据库不可用时保持不可受理。
-- `interrupted`、已有终态及迟到提交结果核对。
-- 已保存数据保留、确认保存对账及 `confirmation_interrupted` 恢复。
-- 恢复后新运行、新确认及单实例检查。
-- Windows 中未通过的 3 项短预算测试及驱动最终复跑。
+- `terminal_persist_failed` 与 `worker_stuck` 两种形态的故障封闭：SSE 5 个事件、无 `done/error` 终态、运行行保持 `running`、名额占用保留。
+- 故障封闭下的准入：新运行返回 503 且错误码 `service_unavailable`；会话、原运行、历史、运行操作、画像五路只读查询全部 200。
+- 停机与退出确认：按快照逐 PID 核验身份后终止，`remaining_pids` 为空、监听为空；Ctrl+Break 通道下 19 个进程 0.52 秒内自然全部退出、监听清零、根退出码 `0xC000013A`。
+- 重启准入：外部排他锁构造恢复窗口期间 8000 监听数 0、探测全部连接超时；锁释放后 0.88 秒受理。
+- 恢复核对：`running` 转 `interrupted`；`completed` 终态原值不变、运行行数不变；已保存画像与确认记录保持有效且未重复增加；未提交事务按 SQLite 语义回滚，确认操作记 `failed` 与 `confirmation_interrupted`、快照回 `pending`、绑定清空。
+- 数据库不可用：路径故障下应用启动失败并打印 `Application startup failed. Exiting.`，8000 无监听、HTTP 连接超时，故障清除后重新人工启动恢复服务。
+- 恢复后新运行与新确认均可正常受理；新实例内 spawn 应用 worker 恰 1 个、其父进程持有唯一 8000 监听、旧工具与应用进程无残留。
 
-WSL/Linux 已有回归证据的范围为对应测试套件；实际进程级重启恢复另需取证。Windows 验收完成须记录 Windows 实际命令、退出码与结果。稳定性治理方案与前后端契约中的最终恢复要求保持有效。
+两条既有语义作为运维前提：
+
+- 停机诊断写入只有 3 次 1 秒的重试窗口，数据库不可用超过约 3.1 秒时 `stop_diagnostic` 不再写入，封闭原因以应用日志与内存诊断为准，重启后运行行进入 `interrupted`。
+- 故障封闭期间数据库仍被外部持锁时，运行请求在幂等解析阶段读库失败返回 500；数据库可用时返回 503。
+
+前端完整浏览器故障矩阵与跨任务集成归任务六验收。本文件路径与命令可在新独占副本上直接复用，执行前须重新确认资源授权与端口空闲。
 
 ## 1. 独占资源与前提
 
@@ -29,7 +33,7 @@ WSL/Linux 已有回归证据的范围为对应测试套件；实际进程级重�
 - 可控模型端点：`127.0.0.1:18081`。
 - 数据库：`C:\Users\Ericcc\fit-agent-task5\backend\data\fit-agent.db`。
 - 附件与工作文件：`C:\Users\Ericcc\fit-agent-task5\tmp\sessions\`。
-- 证据：`C:\Users\Ericcc\fit-agent-task5\tmp\stability-task5\`。
+- 证据：`D:\Repository\Fit-Agent\tmp\stability-task5\`（仓库 `.gitignore` 覆盖 `tmp/`，副本删除后证据仍可复核）。
 
 禁止操作 `D:\Repository\Fit-Agent` 及其运行资源、共享服务、共享数据库和 V2 量化测试。副本的 `.env` 只使用无凭据的本地测试模型配置。
 
@@ -46,27 +50,47 @@ Get-CimInstance Win32_Process |
 
 端口必须为空，且没有属于该副本的旧进程。`backend\data` 与 `tmp` 必须是本次验收的独立副本，不能指向真实用户数据。
 
-验收用 `backend\.env`：
+验收用 `backend\.env`（按实例分段，驱动自动写入）：
 
 ```text
-FIT_AGENT_RUN_BUDGET_SECONDS=6
+# 第一个实例：含 worker_stuck 注入
+FIT_AGENT_RUN_BUDGET_SECONDS=20
+FIT_AGENT_SQLITE_TIMEOUT_SECONDS=2
+
+# 重启实例：恢复门与后续场景
+FIT_AGENT_RUN_BUDGET_SECONDS=20
 FIT_AGENT_SQLITE_TIMEOUT_SECONDS=30
 ```
 
-`FIT_AGENT_SQLITE_TIMEOUT_SECONDS` 只用于延长真实 SQLite 锁等待，默认值为 5 秒。模型配置通过应用内 `PUT /api/provider` 写入本地端点，API Key 使用无凭据的测试值，不写入日志或报告。
+分段取值依据：停机诊断的写入只有 3 次 1 秒的重试窗口（`app/interfaces/http.py:1696-1707`）。第一个实例把 SQLite 超时压到 2 秒，被外部持锁阻塞的终态写入在故障封闭前就已失败并放弃，锁释放后不会迟到提交终态，`stop_diagnostic` 的落库窗口才可核对；重启实例用 30 秒，让恢复流程的首笔读取在持锁上等待而非立刻报错，观察窗口才落在「应用已启动、恢复未完成」这段时间内。SQLite 连接超时默认 5 秒，运行预算默认 300 秒，两者均通过既有治理配置入口注入。模型配置通过应用内 `PUT /api/provider` 写入本地端点，API Key 使用无凭据的测试值，不写入日志或报告。
 
-### 1.1 后续 Windows 完整驱动入口
+### 1.1 驱动入口
 
-重新建立独占副本并同步当前源码，安装根目录与 frontend 的 npm 依赖，以及 `uv sync --project backend --frozen`。完成上述配置后，在独占副本根目录执行：
+重建独占副本：`git clone file:///D:/Repository/Fit-Agent C:\Users\Ericcc\fit-agent-task5`，根目录与 `frontend` 各执行 `npm install --no-audit --no-fund`，再 `uv sync --project backend --frozen`。副本目录名须为 `fit-agent-task5`，驱动按该名称判定可清理的数据范围。四条命令必须串行，每条结束后确认端口释放，单条超时上限 600 秒，实际执行派发给测试 subagent。
 
 ```powershell
 cd C:\Users\Ericcc\fit-agent-task5
+$out = "D:\Repository\Fit-Agent\tmp\stability-task5"
+
+# 1 全链：预热、基线保存、正常运行、terminal_persist_failed 封闭、503 与只读、
+#   按 PID 停机、恢复门、重启恢复、恢复后运行与确认、中断确认对账
 & .\backend\.venv\Scripts\python.exe .\backend\test\check_stability_task5_windows.py `
-  --root (Get-Location).Path `
-  --out .\tmp\stability-task5
+  --root (Get-Location).Path --out $out --frontend-port 15173
+
+# 2 worker_stuck 链与单实例判据（重建全新 backend\data）
+& .\backend\.venv\Scripts\python.exe .\backend\test\check_stability_task5_worker_stuck.py `
+  --root (Get-Location).Path --out "$out\worker-stuck" --frontend-port 15173
+
+# 3 Ctrl+Break 优雅退出：进程树自然退出与端口释放
+& .\backend\.venv\Scripts\python.exe .\backend\test\check_stability_task5_graceful_stop.py `
+  --root (Get-Location).Path --out "$out\graceful" --frontend-port 15173
+
+# 4 数据库路径故障：启动失败语义与不可受理
+& .\backend\.venv\Scripts\python.exe .\backend\test\check_stability_task5_db_down.py `
+  --root (Get-Location).Path --out $out
 ```
 
-每次测试脚本超时上限为 600 秒，实际测试派发给测试 subagent。驱动的两项调整尚待最终复跑确认，完成全部阶段后核对退出码与完整证据。Windows 短预算测试需测量请求时延并核对原断言语义，全部未通过项保持待验证。
+判据取值口径见第 3 节与第 5 节；`tmp/stability-task-5-report.md` 登记了本轮全部实测读数。
 
 ## 2. 实际启动链与 PID 取证
 
@@ -86,28 +110,36 @@ npm run dev
 4. `uvicorn --reload` 包含 reloader 监督进程与应用进程；reloader 会重新拉起应用。
 5. 前端为 Vite，`strictPort`，端口由 `FIT_AGENT_FRONTEND_PORT` 注入。
 
+首轮模型调用包含客户端构造与系统提示装配开销，副本冷启动到双就绪实测 61.3 秒，同一副本温启动实测 12.4 秒。驱动的 `wait_backend`、`wait_frontend` 上限取 150 秒，并在进入计时场景前执行一次 `final` 模式预热运行；预热运行自身有独立 phase 记录，与被验收运行分开计数。
+
 记录根 PID、创建时间、父 PID、可执行路径和命令行：
 
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass `
   -File C:\Users\Ericcc\fit-agent-task5\scripts\stability-task5\process.ps1 `
   snapshot -RootPid <根PID> -Ports 8000,15173 `
-  -OutFile C:\Users\Ericcc\fit-agent-task5\tmp\stability-task5\process-start.json
+  -OutFile D:\Repository\Fit-Agent\tmp\stability-task5\process-start.json
 ```
 
-证据只保留 `pid`、`ppid`、`creation_date`、`executable_path` 与脱敏后的 `command_line`。不得记录 API Key、完整提示词或原始异常正文。本次已执行的文件工具运行于 Agent 执行线程，未观察到独立工具子进程；后续验收须按实际工具行为追踪子进程。进程树中应出现且仅出现一个 Uvicorn 应用 worker、一个 reloader、一个 Vite 进程及其构建子进程。
+证据只保留 `pid`、`ppid`、`creation_date`、`executable_path` 与脱敏后的 `command_line`，不得记录 API Key、完整提示词或原始异常正文。满树 19 个进程：`cmd.exe` → `node.exe` → npm → `uv.exe` → venv 启动器 → reloader（持有 8000 监听 socket）→ spawn 应用 worker（命令行含 `--multiprocessing-fork`），前端为 Vite 与 esbuild。单实例判据按「spawn worker 恰 1 个、其 PID 与启动日志 `Started server process [PID]` 一致、8000 监听记录恰 1 条且属主等于该 worker 的父进程」，按命令行统计 reloader 无法唯一化（含 `uvicorn` 与 `--reload` 字样的进程有 4 个）。本轮工具调用全部运行在 Agent 执行线程内，未派生独立工具子进程；带外部子进程的工具按第 3.3 节的逐 PID 核验追加取证。
 
 ## 3. 人工受控停机与退出确认
 
-### 3.1 协作停机
+### 3.1 正常停止
+
+在交互控制台按 Ctrl+C，`concurrently` 与 uvicorn 走既有收尾路径。核对项：已记录 PID 全部自然退出、8000 与 15173 无监听、根进程退出码为 `0xC000013A`。实测 `check_stability_task5_graceful_stop.py` 下 19 个进程在 0.52 秒内全部退出、`survivors=[]`、`listeners_after=0`。
+
+无控制台的执行宿主里 `CTRL_C_EVENT` 没有送达通道（实测 19 个进程 60 秒零退出）；需先 `FreeConsole` 加 `AllocConsole` 取得控制台句柄，再按进程组发送 `CTRL_BREAK_EVENT`。该通道下进程树整体即时退出，uvicorn 的 `Shutting down` 与 `Finished server process` 日志不会落盘；收尾日志的观测在交互控制台执行本节步骤时取得。
+
+### 3.2 协作停机
 
 优先使用应用现有取消链：前端停止或关闭运行，等待运行进入持久化终态。确认 SSE 已关闭，且没有伪造的 `done/error`。
 
-### 3.2 卡死停机
+### 3.3 卡死停机
 
 `worker_stuck` 或 `terminal_persist_failed` 时，应用保持不可受理，必须人工终止。步骤：
 
-1. 记录故障运行 `run_id`、`operation_id`、`stop_diagnostic`、故障发生时间。
+1. 记录故障运行 `run_id`、`operation_id`、故障发生时间；`stop_diagnostic` 按实际读数记录，数据库不可用超过约 3.1 秒时该列为 NULL，封闭原因以应用日志中的 `{run_id}/{reason}` 与内存诊断为准。
 2. 记录当前应用根 PID 和完整进程树。
 3. 先停止 reloader 监督进程，防止退出核对期间自动生成新实例。
 4. 再停止应用 worker、Vite、npm/concurrently 与根进程。
@@ -120,9 +152,9 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass `
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass `
   -File C:\Users\Ericcc\fit-agent-task5\scripts\stability-task5\process.ps1 `
-  stop -SnapshotFile C:\Users\Ericcc\fit-agent-task5\tmp\stability-task5\process-fault.json `
+  stop -SnapshotFile D:\Repository\Fit-Agent\tmp\stability-task5\process-fault.json `
   -Ports 8000,15173 `
-  -OutFile C:\Users\Ericcc\fit-agent-task5\tmp\stability-task5\process-stop.json
+  -OutFile D:\Repository\Fit-Agent\tmp\stability-task5\process-stop.json
 ```
 
 判定：
@@ -148,8 +180,30 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass `
 - 恢复完成后，`GET /api/sessions` 返回 200。
 - 恢复前不得受理新运行或新确认。
 - 数据库不可用时应用启动失败，不得先开放服务。
+- 故障封闭且数据库可用时，新运行返回 503 且错误码为 `service_unavailable`；数据库被外部持锁时，运行请求在幂等解析阶段读库失败，沿用既有 500 语义。
 
-数据库不可用与准入阻断可直接用路径故障验证：
+恢复门用外部 `BEGIN EXCLUSIVE` 持锁构造：
+
+```powershell
+python C:\Users\Ericcc\fit-agent-task5\scripts\stability-task5\lock_helper.py `
+  --db C:\Users\Ericcc\fit-agent-task5\backend\data\fit-agent.db `
+  --mode exclusive --hold-seconds 90 --ready-file <ready> --release-file <release>
+# 持锁后启动 npm run dev，等日志出现 "Waiting for application startup"
+# 连续探测 GET /api/sessions 8 秒，记录结果分布与 8000 监听数
+# 写 release 文件释放锁，再等待服务就绪
+```
+
+uvicorn 在 lifespan 启动成功后才绑定端口，因此恢复未完成期间探测结果表现为连接超时、8000 监听数为 0；锁释放后同一探测点返回 200。实测窗口内 5 次探测全部 `ConnectTimeout`（1314 至 1331 毫秒）、`listeners_during_gate=0`、锁释放后 0.88 秒完成受理。
+
+数据库不可用用路径故障验证，`backend\test\check_stability_task5_db_down.py` 已把该流程与取证固化（把 `backend\data` 改名为 `data-held`，在同一路径放一个普通文件，启动真实 `npm run dev`，探测 HTTP、统计 8000 监听数、按快照停机并恢复目录）：
+
+```powershell
+cd C:\Users\Ericcc\fit-agent-task5
+& .\backend\.venv\Scripts\python.exe .\backend\test\check_stability_task5_db_down.py `
+  --root (Get-Location).Path --out D:\Repository\Fit-Agent\tmp\stability-task5
+```
+
+等价手工步骤：
 
 ```powershell
 Rename-Item C:\Users\Ericcc\fit-agent-task5\backend\data data-ok
@@ -235,16 +289,16 @@ cd C:\Users\Ericcc\fit-agent-task5\backend
 .venv\Scripts\python.exe -m pytest test\test_stability_task3.py -q
 ```
 
-任务三套件包含真实 SQLite 锁下的 `terminal_persist_failed`、迟到 `finish` 成功与运行占用保留场景。Windows 进程启停与 `worker_stuck` 的完整恢复流程待按本文件第 2–5 节执行 `npm run dev` 验收。
+任务三套件包含真实 SQLite 锁下的 `terminal_persist_failed`、迟到 `finish` 成功与运行占用保留场景。Windows 副本内实测：`test_governance_contract.py` 17 项通过、`test_stability_task2.py` 41 项通过、`test_stability_task3.py` 23 项通过 2 项未通过（`test_http_noncooperative_tool_keeps_slot_and_records_worker_stuck` 与 `test_http_cooperative_tool_exits_on_cancel_and_releases_slot`，均因注入预算 0.2 与 0.3 秒低于本机工具线程启动耗时，`assert started.is_set()` 未成立）。进程启停与两种故障形态的恢复流程已按第 2 至第 5 节以 `npm run dev` 实跑取证。
 
 ## 7. 资源清理
 
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass `
   -File C:\Users\Ericcc\fit-agent-task5\scripts\stability-task5\process.ps1 `
-  stop -SnapshotFile C:\Users\Ericcc\fit-agent-task5\tmp\stability-task5\process-final.json `
+  stop -SnapshotFile D:\Repository\Fit-Agent\tmp\stability-task5\process-final.json `
   -Ports 8000,15173 `
-  -OutFile C:\Users\Ericcc\fit-agent-task5\tmp\stability-task5\process-final-stop.json
+  -OutFile D:\Repository\Fit-Agent\tmp\stability-task5\process-final-stop.json
 ```
 
 确认：
