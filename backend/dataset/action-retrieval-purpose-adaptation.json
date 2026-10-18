@@ -8,7 +8,7 @@
  "deferred_reason": "临时限制「没有单杠」「避免高负荷硬拉」缺少已批准目录动作映射，q-cond-002 通道未决；按主会话决定该三条在质量执行中单列为未执行，其余 125 条按批准映射继续。",
  "owner": "T8",
  "queries_file": "backend/dataset/action-retrieval-queries.json",
- "queries_sha256": "8260d967a5c7a17e36f792e3d5a003cee41454f8ef09fdf7df4caeb55b835458",
+ "queries_sha256": "7098420d214b511d7ceef29cd59220f5e2396399bf70555afba97e4c3220eea1",
  "online_purposes": [
   "lookup",
   "generation",

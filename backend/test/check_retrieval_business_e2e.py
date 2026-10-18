@@ -2396,7 +2396,7 @@ def preflight_mode() -> None:
     index_module.MilvusConnection.call = restore
     checks = {
         "index_identity_matches_frozen": result["matches_frozen"],
-        "catalog_size_1324": result["catalog_size"] == 1324,
+        "catalog_size_1321": result["catalog_size"] == 1321,
         "no_model_requests": all(entry["attempts"] == 0 for entry in counters.values()),
         "protected_originals_intact": all(
             current == PROTECTED_BASELINE.get(name) or name not in PROTECTED_BASELINE

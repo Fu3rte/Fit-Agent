@@ -5,7 +5,7 @@
   "reviewer": "本会话用户",
   "reviewed_at": 1791940096,
   "status": "approved",
-  "published_sha256": "490ad940211ed9b7340f985031c43eef7ba08e396d02df2f14b831da05375904",
+  "published_sha256": "9429aa3c7cfaf9e89c267843f5e6d1adfa55b075a347996c9c8db7c095e949ec",
   "checklist": [
     "英文名称与目录动作变式、器械及中英文步骤一致，未把通用动作名分配给不匹配的变式",
     "别名确为用户可能使用的表面形式（俗称、缩写、英文、中英混合），不是动作描述或使用场景",
@@ -17,8 +17,8 @@
   "decisions": [
     {
       "scope": "backend/dataset/action-supplements.candidates.json",
-      "coverage": "全部 1324 条动作条目（英文名称 1324、中文俗称 2127）",
-      "content_sha256": "6eda310a4aea0e4468992eb5b76065f7d8966c6b2c4716f6f2163f007fa04c34",
+      "coverage": "全部 1321 条动作条目（英文名称 1321、中文俗称 2123）",
+      "content_sha256": "5eec5347f7d1ddbc6c373a62b0fa0f9526728c3c8dfdd2ac5c1b934fb175b7b1",
       "conclusion": "approved",
       "reviewer": "本会话用户",
       "reviewed_at": 1791940096,
@@ -27,7 +27,7 @@
     {
       "scope": "backend/dataset/action-retrieval-queries.json",
       "coverage": "全部 128 条查询与 405 条候选相关性标注",
-      "content_sha256": "8260d967a5c7a17e36f792e3d5a003cee41454f8ef09fdf7df4caeb55b835458",
+      "content_sha256": "7098420d214b511d7ceef29cd59220f5e2396399bf70555afba97e4c3220eea1",
       "conclusion": "approved",
       "reviewer": "本会话用户",
       "reviewed_at": 1791944832,

@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://fit-agent.local/evaluation/corpus.schema.json",
+  "title": "Evaluation Corpus Row",
+  "description": "corpus.jsonl 单行结构。corpus_id 保留真实动作字符串 ID 与前导零，text 与索引编码一致，metadata 保存真实筛选字段，source 绑定目录与已批准补充数据。",
+  "type": "object",
+  "required": ["corpus_id", "text", "metadata", "source"],
+  "additionalProperties": false,
+  "properties": {
+    "corpus_id": {"type": "string", "pattern": "^[0-9]{4}$"},
+    "text": {"type": "string", "minLength": 1},
+    "metadata": {"$ref": "https://fit-agent.local/evaluation/defs.schema.json#/$defs/corpus_metadata"},
+    "source": {"$ref": "https://fit-agent.local/evaluation/defs.schema.json#/$defs/source"}
+  }
+}

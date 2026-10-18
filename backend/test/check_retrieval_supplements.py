@@ -35,7 +35,7 @@ def check_catalog(catalog: Catalog) -> dict:
     records = load(DEFAULT_ACTIONS_PATH)
     sha = hashlib.sha256(DEFAULT_ACTIONS_PATH.read_bytes()).hexdigest()
     ids = [record["id"] for record in records]
-    assert len(ids) == len(set(ids)) == len(catalog) == 1324, "目录数量或唯一 ID 不符"
+    assert len(ids) == len(set(ids)) == len(catalog) == 1321, "目录数量或唯一 ID 不符"
     assert all(len(i) == 4 and i.isdigit() for i in ids), "ID 必须为 4 位零填充字符串"
     by_field = {
         field: Counter(record[field] for record in records)

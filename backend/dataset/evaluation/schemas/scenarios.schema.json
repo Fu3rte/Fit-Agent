@@ -1,0 +1,59 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://fit-agent.local/evaluation/scenarios.schema.json",
+  "title": "Evaluation End-to-End Scenario Row",
+  "description": "scenarios.jsonl 单行结构。场景保存输入、合成初始状态、有序事件、回答检查点、参考回答、审阅标准、带类型断言与逐指标适用性。",
+  "type": "object",
+  "required": [
+    "scenario_id",
+    "input",
+    "initial_state",
+    "events",
+    "reference",
+    "rubric",
+    "assertions",
+    "metric_applicability",
+    "tags",
+    "family",
+    "review"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "scenario_id": {"type": "string", "pattern": "^s-[a-z0-9][a-z0-9_-]*-[0-9]{2}$"},
+    "input": {"$ref": "https://fit-agent.local/evaluation/defs.schema.json#/$defs/scenario_input"},
+    "initial_state": {"$ref": "https://fit-agent.local/evaluation/defs.schema.json#/$defs/initial_state"},
+    "events": {
+      "type": "array",
+      "minItems": 1,
+      "items": {"$ref": "https://fit-agent.local/evaluation/defs.schema.json#/$defs/event"}
+    },
+    "reference": {
+      "type": "array",
+      "minItems": 0,
+      "items": {"$ref": "https://fit-agent.local/evaluation/defs.schema.json#/$defs/reference_item"}
+    },
+    "rubric": {
+      "type": "array",
+      "minItems": 0,
+      "items": {"$ref": "https://fit-agent.local/evaluation/defs.schema.json#/$defs/rubric_item"}
+    },
+    "assertions": {
+      "type": "array",
+      "minItems": 1,
+      "items": {"$ref": "https://fit-agent.local/evaluation/defs.schema.json#/$defs/assertion"}
+    },
+    "metric_applicability": {
+      "type": "array",
+      "minItems": 1,
+      "items": {"$ref": "https://fit-agent.local/evaluation/defs.schema.json#/$defs/metric_applicability"}
+    },
+    "tags": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {"type": "string", "pattern": "^[a-z0-9][a-z0-9_-]*$"}
+    },
+    "family": {"type": "string", "pattern": "^[a-z0-9][a-z0-9_-]*$"},
+    "review": {"$ref": "https://fit-agent.local/evaluation/defs.schema.json#/$defs/review"}
+  }
+}

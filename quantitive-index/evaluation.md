@@ -1,28 +1,37 @@
 # 动作检索评测
 
-## 固定口径
+## 当前口径
 
-- 指标引擎：ranx；版本由 `backend/uv.lock` 锁定，每次运行记录实际版本。
-- 金标：`backend/dataset/action-retrieval-queries.json`；用途和暂缓样例依照已批准适配表。
-- 相关性：grade >= 1；Hit 对应 `hit_rate`，nDCG 对应指数增益 `ndcg_burges`。
-- 截断：k=5、10。Precision@k 固定以 k 为分母，短结果保留未填满位置。
+- 指标引擎：MTEB 2.26.7；版本由 `backend/uv.lock` 锁定，每次运行记录实际版本。
+- 评分入口：`mteb._evaluators.retrieval_metrics.calculate_retrieval_scores` 与 `mrr`；依赖上界为 `<2.27`。
+- 金标：新数据使用 `backend/dataset/evaluation/<dataset_version>/queries.jsonl` 与 `qrels.jsonl`，逐条用户审批后发布；历史记录继续使用 `backend/dataset/action-retrieval-queries.json` 与已批准用途适配表。
+- 相关性：grade >= 1；Hit 对应 `success_5`，Recall 对应 `recall_5`，Precision 对应 `P_5`，nDCG 对应 `ndcg_cut_5`，MRR 由 `mrr()` 返回。
+- nDCG 增益：`2^grade−1`，等级 1/2/3 映射为 1/3/7。
+- 截断：默认 k=5。Precision@5 固定以 5 为分母，短结果保留未填满位置。
 - 排序指标对有金标查询做宏平均；有答案查询返回空列表计零分。
 - 无答案误返回率单独统计，分母为 `expect_empty` 查询数。
 - 缺少结果、重复 ID、目录外 ID、预算或硬约束违规直接阻止记录有效结果。
-- 实际返回顺序编码为单调 rank score 交给 ranx；原检索分数独立保留。
+- 实际返回顺序编码为严格递减 rank score 交给 MTEB；原检索分数独立保留。
+- 新数据证据 Schema 为 `fit-agent-retrieval-mteb-1`，输出目录为 `backend/temp/retrieval-mteb/<run_id>/`。
 - `historical_rescore` 表示对历史实际候选重算指标；不表示当前系统运行或新的留出验收。
 - `live` 使用真实 Milvus 查询和已有查询向量缓存；耗时不包含在线 Embedding。
 - 历史留出集已经被观察，后续运行标记为回归评测。
 
+## 当前实现状态
+
+检索评分迁移、依赖清理、数据加载、证据、报告与上传适配已完成开发验证。当前环境固定 MTEB 2.26.7 与 jsonlines 4.0.0，不包含 ranx。新数据草稿 `backend/dataset/evaluation/rebuild-v1/` 已生成 corpus 1321、queries 150、qrels 1079、scenarios 80、附件 8，全部 review 与 release 为 draft；审阅入口结构检查通过并返回未就绪，正式入口按预期拒绝。正式 150 条检索、80 个业务场景、云端上传、Ragas 与裁判调用尚未执行，本页不追加开发测试成绩。
+
 ## 工具职责与可信度
 
-ranx 负责标准排序指标计算，LangSmith 负责实验管理和逐例分析。检索金标仍需人工复核。工具接入不证明标注正确、覆盖完整或评测集独立。
+MTEB 负责标准排序指标计算，LangSmith 负责实验管理和逐例分析，Ragas 负责后续生成指标。检索金标仍需人工复核。工具接入不证明标注正确、覆盖完整或评测集独立。
 
 现有功能回归测试继续覆盖器械、禁用动作、JSON、索引、取消和保存授权。评测适配器保留输入校验和边界测试。
 
-使用说明见 `optimization/retrieval-evaluation-guide.md`。有效评测通过入口自动追加到本文件，原始逐例数据写入 `backend/temp/retrieval-ranx/`。
+使用说明见 `optimization/retrieval-evaluation-guide.md`。有效评测通过入口写入 `backend/temp/retrieval-mteb/`；历史 ranx 原件继续保留在 `backend/temp/retrieval-ranx/`。
 
 ## 执行验证
+
+以下执行记录、得分、时间和实验 ID 为 ranx 迁移前的历史原件，保持原值。
 
 - worker 执行 `uv run --directory backend python -m pytest test/test_retrieval_ranx.py -q`：退出码 0，32 passed。
 - worker 执行 `uv run --directory backend python -m ruff check evaluation test/test_retrieval_ranx.py`：退出码 0。日志：`tmp/retrieval-final-checks/01-ruff.log`。

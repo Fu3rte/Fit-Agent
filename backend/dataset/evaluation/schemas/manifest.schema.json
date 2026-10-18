@@ -1,0 +1,183 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://fit-agent.local/evaluation/manifest.schema.json",
+  "title": "Evaluation Dataset Manifest",
+  "description": "数据版本清单：文件与 Schema 哈希、业务来源、数量、配额、附件与发布批准。release 内容摘要覆盖除 release 外的全部字段。",
+  "type": "object",
+  "required": [
+    "dataset_version",
+    "schema_version",
+    "created_at",
+    "source",
+    "schemas",
+    "files",
+    "assets",
+    "counts",
+    "quotas",
+    "release"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "dataset_version": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._-]*$"},
+    "schema_version": {"const": "evaluation-dataset-1"},
+    "created_at": {"type": "string", "format": "date-time"},
+    "source": {"$ref": "https://fit-agent.local/evaluation/defs.schema.json#/$defs/source"},
+    "schemas": {
+      "type": "object",
+      "required": ["defs", "manifest", "corpus", "queries", "qrels", "scenarios"],
+      "additionalProperties": false,
+      "properties": {
+        "defs": {"$ref": "#/$defs/schema_ref"},
+        "manifest": {"$ref": "#/$defs/schema_ref"},
+        "corpus": {"$ref": "#/$defs/schema_ref"},
+        "queries": {"$ref": "#/$defs/schema_ref"},
+        "qrels": {"$ref": "#/$defs/schema_ref"},
+        "scenarios": {"$ref": "#/$defs/schema_ref"}
+      }
+    },
+    "files": {
+      "type": "object",
+      "required": ["corpus", "queries", "qrels", "scenarios"],
+      "additionalProperties": false,
+      "properties": {
+        "corpus": {"$ref": "#/$defs/file_ref"},
+        "queries": {"$ref": "#/$defs/file_ref"},
+        "qrels": {"$ref": "#/$defs/file_ref"},
+        "scenarios": {"$ref": "#/$defs/file_ref"}
+      }
+    },
+    "assets": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {"$ref": "#/$defs/asset_ref"}
+    },
+    "counts": {
+      "type": "object",
+      "required": ["corpus", "queries", "qrels", "scenarios", "assets"],
+      "additionalProperties": false,
+      "properties": {
+        "corpus": {"type": "integer", "minimum": 1},
+        "queries": {"type": "integer", "minimum": 0},
+        "qrels": {"type": "integer", "minimum": 0},
+        "scenarios": {"type": "integer", "minimum": 0},
+        "assets": {"type": "integer", "minimum": 0}
+      }
+    },
+    "quotas": {
+      "type": "object",
+      "required": ["purposes", "expect_empty", "scenario_categories"],
+      "additionalProperties": false,
+      "properties": {
+        "purposes": {
+          "type": "object",
+          "required": ["lookup", "generation", "replacement"],
+          "additionalProperties": false,
+          "properties": {
+            "lookup": {"type": "integer", "minimum": 0},
+            "generation": {"type": "integer", "minimum": 0},
+            "replacement": {"type": "integer", "minimum": 0}
+          }
+        },
+        "expect_empty": {
+          "type": "object",
+          "required": ["lookup", "generation", "replacement"],
+          "additionalProperties": false,
+          "properties": {
+            "lookup": {"type": "integer", "minimum": 0},
+            "generation": {"type": "integer", "minimum": 0},
+            "replacement": {"type": "integer", "minimum": 0}
+          }
+        },
+        "scenario_categories": {
+          "type": "object",
+          "required": [
+            "action_verification",
+            "profile_update",
+            "plan_import_file",
+            "incomplete_plan_structure",
+            "plan_generation",
+            "replacement_constraints",
+            "performance_adjustment",
+            "workout_logging_query",
+            "confirmation_cancellation_state",
+            "clarification_authorization_medical_risk"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "action_verification": {"type": "integer", "minimum": 0},
+            "profile_update": {"type": "integer", "minimum": 0},
+            "plan_import_file": {"type": "integer", "minimum": 0},
+            "incomplete_plan_structure": {"type": "integer", "minimum": 0},
+            "plan_generation": {"type": "integer", "minimum": 0},
+            "replacement_constraints": {"type": "integer", "minimum": 0},
+            "performance_adjustment": {"type": "integer", "minimum": 0},
+            "workout_logging_query": {"type": "integer", "minimum": 0},
+            "confirmation_cancellation_state": {"type": "integer", "minimum": 0},
+            "clarification_authorization_medical_risk": {"type": "integer", "minimum": 0}
+          }
+        }
+      }
+    },
+    "release": {
+      "type": "object",
+      "required": ["status", "reviewer", "reviewer_type", "reviewed_at", "comment", "decision_ref", "content_sha256"],
+      "additionalProperties": false,
+      "properties": {
+        "status": {"enum": ["draft", "approved", "rejected"]},
+        "reviewer": {"type": ["string", "null"], "minLength": 1},
+        "reviewer_type": {"enum": ["user", "assistant", "system", null]},
+        "reviewed_at": {"type": ["string", "null"], "format": "date-time"},
+        "comment": {"type": ["string", "null"], "minLength": 1},
+        "decision_ref": {"type": ["string", "null"], "minLength": 1},
+        "content_sha256": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"}
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"status": {"const": "approved"}}, "required": ["status"]},
+          "then": {
+            "properties": {
+              "reviewer": {"type": "string", "minLength": 1},
+              "reviewer_type": {"enum": ["user", "assistant", "system"]},
+              "reviewed_at": {"type": "string", "format": "date-time"},
+              "decision_ref": {"type": "string", "minLength": 1},
+              "content_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+            }
+          }
+        }
+      ]
+    }
+  },
+  "$defs": {
+    "schema_ref": {
+      "type": "object",
+      "required": ["path", "sha256"],
+      "additionalProperties": false,
+      "properties": {
+        "path": {
+          "type": "string",
+          "pattern": "^backend/dataset/evaluation/schemas/[a-z]+\\.schema\\.json$"
+        },
+        "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+      }
+    },
+    "file_ref": {
+      "type": "object",
+      "required": ["path", "sha256"],
+      "additionalProperties": false,
+      "properties": {
+        "path": {"type": "string", "pattern": "^[a-z]+\\.jsonl$"},
+        "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+      }
+    },
+    "asset_ref": {
+      "type": "object",
+      "required": ["asset_id", "path", "sha256"],
+      "additionalProperties": false,
+      "properties": {
+        "asset_id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._-]*$"},
+        "path": {"type": "string", "pattern": "^assets/[A-Za-z0-9][A-Za-z0-9._/-]*$"},
+        "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+      }
+    }
+  }
+}

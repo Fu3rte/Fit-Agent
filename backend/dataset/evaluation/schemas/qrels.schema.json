@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://fit-agent.local/evaluation/qrels.schema.json",
+  "title": "Evaluation Relevance Judgement Row",
+  "description": "qrels.jsonl 单行结构。grade 3 高度相关、2 相关、1 弱相关、0 已审阅且不相关；evidence 使用冻结来源文件与 JSON Pointer。",
+  "type": "object",
+  "required": ["query_id", "corpus_id", "grade", "rationale", "evidence", "review"],
+  "additionalProperties": false,
+  "properties": {
+    "query_id": {"type": "string", "pattern": "^q-[a-z0-9][a-z0-9_-]*-[0-9]{3}$"},
+    "corpus_id": {"type": "string", "pattern": "^[0-9]{4}$"},
+    "grade": {"type": "integer", "minimum": 0, "maximum": 3},
+    "rationale": {"type": "string", "minLength": 1},
+    "evidence": {"$ref": "https://fit-agent.local/evaluation/defs.schema.json#/$defs/evidence"},
+    "review": {"$ref": "https://fit-agent.local/evaluation/defs.schema.json#/$defs/review"}
+  }
+}

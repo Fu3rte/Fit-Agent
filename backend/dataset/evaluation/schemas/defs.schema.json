@@ -1,0 +1,662 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://fit-agent.local/evaluation/defs.schema.json",
+  "title": "Evaluation Dataset Shared Definitions",
+  "description": "评测数据 Schema 共用的审阅、来源、条件、业务状态与场景结构定义。所有对象封闭字段。",
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "non_empty": {
+      "type": "string",
+      "minLength": 1
+    },
+    "uuid": {
+      "type": "string",
+      "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+    },
+    "review": {
+      "type": "object",
+      "required": [
+        "status",
+        "reviewer",
+        "reviewer_type",
+        "reviewed_at",
+        "comment",
+        "content_sha256",
+        "decision_ref"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "status": {"enum": ["draft", "approved", "deferred"]},
+        "reviewer": {"type": ["string", "null"], "minLength": 1},
+        "reviewer_type": {"enum": ["user", "assistant", "system", null]},
+        "reviewed_at": {"type": ["string", "null"], "format": "date-time"},
+        "comment": {"type": ["string", "null"], "minLength": 1},
+        "content_sha256": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"},
+        "decision_ref": {"type": ["string", "null"], "minLength": 1}
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"status": {"const": "approved"}}, "required": ["status"]},
+          "then": {
+            "properties": {
+              "reviewer": {"type": "string", "minLength": 1},
+              "reviewer_type": {"enum": ["user", "assistant", "system"]},
+              "reviewed_at": {"type": "string", "format": "date-time"},
+              "content_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+              "decision_ref": {"type": "string", "minLength": 1}
+            }
+          }
+        }
+      ]
+    },
+    "source": {
+      "type": "object",
+      "required": ["catalog", "supplements", "mappings", "encoding_rule_version"],
+      "additionalProperties": false,
+      "properties": {
+        "catalog": {
+          "type": "object",
+          "required": ["path", "sha256", "count"],
+          "additionalProperties": false,
+          "properties": {
+            "path": {"const": "backend/dataset/actions.agent.json"},
+            "sha256": {"$ref": "#/$defs/sha256"},
+            "count": {"type": "integer", "minimum": 1}
+          }
+        },
+        "supplements": {
+          "type": "object",
+          "required": ["path", "sha256", "version"],
+          "additionalProperties": false,
+          "properties": {
+            "path": {"const": "backend/dataset/action-supplements.published.json"},
+            "sha256": {"$ref": "#/$defs/sha256"},
+            "version": {"$ref": "#/$defs/non_empty"}
+          }
+        },
+        "mappings": {
+          "type": "object",
+          "required": ["path", "sha256"],
+          "additionalProperties": false,
+          "properties": {
+            "path": {"const": "backend/dataset/action-field-mappings.json"},
+            "sha256": {"$ref": "#/$defs/sha256"}
+          }
+        },
+        "encoding_rule_version": {"$ref": "#/$defs/non_empty"}
+      }
+    },
+    "corpus_metadata": {
+      "type": "object",
+      "required": ["equipment", "body_part", "target", "muscle_group"],
+      "additionalProperties": false,
+      "properties": {
+        "equipment": {"$ref": "#/$defs/non_empty"},
+        "body_part": {"$ref": "#/$defs/non_empty"},
+        "target": {"$ref": "#/$defs/non_empty"},
+        "muscle_group": {"$ref": "#/$defs/non_empty"}
+      }
+    },
+    "saved_profile": {
+      "type": "object",
+      "required": ["unavailable_equipment", "forbidden_exercise_ids"],
+      "additionalProperties": false,
+      "properties": {
+        "unavailable_equipment": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {"type": "string", "minLength": 1}
+        },
+        "forbidden_exercise_ids": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {"type": "string", "pattern": "^[0-9]{4}$"}
+        }
+      }
+    },
+    "conditions": {
+      "type": "object",
+      "required": [
+        "equipment",
+        "body_part",
+        "target",
+        "muscle_group",
+        "environment",
+        "declared_equipment",
+        "unavailable_equipment",
+        "excluded_ids",
+        "saved_profile"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "equipment": {"type": ["string", "null"], "minLength": 1},
+        "body_part": {"type": ["string", "null"], "minLength": 1},
+        "target": {"type": ["string", "null"], "minLength": 1},
+        "muscle_group": {"type": ["string", "null"], "minLength": 1},
+        "environment": {"type": ["string", "null"], "minLength": 1},
+        "declared_equipment": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {"type": "string", "minLength": 1}
+        },
+        "unavailable_equipment": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {"type": "string", "minLength": 1}
+        },
+        "excluded_ids": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {"type": "string", "pattern": "^[0-9]{4}$"}
+        },
+        "saved_profile": {"$ref": "#/$defs/saved_profile"}
+      }
+    },
+    "judgement_scope": {
+      "type": "object",
+      "required": ["checked_scope", "candidate_sources", "omission_review", "complete"],
+      "additionalProperties": false,
+      "properties": {
+        "checked_scope": {"$ref": "#/$defs/non_empty"},
+        "candidate_sources": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {"type": "string", "minLength": 1}
+        },
+        "omission_review": {"$ref": "#/$defs/non_empty"},
+        "complete": {"type": "boolean"}
+      }
+    },
+    "evidence": {
+      "type": "object",
+      "required": ["source_path", "json_pointer", "excerpt"],
+      "additionalProperties": false,
+      "properties": {
+        "source_path": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^(?!.*(?:^|/)\\.\\.(?:/|$))(?!.*\\\\).+$"
+        },
+        "json_pointer": {"type": "string", "pattern": "^/"},
+        "excerpt": {"$ref": "#/$defs/non_empty"}
+      }
+    },
+    "load_convention": {
+      "enum": [
+        "per_implement",
+        "barbell_total",
+        "machine_display",
+        "plates_total",
+        "per_side",
+        "added_weight",
+        "assistance_weight",
+        null
+      ]
+    },
+    "profile": {
+      "type": "object",
+      "required": [
+        "goal",
+        "experience",
+        "environment",
+        "availability",
+        "health_notes",
+        "movement_restrictions",
+        "unavailable_equipment",
+        "forbidden_exercise_ids"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "goal": {"type": ["string", "null"], "minLength": 1},
+        "experience": {"type": ["string", "null"], "minLength": 1},
+        "environment": {"type": ["string", "null"], "minLength": 1},
+        "availability": {"type": ["string", "null"], "minLength": 1},
+        "health_notes": {"type": ["string", "null"], "minLength": 1},
+        "movement_restrictions": {"type": ["string", "null"], "minLength": 1},
+        "unavailable_equipment": {
+          "type": ["array", "null"],
+          "uniqueItems": true,
+          "items": {"type": "string", "minLength": 1}
+        },
+        "forbidden_exercise_ids": {
+          "type": ["array", "null"],
+          "uniqueItems": true,
+          "items": {"type": "string", "pattern": "^[0-9]{4}$"}
+        }
+      }
+    },
+    "plan_exercise": {
+      "type": "object",
+      "required": [
+        "exercise_id",
+        "name",
+        "sets",
+        "reps",
+        "duration_seconds",
+        "weight_kg",
+        "load_convention",
+        "rest_seconds"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "exercise_id": {"type": ["string", "null"], "minLength": 1},
+        "name": {"$ref": "#/$defs/non_empty"},
+        "sets": {"type": ["integer", "null"], "minimum": 1},
+        "reps": {"type": ["integer", "null"], "minimum": 1},
+        "duration_seconds": {"type": ["number", "null"], "exclusiveMinimum": 0},
+        "weight_kg": {"type": ["number", "null"], "minimum": 0},
+        "load_convention": {"$ref": "#/$defs/load_convention"},
+        "rest_seconds": {"type": ["number", "null"], "minimum": 0}
+      }
+    },
+    "plan_day": {
+      "type": "object",
+      "required": ["kind", "focus", "exercises", "notes"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": {"enum": ["training", "rest"]},
+        "focus": {"type": ["string", "null"], "minLength": 1},
+        "exercises": {"type": "array", "items": {"$ref": "#/$defs/plan_exercise"}},
+        "notes": {"type": ["string", "null"], "minLength": 1}
+      }
+    },
+    "plan_content": {
+      "type": "object",
+      "required": ["repeat", "days", "notes", "suggested_fields"],
+      "additionalProperties": false,
+      "properties": {
+        "repeat": {"type": ["boolean", "null"]},
+        "days": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/plan_day"}},
+        "notes": {"type": ["string", "null"], "minLength": 1},
+        "suggested_fields": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {"type": "string", "minLength": 1}
+        }
+      }
+    },
+    "plan_record": {
+      "type": "object",
+      "required": ["id", "is_current", "created_at", "content"],
+      "additionalProperties": false,
+      "properties": {
+        "id": {"$ref": "#/$defs/uuid"},
+        "is_current": {"type": "boolean"},
+        "created_at": {"type": "integer", "minimum": 1},
+        "content": {"$ref": "#/$defs/plan_content"}
+      }
+    },
+    "workout_set": {
+      "type": "object",
+      "required": ["reps", "weight_kg", "duration_seconds"],
+      "additionalProperties": false,
+      "properties": {
+        "reps": {"type": ["integer", "null"], "minimum": 1},
+        "weight_kg": {"type": ["number", "null"], "minimum": 0},
+        "duration_seconds": {"type": ["number", "null"], "exclusiveMinimum": 0}
+      }
+    },
+    "workout_exercise": {
+      "type": "object",
+      "required": ["exercise_id", "name", "load_convention", "sets"],
+      "additionalProperties": false,
+      "properties": {
+        "exercise_id": {"type": ["string", "null"], "minLength": 1},
+        "name": {"$ref": "#/$defs/non_empty"},
+        "load_convention": {"$ref": "#/$defs/load_convention"},
+        "sets": {"type": "array", "items": {"$ref": "#/$defs/workout_set"}}
+      }
+    },
+    "workout_content": {
+      "type": "object",
+      "required": ["exercises", "notes"],
+      "additionalProperties": false,
+      "properties": {
+        "exercises": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/workout_exercise"}},
+        "notes": {"type": ["string", "null"], "minLength": 1}
+      }
+    },
+    "workout_record": {
+      "type": "object",
+      "required": ["performed_on", "id", "version", "content", "created_at", "updated_at"],
+      "additionalProperties": false,
+      "properties": {
+        "performed_on": {"type": "string", "format": "date"},
+        "id": {"$ref": "#/$defs/uuid"},
+        "version": {"type": "integer", "minimum": 1},
+        "content": {"$ref": "#/$defs/workout_content"},
+        "created_at": {"type": "integer", "minimum": 1},
+        "updated_at": {"type": "integer", "minimum": 1}
+      }
+    },
+    "prior_message": {
+      "type": "object",
+      "required": ["role", "content"],
+      "additionalProperties": false,
+      "properties": {
+        "role": {"enum": ["user", "assistant"]},
+        "content": {"$ref": "#/$defs/non_empty"}
+      }
+    },
+    "scenario_input": {
+      "anyOf": [
+        {"properties": {"message": {"pattern": "\\S"}}},
+        {"properties": {"attachments": {"minItems": 1}}}
+      ],
+      "type": "object",
+      "required": ["message", "prior_messages", "attachments"],
+      "additionalProperties": false,
+      "properties": {
+        "message": {"type": "string"},
+        "prior_messages": {"type": "array", "items": {"$ref": "#/$defs/prior_message"}},
+        "attachments": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {"type": "string", "minLength": 1}
+        }
+      }
+    },
+    "initial_state": {
+      "type": "object",
+      "required": ["profile", "plans", "workouts", "current_plan_id", "now", "timezone"],
+      "additionalProperties": false,
+      "properties": {
+        "profile": {"oneOf": [{"$ref": "#/$defs/profile"}, {"type": "null"}]},
+        "plans": {"type": "array", "items": {"$ref": "#/$defs/plan_record"}},
+        "workouts": {"type": "array", "items": {"$ref": "#/$defs/workout_record"}},
+        "current_plan_id": {"type": ["string", "null"], "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"},
+        "now": {"type": "string", "format": "date-time"},
+        "timezone": {"$ref": "#/$defs/non_empty"}
+      }
+    },
+    "event_target": {
+      "type": "object",
+      "required": ["business_kind", "proposal_ref", "display_ref", "confirmation_ref"],
+      "additionalProperties": false,
+      "properties": {
+        "business_kind": {"enum": ["profile", "plan", "workout"]},
+        "proposal_ref": {"$ref": "#/$defs/non_empty"},
+        "display_ref": {"type": ["string", "null"], "minLength": 1},
+        "confirmation_ref": {"type": ["string", "null"], "minLength": 1}
+      }
+    },
+    "event": {
+      "type": "object",
+      "required": ["event_id", "type", "source_event_id", "content", "attachments", "target"],
+      "additionalProperties": false,
+      "properties": {
+        "event_id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9_-]*$"},
+        "type": {"enum": ["message", "confirm", "cancel", "session_switch", "restart"]},
+        "source_event_id": {"type": ["string", "null"], "minLength": 1},
+        "content": {"type": ["string", "null"]},
+        "attachments": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {"type": "string", "minLength": 1}
+        },
+        "target": {"oneOf": [{"$ref": "#/$defs/event_target"}, {"type": "null"}]}
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"type": {"const": "message"}}, "required": ["type"]},
+          "then": {
+            "anyOf": [
+              {"properties": {"content": {"pattern": "\\S"}}},
+              {"properties": {"attachments": {"minItems": 1}}}
+            ],
+            "properties": {
+              "content": {"type": "string"},
+              "source_event_id": {"type": "null"},
+              "target": {"type": "null"}
+            }
+          }
+        },
+        {
+          "if": {"properties": {"type": {"enum": ["confirm", "cancel"]}}, "required": ["type"]},
+          "then": {
+            "properties": {
+              "content": {"type": "null"},
+              "source_event_id": {"type": "string", "minLength": 1},
+              "target": {"$ref": "#/$defs/event_target"}
+            }
+          }
+        },
+        {
+          "if": {"properties": {"type": {"enum": ["session_switch", "restart"]}}, "required": ["type"]},
+          "then": {
+            "properties": {
+              "content": {"type": "null"},
+              "source_event_id": {"type": "null"},
+              "attachments": {"maxItems": 0},
+              "target": {"type": "null"}
+            }
+          }
+        }
+      ]
+    },
+    "fact": {
+      "type": "object",
+      "required": ["fact_id", "text", "source", "asset_id"],
+      "additionalProperties": false,
+      "properties": {
+        "fact_id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9_-]*$"},
+        "text": {"$ref": "#/$defs/non_empty"},
+        "source": {"type": ["string", "null"], "minLength": 1},
+        "asset_id": {"type": ["string", "null"], "minLength": 1}
+      }
+    },
+    "reference_item": {
+      "type": "object",
+      "required": ["checkpoint_id", "event_id", "answer", "facts"],
+      "additionalProperties": false,
+      "properties": {
+        "checkpoint_id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9_-]*$"},
+        "event_id": {"$ref": "#/$defs/non_empty"},
+        "answer": {"$ref": "#/$defs/non_empty"},
+        "facts": {"type": "array", "items": {"$ref": "#/$defs/fact"}}
+      }
+    },
+    "rubric_item": {
+      "type": "object",
+      "required": ["checkpoint_id", "event_id", "must_include", "allowed_variation", "forbidden_claims"],
+      "additionalProperties": false,
+      "properties": {
+        "checkpoint_id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9_-]*$"},
+        "event_id": {"$ref": "#/$defs/non_empty"},
+        "must_include": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {"type": "string", "minLength": 1}
+        },
+        "allowed_variation": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {"type": "string", "minLength": 1}
+        },
+        "forbidden_claims": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {"type": "string", "minLength": 1}
+        }
+      }
+    },
+    "assertion_equipment_restriction": {
+      "type": "object",
+      "required": ["checkpoint_id", "event_id", "kind", "allowed_equipment", "forbidden_equipment"],
+      "additionalProperties": false,
+      "properties": {
+        "checkpoint_id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9_-]*$"},
+        "event_id": {"$ref": "#/$defs/non_empty"},
+        "kind": {"const": "equipment_restriction"},
+        "allowed_equipment": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {"type": "string", "minLength": 1}
+        },
+        "forbidden_equipment": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {"type": "string", "minLength": 1}
+        }
+      }
+    },
+    "assertion_forbidden_exercise": {
+      "type": "object",
+      "required": ["checkpoint_id", "event_id", "kind", "exercise_ids"],
+      "additionalProperties": false,
+      "properties": {
+        "checkpoint_id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9_-]*$"},
+        "event_id": {"$ref": "#/$defs/non_empty"},
+        "kind": {"const": "forbidden_exercise"},
+        "exercise_ids": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {"type": "string", "pattern": "^[0-9]{4}$"}
+        }
+      }
+    },
+    "assertion_parameter_preserved": {
+      "type": "object",
+      "required": ["checkpoint_id", "event_id", "kind", "field_path", "expected"],
+      "additionalProperties": false,
+      "properties": {
+        "checkpoint_id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9_-]*$"},
+        "event_id": {"$ref": "#/$defs/non_empty"},
+        "kind": {"const": "parameter_preserved"},
+        "field_path": {"type": "string", "minLength": 1},
+        "expected": {"type": ["string", "number", "integer", "boolean", "null"]}
+      }
+    },
+    "assertion_snapshot_integrity": {
+      "type": "object",
+      "required": ["checkpoint_id", "event_id", "kind", "proposal_ref"],
+      "additionalProperties": false,
+      "properties": {
+        "checkpoint_id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9_-]*$"},
+        "event_id": {"$ref": "#/$defs/non_empty"},
+        "kind": {"const": "snapshot_integrity"},
+        "proposal_ref": {"$ref": "#/$defs/non_empty"}
+      }
+    },
+    "assertion_save_authorization": {
+      "type": "object",
+      "required": ["checkpoint_id", "event_id", "kind", "proposal_ref", "expected_saved"],
+      "additionalProperties": false,
+      "properties": {
+        "checkpoint_id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9_-]*$"},
+        "event_id": {"$ref": "#/$defs/non_empty"},
+        "kind": {"const": "save_authorization"},
+        "proposal_ref": {"$ref": "#/$defs/non_empty"},
+        "expected_saved": {"type": "boolean"}
+      }
+    },
+    "assertion_state_transition": {
+      "type": "object",
+      "required": ["checkpoint_id", "event_id", "kind", "business_kind", "from_status", "to_status"],
+      "additionalProperties": false,
+      "properties": {
+        "checkpoint_id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9_-]*$"},
+        "event_id": {"$ref": "#/$defs/non_empty"},
+        "kind": {"const": "state_transition"},
+        "business_kind": {"enum": ["profile", "plan", "workout"]},
+        "from_status": {"type": ["string", "null"], "minLength": 1},
+        "to_status": {"$ref": "#/$defs/non_empty"}
+      }
+    },
+    "assertion_evidence_present": {
+      "type": "object",
+      "required": ["checkpoint_id", "event_id", "kind", "evidence_kind", "min_count"],
+      "additionalProperties": false,
+      "properties": {
+        "checkpoint_id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9_-]*$"},
+        "event_id": {"$ref": "#/$defs/non_empty"},
+        "kind": {"const": "evidence_present"},
+        "evidence_kind": {"enum": ["context", "tool_result", "snapshot", "ranking"]},
+        "min_count": {"type": "integer", "minimum": 1}
+      }
+    },
+    "assertion_no_saved_state": {
+      "type": "object",
+      "required": ["checkpoint_id", "event_id", "kind", "business_kind"],
+      "additionalProperties": false,
+      "properties": {
+        "checkpoint_id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9_-]*$"},
+        "event_id": {"$ref": "#/$defs/non_empty"},
+        "kind": {"const": "no_saved_state"},
+        "business_kind": {"enum": ["profile", "plan", "workout"]}
+      }
+    },
+    "assertion_saved_state": {
+      "type": "object",
+      "required": ["checkpoint_id", "event_id", "kind", "business_kind"],
+      "additionalProperties": false,
+      "properties": {
+        "checkpoint_id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9_-]*$"},
+        "event_id": {"$ref": "#/$defs/non_empty"},
+        "kind": {"const": "saved_state"},
+        "business_kind": {"enum": ["profile", "plan", "workout"]}
+      }
+    },
+    "assertion_state_unchanged": {
+      "type": "object",
+      "required": ["checkpoint_id", "event_id", "kind", "business_kind"],
+      "additionalProperties": false,
+      "properties": {
+        "checkpoint_id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9_-]*$"},
+        "event_id": {"$ref": "#/$defs/non_empty"},
+        "kind": {"const": "state_unchanged"},
+        "business_kind": {"enum": ["profile", "plan", "workout", "all"]}
+      }
+    },
+    "assertion_saved_data_unchanged": {
+      "type": "object",
+      "required": ["checkpoint_id", "event_id", "kind", "business_kind"],
+      "additionalProperties": false,
+      "properties": {
+        "checkpoint_id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9_-]*$"},
+        "event_id": {"$ref": "#/$defs/non_empty"},
+        "kind": {"const": "saved_data_unchanged"},
+        "business_kind": {"enum": ["profile", "plan", "workout", "all"]}
+      }
+    },
+    "assertion": {
+      "oneOf": [
+        {"$ref": "#/$defs/assertion_state_unchanged"},
+        {"$ref": "#/$defs/assertion_saved_data_unchanged"},
+        {"$ref": "#/$defs/assertion_equipment_restriction"},
+        {"$ref": "#/$defs/assertion_forbidden_exercise"},
+        {"$ref": "#/$defs/assertion_parameter_preserved"},
+        {"$ref": "#/$defs/assertion_snapshot_integrity"},
+        {"$ref": "#/$defs/assertion_save_authorization"},
+        {"$ref": "#/$defs/assertion_state_transition"},
+        {"$ref": "#/$defs/assertion_evidence_present"},
+        {"$ref": "#/$defs/assertion_no_saved_state"},
+        {"$ref": "#/$defs/assertion_saved_state"}
+      ]
+    },
+    "metric_applicability": {
+      "type": "object",
+      "required": ["checkpoint_id", "event_id", "metric", "applicable", "reason"],
+      "additionalProperties": false,
+      "properties": {
+        "checkpoint_id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9_-]*$"},
+        "event_id": {"$ref": "#/$defs/non_empty"},
+        "metric": {"enum": ["faithfulness", "factual_correctness", "deterministic_rules"]},
+        "applicable": {"type": "boolean"},
+        "reason": {"type": ["string", "null"], "minLength": 1}
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"applicable": {"const": false}}, "required": ["applicable"]},
+          "then": {"properties": {"reason": {"type": "string", "minLength": 1}}}
+        }
+      ]
+    }
+  }
+}

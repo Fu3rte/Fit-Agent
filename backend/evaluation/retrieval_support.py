@@ -44,10 +44,9 @@ REQUAL_ROOT = BACKEND / "temp" / "retrieval-evaluation-requalification"
 REQUAL_AUTH_PATH = REQUAL_ROOT / "authorization.json"
 REQUAL_LEDGER_PATH = REQUAL_ROOT / "executions.json"
 FROZEN_CONFIG_PATH = BACKEND / "app/application/business/retrieval_frozen.py"
-OUTPUT_ROOT = BACKEND / "temp" / "retrieval-ranx"
-REPORT_PATH = REPO / "quantitive-index/evaluation.md"
+OUTPUT_ROOT = BACKEND / "temp" / "retrieval-mteb"
 RECALL_LIMIT = SEARCH_LIMIT + 1
-APPROVED_INPUTS = {"queries": 128, "labels": 405, "dev": 61, "holdout": 67, "families": 22, "catalog": 1324}
+APPROVED_INPUTS = {"queries": 128, "labels": 405, "dev": 61, "holdout": 67, "families": 22, "catalog": 1321}
 
 
 class EvaluationBlocked(RuntimeError):
@@ -132,6 +131,30 @@ def load_adaptation() -> tuple[dict, dict[str, str]]:
     return document, {qid: row["purpose"] for qid, row in rows.items()}
 
 
+def dataset_conditions(query: dict, catalog: Catalog, mappings: dict) -> EvaluatedConditions:
+    conditions = query["conditions"]
+    arguments = CatalogSearchArguments(
+        purpose=query["purpose"],
+        name=query["query"],
+        equipment=conditions["equipment"],
+        body_part=conditions["body_part"],
+        target=conditions["target"],
+        muscle_group=conditions["muscle_group"],
+        task_environment=conditions["environment"],
+        available_equipment=conditions["declared_equipment"] or None,
+        unavailable_equipment=conditions["unavailable_equipment"] or None,
+        excluded_ids=conditions["excluded_ids"] or None,
+    )
+    saved = conditions["saved_profile"]
+    profile = ProfileContent(
+        goal=None, experience=None, environment=None, availability=None, health_notes=None,
+        movement_restrictions=None,
+        unavailable_equipment=saved["unavailable_equipment"] or None,
+        forbidden_exercise_ids=saved["forbidden_exercise_ids"] or None,
+    )
+    return evaluate_search_conditions(arguments, profile, catalog, mappings)
+
+
 def effective_conditions(query: dict, catalog: Catalog, mappings: dict, purpose: str, temporary: dict) -> EvaluatedConditions:
     arguments = CatalogSearchArguments(
         purpose=purpose, name=query["query"], **query["filters"],
@@ -170,8 +193,8 @@ def sha256_text(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
-def query_vector_identity(embedding_config, corpus: RetrievalCorpus) -> dict:
-    return {
+def query_vector_identity(embedding_config, corpus: RetrievalCorpus, dataset_identity: dict | None = None) -> dict:
+    identity = {
         "model": embedding_config.model, "dimensions": embedding_config.dimensions,
         "encoding_rule_version": rt.ENCODING_RULE_VERSION,
         "normalization": "NFKC+whitespace-collapse+casefold",
@@ -179,6 +202,9 @@ def query_vector_identity(embedding_config, corpus: RetrievalCorpus) -> dict:
         "service_class": WORKSPACE_DOMAIN + COMPATIBLE_MODE_PATH,
         "sources": corpus.sources, "text_sha256": sha256_text(json_text(corpus.records)),
     }
+    if dataset_identity is not None:
+        identity["dataset"] = dataset_identity
+    return identity
 
 
 def cache_path(identity: dict) -> Path:

@@ -21,6 +21,7 @@ dependencies = [
     "pymilvus>=3.0.2,<3.1",
     "limits>=5,<6",
     "pyyaml>=6,<7",
+    "jsonlines>=4,<5",
 ]
 
 # 源码以 backend/ 下的 app namespace package 直接导入。
@@ -30,8 +31,8 @@ package = false
 [dependency-groups]
 dev = [
     "langsmith>=0.14.11",
+    "mteb>=2.26.7,<2.27",
     "pytest>=9.1",
-    "ranx>=0.3.21",
     "ruff>=0.16",
 ]
 

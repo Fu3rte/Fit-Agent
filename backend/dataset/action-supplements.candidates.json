@@ -1,9 +1,9 @@
 {
-  "version": "2026-10-14.3",
+  "version": "2026-10-18.1",
   "catalog": {
     "path": "backend/dataset/actions.agent.json",
-    "sha256": "4860919c855e343130a1b13a53e4abcc32ca9f8cecf4c0ffbc55412fb51870ee",
-    "count": 1324
+    "sha256": "d3fd22334038a8a3803ce191acf28847003cb1057673dbbb0a470d153fa80b30",
+    "count": 1321
   },
   "upstream": {
     "repo": "hasaneyldrm/exercises-dataset",
@@ -20370,26 +20370,6 @@
       "note": null
     },
     {
-      "id": "1628",
-      "english_name": {
-        "text": "ez barbell spider curl",
-        "source": "upstream:hasaneyldrm/exercises-dataset@7455efae41b330c265e7cd4b78dfa848e7ce5ebd:data/exercises.json",
-        "review_status": "candidate",
-        "note": "与目录动作变式、器械及中英文步骤逐条对齐校验，MIT 许可数据层字段 name。"
-      },
-      "aliases": [
-        {
-          "text": "EZ杆蜘蛛弯举",
-          "lang": "mixed",
-          "family": "spider-curl",
-          "source": "subagent:upper-arms-b",
-          "review_status": "candidate",
-          "note": "常见俗称/简写，省略器械或修饰"
-        }
-      ],
-      "note": null
-    },
-    {
       "id": "2404",
       "english_name": {
         "text": "ez-bar biceps curl (with arm blaster)",
@@ -23986,26 +23966,6 @@
       "note": null
     },
     {
-      "id": "0577",
-      "english_name": {
-        "text": "lever chest press",
-        "source": "upstream:hasaneyldrm/exercises-dataset@7455efae41b330c265e7cd4b78dfa848e7ce5ebd:data/exercises.json",
-        "review_status": "candidate",
-        "note": "与目录动作变式、器械及中英文步骤逐条对齐校验，MIT 许可数据层字段 name。"
-      },
-      "aliases": [
-        {
-          "text": "坐姿推胸",
-          "lang": "zh",
-          "family": "chest-press",
-          "source": "subagent:chest",
-          "review_status": "candidate",
-          "note": "器械推胸的常见叫法"
-        }
-      ],
-      "note": null
-    },
-    {
       "id": "0576",
       "english_name": {
         "text": "lever chest press",
@@ -26895,34 +26855,6 @@
     },
     {
       "id": "0655",
-      "english_name": {
-        "text": "push-up (on stability ball)",
-        "source": "upstream:hasaneyldrm/exercises-dataset@7455efae41b330c265e7cd4b78dfa848e7ce5ebd:data/exercises.json",
-        "review_status": "candidate",
-        "note": "与目录动作变式、器械及中英文步骤逐条对齐校验，MIT 许可数据层字段 name。"
-      },
-      "aliases": [
-        {
-          "text": "健身球俯卧撑",
-          "lang": "zh",
-          "family": "push-up",
-          "source": "subagent:chest",
-          "review_status": "candidate",
-          "note": null
-        },
-        {
-          "text": "push-up on stability ball",
-          "lang": "en",
-          "family": "push-up",
-          "source": "subagent:chest",
-          "review_status": "candidate",
-          "note": null
-        }
-      ],
-      "note": null
-    },
-    {
-      "id": "0656",
       "english_name": {
         "text": "push-up (on stability ball)",
         "source": "upstream:hasaneyldrm/exercises-dataset@7455efae41b330c265e7cd4b78dfa848e7ce5ebd:data/exercises.json",
