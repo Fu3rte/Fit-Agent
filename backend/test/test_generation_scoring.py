@@ -291,6 +291,10 @@ def test_judge_model_environment_value_supports_explicit_switch():
         load_judge_model({"FIT_AGENT_EVAL_JUDGE_MODEL": "deepseek-v4.1-flash"})
         == "deepseek-v4.1-flash"
     )
+    assert (
+        load_judge_model({"FIT_AGENT_EVAL_JUDGE_MODEL": "qwen3.6-flash"})
+        == "qwen3.6-flash"
+    )
     for value in (None, "", "   ", "unknown-judge", "step-5-preview-extra"):
         source = (
             {}

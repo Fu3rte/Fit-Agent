@@ -94,8 +94,15 @@ RETRIEVAL_METRIC_STAGES: dict[str, tuple[RetrievalStage, int]] = {
 RETRIEVAL_METRICS: tuple[str, ...] = tuple(RETRIEVAL_METRIC_STAGES)
 GENERATION_METRICS: tuple[str, ...] = ("faithfulness", "factual_correctness")
 JUDGE_MODEL = "step-5-preview"
-JUDGE_MODELS = ("step-5-preview", "step-3.7-flash", "deepseek-v4.1-flash")
-JudgeModel = Literal["step-5-preview", "step-3.7-flash", "deepseek-v4.1-flash"]
+JUDGE_MODELS = (
+    "step-5-preview",
+    "step-3.7-flash",
+    "deepseek-v4.1-flash",
+    "qwen3.6-flash",
+)
+JudgeModel = Literal[
+    "step-5-preview", "step-3.7-flash", "deepseek-v4.1-flash", "qwen3.6-flash"
+]
 
 
 def _require_unique_ids(items: list[str], label: str) -> None:

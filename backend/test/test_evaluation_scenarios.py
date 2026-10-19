@@ -103,6 +103,7 @@ from evaluation.scenario_evidence import (
     tool_content_by_visible,
 )
 from evaluation.scenarios import (
+    DEFAULT_JUDGE_TIMEOUT,
     DEFAULT_VERSION_DIR,
     SCENARIO_ROOT,
     AssertionCheckpointArtifact,
@@ -118,6 +119,7 @@ from evaluation.scenarios import (
     _cancel_driving_capture,
     _current_input_text,
     _incomplete_items,
+    _judge_config,
     _not_applicable_generation,
     _parse_args,
     _partial_artifact,
@@ -1194,6 +1196,65 @@ def test_judge_model_supports_explicit_step_37_flash():
         run_judge_identity(evidence)
     identity = run_judge_identity(evidence[:1])
     assert identity.model == "step-3.7-flash"
+
+
+def _forbid_generation_model_config(monkeypatch):
+    def fail_load_model_config():
+        raise AssertionError("裁判配置不得读取生成模型配置")
+
+    monkeypatch.setattr(
+        "evaluation.scenarios.load_model_config", fail_load_model_config
+    )
+
+
+def test_judge_config_reads_all_fields_from_environment(monkeypatch):
+    _forbid_generation_model_config(monkeypatch)
+    monkeypatch.setenv("FIT_AGENT_EVAL_JUDGE_MODEL", "qwen3.6-flash")
+    monkeypatch.setenv(
+        "FIT_AGENT_EVAL_JUDGE_BASE_URL",
+        "https://judge.example.invalid/compatible-mode/v1",
+    )
+    monkeypatch.setenv("FIT_AGENT_EVAL_JUDGE_API_KEY", "judge-synthetic-key")
+    judge, timeout = _judge_config()
+    assert judge is not None
+    assert judge.model == "qwen3.6-flash"
+    assert judge.base_url == "https://judge.example.invalid/compatible-mode/v1"
+    assert judge.api_key == "judge-synthetic-key"
+    assert timeout == DEFAULT_JUDGE_TIMEOUT
+
+
+def test_judge_config_requires_dedicated_base_url(monkeypatch):
+    _forbid_generation_model_config(monkeypatch)
+    monkeypatch.setenv("FIT_AGENT_EVAL_JUDGE_API_KEY", "judge-synthetic-key")
+    monkeypatch.setenv("FIT_AGENT_EVAL_JUDGE_MODEL", "qwen3.6-flash")
+    monkeypatch.delenv("FIT_AGENT_EVAL_JUDGE_BASE_URL", raising=False)
+    assert _judge_config() == (None, None)
+    for blank in ("", "   "):
+        monkeypatch.setenv("FIT_AGENT_EVAL_JUDGE_BASE_URL", blank)
+        assert _judge_config() == (None, None)
+    monkeypatch.setenv("FIT_AGENT_EVAL_JUDGE_BASE_URL", "https://judge.example.invalid/v1")
+    monkeypatch.delenv("FIT_AGENT_EVAL_JUDGE_MODEL", raising=False)
+    assert _judge_config() == (None, None)
+    monkeypatch.setenv("FIT_AGENT_EVAL_JUDGE_MODEL", "unknown-judge")
+    assert _judge_config() == (None, None)
+
+
+def test_judge_config_requires_dedicated_api_key(monkeypatch):
+    _forbid_generation_model_config(monkeypatch)
+    monkeypatch.setenv("FIT_AGENT_EVAL_JUDGE_MODEL", "qwen3.6-flash")
+    monkeypatch.setenv(
+        "FIT_AGENT_EVAL_JUDGE_BASE_URL",
+        "https://judge.example.invalid/compatible-mode/v1",
+    )
+    monkeypatch.delenv("FIT_AGENT_EVAL_JUDGE_API_KEY", raising=False)
+    assert _judge_config() == (None, None)
+    for blank in ("", "   "):
+        monkeypatch.setenv("FIT_AGENT_EVAL_JUDGE_API_KEY", blank)
+        assert _judge_config() == (None, None)
+    monkeypatch.setenv("FIT_AGENT_EVAL_JUDGE_API_KEY", "judge-synthetic-key")
+    judge, _ = _judge_config()
+    assert judge is not None
+    assert judge.api_key == "judge-synthetic-key"
 
 
 def test_hidden_candidate_identity_is_rejected_from_public_response():

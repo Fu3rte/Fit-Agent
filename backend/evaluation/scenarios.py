@@ -16,6 +16,7 @@ from threading import Lock
 from typing import Any
 from uuid import UUID, uuid4, uuid5
 
+from dotenv import load_dotenv
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.agent.prompts import build_system_prompt
@@ -147,6 +148,8 @@ from evaluation.scenario_evidence import (
 SCENARIO_ROOT = BACKEND / "temp" / "evaluation-scenarios"
 DEFAULT_VERSION_DIR = BACKEND / "dataset" / "evaluation" / "rebuild-v1"
 DEFAULT_JUDGE_TIMEOUT = 300.0
+JUDGE_BASE_URL_VARIABLE = "FIT_AGENT_EVAL_JUDGE_BASE_URL"
+JUDGE_API_KEY_VARIABLE = "FIT_AGENT_EVAL_JUDGE_API_KEY"
 EVENT_TYPES = {"message", "confirm", "cancel", "session_switch", "restart"}
 
 
@@ -1954,15 +1957,17 @@ def _judge_config() -> tuple[JudgeConfig | None, float | None]:
         model_name = load_judge_model(os.environ)
     except JudgeConfigError:
         return None, None
-    try:
-        model = load_model_config()
-    except Exception:
+    base_url = (os.environ.get(JUDGE_BASE_URL_VARIABLE) or "").strip()
+    if not base_url:
+        return None, None
+    judge_api_key = (os.environ.get(JUDGE_API_KEY_VARIABLE) or "").strip()
+    if not judge_api_key:
         return None, None
     return (
         JudgeConfig(
             model=model_name,
-            base_url=model.base_url,
-            api_key=model.api_key,
+            base_url=base_url,
+            api_key=judge_api_key,
         ),
         DEFAULT_JUDGE_TIMEOUT,
     )
@@ -2902,6 +2907,7 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    load_dotenv(BACKEND / ".env", override=False)
     args = _parse_args(argv)
     dataset = _dataset(args.version_dir)
     if args.list:
