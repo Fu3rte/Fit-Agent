@@ -7,6 +7,7 @@ import subprocess
 from datetime import UTC, datetime
 from importlib.metadata import version
 from pathlib import Path
+from statistics import mean
 from uuid import NAMESPACE_URL, uuid4, uuid5
 
 from langsmith import Client
@@ -20,23 +21,48 @@ from app.application.business.retrieval_index import (
     RetrievalCorpus,
     sha256,
 )
+from app.application.business.retrieval_response import (
+    CANDIDATE_POOL_LIMIT,
+    SEARCH_BUDGET,
+    SEARCH_LIMIT,
+    build_search_stage,
+    encoded_length,
+)
 from app.application.business.retrieval_search import (
+    RetrievalCandidate,
     search_vectors,
     validate_parameters,
 )
 from evaluation import retrieval_support as support
+from evaluation.contracts import (
+    RETRIEVAL_METRICS,
+    RelevanceLabel,
+    RetrievalInput,
+    RetrievalResult,
+    SearchResponseEvidence,
+)
 from evaluation.dataset import (
     DatasetError,
     EvaluationDataset,
     load_for_evaluation,
     retrieval_corpus_identity,
 )
-from evaluation.retrieval_metrics import DEFAULT_KS, require, score
+from evaluation.retrieval_metrics import evaluate_staged, require, score_legacy
 from evaluation.retrieval_support import load_queries
 
-SCHEMA = "fit-agent-retrieval-mteb-1"
-METRICS = ("hit", "recall", "precision", "mrr", "ndcg")
-DISPLAY = {"hit": "Hit", "recall": "Recall", "precision": "Precision", "mrr": "MRR", "ndcg": "nDCG"}
+SCHEMA_STAGED = "fit-agent-retrieval-mteb-2"
+SCHEMA_LEGACY = "fit-agent-retrieval-mteb-1"
+STAGED_METRICS = RETRIEVAL_METRICS
+LEGACY_METRICS = ("hit@5", "recall@5", "precision@5", "mrr@5", "ndcg@5")
+LEGACY_RETRIEVAL_LIMIT = 10
+DISPLAY = {
+    "recall@20": "Recall@20",
+    "hit@5": "Hit@5",
+    "mrr@5": "MRR@5",
+    "ndcg@5": "nDCG@5",
+    "precision@5": "Precision@5",
+    "recall@5": "Recall@5",
+}
 
 
 def now() -> str:
@@ -47,6 +73,7 @@ def identity() -> dict:
     paths = [
         *sorted((support.BACKEND / "app/application/business").glob("retrieval_*.py")),
         Path(__file__), Path(support.__file__),
+        support.BACKEND / "evaluation/contracts.py",
         support.BACKEND / "evaluation/retrieval_metrics.py",
         support.BACKEND / "evaluation/dataset.py",
         *sorted((support.BACKEND / "dataset/evaluation/schemas").glob("*.schema.json")),
@@ -59,19 +86,217 @@ def identity() -> dict:
             "versions": {name: version(name) for name in ("mteb", "langsmith", "pymilvus", "openai")}}
 
 
-def validate_projections(queries: list[dict], projections: dict, catalog: Catalog) -> dict:
+def _retrieval_inputs(
+    queries: list[dict],
+    projections: dict,
+    catalog: Catalog,
+    evaluated_by_query: dict,
+    expected_threshold: float | None,
+) -> list[RetrievalInput]:
     require(set(projections) == {item["id"] for item in queries}, "候选证据与查询 ID 不一致")
+    inputs = []
+    for query in queries:
+        qid = query["id"]
+        projection = projections[qid]
+        require(qid in evaluated_by_query, f"缺少批准查询条件: {qid}")
+        evaluated = evaluated_by_query[qid]
+        require("candidate_pool" in projection, f"缺少候选池: {qid}")
+        require("final_model_input" in projection, f"缺少最终模型输入: {qid}")
+        pool = projection["candidate_pool"]
+        final = projection["final_model_input"]
+        require(isinstance(pool, list) and len(pool) <= CANDIDATE_POOL_LIMIT, f"候选池非法: {qid}")
+        require(isinstance(final, list) and len(final) <= SEARCH_LIMIT, f"最终输入非法: {qid}")
+        require(all(eid in catalog.exercise_ids for eid in pool), f"候选池含目录外动作: {qid}")
+        require(all(eid in catalog.exercise_ids for eid in final), f"最终输入含目录外动作: {qid}")
+        for key in ("response", "search_evidence", "scores", "threshold"):
+            require(key in projection, f"缺少{key}: {qid}")
+        require("budget_compliant" in projection, f"缺少预算标记: {qid}")
+        require("hard_constraint_violations" in projection, f"缺少硬约束标记: {qid}")
+        require(projection["hard_constraint_violations"] == [], f"硬约束违规: {qid}")
+        require(projection["budget_compliant"] is True, f"字符预算违规: {qid}")
+
+        response = projection["response"]
+        require(isinstance(response, dict), f"公开响应非法: {qid}")
+        actual_chars = encoded_length(response)
+        require(projection.get("serialized_chars") == actual_chars, f"响应字符数与证据不一致: {qid}")
+        require(projection.get("budget_chars") == SEARCH_BUDGET, f"响应预算与冻结预算不一致: {qid}")
+        require(projection.get("item_limit") == SEARCH_LIMIT, f"条目上限与冻结上限不一致: {qid}")
+        require(actual_chars <= SEARCH_BUDGET, f"公开响应超出字符预算: {qid}")
+
+        require(
+            response == projection["search_evidence"]["response_json"],
+            f"公开响应与证据不一致: {qid}",
+        )
+        evidence = SearchResponseEvidence.model_validate(projection["search_evidence"])
+        evidence.require_scored_consistency(final)
+
+        scores = projection["scores"]
+        require(isinstance(scores, dict), f"原始分数非法: {qid}")
+        require(all(eid in scores for eid in pool), f"候选池缺少原始分数: {qid}")
+        for exercise_id, value in scores.items():
+            require(
+                type(value) in (int, float) and math.isfinite(value),
+                f"候选分数非法: {qid}:{exercise_id}",
+            )
+        threshold = projection["threshold"]
+        require(
+            threshold is None or (type(threshold) in (int, float) and math.isfinite(threshold)),
+            f"门槛非法: {qid}",
+        )
+        require(threshold == expected_threshold, f"门槛与批准参数不一致: {qid}")
+
+        candidates = []
+        for exercise_id in pool:
+            exercise = catalog.get(exercise_id)
+            require(
+                evaluated.conditions.matches(exercise),
+                f"候选违反查询条件: {qid}:{exercise_id}",
+            )
+            candidates.append(
+                RetrievalCandidate(
+                    id=exercise.id,
+                    score=scores[exercise_id],
+                    name=exercise.name,
+                    equipment=exercise.equipment,
+                    body_part=exercise.body_part,
+                    target=exercise.target,
+                    muscle_group=exercise.muscle_group,
+                )
+            )
+        expected = build_search_stage(candidates, evaluated, threshold=threshold)
+        require(
+            [item.id for item in expected.candidate_pool] == pool,
+            f"候选池与共享阶段不一致: {qid}",
+        )
+        require(
+            [item.id for item in expected.final_input] == final,
+            f"最终输入与候选池顺序或裁剪不一致: {qid}",
+        )
+        require(
+            expected.response.model_dump() == response,
+            f"公开响应与共享阶段不一致: {qid}",
+        )
+
+        inputs.append(
+            RetrievalInput(
+                query_id=qid,
+                scenario_id=query.get("scenario_id"),
+                expect_empty=query["expect_empty"],
+                labels=[
+                    RelevanceLabel(exercise_id=label["id"], grade=label["grade"])
+                    for label in query["labels"]
+                ],
+                candidate_pool=pool,
+                final_model_input=final,
+            )
+        )
+    return inputs
+
+
+def _result_scores(result: RetrievalResult) -> dict[str, float]:
+    if result.expect_empty:
+        return {"false_return": float(bool(result.false_return))}
+    return {metric.name: metric.value for metric in result.metrics}
+
+
+def summarize_staged(results: list[RetrievalResult], queries: list[dict]) -> dict:
+    metadata = {item["id"]: item for item in queries}
+    rows = {}
+    for result in results:
+        query = metadata[result.query_id]
+        rows[result.query_id] = {
+            "id": result.query_id,
+            "intent": query.get("intent"),
+            "purpose": query.get("purpose"),
+            "tags": list(query["tags"]),
+            "split": query["split"],
+            "family": query["family"],
+            "expected_ids": {
+                label["id"]: label["grade"] for label in query["labels"]
+            },
+            "expect_empty": result.expect_empty,
+            "candidate_pool": list(result.candidate_pool),
+            "final_model_input": list(result.final_model_input),
+            "metrics": [metric.model_dump() for metric in result.metrics],
+            "scores": _result_scores(result),
+            "false_return": result.false_return,
+        }
+
+    def summarize(selected: list[dict]) -> dict:
+        positives = [row for row in selected if not row["expect_empty"]]
+        empties = [row for row in selected if row["expect_empty"]]
+        return {
+            "queries": len(selected),
+            "with_labels": len(positives),
+            "empty_expectation_queries": len(empties),
+            **{
+                key: mean(row["scores"][key] for row in positives) if positives else None
+                for key in STAGED_METRICS
+            },
+            "false_return_rate": mean(row["scores"]["false_return"] for row in empties) if empties else None,
+        }
+
+    return {
+        "engine": {
+            "name": "mteb",
+            "version": version("mteb"),
+            "entry": "mteb._evaluators.retrieval_metrics.calculate_retrieval_scores",
+            "mrr_entry": "mteb._evaluators.retrieval_metrics.mrr",
+            "relevance": "grade>=1",
+            "ndcg_gain": "2^grade-1",
+            "precision_denominator": "5",
+            "stages": {
+                "recall@20": "candidate_pool",
+                "hit@5": "final_model_input",
+                "mrr@5": "final_model_input",
+                "ndcg@5": "final_model_input",
+                "precision@5": "final_model_input",
+            },
+            "averaging": "macro over labelled queries from per-query raw scores; expect_empty scored separately",
+            "identity": "staged_candidate_pool_20_final_input_5",
+        },
+        "overall": summarize(list(rows.values())),
+        "by_intent": {
+            intent: summarize([row for row in rows.values() if row["intent"] == intent])
+            for intent in sorted({item["intent"] for item in queries if item.get("intent") is not None})
+        },
+        "by_tag": {
+            tag: summarize([row for row in rows.values() if tag in row["tags"]])
+            for tag in sorted({tag for item in queries for tag in item.get("tags", [])})
+        },
+        "per_query": rows,
+    }
+
+
+def validate_projections(
+    queries: list[dict],
+    projections: dict,
+    catalog: Catalog,
+    evaluated_by_query: dict,
+    expected_threshold: float | None,
+) -> dict:
+    inputs = _retrieval_inputs(
+        queries, projections, catalog, evaluated_by_query, expected_threshold
+    )
+    return summarize_staged(evaluate_staged(inputs), queries)
+
+
+def validate_legacy_projections(queries: list[dict], projections: dict, catalog: Catalog) -> dict:
+    # 历史入口保留单阶段 @5 身份；缺少候选池时不得推算 Recall@20。
+    require(set(projections) == {item["id"] for item in queries}, "候选证据与查询 ID 不一致")
+    rankings = {}
     for qid, projection in projections.items():
-        ids = projection["returned"]
-        require(isinstance(ids, list) and len(ids) <= 10, f"返回候选非法: {qid}")
+        ids = projection.get("final_model_input", projection.get("returned"))
+        require(isinstance(ids, list) and len(ids) <= LEGACY_RETRIEVAL_LIMIT, f"返回候选非法: {qid}")
         require(all(eid in catalog.exercise_ids for eid in ids), f"返回目录外动作: {qid}")
         require(projection["budget_compliant"] is True, f"字符预算违规: {qid}")
         require(not projection["hard_constraint_violations"], f"硬约束违规: {qid}")
-    return score(queries, {qid: row["returned"] for qid, row in projections.items()})
+        rankings[qid] = ids
+    return score_legacy(queries, rankings)
 
 
-def _metric_keys() -> list[str]:
-    return [f"{name}@{k}" for k in DEFAULT_KS for name in METRICS]
+def _metric_keys(document: dict) -> list[str]:
+    return list(STAGED_METRICS if document.get("schema") == SCHEMA_STAGED else LEGACY_METRICS)
 
 
 def _report_lines(document: dict) -> list[str]:
@@ -79,7 +304,12 @@ def _report_lines(document: dict) -> list[str]:
     lines = [
         f"\n## {document['run_id']}\n",
         f"- 证据 Schema：`{document['schema']}`；类型：`{document['mode']}`；拆分：`{document['split']}`。",
-        f"- 评分引擎：MTEB `{version('mteb')}`；相关性 grade>=1；nDCG 增益 `2^grade-1`；Precision@k 固定分母 k。",
+        f"- 评分引擎：MTEB `{version('mteb')}`；相关性 grade>=1；nDCG 增益 `2^grade-1`；Precision@5 固定分母 5。",
+        (
+            "- 阶段：Recall@20 取候选池；Hit@5、MRR@5、nDCG@5、Precision@5 取最终模型输入。"
+            if document.get("schema") == SCHEMA_STAGED
+            else "- 历史单阶段：仅记录 @5 指标，不推算 Recall@20。"
+        ),
         f"- 运行身份：`{document['identity']['head']}`。",
         f"- 时间范围：`{document['started_at']}` 至 `{document.get('finished_at', '未完成')}`。",
     ]
@@ -95,10 +325,12 @@ def _report_lines(document: dict) -> list[str]:
             f"- 数据集 SHA-256：`{document.get('dataset_sha256', '')}`。",
             f"- 用途适配 SHA-256：`{document.get('adaptation_sha256', '')}`。",
         ])
+    if "parameters" in document:
+        lines.append(f"- 检索参数：`{json.dumps(document['parameters'], ensure_ascii=False, sort_keys=True)}`。")
     if document.get("status") != "complete":
         lines.append("- 发布门禁：未通过。")
-    keys = _metric_keys()
-    header = "| group | 有标注 / 无答案 | " + " | ".join(DISPLAY[name] + key[key.index("@"):] for key, name in ((key, key.split("@")[0]) for key in keys)) + " | 无答案误返回率 |"
+    keys = _metric_keys(document)
+    header = "| group | 有标注 / 无答案 | " + " | ".join(DISPLAY[key] for key in keys) + " | 无答案误返回率 |"
     lines.extend([header, "|" + "---|" * (len(keys) + 3)])
     for group, result in document["groups"].items():
         metrics = result.get("metrics")
@@ -145,25 +377,51 @@ def save_result(document: dict) -> Path:
     return artifact
 
 
-def base_document(mode: str, split: str) -> dict:
-    return {"schema": SCHEMA, "run_id": datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ") + "-" + uuid4().hex[:8],
+def base_document(mode: str, split: str, *, staged: bool = True) -> dict:
+    return {"schema": SCHEMA_STAGED if staged else SCHEMA_LEGACY,
+            "run_id": datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ") + "-" + uuid4().hex[:8],
             "mode": mode, "split": split, "status": "running", "started_at": now(), "identity": identity(), "groups": {}}
 
 
-def validate_group(dataset: EvaluationDataset, group: str, projections: dict, timings: dict, catalog: Catalog) -> dict:
-    unknown = dataset.unreviewed_candidates({qid: row["returned"] for qid, row in projections.items()})
+def validate_group(
+    dataset: EvaluationDataset,
+    group: str,
+    projections: dict,
+    timings: dict,
+    catalog: Catalog,
+    mappings: dict | None = None,
+    expected_threshold: float | None = None,
+) -> dict:
+    # 未审阅候选门禁覆盖整个参与 Recall@20 的候选池。
+    unknown = dataset.unreviewed_candidates(
+        {qid: row["candidate_pool"] for qid, row in projections.items()}
+    )
     if unknown:
         return {"status": "blocked_unreviewed_candidates", "unknown_candidates": unknown,
                 "metrics": None, "projections": projections, "timings": timings}
-    return {"status": "complete", "metrics": validate_projections(dataset.scoring_queries(), projections, catalog),
+    require(catalog is not None, "评测算分需要 Catalog")
+    require(mappings is not None, "评测算分需要字段映射")
+    evaluated_by_query = {
+        item["query_id"]: support.dataset_conditions(item, catalog, mappings)
+        for item in dataset.queries
+    }
+    return {"status": "complete", "metrics": validate_projections(
+                dataset.scoring_queries(), projections, catalog, evaluated_by_query, expected_threshold
+            ),
             "projections": projections, "timings": timings}
 
 
-def publishable(document: dict) -> bool:
+def _structural_publishable(document: dict) -> bool:
     groups = document.get("groups")
     if not isinstance(groups, dict) or not groups:
         return False
-    keys = _metric_keys()
+    query_ids = document.get("query_ids")
+    if not isinstance(query_ids, list) or not query_ids:
+        return False
+    if len(set(query_ids)) != len(query_ids):
+        return False
+    keys = _metric_keys(document)
+    staged = document.get("schema") == SCHEMA_STAGED
     for group in groups.values():
         if group.get("status") != "complete":
             return False
@@ -176,6 +434,57 @@ def publishable(document: dict) -> bool:
             return False
         if any(key not in overall for key in keys):
             return False
+        if set(per_query) != set(query_ids):
+            return False
+        projections = group.get("projections") if staged else None
+        if staged and (
+            not isinstance(projections, dict)
+            or set(projections) != set(query_ids)
+        ):
+            return False
+        for qid, row in per_query.items():
+            scores = row.get("scores")
+            if not isinstance(scores, dict):
+                return False
+            expected = {"false_return"} if row.get("expect_empty") else set(keys)
+            if set(scores) != expected:
+                return False
+            if not staged:
+                continue
+            projection = projections[qid]
+            if not isinstance(projection, dict):
+                return False
+            pool = projection.get("candidate_pool")
+            final = projection.get("final_model_input")
+            if row.get("candidate_pool") != pool:
+                return False
+            if row.get("final_model_input") != final:
+                return False
+            if not isinstance(pool, list) or len(pool) > CANDIDATE_POOL_LIMIT:
+                return False
+            if not isinstance(final, list) or len(final) > SEARCH_LIMIT:
+                return False
+            if projection.get("hard_constraint_violations") != []:
+                return False
+            if projection.get("budget_compliant") is not True:
+                return False
+            candidate_scores = projection.get("scores")
+            if (
+                not isinstance(candidate_scores, dict)
+                or not set(pool) <= set(candidate_scores)
+            ):
+                return False
+            evidence = projection.get("search_evidence")
+            if not isinstance(evidence, dict):
+                return False
+            visible = evidence.get("model_visible")
+            if not isinstance(visible, dict):
+                return False
+            items = visible.get("items")
+            if not isinstance(items, list) or len(items) > SEARCH_LIMIT:
+                return False
+            if [item.get("exercise_id") for item in items] != final:
+                return False
     return True
 
 
@@ -183,6 +492,55 @@ def settle_document(document: dict) -> str:
     document["finished_at"] = now()
     document["status"] = "complete" if publishable(document) else "blocked"
     return document["status"]
+
+
+def _validate_staged_evidence(document: dict) -> None:
+    # 发布判定复用算分阶段的同一校验：候选、公开响应、预算、硬约束与金标必须能重算已记录指标。
+    require(isinstance(document.get("dataset"), dict), "两阶段证据缺少数据身份")
+    require(isinstance(document.get("parameters"), dict), "两阶段证据缺少批准检索参数")
+    require(isinstance(document.get("index_identity"), dict), "两阶段证据缺少物理索引身份")
+    dataset = bind_dataset(document)
+    require(
+        document.get("query_ids") == [item["query_id"] for item in dataset.queries],
+        "查询列表与数据版本不一致",
+    )
+    catalog = Catalog.load()
+    mappings = rt.load_mappings()
+    evaluated_by_query = {
+        item["query_id"]: support.dataset_conditions(item, catalog, mappings)
+        for item in dataset.queries
+    }
+    queries = dataset.scoring_queries()
+    query_ids = {item["id"] for item in queries}
+    for group, result in document["groups"].items():
+        projections = result.get("projections")
+        require(isinstance(projections, dict), f"{group} 缺少候选证据")
+        require(set(projections) == query_ids, f"{group} 候选证据覆盖与数据版本不一致")
+        require(
+            all(isinstance(row, dict) for row in projections.values()),
+            f"{group} 候选证据结构非法",
+        )
+        threshold = document["parameters"].get("threshold") if group == "hybrid" else None
+        recomputed = validate_projections(
+            queries, projections, catalog, evaluated_by_query, threshold
+        )
+        require(recomputed == result["metrics"], f"{group} 评分与候选、金标或引擎身份不一致")
+        unknown = dataset.unreviewed_candidates(
+            {qid: row["candidate_pool"] for qid, row in projections.items()}
+        )
+        require(not unknown, f"{group} 存在未审阅候选")
+
+
+def publishable(document: dict) -> bool:
+    if not _structural_publishable(document):
+        return False
+    if document.get("schema") != SCHEMA_STAGED:
+        return True
+    try:
+        _validate_staged_evidence(document)
+    except (ValueError, DatasetError):
+        return False
+    return True
 
 
 def dataset_directory(document: dict) -> Path:
@@ -206,12 +564,14 @@ async def collect_dataset(args) -> None:
     corpus = RetrievalCorpus.load()
     require(dataset.corpus_sha256 == retrieval_corpus_identity(corpus), "评测语料快照与真实目录不一致")
     values = frozen_values()
-    params = {"alpha": values["alpha"] if args.alpha is None else args.alpha,
+    params = {"fusion": values["fusion"], "rrf_k": values["rrf_k"] if args.rrf_k is None else args.rrf_k,
               "bm25_depth": values["bm25_depth"] if args.depth is None else args.depth,
               "dense_depth": values["dense_depth"] if args.depth is None else args.depth,
-              "threshold": values["threshold"]}
+              "threshold": values["threshold"],
+              "candidate_pool_limit": values["candidate_pool_limit"],
+              "final_input_limit": values["final_input_limit"]}
     require(args.frozen is None, "新数据入口不接受冻结来源参数")
-    validate_parameters("评测", params["alpha"], support.RECALL_LIMIT, params["bm25_depth"], params["dense_depth"])
+    validate_parameters("评测", params["rrf_k"], support.RECALL_LIMIT, params["bm25_depth"], params["dense_depth"])
     require(params["threshold"] is None or math.isfinite(params["threshold"]), "门槛非法")
     embedding = EmbeddingClient.from_env()
     dataset_identity = dataset.identity()
@@ -233,11 +593,17 @@ async def collect_dataset(args) -> None:
                 evaluated = support.dataset_conditions(item, corpus.catalog, mappings)
                 started = now()
                 recalled = await search_vectors(db, collection, corpus.catalog, item["query"], vectors[qid] if group != "bm25" else [],
-                                                conditions=evaluated.conditions, alpha=params["alpha"], bm25_depth=params["bm25_depth"],
+                                                conditions=evaluated.conditions, rrf_k=params["rrf_k"], bm25_depth=params["bm25_depth"],
                                                 dense_depth=params["dense_depth"], limit=support.RECALL_LIMIT, mode=group)
-                projections[qid] = support.project_response(corpus.catalog, recalled, evaluated, params["threshold"] if group == "hybrid" else None)
+                projections[qid] = support.project_response(
+                    corpus.catalog, qid, recalled, evaluated,
+                    params["threshold"] if group == "hybrid" else None,
+                )
                 timings[qid] = {"start_time": started, "end_time": now()}
-            document["groups"][group] = validate_group(dataset, group, projections, timings, corpus.catalog)
+            document["groups"][group] = validate_group(
+                dataset, group, projections, timings, corpus.catalog, mappings,
+                params["threshold"] if group == "hybrid" else None,
+            )
     require(document["identity"] == identity(), "运行期间代码或数据改变，拒绝记录有效结果")
     settle_document(document)
     save_result(document)
@@ -252,23 +618,24 @@ async def collect_legacy(args) -> None:
     deferred = adaptation["deferred_query_ids"]
     selected = [item for item in load_queries(args.legacy_split) if item["id"] not in deferred]
     values = frozen_values()
-    params = {"alpha": values["alpha"] if args.alpha is None else args.alpha,
+    params = {"fusion": values["fusion"], "rrf_k": values["rrf_k"] if args.rrf_k is None else args.rrf_k,
               "bm25_depth": values["bm25_depth"] if args.depth is None else args.depth,
               "dense_depth": values["dense_depth"] if args.depth is None else args.depth,
               "threshold": values["threshold"]}
     if args.legacy_split == "holdout":
-        require(args.frozen is not None and args.alpha is None and args.depth is None, "留出运行需要 --frozen 开发集证据，且不得覆盖参数")
+        require(args.frozen is not None and args.rrf_k is None and args.depth is None, "留出运行需要 --frozen 开发集证据，且不得覆盖参数")
         frozen = support.load_document(args.frozen)
         require(frozen["mode"] == "live" and frozen["split"] == "dev", "冻结来源必须为真实开发集运行")
         require(frozen["dataset_sha256"] == sha256(support.QUERIES_PATH) and frozen["identity"] == identity(), "冻结来源与当前数据或代码不一致")
         params = frozen["parameters"]
     else:
-        require(args.frozen is None, "开发集通过 --alpha / --depth 指定参数")
-    validate_parameters("评测", params["alpha"], support.RECALL_LIMIT, params["bm25_depth"], params["dense_depth"])
+        require(args.frozen is None, "开发集通过 --rrf-k / --depth 指定参数")
+    require(params["fusion"] == "rrf", "冻结来源必须使用 RRF 融合")
+    validate_parameters("评测", params["rrf_k"], support.LEGACY_RECALL_LIMIT, params["bm25_depth"], params["dense_depth"])
     require(params["threshold"] is None or math.isfinite(params["threshold"]), "门槛非法")
     vector_identity = support.query_vector_identity(EmbeddingClient.from_env().config, corpus)
     vectors = support.read_query_cache(vector_identity, selected)[0] if any(group != "bm25" for group in args.groups) else {}
-    document = base_document("live", args.legacy_split)
+    document = base_document("live", args.legacy_split, staged=False)
     document.update(parameters=params, deferred_query_ids=deferred, query_ids=[item["id"] for item in selected],
                     vector_cache_identity=vector_identity, embedding_requests=0, timing_scope="cached_vector_search_and_response",
                     observation_scope="previously_observed_holdout_regression" if args.legacy_split == "holdout" else "development",
@@ -288,11 +655,14 @@ async def collect_legacy(args) -> None:
                 evaluated = support.effective_conditions(item, corpus.catalog, mappings, purposes[qid], adapted[qid]["temporary_mapping"])
                 started = now()
                 recalled = await search_vectors(db, collection, corpus.catalog, item["query"], vectors[qid] if group != "bm25" else [],
-                                                conditions=evaluated.conditions, alpha=params["alpha"], bm25_depth=params["bm25_depth"],
-                                                dense_depth=params["dense_depth"], limit=support.RECALL_LIMIT, mode=group)
-                projections[qid] = support.project_response(corpus.catalog, recalled, evaluated, params["threshold"] if group == "hybrid" else None)
+                                                conditions=evaluated.conditions, rrf_k=params["rrf_k"], bm25_depth=params["bm25_depth"],
+                                                dense_depth=params["dense_depth"], limit=support.LEGACY_RECALL_LIMIT, mode=group)
+                projections[qid] = support.project_legacy_response(
+                    corpus.catalog, recalled, evaluated,
+                    params["threshold"] if group == "hybrid" else None,
+                )
                 timings[qid] = {"start_time": started, "end_time": now()}
-            document["groups"][group] = {"status": "complete", "metrics": validate_projections(selected, projections, corpus.catalog),
+            document["groups"][group] = {"status": "complete", "metrics": validate_legacy_projections(selected, projections, corpus.catalog),
                                          "projections": projections, "timings": timings}
     require(document["identity"] == identity(), "运行期间代码或数据改变，拒绝记录有效结果")
     settle_document(document)
@@ -313,7 +683,7 @@ def rescore(args) -> None:
     history = support.load_document(args.source)
     validate_history(history)
     selected = [item for item in load_queries(history["split"]) if item["id"] not in history["deferred_query_ids"]]
-    document = base_document("historical_rescore", history["split"])
+    document = base_document("historical_rescore", history["split"], staged=False)
     document.update(source=str(args.source.resolve()), source_sha256=sha256(args.source),
                     dataset_sha256=sha256(support.QUERIES_PATH), adaptation_sha256=sha256(support.ADAPTATION_PATH),
                     source_identity=history["run_identity"], index_identity=history["index_identity"],
@@ -322,13 +692,23 @@ def rescore(args) -> None:
     for group, result in history["groups"].items():
         projections = result["per_query_projection"]
         started = now()
-        metrics = validate_projections(selected, projections, catalog)
+        metrics = validate_legacy_projections(selected, projections, catalog)
         finished = now()
         document["groups"][group] = {"status": "complete", "metrics": metrics, "projections": projections,
                                      "timings": {item["id"]: {"start_time": started, "end_time": finished} for item in selected}}
     document["finished_at"] = now()
     document["status"] = "complete"
     save_result(document)
+
+
+def _parameter_metadata(document: dict) -> dict:
+    if "parameters" not in document:
+        return {}
+    allowed = (
+        "fusion", "rrf_k", "alpha", "bm25_depth", "dense_depth", "threshold",
+        "candidate_pool_limit", "final_input_limit", "recall_limit",
+    )
+    return {"parameters": {key: value for key, value in document["parameters"].items() if key in allowed}}
 
 
 def _upload_dataset_payload(document: dict, group: str) -> dict:
@@ -340,26 +720,57 @@ def _upload_dataset_payload(document: dict, group: str) -> dict:
     require(result.get("status") == "complete", "检索组未通过发布门禁")
     require(set(queries) == set(result["metrics"]["per_query"]) == set(result["projections"]) == set(result["timings"]), "上传样例覆盖不完整")
     require(document["query_ids"] == [item["query_id"] for item in dataset.queries], "上传查询列表与数据版本不一致")
-    unknown = dataset.unreviewed_candidates({qid: row["returned"] for qid, row in result["projections"].items()})
+    unknown = dataset.unreviewed_candidates(
+        {qid: row["candidate_pool"] for qid, row in result["projections"].items()}
+    )
     require(not unknown, f"存在未审阅候选: {unknown}")
-    recomputed = validate_projections(dataset.scoring_queries(), result["projections"], Catalog.load())
+    catalog = Catalog.load()
+    mappings = rt.load_mappings()
+    evaluated_by_query = {
+        item["query_id"]: support.dataset_conditions(item, catalog, mappings)
+        for item in dataset.queries
+    }
+    require("parameters" in document, "缺少批准检索参数")
+    expected_threshold = document["parameters"].get("threshold") if group == "hybrid" else None
+    recomputed = validate_projections(
+        dataset.scoring_queries(), result["projections"], catalog, evaluated_by_query, expected_threshold
+    )
     require(recomputed == result["metrics"], "上传评分与实际候选、金标或引擎身份不一致")
-    aliases = set(recomputed["engine"]["aliases"])
+    expected_keys = set(STAGED_METRICS)
     dataset_name = f"fit-agent-retrieval-{dataset.version}-{dataset.content_sha256[:12]}"
     rows = []
     for qid, item in queries.items():
         row = result["metrics"]["per_query"][qid]
         projection = result["projections"][qid]
-        require(all(eid in projection["scores"] for eid in row["returned_ids"]), "上传候选缺少原始分数")
-        require(all(type(value) in (int, float) and math.isfinite(value) for value in projection["scores"].values()), "上传候选分数非法")
-        expected_keys = {"false_return"} if item["expect_empty"] else aliases
-        require(set(row["scores"]) == expected_keys, "上传排序指标必须为契约字段")
+        require(
+            all(eid in projection["scores"] for eid in row["candidate_pool"]),
+            "上传候选缺少原始分数",
+        )
+        require(
+            all(
+                type(value) in (int, float) and math.isfinite(value)
+                for value in projection["scores"].values()
+            ),
+            "上传候选分数非法",
+        )
+        keys = {"false_return"} if item["expect_empty"] else expected_keys
+        require(set(row["scores"]) == keys, "上传排序指标必须为契约字段")
+        evidence = SearchResponseEvidence.model_validate(projection["search_evidence"])
+        evidence.require_scored_consistency(row["final_model_input"])
         rows.append({
             "row_id": str(uuid5(NAMESPACE_URL, dataset_name + ":" + qid)),
             "inputs": {key: item[key] for key in ("query", "conditions", "purpose", "tags", "family")},
             "expected_outputs": {"qrels": [{"corpus_id": qrel["corpus_id"], "grade": qrel["grade"]} for qrel in qrels.get(qid, ())],
                                  "expect_empty": item["expect_empty"]},
-            "actual_outputs": {"returned_ids": row["returned_ids"], "candidate_scores": projection["scores"]},
+            "actual_outputs": {
+                "candidate_pool": row["candidate_pool"],
+                "final_model_input": row["final_model_input"],
+                "candidate_scores": {
+                    eid: projection["scores"][eid] for eid in row["candidate_pool"]
+                },
+                "search_response": projection["response"],
+                "search_evidence": projection["search_evidence"],
+            },
             "evaluation_scores": [{"key": key, "score": round(value, 4)} for key, value in row["scores"].items()]
                                  + [{"key": "hard_constraint_violation", "score": 0}, {"key": "budget_compliant", "score": 1}],
             **result["timings"][qid], "run_name": group,
@@ -374,11 +785,12 @@ def _upload_dataset_payload(document: dict, group: str) -> dict:
         "experiment_metadata": {"mode": document["mode"], "dataset": document["dataset"], "identity": document["identity"],
                                 "index_identity": document["index_identity"], "timing_scope": document["timing_scope"],
                                 "observation_scope": document["observation_scope"], "group": group,
-                                "scoring": result["metrics"]["engine"]},
+                                "scoring": result["metrics"]["engine"]}
+                               | _parameter_metadata(document),
         "summary_experiment_scores": [
             {"key": key, "score": round(value, 4)}
             for key, value in overall.items()
-            if value is not None and (key in aliases or key == "false_return_rate")
+            if value is not None and (key in expected_keys or key == "false_return_rate")
         ],
         "results": rows,
     }
@@ -392,7 +804,7 @@ def _upload_legacy_payload(document: dict, group: str) -> dict:
     queries = {item["id"]: item for item in query_documents_for_upload(document)}
     result = document["groups"][group]
     require(set(queries) == set(result["metrics"]["per_query"]) == set(result["projections"]) == set(result["timings"]), "上传样例覆盖不完整")
-    require(validate_projections(list(queries.values()), result["projections"], Catalog.load()) == result["metrics"], "上传评分与实际候选或金标不一致")
+    require(validate_legacy_projections(list(queries.values()), result["projections"], Catalog.load()) == result["metrics"], "上传评分与实际候选或金标不一致")
     dataset_name = f"fit-agent-retrieval-{document['split']}-{document['dataset_sha256'][:12]}-{document['adaptation_sha256'][:12]}"
     rows = []
     for qid, item in queries.items():
@@ -416,15 +828,22 @@ def _upload_legacy_payload(document: dict, group: str) -> dict:
         "experiment_start_time": min(row["start_time"] for row in rows),
         "experiment_end_time": max(row["end_time"] for row in rows),
         "experiment_metadata": {key: document[key] for key in ("mode", "split", "dataset_sha256", "adaptation_sha256", "identity", "index_identity", "timing_scope", "observation_scope")}
-                               | {"group": group, "scoring": result["metrics"]["engine"]},
+                               | {"group": group, "scoring": result["metrics"]["engine"]}
+                               | _parameter_metadata(document),
         "summary_experiment_scores": [{"key": key, "score": round(value, 4)} for key, value in result["metrics"]["overall"].items() if value is not None],
         "results": rows,
     }
 
 
 def upload_payload(document: dict, group: str) -> dict:
-    require(document.get("schema") == SCHEMA, "评测证据格式非法")
-    return _upload_dataset_payload(document, group) if "dataset" in document else _upload_legacy_payload(document, group)
+    schema = document.get("schema")
+    if schema == SCHEMA_STAGED:
+        require("dataset" in document, "两阶段证据必须绑定评测数据版本")
+        return _upload_dataset_payload(document, group)
+    if schema == SCHEMA_LEGACY:
+        require("dataset" not in document, "历史格式不接受两阶段数据证据")
+        return _upload_legacy_payload(document, group)
+    raise ValueError("评测证据格式非法")
 
 
 def query_documents_for_upload(document: dict) -> list[dict]:
@@ -436,7 +855,7 @@ def query_documents_for_upload(document: dict) -> list[dict]:
 def upload(args) -> None:
     require(bool(os.environ.get("LANGSMITH_API_KEY")), "请在 backend/.env 配置 LANGSMITH_API_KEY")
     document = support.load_document(args.source)
-    require(document.get("schema") == SCHEMA, "评测证据格式非法")
+    require(document.get("schema") in (SCHEMA_STAGED, SCHEMA_LEGACY), "评测证据格式非法")
     require(document.get("status") == "complete", "证据未通过发布门禁")
     if "dataset" not in document:
         support.require_inputs(Catalog.load())
@@ -468,7 +887,7 @@ def main() -> None:
     source.add_argument("--dataset", type=Path, help="新评测数据版本目录（正式门禁）")
     source.add_argument("--legacy-split", choices=("dev", "holdout"), help="历史查询集拆分，仅用于历史身份运行")
     live.add_argument("--groups", choices=("bm25", "dense", "hybrid"), nargs="+", default=["bm25", "dense", "hybrid"])
-    live.add_argument("--alpha", type=float)
+    live.add_argument("--rrf-k", type=int, help="RRF 平滑参数，默认读取正式运行配置")
     live.add_argument("--depth", type=int)
     live.add_argument("--frozen", type=Path)
     replay = commands.add_parser("rescore", help="对历史 compare.json 的实际候选按 MTEB 重新评分")

@@ -142,6 +142,8 @@ class RunState:
         self.closed_without_terminal = False
         self.secrets: tuple[str, ...] = ()
         self.origin = "send"
+        # 显式装配的调用观测工厂：默认 None 时沿用生产 CacheObserver。
+        self.observation_factory: Callable[[], object] | None = None
         # 故障收尾保留真实在途句柄，超时不得作为回滚证据。
         self.fault_reason: str | None = None
         self.inflight_work = None

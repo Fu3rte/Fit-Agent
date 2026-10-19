@@ -3,7 +3,10 @@ import shutil
 from pathlib import Path
 
 from app.application.business import retrieval_text as rt
+from app.application.business.retrieval_frozen import frozen_values
 from app.application.business.retrieval_index import RetrievalCorpus, sha256
+from app.application.business.retrieval_search import RetrievalCandidate
+from evaluation import retrieval_support as support
 from evaluation.dataset import (
     DATA_FILES,
     EMPTY_QUOTAS,
@@ -311,41 +314,69 @@ def build_dataset(root: Path, *, approve: bool = True) -> Path:
     return version_dir
 
 
+def _recalled(catalog, rows: list[tuple[str, float]]) -> list[RetrievalCandidate]:
+    candidates = []
+    for corpus_id, score in rows:
+        exercise = catalog.get(corpus_id)
+        candidates.append(
+            RetrievalCandidate(
+                id=exercise.id,
+                score=score,
+                name=exercise.name,
+                equipment=exercise.equipment,
+                body_part=exercise.body_part,
+                target=exercise.target,
+                muscle_group=exercise.muscle_group,
+            )
+        )
+    return candidates
+
+
 def make_document(version_dir: Path, group: str = "hybrid", *, unknown: bool = False) -> tuple[dict, object]:
     dataset = load_for_evaluation(version_dir)
     corpus = RetrievalCorpus.load()
+    mappings = rt.load_mappings()
     qrels = dataset.qrels_by_query()
-    projections, timings = {}, {}
+    threshold = 0.5 if unknown else 0.0
+    projections, timings, evaluated_by_query = {}, {}, {}
     for item in dataset.queries:
         query_id = item["query_id"]
-        if item["expect_empty"]:
-            returned = []
-        else:
-            returned = [qrel["corpus_id"] for qrel in qrels[query_id] if qrel["grade"] >= 1][:1]
-        if unknown and not item["expect_empty"]:
-            reviewed = {qrel["corpus_id"] for qrel in qrels[query_id]}
-            returned = [corpus_id for corpus_id in corpus.catalog.exercise_ids if corpus_id not in reviewed][:1] + returned
-        projections[query_id] = {
-            "returned": returned,
-            "scores": {corpus_id: 1.0 for corpus_id in returned},
-            "hard_constraint_violations": [],
-            "budget_compliant": True,
-        }
+        evaluated_by_query[query_id] = evaluated = support.dataset_conditions(
+            item, corpus.catalog, mappings
+        )
+        rows = []
+        if not item["expect_empty"]:
+            rows.append((next(qrel["corpus_id"] for qrel in qrels[query_id] if qrel["grade"] >= 1), 1.0))
+            if unknown:
+                reviewed = {qrel["corpus_id"] for qrel in qrels[query_id]}
+                extra = next(
+                    corpus_id for corpus_id in corpus.catalog.exercise_ids if corpus_id not in reviewed
+                )
+                # 未审阅候选仅出现在候选池，用于验证 Recall@20 阶段门禁。
+                rows.append((extra, 0.0))
+        projections[query_id] = support.project_response(
+            corpus.catalog, query_id, _recalled(corpus.catalog, rows), evaluated, threshold
+        )
         timings[query_id] = {"start_time": "2026-10-18T09:00:00+00:00", "end_time": "2026-10-18T09:00:01+00:00"}
     document = base_document("live", dataset.version)
     document.update(
         dataset=dataset.identity(),
+        parameters=frozen_values(),
         query_ids=[item["query_id"] for item in dataset.queries],
         index_identity={},
         timing_scope="unit_test",
         observation_scope="unit_test",
     )
     if unknown:
-        document["groups"][group] = validate_group(dataset, group, projections, timings, corpus.catalog)
+        document["groups"][group] = validate_group(
+            dataset, group, projections, timings, corpus.catalog, mappings, threshold
+        )
     else:
         document["groups"][group] = {
             "status": "complete",
-            "metrics": validate_projections(dataset.scoring_queries(), projections, corpus.catalog),
+            "metrics": validate_projections(
+                dataset.scoring_queries(), projections, corpus.catalog, evaluated_by_query, threshold
+            ),
             "projections": projections,
             "timings": timings,
         }

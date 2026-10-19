@@ -345,6 +345,87 @@ def test_rejects_dangling_event_reference(tmp_path):
         load_for_review(version_dir)
 
 
+def test_message_state_transition_requires_unique_later_cancel_target(tmp_path):
+    version_dir = approved_dataset(tmp_path)
+    scenarios = rows(version_dir, "scenarios")
+    scenario = scenarios[0]
+    scenario["events"] = [
+        scenario["events"][0],
+        {
+            "event_id": "e02",
+            "type": "message",
+            "source_event_id": None,
+            "content": "取消刚才的提案",
+            "attachments": [],
+            "target": None,
+        },
+        {
+            "event_id": "e03",
+            "type": "cancel",
+            "source_event_id": "e01",
+            "content": None,
+            "attachments": [],
+            "target": {
+                "business_kind": "profile",
+                "proposal_ref": "profile-proposal-e01",
+                "display_ref": None,
+                "confirmation_ref": None,
+            },
+        },
+    ]
+    scenario["assertions"] = [
+        {
+            "checkpoint_id": "cp1",
+            "event_id": "e01",
+            "kind": "no_saved_state",
+            "business_kind": "profile",
+        },
+        {
+            "checkpoint_id": "cp2",
+            "event_id": "e02",
+            "kind": "state_transition",
+            "business_kind": "profile",
+            "from_status": "pending",
+            "to_status": "invalidated",
+        },
+        {
+            "checkpoint_id": "cp3",
+            "event_id": "e03",
+            "kind": "state_transition",
+            "business_kind": "profile",
+            "from_status": "invalidated",
+            "to_status": "invalidated",
+        },
+    ]
+    scenario["metric_applicability"] = [
+        {"checkpoint_id": "cp1", "event_id": "e01", "metric": "faithfulness",
+         "applicable": True, "reason": None},
+        {"checkpoint_id": "cp1", "event_id": "e01", "metric": "factual_correctness",
+         "applicable": True, "reason": None},
+        {"checkpoint_id": "cp1", "event_id": "e01", "metric": "deterministic_rules",
+         "applicable": True, "reason": None},
+        *business_metrics("cp2", "e02"),
+        *business_metrics("cp3", "e03"),
+    ]
+    write_rows(version_dir, "scenarios", scenarios)
+    review = load_for_review(version_dir)
+    assert len(review.scenarios[0]["assertions"]) == 3
+    assert review.review["ready"] is False
+
+    scenarios = rows(version_dir, "scenarios")
+    scenario = scenarios[0]
+    scenario["events"] = [event for event in scenario["events"] if event["event_id"] != "e03"]
+    scenario["assertions"] = [
+        assertion for assertion in scenario["assertions"] if assertion["event_id"] != "e03"
+    ]
+    scenario["metric_applicability"] = [
+        row for row in scenario["metric_applicability"] if row["event_id"] != "e03"
+    ]
+    write_rows(version_dir, "scenarios", scenarios)
+    with pytest.raises(DatasetError, match="后续取消事件目标"):
+        load_for_review(version_dir)
+
+
 def test_saved_state_assertion_is_accepted(tmp_path):
     version_dir = approved_dataset(tmp_path)
     scenarios = rows(version_dir, "scenarios")

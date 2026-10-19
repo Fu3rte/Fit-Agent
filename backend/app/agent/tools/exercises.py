@@ -18,8 +18,9 @@ SEARCH_EXERCISES_DESCRIPTION = (
     "name 为语义查询；equipment、body_part、target、muscle_group 为目录 canonical 精确筛选。"
     "task_environment、available_equipment、unavailable_equipment、excluded_ids 为本次任务条件，"
     "不写入长期画像；available_equipment 表示本次明确可用声明（并入环境默认集合），"
-    "\"只用某种器械\"应通过 equipment 精确筛选表达。返回 items、has_more、remaining_ids："
-    "items 每项含 id、name、equipment、target 与可核实的 matches 说明；"
+    "\"只用某种器械\"应通过 equipment 精确筛选表达。返回 items 与 has_more："
+    "items 最多 5 条，每项含 id、name、equipment、target 与可核实的 matches 说明；"
+    "has_more 仅表示同一候选池中还有通过门槛但被数量或预算裁剪的候选，不提供其身份；"
     "如需完整步骤与重量口径，按返回的 id 调用 get_exercise_details。"
 )
 
@@ -114,7 +115,9 @@ def bind_exercise_tools(
         # 搜索资源属于主事件循环：经 MainLoopCall 投递回主循环执行，不另起 SDK 循环。
         # 工具取消信号随调用桥接到主循环检索任务，阶段间检查并在真实 RPC 收尾后停止后续编码。
         try:
-            result = call(service.search_exercises(params, signal=signal))
+            result = call(
+                service.search_exercises(params, signal=signal, tool_call_id=tool_call_id)
+            )
         except BusinessError as error:
             return _retrieval_envelope(error.detail(), True, budget=SEARCH_BUDGET)
         return _retrieval_envelope(result.model_dump(), budget=SEARCH_BUDGET)

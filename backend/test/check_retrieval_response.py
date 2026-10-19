@@ -9,6 +9,7 @@ from app.application.business.retrieval_response import (
     SEARCH_BUDGET,
     build_details_result,
     build_search_result,
+    build_search_stage,
 )
 from app.application.business.retrieval_search import (
     RetrievalCandidate,
@@ -57,28 +58,34 @@ def search_cases() -> dict:
     catalog = Catalog.load()
     evidence: dict = {}
     recalled = candidate_rows(catalog, 12)
-    limit_budget = build_search_result(recalled, evaluated())
-    assert len(limit_budget.items) <= 10
+    stage = build_search_stage(recalled, evaluated(), threshold=0.0)
+    limit_budget = stage.response
+    assert len(stage.candidate_pool) == 12
+    assert len(limit_budget.items) <= 5
     assert limit_budget.has_more is True
-    assert limit_budget.remaining_ids == [item.id for item in recalled[10:]]
+    assert not hasattr(limit_budget, "remaining_ids")
     assert all(set(item.model_dump()) == SEARCH_ITEM_FIELDS for item in limit_budget.items)
     payload = encoded(limit_budget.model_dump())
     assert len(payload) <= SEARCH_BUDGET, len(payload)
-    assert json.loads(payload)["items"]
+    assert set(json.loads(payload)) == {"items", "has_more"}
     # matches 只含可核实目录字段与有效条件。
     assert limit_budget.items[0].matches[0].startswith("body_part=")
     assert "环境=居家" in limit_budget.items[0].matches
+    hidden = [item for item in recalled[5:]]
+    for item in hidden:
+        assert f'"id": "{item.id}"' not in payload
+        assert f'"name": "{item.name}"' not in payload
     evidence["limit"] = {"items": len(limit_budget.items), "chars": len(payload)}
 
     trimmed = build_search_result(recalled, evaluated(), budget=600)
     assert trimmed.has_more is True
-    assert len(trimmed.items) < 10
-    assert trimmed.remaining_ids and trimmed.remaining_ids[0] == recalled[len(trimmed.items)].id
+    assert len(trimmed.items) < 5
     assert len(encoded(trimmed.model_dump())) <= 600
-    evidence["trimmed"] = {"items": len(trimmed.items), "remaining": len(trimmed.remaining_ids)}
+    evidence["trimmed"] = {"items": len(trimmed.items)}
 
-    empty = build_search_result([], evaluated())
-    assert empty.items == [] and empty.has_more is False and empty.remaining_ids == []
+    empty_stage = build_search_stage([], evaluated(), threshold=0.0)
+    empty = empty_stage.response
+    assert empty.items == [] and empty.has_more is False
     return evidence
 
 
@@ -163,7 +170,7 @@ def check() -> None:
     (EVIDENCE / "response.json").write_text(
         json.dumps(evidence, ensure_ascii=False, indent=2, default=str), encoding="utf-8"
     )
-    print("PASS: 简要候选上限与预算、has_more/remaining_ids 含义、详情九字段与预算、参数层拒绝")
+    print("PASS: 候选池与最终输入上限、预算、has_more 含义、隐藏身份、详情九字段与预算、参数层拒绝")
 
 
 if __name__ == "__main__":

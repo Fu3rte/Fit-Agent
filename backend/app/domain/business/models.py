@@ -744,7 +744,6 @@ class ExerciseMatch(BusinessModel):
 class ExerciseSearchResult(BusinessModel):
     items: list[ExerciseMatch]
     has_more: bool
-    remaining_ids: list[str]
 
 
 class ExerciseDetailResult(BusinessModel):

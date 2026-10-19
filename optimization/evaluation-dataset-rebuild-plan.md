@@ -127,7 +127,7 @@ manifest 记录 corpus、queries、qrels、scenarios、附件及 Schema 的原�
 
 qrels 只把 grade≥1 计入二元相关集合。未审阅动作保留未知身份。正式结果中出现未审阅候选时，保留实际证据并阻止正式汇总发布；补标、用户批准新版本后，对同一数据版本重算全部对照组。
 
-检索默认计算 Hit@5、Recall@5、Precision@5、MRR@5、nDCG@5。Precision@5 固定分母 5；nDCG 使用 `2^grade−1` 增益。有金标空返回五项记 0；无答案只统计误返回率。评分按最终过滤、门槛及裁剪后的实际顺序执行。
+检索候选阶段计算 Recall@20，消费门槛与预算裁剪前的前 20 条；最终输入阶段计算 Hit@5、MRR@5、nDCG@5、Precision@5，消费实际公开的最多 5 条及顺序。Precision@5 固定分母 5；nDCG 使用 `2^grade−1` 增益。有金标最终输入为空时四项 @5 记 0，Recall@20 保持候选阶段真实值；无答案只按最终输入统计误返回率。
 
 宽泛查询审阅完整相关集合。无答案需要目录范围复核。相关集合与分级不能由实际排名自动生成。
 
@@ -173,7 +173,8 @@ LangSmith 管理样例与实验；MTEB 计算真实排名指标；Ragas 使用�
 - 空值语义：记录不存在与记录存在但内容为空分别判定，前者不算空内容，后者不算缺失。
 - `parameter_preserved`：只表达单个具体参数的保留，`field_path` 为该参数在业务投影中的路径，`expected` 为原值；需要证明整体未变时，按比较范围使用 `state_unchanged` 或 `saved_data_unchanged`。
 - 其余断言：`equipment_restriction`（允许与禁止的器械）、`forbidden_exercise`（禁止出现的动作 ID）、`snapshot_integrity`（快照仍为准备时的内容）、`save_authorization`（是否保存成功）、`state_transition`（业务状态迁移）、`evidence_present`（实际证据条目数）、`no_saved_state`（截至该检查点不存在对应业务类别的已保存记录；已有保存记录时不得用于表达保存前零提交）、`saved_state`（截至该检查点存在已保存记录）。
-- 保存时点规则固定：`save_authorization` 绑定消息事件检查点时 `expected_saved` 只能为 false，用于验证保存前零提交；声明保存成功时必须绑定 `confirm` 事件检查点，且断言的 `proposal_ref` 与该确认事件的目标一致。`state_transition` 的 `saved` 只能出现在确认事件检查点，`invalidated` 只能出现在取消事件检查点。需要表达“截至某时点已经保存”的回归检查使用 `saved_state`。
+- 保存时点规则固定：`save_authorization` 绑定消息事件检查点时 `expected_saved` 只能为 false，用于验证保存前零提交；声明保存成功时必须绑定 `confirm` 事件检查点，且断言的 `proposal_ref` 与该确认事件的目标一致。`state_transition` 的 `saved` 只能出现在确认事件检查点，`invalidated` 可出现在消息或取消事件检查点。需要表达“截至某时点已经保存”的回归检查使用 `saved_state`。
+- 失效迁移规则：消息检查点使用本消息真实的前后投影验证 `pending→invalidated`，目标来自场景中明确的后续取消事件目标并由真实提案绑定解析；后置取消检查点使用该事件自身真实的前后投影验证 `invalidated→invalidated`。两者都要求唯一的成功取消工具证据，且证据必须匹配当前会话、助手运行、请求节点、来源助手节点、结果节点、`tool_call_id` 与目标提案。缺少证据、目标不匹配、证据重复或事件身份缺失时失败或阻断。
 - 提案引用固定为 `<business_kind>-proposal-<触发提案的事件>`：确认与取消事件的 `source_event_id` 必须指向真正触发提案的用户消息事件，展示与确认入口引用由同一事件派生，取消事件不携带展示与确认入口。消息事件不得承载参考回答正文。
 - 纯授权、取消与状态类检查点没有模型生成的事实内容，其 `faithfulness` 与 `factual_correctness` 记为不适用并写明原因，`deterministic_rules` 适用并至少绑定一条断言。
 - 加载器按封闭分支校验断言类型与业务字段；新增断言类型时必须同步 Schema、加载器与运行器，不得以未校验字段绕过。
@@ -182,8 +183,8 @@ LangSmith 管理样例与实验；MTEB 计算真实排名指标；Ragas 使用�
 
 数据版本 `backend/dataset/evaluation/rebuild-v1/` 已生成完整静态数据：corpus 1321 条、queries 150 条（lookup 60、generation 45、replacement 45，其中无答案各 10 条）、qrels 1079 条、scenarios 80 个（10 类各 8 个）、附件 8 个。manifest 绑定真实目录、补充数据、字段映射、Schema、数据文件与附件哈希。目录已按用户批准删除三对逐字节重复动作（保留 0454、0576、0655），补充语料与字段映射升至 `2026-10-18.1`，审批记录重绑文件哈希与条目计数。
 
-用户已明确批准冻结当前版本。全部 query、qrel、scenario 的 `review` 及 `manifest.release` 为 `approved`。worker 实际执行正式加载与冻结一致性校验，退出码 0，`load_for_evaluation` 通过，`ready=true`、`issues=[]`。冻结内容、哈希和授权依据见 [冻结记录](evaluation-rebuild-v1-freeze.md)。场景断言的比较范围已修订：纯查询、明确澄清与重复确认保留 `state_unchanged`；生成或修改待确认提案的消息检查点改用 `saved_data_unchanged`；快照生成与完整展示继续由 `snapshot_integrity` 与 `save_authorization` 检查。加载器封闭分支已同步新类型，并拒绝与检查点已保存记录矛盾的 `no_saved_state`。本次冻结校验未执行真实检索、Agent 端到端、Ragas 裁判或 LangSmith 上传，也未核验这些运行入口的接入状态；`saved_data_unchanged` 的真实运行比较不属于本次验收。
+用户已明确批准冻结当前版本。全部 query、qrel、scenario 的 `review` 及 `manifest.release` 为 `approved`。worker 实际执行正式加载与冻结一致性校验，退出码 0，`load_for_evaluation` 通过，`ready=true`、`issues=[]`。取消检查点的修订范围、检查点映射与授权依据见 [取消评测契约修订记录](evaluation-rebuild-v1-cancellation-amendment.md)。场景断言的比较范围已修订：纯查询、明确澄清与重复确认保留 `state_unchanged`；生成或修改待确认提案的消息检查点改用 `saved_data_unchanged`；快照生成与完整展示继续由 `snapshot_integrity` 与 `save_authorization` 检查。加载器封闭分支已同步新类型，并按场景中明确的后续取消事件目标校验消息检查点的失效迁移，拒绝与检查点已保存记录矛盾的 `no_saved_state`。本次冻结校验未执行真实检索、Agent 端到端、Ragas 裁判或 LangSmith 上传，也未核验这些运行入口的接入状态；`saved_data_unchanged` 的真实运行比较不属于本次验收。
 
-场景事件已完成角色核查：80 个场景的消息事件只保留实际待发送的用户输入，写好的助理回答、快照正文与工具结论移入 `reference`，要求移入 `rubric` 与 `assertions`。保存类断言在消息检查点验证零提交，保存成功绑定真实 `confirm` 事件检查点，取消、重复确认、重启与跨会话按实际采样时刻绑定断言。重复确认场景对两次点击分别设检查点：首次确认断言保存成功与状态迁移，重复确认断言业务投影未变且仍处于已保存状态。corpus 1321、queries 150、qrels 1079、scenarios 80 与附件 8 保持不变。
+场景事件已完成角色核查：80 个场景的消息事件只保留实际待发送的用户输入，写好的助理回答、快照正文与工具结论移入 `reference`，要求移入 `rubric` 与 `assertions`。保存类断言在消息检查点验证零提交，保存成功绑定真实 `confirm` 事件检查点。取消场景在真实发送取消指令的消息检查点验证 `pending→invalidated`，并在后续取消事件检查点验证 `invalidated→invalidated` 与同一份成功取消证据；重复取消、重启与跨会话按实际采样时刻绑定断言。重复确认场景对两次点击分别设检查点：首次确认断言保存成功与状态迁移，重复确认断言业务投影未变且仍处于已保存状态。执行计划为 80 场景、134 事件、127 检查点、254 个生成指标条目；corpus 1321、queries 150、qrels 1079、scenarios 80 与附件 8 保持不变。
 
-数据冻结时间为 `2026-10-18T12:03:51+00:00`，内容摘要为 `634fd90d4a9326efb92129afb416daf061e5cad1466b0c7e049447886e96cef1`。批准基于用户明确授权，正文、条件、金标、参考答案与断言未因冻结而变化。评测结果反映该固定集合上的表现，反复调优存在过拟合风险。历史指标原值和原件保持完整。
+数据冻结时间为 `2026-10-19T12:03:15+00:00`。manifest 文件摘要为 `f63a9efa2beca168647758c7ef8d14bf6f3bc4e4dd18665fd07213e3828c920b`，场景文件摘要为 `6ed828f8685b2ef87c33849ae5793f39c6cd0ee264f4547fcdb848555f7fc379`，release 内容摘要为 `0b67ac8477536f5f3e6e8360adc2302808ee360e2ba39f71c9e015a34478c32b`。批准基于用户明确授权；本次修订只改变三个取消场景的检查点与相关状态断言，其余业务正文、条件、金标与参考答案保持不变。评测结果反映该固定集合上的表现，反复调优存在过拟合风险。历史指标原值和原件保持完整。

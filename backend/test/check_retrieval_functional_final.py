@@ -295,7 +295,7 @@ def selfcheck_mode(run: Path) -> tuple[list[dict], dict]:
     values = frozen_values()
     checks.append(check(
         "runtime_frozen_parameters_wired",
-        values == {"alpha": 0.5, "bm25_depth": 100, "dense_depth": 100,
+        values == {"fusion": "rrf", "rrf_k": 60, "bm25_depth": 100, "dense_depth": 100,
                    "threshold": 0.0, "recall_limit": 11},
         values,
     ))
@@ -496,10 +496,10 @@ def search_mode(run: Path) -> tuple[list[dict], dict]:
                 checks.append(check(f"search_ok_{query['id']}", not message.is_error, entry))
                 checks.append(check(f"search_shape_{query['id']}",
                                     isinstance(payload, dict)
-                                    and set(payload) == {"items", "has_more", "remaining_ids"},
+                                    and set(payload) == {"items", "has_more"},
                                     {"keys": sorted(payload) if isinstance(payload, dict) else None}))
                 checks.append(check(f"search_budget_{query['id']}",
-                                    len(returned) <= 10 and len(text) <= 4000,
+                                    len(returned) <= 5 and len(text) <= 4000,
                                     {"items": len(returned), "chars": len(text)}))
                 checks.append(check(f"search_expected_hit_{query['id']}",
                                     bool(set(expected) & set(returned)),

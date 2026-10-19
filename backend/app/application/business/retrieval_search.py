@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from threading import Event
 from typing import Literal
 
-from pymilvus import AnnSearchRequest, WeightedRanker
+from pymilvus import AnnSearchRequest, RRFRanker
 
 from app.ai.types import check_cancelled
 from app.application.business import retrieval_text as rt
@@ -69,9 +69,17 @@ class RetrievalCandidate:
     muscle_group: str
 
 
-def validate_parameters(query: str, alpha: float, limit: int, bm25_depth: int, dense_depth: int) -> str:
+@dataclass(frozen=True)
+class SearchExecution:
+    # 每次调用独立携带实际命中的物理集合与清单：别名切换或并发调用不得共用其它调用的身份。
+    candidates: list[RetrievalCandidate]
+    collection: str
+    manifest_json: str
+
+
+def validate_parameters(query: str, rrf_k: int, limit: int, bm25_depth: int, dense_depth: int) -> str:
     require(isinstance(query, str) and bool(rt.normalize(query)), "查询文本不得为空")
-    require(not isinstance(alpha, bool) and isinstance(alpha, (int, float)) and 0 <= alpha <= 1 and math.isfinite(alpha), "alpha 必须为有限的 [0,1] 数值")
+    require(type(rrf_k) is int and 0 < rrf_k < 16384, "rrf_k 必须为 1..16383 的整数")
     for name, value in (("limit", limit), ("bm25_depth", bm25_depth), ("dense_depth", dense_depth)):
         require(not isinstance(value, bool) and isinstance(value, int) and 0 < value <= 16384, f"{name} 必须为 1..16384 的整数")
     return rt.normalize(query)
@@ -113,13 +121,13 @@ async def search_vectors(
     vector: list[float],
     *,
     conditions: SearchConditions = SearchConditions(),
-    alpha: float = 0.5,
+    rrf_k: int = 60,
     bm25_depth: int = 50,
     dense_depth: int = 50,
     limit: int = 10,
     mode: Literal["bm25", "dense", "hybrid"] = "hybrid",
 ) -> list[RetrievalCandidate]:
-    query = validate_parameters(query, alpha, limit, bm25_depth, dense_depth)
+    query = validate_parameters(query, rrf_k, limit, bm25_depth, dense_depth)
     expression = conditions.expression(catalog)
     require(mode in ("bm25", "dense", "hybrid"), "非法检索路径")
     output = list(rt.MAPPING_FIELDS)
@@ -128,7 +136,7 @@ async def search_vectors(
             AnnSearchRequest(data=[query], anns_field="sparse", param={"metric_type": "BM25", "params": {}}, limit=bm25_depth, expr=expression),
             AnnSearchRequest(data=[vector], anns_field="dense", param={"metric_type": "COSINE", "params": {}}, limit=dense_depth, expr=expression),
         ]
-        result = await db.call("hybrid_search", collection, reqs=requests, ranker=WeightedRanker(alpha, 1 - alpha, norm_score=True), limit=limit, output_fields=output, consistency_level="Strong")
+        result = await db.call("hybrid_search", collection, reqs=requests, ranker=RRFRanker(k=rrf_k), limit=limit, output_fields=output, consistency_level="Strong")
     else:
         result = await db.call("search", collection, data=[query] if mode == "bm25" else [vector], anns_field="sparse" if mode == "bm25" else "dense", search_params={"metric_type": "BM25" if mode == "bm25" else "COSINE", "params": {}}, filter=expression, limit=limit, output_fields=output, consistency_level="Strong")
     require(len(result) == 1 and len(result[0]) <= limit, "检索结果数量不符")
@@ -170,21 +178,21 @@ class HybridRetriever:
         manifest = await validated_manifest(self.db, collection, expected)
         return (collection, json_text(manifest)), expected
 
-    async def _ensure_collection(self, collection: str) -> str:
+    async def _ensure_collection(self, collection: str) -> tuple[str, str]:
         # 按实际物理集合执行的核验入口；轻量核验通过且身份命中时跳过完整校验。
         # 成功记录仅取 validate_index 实际成功返回的清单，失败或取消不写入凭证。
         async with self._validation_lock:
             identity, expected = await self._manifest_identity(collection)
             if identity == self._validated:
-                return collection
+                return identity
             manifest = await validate_index(self.db, collection, self.corpus, expected)
-            self._validated = (collection, json_text(manifest))
-            return collection
+            recorded = (collection, json_text(manifest))
+            self._validated = recorded
+            return recorded
 
-    async def _validate_published(self) -> str:
-        # 保留正式 alias 解析入口；按解析出的实际集合执行核验，查询沿用本次解析结果。
-        collection = await published_collection(self.db)
-        return await self._ensure_collection(collection)
+    async def _validate_published(self) -> tuple[str, str]:
+        # 保留正式 alias 解析入口；按解析出的实际集合执行核验，本次调用沿用本次解析身份。
+        return await self._ensure_collection(await published_collection(self.db))
 
     def validation_identity(self) -> tuple[str, str]:
         # 已完成校验的物理集合名与清单 JSON 文本；供评测入口记录并核验实际发布身份。
@@ -196,24 +204,25 @@ class HybridRetriever:
         query: str,
         *,
         conditions: SearchConditions = SearchConditions(),
-        alpha: float = 0.5,
+        rrf_k: int = 60,
         bm25_depth: int = 50,
         dense_depth: int = 50,
         limit: int = 10,
         signal: Event | None = None,
-    ) -> list[RetrievalCandidate]:
+    ) -> SearchExecution:
         # 校验发布索引后排除互斥硬条件；阶段之间传播取消，编码在途可被真实任务取消中止。
         check_cancelled(signal)
-        query = validate_parameters(query, alpha, limit, bm25_depth, dense_depth)
+        query = validate_parameters(query, rrf_k, limit, bm25_depth, dense_depth)
         conditions.expression(self.corpus.catalog)
-        collection = await self._validate_published()
+        collection, manifest_json = await self._validate_published()
         check_cancelled(signal)
         has_eligible_exercises = any(
             conditions.matches(exercise) for exercise in self.corpus.catalog.all()
         )
         check_cancelled(signal)
         if not has_eligible_exercises:
-            return []
+            return SearchExecution(candidates=[], collection=collection, manifest_json=manifest_json)
         vector = await _encode_cancellable(self.embedding, query, signal)
         check_cancelled(signal)
-        return await search_vectors(self.db, collection, self.corpus.catalog, query, vector, conditions=conditions, alpha=alpha, bm25_depth=bm25_depth, dense_depth=dense_depth, limit=limit)
+        candidates = await search_vectors(self.db, collection, self.corpus.catalog, query, vector, conditions=conditions, rrf_k=rrf_k, bm25_depth=bm25_depth, dense_depth=dense_depth, limit=limit)
+        return SearchExecution(candidates=candidates, collection=collection, manifest_json=manifest_json)

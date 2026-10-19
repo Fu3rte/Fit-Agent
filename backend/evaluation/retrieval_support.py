@@ -24,12 +24,20 @@ from app.application.business.retrieval_index import (
     sha256,
 )
 from app.application.business.retrieval_response import (
+    CANDIDATE_POOL_LIMIT,
     SEARCH_BUDGET,
     SEARCH_LIMIT,
     build_search_result,
+    build_search_stage,
+    encoded_length,
 )
 from app.application.business.retrieval_search import HybridRetriever
 from app.domain.business.models import CatalogSearchArguments, ProfileContent
+from evaluation.contracts import (
+    ModelVisibleSearch,
+    SearchResponseEvidence,
+    VisibleExercise,
+)
 
 BACKEND = Path(__file__).resolve().parents[1]
 REPO = BACKEND.parent
@@ -45,7 +53,10 @@ REQUAL_AUTH_PATH = REQUAL_ROOT / "authorization.json"
 REQUAL_LEDGER_PATH = REQUAL_ROOT / "executions.json"
 FROZEN_CONFIG_PATH = BACKEND / "app/application/business/retrieval_frozen.py"
 OUTPUT_ROOT = BACKEND / "temp" / "retrieval-mteb"
-RECALL_LIMIT = SEARCH_LIMIT + 1
+RECALL_LIMIT = CANDIDATE_POOL_LIMIT
+# 历史入口保持原 11→10 单阶段身份，不接入两阶段候选池。
+LEGACY_RETRIEVAL_LIMIT = 10
+LEGACY_RECALL_LIMIT = LEGACY_RETRIEVAL_LIMIT + 1
 APPROVED_INPUTS = {"queries": 128, "labels": 405, "dev": 61, "holdout": 67, "families": 22, "catalog": 1321}
 
 
@@ -171,21 +182,103 @@ def effective_conditions(query: dict, catalog: Catalog, mappings: dict, purpose:
     return evaluate_search_conditions(arguments, profile, catalog, mappings)
 
 
-def project_response(catalog: Catalog, recalled: list, evaluated: EvaluatedConditions, threshold: float | None) -> dict:
+def _conditions_payload(evaluated: EvaluatedConditions) -> dict:
+    conditions = evaluated.conditions
+    return {
+        "equipment": conditions.equipment,
+        "body_part": conditions.body_part,
+        "target": conditions.target,
+        "muscle_group": conditions.muscle_group,
+        "available_equipment": list(conditions.available_equipment or ()),
+        "excluded_ids": list(conditions.excluded_ids),
+        "filtered_fields": list(evaluated.filtered_fields),
+        "condition_notes": list(evaluated.condition_notes),
+    }
+
+
+def project_response(
+    catalog: Catalog,
+    query_id: str,
+    recalled: list,
+    evaluated: EvaluatedConditions,
+    threshold: float | None,
+) -> dict:
+    # 生产与评测共用同一阶段构造：门槛前候选池与公开最终输入来自同一次检索。
+    if any(not math.isfinite(item.score) for item in recalled):
+        raise ValueError("候选分数非有限值")
+    stage = build_search_stage(recalled, evaluated, threshold=threshold)
+    payload = stage.response.model_dump()
+    chars = encoded_length(payload)
+    evidence = SearchResponseEvidence(
+        query_id=query_id,
+        response_json=payload,
+        model_visible=ModelVisibleSearch(
+            items=[
+                VisibleExercise(
+                    exercise_id=item.id,
+                    name=item.name,
+                    equipment=item.equipment,
+                    target=item.target,
+                    matches=item.matches,
+                )
+                for item in stage.response.items
+            ],
+            has_more=stage.response.has_more,
+        ),
+    )
+    evidence.require_scored_consistency(
+        [item.id for item in stage.final_input]
+    )
+    return {
+        "recalled": [item.id for item in recalled],
+        "candidate_pool": [item.id for item in stage.candidate_pool],
+        "final_model_input": [item.id for item in stage.final_input],
+        "scores": {item.id: item.score for item in recalled},
+        "response": payload,
+        "search_evidence": evidence.model_dump(),
+        "conditions": _conditions_payload(evaluated),
+        "threshold": threshold,
+        "budget_chars": SEARCH_BUDGET,
+        "item_limit": SEARCH_LIMIT,
+        "serialized_chars": chars,
+        "hard_constraint_violations": [
+            item.id
+            for item in stage.candidate_pool
+            if not evaluated.conditions.matches(catalog.get(item.id))
+        ],
+        "budget_compliant": (
+            chars <= SEARCH_BUDGET
+            and len(stage.response.items) <= SEARCH_LIMIT
+            and len(stage.candidate_pool) <= CANDIDATE_POOL_LIMIT
+        ),
+    }
+
+
+def project_legacy_response(
+    catalog: Catalog, recalled: list, evaluated: EvaluatedConditions, threshold: float | None
+) -> dict:
+    # 历史入口保留原 11→10 单阶段返回与指标身份；不生成两阶段候选池证据。
     if any(not math.isfinite(item.score) for item in recalled):
         raise ValueError("候选分数非有限值")
     filtered = [item for item in recalled if threshold is None or item.score >= threshold]
-    result = build_search_result(filtered, evaluated)
+    result = build_search_result(
+        filtered, evaluated, limit=LEGACY_RETRIEVAL_LIMIT
+    )
     payload = result.model_dump()
-    chars = len(json.dumps(payload, ensure_ascii=False, allow_nan=False))
+    chars = encoded_length(payload)
     return {
         "recalled": [item.id for item in recalled],
         "returned": [item.id for item in result.items],
         "scores": {item.id: item.score for item in recalled},
         "response": payload,
-        "hard_constraint_violations": [item.id for item in filtered if not evaluated.conditions.matches(catalog.get(item.id))],
+        "hard_constraint_violations": [
+            item.id
+            for item in filtered
+            if not evaluated.conditions.matches(catalog.get(item.id))
+        ],
         "serialized_chars": chars,
-        "budget_compliant": chars <= SEARCH_BUDGET and len(result.items) <= SEARCH_LIMIT,
+        "budget_compliant": chars <= SEARCH_BUDGET
+        and len(result.items) <= LEGACY_RETRIEVAL_LIMIT,
     }
 
 

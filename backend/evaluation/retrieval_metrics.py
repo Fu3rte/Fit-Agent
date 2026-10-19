@@ -4,9 +4,18 @@ from statistics import mean
 
 from mteb._evaluators.retrieval_metrics import calculate_retrieval_scores, mrr
 
+from evaluation.contracts import (
+    RETRIEVAL_METRICS,
+    RetrievalInput,
+    RetrievalMetric,
+    RetrievalResult,
+)
+
 DEFAULT_KS = (5,)
 GAIN = {1: 1, 2: 3, 3: 7}
 FIELDS = {"hit": "success", "recall": "recall", "precision": "P", "mrr": None, "ndcg": "ndcg_cut"}
+CANDIDATE_K = 20
+FINAL_K = 5
 
 
 def require(condition: bool, message: str) -> None:
@@ -22,7 +31,115 @@ def metric_aliases(ks) -> dict[str, str]:
     }
 
 
-def score(queries: list[dict], rankings: dict[str, list[str]], ks=DEFAULT_KS) -> dict:
+def _rank_scores(ids: list[str]) -> dict[str, float]:
+    # 单调递减分数仅编码实际顺序；MTEB 与 pytrec_eval 按分数排序，分数互不相同以保留原顺序。
+    return {eid: float(len(ids) - rank) for rank, eid in enumerate(ids)}
+
+
+def _qrels(item: RetrievalInput) -> dict[str, int]:
+    # MTEB 以 qrel 数值作为增益；映射为 2^grade-1 后再交给库内 nDCG。
+    return {label.exercise_id: GAIN[label.grade] for label in item.positive_labels}
+
+
+def _checked(value: float, qid: str, name: str) -> float:
+    require(math.isfinite(value) and 0 <= value <= 1, f"指标超出范围: {qid}/{name}")
+    return value
+
+
+def evaluate_staged(items: list[RetrievalInput]) -> list[RetrievalResult]:
+    # 候选阶段只消费 candidate_pool，最终输入阶段只消费 final_model_input；
+    # 两次独立调用 MTEB，禁止把同一份最终排名同时用于 k=5 与 k=20。
+    require(bool(items), "评测查询为空")
+    query_ids = [item.query_id for item in items]
+    require(len(set(query_ids)) == len(query_ids), "查询 ID 重复")
+    labelled = [item for item in items if not item.expect_empty]
+    candidate_scores = final_scores = None
+    mrr_values = {}
+    if labelled:
+        qrels = {item.query_id: _qrels(item) for item in labelled}
+        candidate_results = {
+            item.query_id: _rank_scores(item.candidate_pool) for item in labelled
+        }
+        final_results = {
+            item.query_id: _rank_scores(item.final_model_input) for item in labelled
+        }
+        candidate_scores = calculate_retrieval_scores(
+            candidate_results, qrels, [CANDIDATE_K]
+        )
+        final_scores = calculate_retrieval_scores(final_results, qrels, [FINAL_K])
+        mrr_values = mrr(qrels, final_results, [FINAL_K])[f"MRR@{FINAL_K}"]
+        require(
+            len(mrr_values) == len(labelled), "MRR 逐查询数量不一致"
+        )
+        for index, item in enumerate(labelled):
+            require(
+                item.query_id in candidate_scores.all_scores
+                and item.query_id in final_scores.all_scores,
+                f"评分结果缺少查询: {item.query_id}",
+            )
+    positions = {item.query_id: index for index, item in enumerate(labelled)}
+    results = []
+    for item in items:
+        if item.expect_empty:
+            results.append(
+                RetrievalResult(
+                    query_id=item.query_id,
+                    scenario_id=item.scenario_id,
+                    expect_empty=True,
+                    candidate_pool=item.candidate_pool,
+                    final_model_input=item.final_model_input,
+                    metrics=[],
+                    false_return=bool(item.final_model_input),
+                )
+            )
+            continue
+        index = positions[item.query_id]
+        raw_candidate = candidate_scores.all_scores[item.query_id]
+        raw_final = final_scores.all_scores[item.query_id]
+        values = {
+            "recall@20": _checked(
+                float(raw_candidate["recall_20"]), item.query_id, "recall@20"
+            ),
+            "hit@5": _checked(
+                float(raw_final["success_5"]), item.query_id, "hit@5"
+            ),
+            "mrr@5": _checked(float(mrr_values[index]), item.query_id, "mrr@5"),
+            "ndcg@5": _checked(
+                float(raw_final["ndcg_cut_5"]), item.query_id, "ndcg@5"
+            ),
+            "precision@5": _checked(
+                float(raw_final["P_5"]), item.query_id, "precision@5"
+            ),
+        }
+        results.append(
+            RetrievalResult(
+                query_id=item.query_id,
+                scenario_id=item.scenario_id,
+                expect_empty=False,
+                candidate_pool=item.candidate_pool,
+                final_model_input=item.final_model_input,
+                metrics=[
+                    RetrievalMetric(
+                        name=name,
+                        stage=(
+                            "candidate_pool" if name == "recall@20" else "final_model_input"
+                        ),
+                        k=CANDIDATE_K if name == "recall@20" else FINAL_K,
+                        value=values[name],
+                    )
+                    for name in RETRIEVAL_METRICS
+                ],
+            )
+        )
+    return results
+
+
+def evaluate(item: RetrievalInput) -> RetrievalResult:
+    return evaluate_staged([item])[0]
+
+
+def score_legacy(queries: list[dict], rankings: dict[str, list[str]], ks=DEFAULT_KS) -> dict:
+    # 历史入口：保留原数据、参数、算法与单阶段 @5 指标身份，不推算 Recall@20。
     require(bool(queries), "评测查询为空")
     require(bool(ks) and all(type(k) is int and k > 0 for k in ks), "k 必须为正整数")
     query_ids = [item["id"] for item in queries]
@@ -64,14 +181,12 @@ def score(queries: list[dict], rankings: dict[str, list[str]], ks=DEFAULT_KS) ->
             item["id"]: {eid: GAIN[grade] for eid, grade in rows[item["id"]]["expected_ids"].items()}
             for item in labelled
         }
-        # 单调递减分数仅编码实际返回顺序；库内按前 max(ks) 条评分，完整返回保留在证据中。
         limit = max(ks)
         results = {}
         for item in labelled:
             qid = item["id"]
             ids = rankings[qid][:limit]
             results[qid] = {eid: float(len(ids) - rank) for rank, eid in enumerate(ids)}
-        # mrr() 以 results 的插入顺序返回逐查询列表，显式保留该顺序并校验数量。
         mrr_order = [item["id"] for item in labelled]
         result = calculate_retrieval_scores(results, qrels, list(ks))
         mrr_values = mrr(qrels, results, list(ks))
@@ -113,6 +228,7 @@ def score(queries: list[dict], rankings: dict[str, list[str]], ks=DEFAULT_KS) ->
             "averaging": "macro over labelled queries from per-query raw scores; expect_empty scored separately",
             "truncation": "top-k by final response order",
             "mrr_alignment": "results insertion order",
+            "identity": "historical_single_stage",
         },
         "overall": summarize(list(rows.values())),
         "by_intent": {

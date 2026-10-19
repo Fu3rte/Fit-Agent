@@ -5,21 +5,22 @@
 - 指标引擎：MTEB 2.26.7；版本由 `backend/uv.lock` 锁定，每次运行记录实际版本。
 - 评分入口：`mteb._evaluators.retrieval_metrics.calculate_retrieval_scores` 与 `mrr`；依赖上界为 `<2.27`。
 - 金标：新数据使用 `backend/dataset/evaluation/<dataset_version>/queries.jsonl` 与 `qrels.jsonl`，逐条用户审批后发布；历史记录继续使用 `backend/dataset/action-retrieval-queries.json` 与已批准用途适配表。
-- 相关性：grade >= 1；Hit 对应 `success_5`，Recall 对应 `recall_5`，Precision 对应 `P_5`，nDCG 对应 `ndcg_cut_5`，MRR 由 `mrr()` 返回。
+- 相关性：grade >= 1。候选阶段 Recall@20 对应 `recall_20`；最终输入阶段 Hit 对应 `success_5`，Precision 对应 `P_5`，nDCG 对应 `ndcg_cut_5`，MRR 由 `mrr()` 返回。
 - nDCG 增益：`2^grade−1`，等级 1/2/3 映射为 1/3/7。
-- 截断：默认 k=5。Precision@5 固定以 5 为分母，短结果保留未填满位置。
-- 排序指标对有金标查询做宏平均；有答案查询返回空列表计零分。
-- 无答案误返回率单独统计，分母为 `expect_empty` 查询数。
+- 阶段：Recall@20 只消费门槛前候选池（最多 20 条）；四项 @5 只消费实际公开的最终输入（最多 5 条）。两阶段分别调用 MTEB。
+- Precision@5 固定以 5 为分母，短结果保留未填满位置。
+- 排序指标对有金标查询做宏平均；有答案查询最终输入为空时四项 @5 计零分，Recall@20 保持候选阶段真实值。
+- 无答案误返回率只按最终模型输入是否非空统计，分母为 `expect_empty` 查询数。
 - 缺少结果、重复 ID、目录外 ID、预算或硬约束违规直接阻止记录有效结果。
 - 实际返回顺序编码为严格递减 rank score 交给 MTEB；原检索分数独立保留。
-- 新数据证据 Schema 为 `fit-agent-retrieval-mteb-1`，输出目录为 `backend/temp/retrieval-mteb/<run_id>/`。
+- 新数据两阶段证据 Schema 为 `fit-agent-retrieval-mteb-2`，历史单阶段证据继续使用 `fit-agent-retrieval-mteb-1`；输出目录为 `backend/temp/retrieval-mteb/<run_id>/`。
 - `historical_rescore` 表示对历史实际候选重算指标；不表示当前系统运行或新的留出验收。
 - `live` 使用真实 Milvus 查询和已有查询向量缓存；耗时不包含在线 Embedding。
 - 历史留出集已经被观察，后续运行标记为回归评测。
 
 ## 当前实现状态
 
-检索评分迁移、依赖清理、数据加载、证据、报告与上传适配已完成开发验证。当前环境固定 MTEB 2.26.7 与 jsonlines 4.0.0，不包含 ranx。新数据草稿 `backend/dataset/evaluation/rebuild-v1/` 已生成 corpus 1321、queries 150、qrels 1079、scenarios 80、附件 8，全部 review 与 release 为 draft；审阅入口结构检查通过并返回未就绪，正式入口按预期拒绝。正式 150 条检索、80 个业务场景、云端上传、Ragas 与裁判调用尚未执行，本页不追加开发测试成绩。
+检索评分迁移、依赖清理、数据加载、证据、报告与上传适配已完成开发验证。当前环境固定 MTEB 2.26.7 与 jsonlines 4.0.0，不包含 ranx。新数据 `backend/dataset/evaluation/rebuild-v1/` 已冻结为 corpus 1321、queries 150、qrels 1079、scenarios 80、附件 8；全部 query、qrel、scenario 的 review 与 manifest.release 为 approved，`load_for_review` 与 `load_for_evaluation` 通过。取消检查点按用户授权修订：消息回合验证 `pending→invalidated`，后置取消事件验证 `invalidated→invalidated` 并保留真实取消证据。正式 150 条检索、80 个业务场景、云端上传、Ragas 与裁判调用尚未执行，本页不追加开发测试成绩。
 
 ## 工具职责与可信度
 

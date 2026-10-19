@@ -115,6 +115,7 @@ class SessionService:
         *,
         system_message: SystemMessage,
         credentials: Sequence[str] = (),
+        now: int | None = None,
     ) -> OperationOutcome:
         request = command.request
         reject_credentials(command.model_dump(exclude_unset=True), credentials)
@@ -135,7 +136,7 @@ class SessionService:
             await self.queries.ensure_pairable(
                 command.session_id, entries, session.active_leaf_id
             )
-            now = now_ms()
+            now = now_ms() if now is None else now
             attachments = await self.attachments.accept_attachments(
                 command.session_id, request.attachments, created, now, credentials,
             )

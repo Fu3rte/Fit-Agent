@@ -1,30 +1,37 @@
 # LangSmith + MTEB + Ragas 评测方案
 
+## 已确定的基线目标
+
+主 baseline 为 Hybrid，保留 BM25、dense 对照。候选池上限 20，使用 Recall@20；实际模型输入最多 5 个候选，使用 Hit@5、MRR@5、nDCG@5 和 Precision@5。Hybrid 使用 Milvus 内置 RRF，参数为 `rrf_k=60`、两路深度 100/100、门槛 0.0，基线按 RRF 融合分数排序。
+
+完整配置见 [检索 Baseline 定义](retrieval-baseline.md)。20→5 两阶段管线及指标接入已实现，正式基线成绩待实际运行。下节记录当前源码的实现状态。
+
 ## 当前实现与迁移范围
 
 检索评分已迁移到 MTEB 2.26.7。`backend/uv.lock` 固定 `mteb==2.26.7` 与 `jsonlines==4.0.0`，dev 依赖已移除 ranx。评分适配、数据加载、证据、报告和 LangSmith 上传适配已完成开发验证；正式 150 条检索、80 个业务场景执行、云端上传、Ragas 与裁判调用尚未执行。
 
 - LangSmith 负责统一看板、实验管理、对照和逐例分析，MTEB 负责检索指标，Ragas 负责生成指标。
-- 默认仅计算 Hit@5、Recall@5、Precision@5、MRR@5、nDCG@5，按最终响应中的实际顺序截取前 5 条评分。
-- 无答案误返回率、硬约束、候选数、字符预算和 JSON 结构检查继续保留；检索返回上限保持现有配置。
+- 候选阶段只计算 Recall@20：门槛与预算裁剪前的前 20 条候选。最终输入阶段计算 Hit@5、MRR@5、nDCG@5、Precision@5，按实际公开顺序最多 5 条评分。两阶段分别调用 MTEB。
+- 无答案误返回率、硬约束、候选数、字符预算和 JSON 结构检查继续保留；搜索公开响应最多 5 条且不暴露内部剩余候选身份。
 - 二元相关性沿用 grade≥1；Precision@5 固定分母为 5；nDCG@5 使用 `2^grade−1` 增益。
 - 新数据包含 150 条检索请求与 80 个端到端业务场景，逐条用户审批后发布。详见 [全新评测数据准备方案](evaluation-dataset-rebuild-plan.md)。
 - 历史量化指标、逐例结果、旧数据版本及实验身份完整存档；历史 holdout 保留 `previously_observed_holdout_regression` 身份。
 - Ragas 生成评测及 LLM 裁判作为后续需求；本次检索迁移不新增生成运行或裁判调用。
 - 上传沿用现有字段白名单与外部实验接口，保持生产 Trace 隐私契约。
 
-MTEB 接入真实 BM25、dense、hybrid 检索结果及业务金标，评分输入保留实际过滤、门槛和响应裁剪后的最终顺序。评分入口为 `mteb._evaluators.retrieval_metrics.calculate_retrieval_scores` 与 `mrr`，模块属于 MTEB 私有实现，依赖上界为 `<2.27`；固定分母 Precision@5、nDCG 增益、空返回及宏平均已通过真实 MTEB 的固定用例验证。
+MTEB 接入真实 BM25、dense、hybrid 检索结果及业务金标。候选池与最终输入分别调用评分入口：`mteb._evaluators.retrieval_metrics.calculate_retrieval_scores`（候选池 k=20、最终输入 k=5）与 `mrr`（最终输入 k=5）。模块属于 MTEB 私有实现，依赖上界为 `<2.27`。固定分母 Precision@5、nDCG 增益、阶段独立空返回口径及宏平均由测试代码覆盖；功能测试待统一验证阶段执行。
 
 检索与生成指标分别命名，并通过样例 ID、数据版本及运行证据关联。项目验收使用动作目录与业务查询集；公开基准结果单独标明其任务及数据来源。
 
 ## 文件与职责
 
 - `backend/evaluation/retrieval.py`：新数据全量检索、历史重评分与 LangSmith 上传入口。
-- `backend/evaluation/retrieval_metrics.py`：金标和有序动作 ID 到 MTEB 检索指标的适配，输出五项 @5 指标及标签分组。
+- `backend/evaluation/retrieval_metrics.py`：`RetrievalInput` 到 `RetrievalResult` 的适配；候选池 Recall@20 与最终输入四项 @5 分别计算，历史入口保留单阶段 @5 身份。
 - `backend/evaluation/retrieval_support.py`：复用目录、用途适配、条件求值、索引验证与查询向量缓存。
 - `backend/evaluation/dataset.py`：新数据加载、Schema 与来源校验、审批门禁、评分输入适配与未审阅候选检测。
 - `backend/dataset/evaluation/schemas/`：`defs`、`manifest`、`corpus`、`queries`、`qrels`、`scenarios` 六个 Draft 2020-12 Schema。
-- `backend/test/test_retrieval_mteb.py`：MTEB 评分、证据、报告与上传回归测试。
+- `backend/test/test_retrieval_mteb.py`：MTEB 两阶段评分、证据、报告与上传回归测试。
+- `backend/test/test_retrieval_stages.py`：生产 20→5 阶段构造、预算裁剪、隐藏身份与取消语义测试。
 - `backend/test/test_evaluation_dataset.py`：数据加载、审批、配额、引用、路径边界与发布门禁测试。
 - `backend/test/evaluation_fixtures.py`：使用真实动作目录、已批准补充数据与真实 Schema 构造的开发测试数据。
 - `quantitive-index/evaluation.md`：保留历史实际评测指标与实验身份；新数据版本的结果独立记录。
@@ -52,9 +59,9 @@ MTEB 负责检索评分，Ragas 负责生成评分。数据适配和业务规则
 - `(query_id, corpus_id)` 组合唯一。
 - `evidence` 使用冻结来源文件与 JSON Pointer，加载器实际解析指针。
 
-等级为 1、2、3 的动作进入二元相关集合，供 Hit、Recall、Precision 和 MRR 使用；nDCG 按等级使用 7、3、1 增益。`grade=0` 是已审阅负例，不进入评分输入，可作为未审阅候选检查的已知候选。完整最终返回列表中的每个动作 ID 必须具有该请求的 qrel 记录，未审阅候选按未知身份处理。
+等级为 1、2、3 的动作进入二元相关集合，供 Recall@20、Hit、Precision 和 MRR 使用；nDCG 按等级使用 7、3、1 增益。`grade=0` 是已审阅负例，不进入相关集合，可作为未审阅候选检查的已知候选。参与 Recall@20 的整个候选池及最终公开列表中的每个动作 ID 必须具有该请求的 qrel 记录，未审阅候选按未知身份处理并阻止发布。
 
-数据版本统一全量评测：150 条 query（`lookup=60`、`generation=45`、`replacement=45`，各含 10 条 `expect_empty`）、80 个 scenario（10 个主要类别各 8 个）。corpus 与真实目录一致，当前为 1321 条；正式 qrels 数量以实际版本 manifest 为准，`rebuild-v1` 草稿为 1079 条。
+数据版本统一全量评测：150 条 query（`lookup=60`、`generation=45`、`replacement=45`，各含 10 条 `expect_empty`）、80 个 scenario（10 个主要类别各 8 个）。corpus 与真实目录一致，当前为 1321 条；正式 qrels 数量以实际版本 manifest 为准，`rebuild-v1` 为 1079 条。
 
 两种加载入口：
 
@@ -71,7 +78,7 @@ query 批准覆盖自身正文与关联 qrels，qrel 批准覆盖自身正文，
 
 未审阅候选会阻止正式汇总发布。运行结果保留实际 `projections`、`timings` 与未审阅候选列表，组状态记为 `blocked_unreviewed_candidates`，上传入口拒绝该证据。补标并由用户批准新版本后，对同一新版本重算全部对照组；已有证据与旧身份保持原值。
 
-`backend/dataset/evaluation/rebuild-v1/` 已生成完整草稿：corpus 1321、queries 150、qrels 1079、scenarios 80、附件 8。全部 query、qrel、scenario 与 release 均为 `draft`；`load_for_review()` 完成结构、来源、引用、语义与配额检查并返回 `ready=false`，`load_for_evaluation()` 按预期拒绝。场景消息事件只保留实际待发送的用户输入，保存类断言在消息检查点验证零提交、在确认事件检查点验证保存成功，`saved_state` 表达截至检查点的已保存状态。
+`backend/dataset/evaluation/rebuild-v1/` 已冻结：corpus 1321、queries 150、qrels 1079、scenarios 80、附件 8。全部 query、qrel、scenario 与 release 均为 `approved`；`load_for_review()` 完成结构、来源、引用、语义与配额检查并返回 `ready=true`，`load_for_evaluation()` 通过。场景消息事件只保留实际待发送的用户输入，保存类断言在消息检查点验证零提交、在确认事件检查点验证保存成功，`saved_state` 表达截至检查点的已保存状态。取消场景在消息检查点验证 `pending→invalidated`，在后置取消事件检查点验证 `invalidated→invalidated` 并保留真实取消证据。
 
 批准状态及内容哈希只能证明文件与批准记录一致。标注是否符合业务，需要人工复核。可以在 LangSmith 查看失分样例，并回到动作目录核实。
 
@@ -113,17 +120,17 @@ uv run --locked --directory backend python -m evaluation.retrieval run --dataset
 
 每轮结果写入 `backend/temp/retrieval-mteb/<run_id>/`：
 
-- `evaluation.json`：Schema 为 `fit-agent-retrieval-mteb-1`，包含数据身份、参数、身份哈希、逐组指标、逐查询候选与原分数、耗时和未审阅候选。
-- `report.md`：逐组 Hit@5、Recall@5、Precision@5、MRR@5、nDCG@5、有标注/无答案数量与无答案误返回率。
+- `evaluation.json`：新数据 Schema 为 `fit-agent-retrieval-mteb-2`，包含数据身份、参数、身份哈希、逐组指标、逐查询候选池、最终模型输入、原分数、公开响应与证据、耗时和未审阅候选。历史入口继续使用 `fit-agent-retrieval-mteb-1` 单阶段身份。
+- `report.md`：逐组 Recall@20、Hit@5、MRR@5、nDCG@5、Precision@5、有标注/无答案数量与无答案误返回率。
 - `langsmith-<group>.json`：上传成功后写入的回执。
 
 结果包括：
 
-- Hit@5、Recall@5、Precision@5、MRR@5、nDCG@5。
+- Recall@20、Hit@5、MRR@5、nDCG@5、Precision@5。
 - 无答案误返回率。
 - 按 `tags` 分组的指标；历史入口保留 `by_intent`。
-- 每条查询的候选 ID、原分数、逐项得分和真实搜索时间。
-- 硬约束、字符预算及索引、模型、代码身份。
+- 每条查询的有序候选池、最终模型输入、原始融合分数、完整公开响应、SearchResponseEvidence、逐项指标与真实搜索时间。
+- 条件、门槛、预算、RRF 参数及索引、模型、代码、数据身份。
 
 数据身份由 `dataset.version`、`version_dir`、`manifest_sha256`、`content_sha256`、`corpus_sha256`、Schema 哈希、来源与文件哈希组成。实验数据集名称为 `fit-agent-retrieval-<version>-<content_sha256[:12]>`，样例行 ID 使用 `uuid5(dataset_name + ":" + query_id)`，同一数据身份的 ID 稳定，不同版本相互隔离。
 
@@ -149,9 +156,9 @@ uv run --locked --directory backend python -m evaluation.retrieval run --dataset
 uv run --locked --directory backend python -m evaluation.retrieval upload --source D:/repository/fit-agent/backend/temp/retrieval-mteb/<run_id>/evaluation.json
 ```
 
-上传采用 LangSmith 官方外部实验接口。每个检索组成为一个 experiment，共用同一版本的数据集。上传前重新执行真实 `score()` 与 `validate_projections()`，并核对数据版本、manifest、内容摘要与语料摘要；存储评分与实际候选、金标或引擎身份不一致时拒绝上传。
+上传采用 LangSmith 官方外部实验接口。每个检索组成为一个 experiment，共用同一版本的数据集。上传前重新执行真实两阶段评分与 `validate_projections()`，核验候选池、最终输入、公开响应与 SearchResponseEvidence 一致，并核对数据版本、manifest、内容摘要与语料摘要；按生产序列化重算完整公开响应字符数，从已批准查询条件重做整个候选池的硬约束，并用共享阶段构造核对门槛、裁剪与最终响应。投影自报的预算与硬约束标记不作为合规依据；存储评分与实际候选、金标或引擎身份不一致时拒绝上传。
 
-上传反馈分数按接口要求保留 4 位小数；本地原始指标保持完整精度。上传字段白名单包含查询、条件、用途、标签、家族、候选 ID、候选原分数、契约指标、硬约束与预算结果；不上传真实个人画像、缓存向量、服务凭据或查询端点配置。
+上传反馈分数按接口要求保留 4 位小数；本地原始指标保持完整精度。上传字段白名单包含查询、条件、用途、标签、家族、有序候选池、最终模型输入、候选原分数、公开搜索响应与证据、契约指标、硬约束、预算结果与 RRF 参数；不上传真实个人画像、缓存向量、服务凭据或查询端点配置。
 
 新数据的数据集名称为 `fit-agent-retrieval-<version>-<content_sha256[:12]>`；历史入口使用拆分、数据集哈希与用途适配哈希生成名称。每条查询的行 ID 使用 `uuid5(dataset_name + ":" + query_id)`，同一数据身份稳定，不同版本相互隔离。
 
@@ -173,13 +180,13 @@ uv run --locked --directory backend python -m evaluation.retrieval upload --sour
 
 ## 6. 比较两轮配置
 
-在同一版本的全部 150 条检索请求上比较 hybrid 权重与召回深度，每轮固定其余条件并记录参数。每轮使用独立运行目录：
+在同一版本的全部 150 条检索请求上比较 RRF 平滑参数与召回深度，每轮固定其余条件并记录参数。每轮使用独立运行目录：
 
 ```powershell
-uv run --locked --directory backend python -m evaluation.retrieval run --dataset dataset/evaluation/<dataset_version> --alpha 0.5 --depth 100
+uv run --locked --directory backend python -m evaluation.retrieval run --dataset dataset/evaluation/<dataset_version> --rrf-k 60 --depth 100
 ```
 
-新数据入口从 `retrieval_frozen` 读取未显式覆盖的参数，`--alpha` 与 `--depth` 只覆盖本轮运行值；运行结果绑定参数与数据身份，不自动改写 runtime 配置。
+新数据入口从 `retrieval_frozen` 读取未显式覆盖的参数，`--rrf-k` 与 `--depth` 只覆盖本轮运行值；运行结果绑定参数与数据身份，不自动改写 runtime 配置。
 
 两轮配置的结果均记录在对应新数据版本的指标文件。在 LangSmith 选择对应实验对照：
 
@@ -211,7 +218,7 @@ $history.groups
 uv run --locked --directory backend python -m evaluation.retrieval upload --source $history.artifact
 ```
 
-`rescore` 是历史入口，继续使用旧查询集与已批准用途适配，要求历史 `compare.json` 的查询集与适配哈希一致。结果标记为 `historical_rescore`，使用历史返回 ID 及顺序，按当前 @5 口径重新交给 MTEB 评分；历史原始分数仅保留为证据。历史证据身份与成绩保持原值，不追加开发测试结果。
+`rescore` 是历史入口，继续使用旧查询集与已批准用途适配，要求历史 `compare.json` 的查询集与适配哈希一致。结果标记为 `historical_rescore`，使用历史返回 ID 及顺序，按单阶段 @5 口径重新交给 MTEB 评分；历史证据缺少 20 候选，不推算或宣称 Recall@20。历史原始分数仅保留为证据，历史证据身份与成绩保持原值，不追加开发测试结果。
 
 历史证据缺少逐查询检索耗时。上传时间范围表示本次批量重评分，LangSmith 展示的这类延迟不能用于评价检索速度。
 
@@ -228,18 +235,26 @@ uv run --locked --directory backend python -m evaluation.retrieval upload --sour
 
 生成评分与检索评分分别展示。器械限制、禁用动作、响应预算、无答案误返回和保存授权继续通过项目确定性规则检查。生成评测须使用实际产物验证证据关联、指标输入、裁判调用及上传白名单。
 
-本节记录后续生成评测职责与输入要求；当前不新增生成评测命令或裁判调用。
+生成评测已实现独立入口：
+
+```powershell
+uv run --locked --directory backend python -m evaluation.summary report --source backend/temp/evaluation-scenarios/<run_id>
+uv run --locked --directory backend python -m evaluation.generation_upload check --source backend/temp/evaluation-scenarios/<run_id>
+uv run --locked --directory backend python -m evaluation.generation_upload upload --source backend/temp/evaluation-scenarios/<run_id>
+```
+
+`summary` 与 `generation_upload check` 均只读本地产物，不加载密钥、不发起网络请求。生成指标逐检查点保留状态，场景内按成功检查点取均值，跨场景并列输出“含部分成功”与“仅完整成功”两套分母；有效发布只认完整成功口径。`upload` 仅消费通过正式全量门禁的运行，按独立字段白名单逐字段构造 payload，排除裁判地址、裁判调用原文、prompt 指纹原文、原始模型调用与本地路径，并保存源摘要和 payload 摘要回执。详细口径见 [共享契约](evaluation-contracts.md) 第 9 节。
 
 ## 检索评分口径核对
 
-- **Hit@5**：前 5 条至少命中一个 grade≥1 的相关 ID 记 1，否则记 0。
-- **Recall@5**：前 5 条命中的相关 ID 数除以已标注相关 ID 总数。
-- **Precision@5**：前 5 条命中的相关 ID 数除以 5，短返回保留空位。
-- **MRR@5**：前 5 条中第一个相关动作的排名倒数；未命中记 0。
+- **Recall@20**：候选池前 20 条命中的相关 ID 数除以金标全部正相关 ID 总数。候选池为空时记 0。
+- **Hit@5**：最终模型输入前 5 条至少命中一个 grade≥1 的相关 ID 记 1，否则记 0。
+- **Precision@5**：最终模型输入前 5 条命中的相关 ID 数除以 5，短返回保留空位。
+- **MRR@5**：最终模型输入前 5 条中第一个相关动作的排名倒数；未命中记 0。
 - **nDCG@5**：以 `2^grade−1` 为增益、`log2(rank+1)` 为折损计算 DCG@5，除以完整金标按等级降序排列的理想 DCG@5。
-- **无答案误返回率**：预期空结果样例的实际返回非空记 1，按这类样例平均。
+- **无答案误返回率**：预期空结果样例的最终模型输入非空记 1，按这类样例平均。
 
-有金标样例的空返回计入五项 @5 指标，得分均为 0；无答案样例的排序指标不填值。汇总按对应样例逐条宏平均。
+有金标样例的最终输入为空时，四项 @5 指标为 0；Recall@20 保持候选阶段的真实值。无答案样例的排序指标不填值。汇总按对应样例逐条宏平均。
 
 自定义布尔业务规则可由人工直接核对。平台和指标库不会自动消除金标遗漏、用途偏差或数据泄漏。
 

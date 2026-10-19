@@ -1,7 +1,8 @@
+from collections.abc import Callable
 from threading import Event
 
 from app.ai.types import check_cancelled
-from app.application.business import retrieval_text
+from app.application.business import retrieval_frozen, retrieval_text
 from app.application.business.catalog import Catalog
 from app.application.business.coordination import ReplacementCoordinator
 from app.application.business.plans import PlanService
@@ -9,9 +10,9 @@ from app.application.business.profile import ProfileService
 from app.application.business.proposals import PendingProposalService
 from app.application.business.retrieval_conditions import evaluate_search_conditions
 from app.application.business.retrieval_response import (
-    SEARCH_LIMIT,
+    SearchObservation,
     build_details_result,
-    build_search_result,
+    build_search_stage,
 )
 from app.application.business.retrieval_runtime import ActionRetrievalRuntime
 from app.application.business.workouts import WorkoutService
@@ -33,10 +34,13 @@ class BusinessService:
         sessions: SessionQueries,
         replacements: ReplacementCoordinator,
         retrieval: ActionRetrievalRuntime | None = None,
+        search_observer: Callable[[SearchObservation], None] | None = None,
     ) -> None:
         self._catalog = catalog
         # 未显式注入时使用惰性空的检索运行时：缺省配置或 Milvus 不可用只影响检索请求。
         self._retrieval = retrieval if retrieval is not None else ActionRetrievalRuntime()
+        # 只读阶段观测：默认关闭，生产响应与执行结果不受影响。
+        self._search_observer = search_observer
         self._mappings = retrieval_text.load_mappings()
         self.profile = ProfileService(repository, catalog, sessions, replacements)
         self.plans = PlanService(repository, catalog, sessions, replacements)
@@ -51,6 +55,7 @@ class BusinessService:
         self,
         arguments: CatalogSearchArguments,
         signal: Event | None = None,
+        tool_call_id: str | None = None,
     ) -> ExerciseSearchResult:
         # 先以短事务读取真实画像并立即释放，不持有事务等待 Embedding 或 Milvus 网络调用。
         check_cancelled(signal)
@@ -59,13 +64,24 @@ class BusinessService:
         evaluated = evaluate_search_conditions(
             arguments, profile, self._catalog, self._mappings
         )
-        candidates = await self._retrieval.search(
+        execution = await self._retrieval.search(
             arguments.name,
             conditions=evaluated.conditions,
-            limit=SEARCH_LIMIT + 1,
+            limit=retrieval_frozen.RECALL_LIMIT,
             signal=signal,
         )
-        return build_search_result(candidates, evaluated)
+        stage = build_search_stage(
+            execution.candidates, evaluated, threshold=retrieval_frozen.THRESHOLD
+        )
+        if self._search_observer is not None:
+            self._search_observer(SearchObservation(
+                tool_call_id=tool_call_id,
+                arguments=arguments,
+                stage=stage,
+                collection=execution.collection,
+                manifest_json=execution.manifest_json,
+            ))
+        return stage.response
 
     def exercise_details(
         self, arguments: ExerciseDetailsArguments

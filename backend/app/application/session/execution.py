@@ -109,8 +109,12 @@ def execute(
     coordinator = state.coordinator
     guard = CredentialFilter(secrets)
     # 逐模型调用缓存观测：普通调用、摘要子调用与恢复重试均按真实请求记录，身份绑定当前运行。
-    observer = CacheObserver(
-        session_id=session_id, run_id=run.id, contains=guard.contains
+    observer = (
+        state.observation_factory()
+        if state.observation_factory is not None
+        else CacheObserver(
+            session_id=session_id, run_id=run.id, contains=guard.contains
+        )
     )
     if state.origin == "edit":
         observer.note_event("edit")

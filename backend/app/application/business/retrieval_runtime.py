@@ -12,8 +12,8 @@ from app.application.business.retrieval_index import (
 )
 from app.application.business.retrieval_search import (
     HybridRetriever,
-    RetrievalCandidate,
     SearchConditions,
+    SearchExecution,
 )
 
 
@@ -40,26 +40,23 @@ class ActionRetrievalRuntime:
         query: str,
         *,
         conditions: SearchConditions = SearchConditions(),
-        limit: int = 10,
+        limit: int = retrieval_frozen.RECALL_LIMIT,
         signal: Event | None = None,
-    ) -> list[RetrievalCandidate]:
+    ) -> SearchExecution:
         # 检索管线与取消语义由 HybridRetriever 承载；运行时只负责所属循环、冻结参数应用与资源生命周期。
+        # 门槛属于阶段构造，不在返回候选前过滤，保证调用方能够保留门槛前的真实候选池。
+        # 返回体携带本次调用实际命中的物理集合与清单，供调用处绑定证据身份。
         self._bind_loop()
         retriever = await self._ensure(signal)
-        candidates = await retriever.search(
+        return await retriever.search(
             query,
             conditions=conditions,
-            alpha=retrieval_frozen.ALPHA,
+            rrf_k=retrieval_frozen.RRF_K,
             bm25_depth=retrieval_frozen.BM25_DEPTH,
             dense_depth=retrieval_frozen.DENSE_DEPTH,
             limit=limit,
             signal=signal,
         )
-        # 门槛只作用于 WeightedRanker 归一化后的融合分数，单路检索不经本入口。
-        threshold = retrieval_frozen.THRESHOLD
-        if threshold is None:
-            return candidates
-        return [candidate for candidate in candidates if candidate.score >= threshold]
 
     async def _ensure(self, signal: Event | None = None) -> HybridRetriever:
         # 首次或上一次失败后的初始化：整个上下文栈构建成功后才记录实例。

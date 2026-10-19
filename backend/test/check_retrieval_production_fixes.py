@@ -184,8 +184,13 @@ async def output_validation_cases() -> None:
         (_search_tool(unbound), {"purpose": "lookup", "name": "卧推"}, SEARCH_BUDGET),
         (_details_tool(unbound), {"ids": ["0001"]}, DETAILS_BUDGET),
     ):
+        valid_payload = (
+            {"items": [], "has_more": False}
+            if tool.name == SEARCH_EXERCISES
+            else {"items": [], "has_more": False, "remaining_ids": []}
+        )
         for payload, is_error in (
-            ({"items": [], "has_more": False, "remaining_ids": []}, False),
+            (valid_payload, False),
             ({"code": "exercise_not_found", "message": "ids: 动作 ID 不存在于动作目录。"}, True),
         ):
             expected = envelope(payload, is_error)
@@ -325,7 +330,7 @@ def response_boundary_cases() -> None:
         result = _retrieval_envelope(response.model_dump(), budget=SEARCH_BUDGET)
         payload = assert_json(result, SEARCH_BUDGET)
         assert result.is_error is False
-        assert set(payload) == {"items", "has_more", "remaining_ids"}
+        assert set(payload) == {"items", "has_more"}
     for budget in (SEARCH_BUDGET, DETAILS_BUDGET):
         try:
             _retrieval_envelope({"message": "x" * budget}, True, budget=budget)
@@ -387,7 +392,9 @@ async def index_readonly_cases() -> None:
         retriever = await HybridRetriever.open(db, corpus, embedding)
         identity = retriever.validation_identity()
         calls.clear()
-        assert await retriever.search("练背", conditions=evaluated.conditions) == []
+        empty_execution = await retriever.search("练背", conditions=evaluated.conditions)
+        assert empty_execution.candidates == []
+        assert (empty_execution.collection, empty_execution.manifest_json) == identity
         assert retriever.validation_identity() == identity
         assert not any(calls.get(method, 0) for method in ("get", "query", "load_collection", "search", "hybrid_search")), calls
         assert sum(calls.values()) == 4, calls
@@ -417,9 +424,9 @@ async def index_readonly_cases() -> None:
         original_validate = retriever._validate_published
 
         async def cancel_after_validation():
-            collection = await original_validate()
+            validated = await original_validate()
             signal.set()
-            return collection
+            return validated
 
         retriever._validate_published = cancel_after_validation
         try:
@@ -438,8 +445,9 @@ def main() -> None:
     parser.add_argument("mode", choices=("pure", "index-readonly"))
     mode = parser.parse_args().mode
     assert retrieval_frozen.frozen_values() == {
-        "alpha": 0.5, "bm25_depth": 100, "dense_depth": 100,
-        "threshold": 0.0, "recall_limit": 11,
+        "fusion": "rrf", "rrf_k": 60, "bm25_depth": 100, "dense_depth": 100,
+        "threshold": 0.0, "candidate_pool_limit": 20, "final_input_limit": 5,
+        "recall_limit": 20,
     }
     if mode == "index-readonly":
         asyncio.run(index_readonly_cases())

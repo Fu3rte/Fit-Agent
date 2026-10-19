@@ -16,8 +16,9 @@
 - `task_environment`、`available_equipment`、`unavailable_equipment`、`excluded_ids` 是本次任务条件，不写入
   长期画像。
 
-返回 `items`、`has_more`、`remaining_ids`；每项含 `id`、`name`、`equipment`、`target` 与可核实的 `matches`
-说明。需要完整步骤与负重口径时，按返回的 `id` 调用 `get_exercise_details`。
+返回 `items` 与 `has_more`；`items` 最多 5 条，每项含 `id`、`name`、`equipment`、`target` 与可核实的
+`matches` 说明。`has_more` 仅表示同一候选池中仍有通过门槛但被数量或预算裁剪的候选，不提供其身份。
+需要完整步骤与负重口径时，按返回的 `id` 调用 `get_exercise_details`。
 
 ### 1.2 `get_exercise_details`
 

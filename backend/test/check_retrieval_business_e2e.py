@@ -866,7 +866,8 @@ def selfcheck() -> dict:
 
     frozen = frozen_values()
     checks["frozen_parameters_unchanged"] = (
-        frozen["alpha"] == 0.5 and frozen["bm25_depth"] == 100 and frozen["dense_depth"] == 100
+        frozen["fusion"] == "rrf" and frozen["rrf_k"] == 60
+        and frozen["bm25_depth"] == 100 and frozen["dense_depth"] == 100
         and frozen["threshold"] == 0.0 and frozen["recall_limit"] == 11
     )
     details["frozen_parameters"] = dict(frozen)

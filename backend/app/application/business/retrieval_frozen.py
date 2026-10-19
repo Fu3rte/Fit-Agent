@@ -1,23 +1,27 @@
-from app.application.business.retrieval_response import SEARCH_LIMIT
+from app.application.business.retrieval_response import (
+    CANDIDATE_POOL_LIMIT,
+    SEARCH_LIMIT,
+)
 
-# T8 冻结参数接线：正式 runtime 的权重、两路召回深度与融合门槛。
-# 本文件为声明式运行配置，不计入 run_identity 源码快照；取值由
-# backend/temp/retrieval-evaluation/frozen-parameters.json 显式绑定，冻结前后核对取值与 SHA-256。
-# 取值来自 T8 开发集网格选定（alpha=0.1、两路深度=100、门槛=0.0），由冻结账本绑定核验。
-ALPHA = 0.1
+# 正式 runtime 与评测入口共用的 RRF 基线参数。
+FUSION = "rrf"
+RRF_K = 60
 BM25_DEPTH = 100
 DENSE_DEPTH = 100
 THRESHOLD: float | None = 0.0
 
-# 线上向检索实例请求的候选数：最终返回 SEARCH_LIMIT 条，另留一条用于 has_more。
-RECALL_LIMIT = SEARCH_LIMIT + 1
+# 线上向检索实例请求的候选数与阶段上限相互独立。
+RECALL_LIMIT = CANDIDATE_POOL_LIMIT
 
 
 def frozen_values() -> dict:
     return {
-        "alpha": ALPHA,
+        "fusion": FUSION,
+        "rrf_k": RRF_K,
         "bm25_depth": BM25_DEPTH,
         "dense_depth": DENSE_DEPTH,
         "threshold": THRESHOLD,
+        "candidate_pool_limit": CANDIDATE_POOL_LIMIT,
+        "final_input_limit": SEARCH_LIMIT,
         "recall_limit": RECALL_LIMIT,
     }

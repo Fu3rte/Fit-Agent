@@ -60,7 +60,7 @@
     },
     "scenarios": {
       "path": "scenarios.jsonl",
-      "sha256": "89bf48d23ba6a0e2abb42f395a3e778f9c8f187f9227cf20da115b42d7d0541a"
+      "sha256": "6ed828f8685b2ef87c33849ae5793f39c6cd0ee264f4547fcdb848555f7fc379"
     }
   },
   "assets": [
@@ -140,9 +140,9 @@
     "status": "approved",
     "reviewer": "用户",
     "reviewer_type": "user",
-    "reviewed_at": "2026-10-18T12:03:51+00:00",
-    "comment": "用户授权冻结当前 rebuild-v1 数据及完整标注范围。",
-    "content_sha256": "634fd90d4a9326efb92129afb416daf061e5cad1466b0c7e049447886e96cef1",
-    "decision_ref": "optimization/evaluation-rebuild-v1-freeze.md#用户授权"
+    "reviewed_at": "2026-10-19T12:03:15+00:00",
+    "comment": "用户授权直接修订取消检查点、相关状态断言及必要配套实现并重新审批；批准范围限于取消时点与状态断言。",
+    "content_sha256": "0b67ac8477536f5f3e6e8360adc2302808ee360e2ba39f71c9e015a34478c32b",
+    "decision_ref": "optimization/evaluation-rebuild-v1-cancellation-amendment.md#用户授权"
   }
 }

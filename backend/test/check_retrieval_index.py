@@ -50,13 +50,13 @@ def save(name: str, data: dict) -> None:
 def check_inputs(corpus: RetrievalCorpus) -> dict:
     rejected = []
     for name, values in (
-        ("alpha", [True, None, "0.5", -0.01, 1.01, float("nan"), float("inf")]),
+        ("rrf_k", [True, None, "60", 0, -1, 60.5, 16384, float("nan"), float("inf")]),
         ("limit", [True, 0, -1, 1.5, "10", 16385]),
         ("bm25_depth", [False, 0, -1, 1.2]),
         ("dense_depth", [False, 0, -1, 1.2]),
     ):
         for value in values:
-            kwargs = {"alpha": 0.5, "limit": 10, "bm25_depth": 50, "dense_depth": 50}
+            kwargs = {"rrf_k": 60, "limit": 10, "bm25_depth": 50, "dense_depth": 50}
             kwargs[name] = value
             try:
                 validate_parameters("哑铃", **kwargs)
@@ -66,7 +66,7 @@ def check_inputs(corpus: RetrievalCorpus) -> dict:
                 raise AssertionError("非法参数被接受")
     for query in ("", " \t\n", None, 123):
         try:
-            validate_parameters(query, 0.5, 10, 50, 50)
+            validate_parameters(query, 60, 10, 50, 50)
         except IndexCompatibilityError:
             rejected.append("query:" + repr(query))
         else:
@@ -211,7 +211,7 @@ async def check(corpus: RetrievalCorpus, persistence: bool = False) -> None:
     async with EmbeddingClient.from_env() as embedding, MilvusConnection.from_env() as db:
         started = time.monotonic()
         completed = False
-        report = {"mode": "persistence" if persistence else "check", "alpha": 0.5, "bm25_depth": 50, "dense_depth": 50, "limit": 10, "cases": []}
+        report = {"mode": "persistence" if persistence else "check", "fusion": "rrf", "rrf_k": 60, "bm25_depth": 50, "dense_depth": 50, "limit": 10, "cases": []}
         try:
             retriever = await HybridRetriever.open(db, corpus, embedding)
             assert embedding.usage.requests == 0
@@ -219,8 +219,9 @@ async def check(corpus: RetrievalCorpus, persistence: bool = False) -> None:
             manifest = await read_manifest(db, collection)
             report.update(collection=collection, manifest=manifest, startup_directory_encoding_requests=embedding.usage.requests)
             if persistence:
-                result = await retriever.search("杠铃卧推")
-                report["cases"].append({"query": "杠铃卧推", "hybrid": [asdict(item) for item in result]})
+                execution = await retriever.search("杠铃卧推")
+                assert execution.collection == collection
+                report["cases"].append({"query": "杠铃卧推", "hybrid": [asdict(item) for item in execution.candidates]})
                 previous = json.loads((EVIDENCE / "retrieval-results.json").read_text(encoding="utf-8"))
                 assert report["collection"] == previous["collection"] and manifest == previous["manifest"]
                 assert report["cases"][0]["hybrid"] == previous["public_search"]
@@ -262,10 +263,10 @@ async def check(corpus: RetrievalCorpus, persistence: bool = False) -> None:
                     assert all(conditions.matches(corpus.catalog.get(item.id)) for item in results)
                     if catalog_match_count == 0:
                         assert results == []
-            report["weights"] = []
-            for alpha in (0, 0.25, 0.5, 0.75, 1):
-                results = await search_vectors(db, collection, corpus.catalog, "杠铃卧推", first_vector, alpha=alpha, bm25_depth=30, dense_depth=40, limit=3)
-                report["weights"].append({"alpha": alpha, "bm25_depth": 30, "dense_depth": 40, "limit": 3, "results": [asdict(item) for item in results]})
+            report["rrf_parameters"] = []
+            for rrf_k in (1, 60, 16383):
+                results = await search_vectors(db, collection, corpus.catalog, "杠铃卧推", first_vector, rrf_k=rrf_k, bm25_depth=30, dense_depth=40, limit=3)
+                report["rrf_parameters"].append({"rrf_k": rrf_k, "bm25_depth": 30, "dense_depth": 40, "limit": 3, "results": [asdict(item) for item in results]})
                 assert len(results) <= 3
                 assert [item.score for item in results] == sorted([item.score for item in results], reverse=True)
             excluded = tuple(sorted(corpus.catalog.exercise_ids - {"0001"}))
@@ -273,7 +274,7 @@ async def check(corpus: RetrievalCorpus, persistence: bool = False) -> None:
             report["leading_zero"] = [asdict(item) for item in leading_zero]
             assert [item.id for item in leading_zero] == ["0001"]
             before = embedding.usage.requests
-            for kwargs in ({"alpha": float("nan")}, {"limit": 0}, {"conditions": SearchConditions(equipment='dumbbell" or id != "')}, {"conditions": SearchConditions(excluded_ids=("0000",))}):
+            for kwargs in ({"rrf_k": float("nan")}, {"limit": 0}, {"conditions": SearchConditions(equipment='dumbbell" or id != "')}, {"conditions": SearchConditions(excluded_ids=("0000",))}):
                 try:
                     await retriever.search("杠铃卧推", **kwargs)
                 except IndexCompatibilityError:
@@ -282,9 +283,9 @@ async def check(corpus: RetrievalCorpus, persistence: bool = False) -> None:
                     raise AssertionError("非法公开输入被接受")
             assert embedding.usage.requests == before
             report["invalid_public_query_encoding_requests"] = 0
-            report["public_search"] = [asdict(item) for item in await retriever.search("杠铃卧推")]
+            report["public_search"] = [asdict(item) for item in (await retriever.search("杠铃卧推")).candidates]
             injection = '哑铃\" or id != \"'
-            report["query_injection_text"] = [asdict(item) for item in await retriever.search(injection, conditions=SearchConditions(equipment="dumbbell"))]
+            report["query_injection_text"] = [asdict(item) for item in (await retriever.search(injection, conditions=SearchConditions(equipment="dumbbell"))).candidates]
             assert all(item["equipment"] == "dumbbell" for item in report["query_injection_text"])
             completed = True
         finally:

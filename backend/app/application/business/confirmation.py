@@ -114,15 +114,18 @@ class ConfirmationService:
         self, session_id: str, request: SaveConfirmationRequest, signal: Event | None = None,
         *, trace_store: TraceStore | None = None,
         contains: Callable[[object], bool] | None = None,
+        now: int | None = None,
     ) -> SaveConfirmationOperation:
         check_cancelled(signal)
-        operation, accepted = await self._accept(session_id, request, _now_ms())
+        effective_now = _now_ms() if now is None else now
+        operation, accepted = await self._accept(session_id, request, effective_now)
         if not accepted:
             # 同键复用（含处理中、已保存、已失败）与已保存快照重复确认：返回原操作对象，
             # 本次请求不是执行负责人，不得启动保存、改写状态或覆盖原执行结果。
             return operation
         return await self._execute(
-            operation, request, signal, trace_store=trace_store, contains=contains
+            operation, request, signal, trace_store=trace_store, contains=contains,
+            now=effective_now,
         )
 
     async def get(self, session_id: str, operation_id: str) -> SaveConfirmationOperation:
@@ -265,10 +268,11 @@ class ConfirmationService:
         self, operation: SaveConfirmationOperation, request: SaveConfirmationRequest,
         signal: Event | None, *, trace_store: TraceStore | None = None,
         contains: Callable[[object], bool] | None = None,
+        now: int | None = None,
     ) -> SaveConfirmationOperation:
         if trace_store is None:
             # 未提供观测依赖：沿用无记录语义，独立调用与测试路径行为不变。
-            return await self._run_save(operation, request, signal)
+            return await self._run_save(operation, request, signal, now=now)
         # 根身份取实际受理操作：session_id 与 operation_id 来自已受理操作，run_id 为空。
         # 受理起点在受理事务返回之后，根只覆盖已受理后的执行段。
         trace = RunTrace(
@@ -281,7 +285,7 @@ class ConfirmationService:
         )
 
         async def settle(root: TraceSpan) -> SaveConfirmationOperation:
-            result = await self._run_save(operation, request, signal)
+            result = await self._run_save(operation, request, signal, now=now)
             if result.status == "saved":
                 root.set_status("completed")
             else:
@@ -301,10 +305,10 @@ class ConfirmationService:
 
     async def _run_save(
         self, operation: SaveConfirmationOperation, request: SaveConfirmationRequest,
-        signal: Event | None,
+        signal: Event | None, *, now: int | None = None,
     ) -> SaveConfirmationOperation:
         snapshot, _ = await self._load(request.business_kind, request.proposal_id)
-        now = _now_ms()
+        now = _now_ms() if now is None else now
         context = BusinessContext(
             timezone=BUSINESS_TIMEZONE,
             business_date=business_date(now),

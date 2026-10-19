@@ -340,17 +340,22 @@ class EvaluationDataset:
         return {query_id: tuple(rows) for query_id, rows in grouped.items()}
 
     def scoring_queries(self) -> list[dict]:
-        positives: dict[str, list[dict]] = {}
+        # 评分输入只包含 grade>=1 的正例；grade=0 的已审阅负例仅用于未审阅门禁。
+        labels: dict[str, list[dict]] = {}
         for qrel in self.qrels:
             if qrel["grade"] >= 1:
-                positives.setdefault(qrel["query_id"], []).append({"id": qrel["corpus_id"], "grade": qrel["grade"]})
+                labels.setdefault(qrel["query_id"], []).append(
+                    {"id": qrel["corpus_id"], "grade": qrel["grade"]}
+                )
         return [
             {
                 "id": query["query_id"],
+                "scenario_id": query["scenario_id"],
+                "purpose": query["purpose"],
                 "tags": list(query["tags"]),
                 "family": query["family"],
                 "split": self.version,
-                "labels": positives.get(query["query_id"], []),
+                "labels": labels.get(query["query_id"], []),
                 "expect_empty": query["expect_empty"],
             }
             for query in self.queries
@@ -543,6 +548,7 @@ def _validate_assertion_timing(
     event_ids: dict[str, int],
     event_types: dict[str, str],
     event_targets: dict[str, dict | None],
+    event_sources: dict[str, str | None],
     where: str,
 ) -> None:
     kind = assertion["kind"]
@@ -574,8 +580,46 @@ def _validate_assertion_timing(
     if kind == "state_transition":
         if assertion["to_status"] == SAVED_STATUS and event_types[event_id] != "confirm":
             _fail("保存状态迁移必须发生在确认事件检查点", event_where)
-        if assertion["to_status"] == INVALIDATED_STATUS and event_types[event_id] != "cancel":
-            _fail("失效状态迁移必须发生在取消事件检查点", event_where)
+        if assertion["to_status"] == INVALIDATED_STATUS:
+            event_type = event_types[event_id]
+            if event_type == "cancel":
+                target = event_targets[event_id]
+                if (
+                    target is None
+                    or target["business_kind"] != assertion["business_kind"]
+                ):
+                    _fail("失效状态迁移与取消事件目标不一致", event_where)
+            elif event_type == "message":
+                current = event_ids[event_id]
+                candidates = []
+                for cancel_id, target in event_targets.items():
+                    if event_types.get(cancel_id) != "cancel" or target is None:
+                        continue
+                    if target["business_kind"] != assertion["business_kind"]:
+                        continue
+                    if event_ids[cancel_id] <= current:
+                        continue
+                    source = event_sources.get(cancel_id)
+                    if (
+                        source not in event_ids
+                        or event_types.get(source) != "message"
+                        or event_ids[source] >= current
+                    ):
+                        continue
+                    expected = proposal_ref(target["business_kind"], source)
+                    if target["proposal_ref"] != expected:
+                        _fail("取消事件目标与触发提案不一致", event_where)
+                    candidates.append(cancel_id)
+                if len(candidates) != 1:
+                    _fail(
+                        "消息检查点的失效状态迁移必须唯一对应后续取消事件目标",
+                        event_where,
+                    )
+            else:
+                _fail(
+                    "失效状态迁移必须发生在消息或取消事件检查点",
+                    event_where,
+                )
 
 
 def _validate_scenarios(rows: list[dict], assets: dict[str, Path]) -> None:
@@ -618,6 +662,10 @@ def _validate_scenarios(rows: list[dict], assets: dict[str, Path]) -> None:
             event_ids[event_id] = order
         event_types = {event["event_id"]: event["type"] for event in scenario["events"]}
         event_targets = {event["event_id"]: event["target"] for event in scenario["events"]}
+        event_sources = {
+            event["event_id"]: event["source_event_id"]
+            for event in scenario["events"]
+        }
         for event in scenario["events"]:
             event_where = f"{where}:event:{event['event_id']}"
             for asset_id in event["attachments"]:
@@ -710,7 +758,14 @@ def _validate_scenarios(rows: list[dict], assets: dict[str, Path]) -> None:
                         "no_saved_state 与检查点已保存记录矛盾",
                         f"{where}:assertion:{assertion['checkpoint_id']}",
                     )
-            _validate_assertion_timing(assertion, event_ids, event_types, event_targets, where)
+            _validate_assertion_timing(
+                assertion,
+                event_ids,
+                event_types,
+                event_targets,
+                event_sources,
+                where,
+            )
         metric_rows = {}
         for row in scenario["metric_applicability"]:
             register(row["checkpoint_id"], row["event_id"], "metric_applicability")

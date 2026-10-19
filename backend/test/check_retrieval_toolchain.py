@@ -82,7 +82,7 @@ async def toolchain_cases(root: Path) -> dict:
         )
         assert first.is_error is False, body(first)
         first_body = body(first)
-        assert set(first_body) == {"items", "has_more", "remaining_ids"}
+        assert set(first_body) == {"items", "has_more"}
         assert first_body["items"]
         assert all(set(item) == {"id", "name", "equipment", "target", "matches"} for item in first_body["items"])
         assert len(json.dumps(first_body, ensure_ascii=False, allow_nan=False)) <= 4000
