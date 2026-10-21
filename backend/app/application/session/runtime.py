@@ -1,6 +1,7 @@
 import asyncio
 import logging
 from collections.abc import Callable
+from contextvars import ContextVar
 from math import ceil
 from threading import Event, Lock
 from time import time
@@ -24,10 +25,47 @@ from app.application.session.steering import SteeringCoordinator
 OUTPUT_TOO_LARGE_MESSAGE = "输出内容超过单事件上限，已结束本次运行。"
 
 logger = logging.getLogger(__name__)
+# 生产运行容量沿用全局单槽；评测场景通过独立作用域隔离容量与故障封闭状态。
 active = Lock()
+_run_scope: ContextVar[str] = ContextVar("fit_agent_run_scope", default="")
+_runtime_lock = Lock()
+_run_slots: dict[str, bool] = {}
+_fault_states: dict[str, bool] = {}
 runs_lock = Lock()
 accepting_runs = Event()
 coordination: set[asyncio.Task] = set()
+
+
+def current_run_scope() -> str:
+    return _run_scope.get() or "global"
+
+
+def set_run_scope(scope: str):
+    return _run_scope.set(scope)
+
+
+def reset_run_scope(token) -> None:
+    _run_scope.reset(token)
+
+
+def acquire_run_slot(scope: str | None = None) -> bool:
+    key = scope or current_run_scope()
+    if key == "global":
+        return active.acquire(blocking=False)
+    with _runtime_lock:
+        if _run_slots.get(key, False):
+            return False
+        _run_slots[key] = True
+        return True
+
+
+def release_run_slot(scope: str | None = None) -> None:
+    key = scope or current_run_scope()
+    if key == "global":
+        active.release()
+        return
+    with _runtime_lock:
+        _run_slots.pop(key, None)
 
 
 def track(task: asyncio.Task) -> None:
@@ -83,25 +121,25 @@ class SessionRunRateLimiter:
 
 
 session_run_limits = SessionRunRateLimiter()
-_fault_lock = Lock()
-_fault_closed = False
 
 
-def enter_fault_closure() -> None:
-    global _fault_closed
-    with _fault_lock:
-        _fault_closed = True
+def _state_key(scope: str | None) -> str:
+    return scope or current_run_scope()
 
 
-def is_fault_closed() -> bool:
-    with _fault_lock:
-        return _fault_closed
+def enter_fault_closure(scope: str | None = None) -> None:
+    with _runtime_lock:
+        _fault_states[_state_key(scope)] = True
 
 
-def reset_fault_closure() -> None:
-    global _fault_closed
-    with _fault_lock:
-        _fault_closed = False
+def is_fault_closed(scope: str | None = None) -> bool:
+    with _runtime_lock:
+        return _fault_states.get(_state_key(scope), False)
+
+
+def reset_fault_closure(scope: str | None = None) -> None:
+    with _runtime_lock:
+        _fault_states.pop(_state_key(scope), None)
 
 
 class RunOutput(Protocol):
@@ -142,6 +180,8 @@ class RunState:
         self.closed_without_terminal = False
         self.secrets: tuple[str, ...] = ()
         self.origin = "send"
+        # 运行容量与故障封闭的执行作用域；生产请求保持 global。
+        self.run_scope = "global"
         # 显式装配的调用观测工厂：默认 None 时沿用生产 CacheObserver。
         self.observation_factory: Callable[[], object] | None = None
         # 故障收尾保留真实在途句柄，超时不得作为回滚证据。

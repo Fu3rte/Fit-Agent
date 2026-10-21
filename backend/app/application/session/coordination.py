@@ -32,8 +32,8 @@ from app.application.session.runs import SessionRuns
 from app.application.session.runtime import (
     OUTPUT_TOO_LARGE_MESSAGE,
     RunState,
-    active,
     enter_fault_closure,
+    release_run_slot,
     runs,
     runs_lock,
 )
@@ -64,7 +64,7 @@ def retire(state: RunState) -> None:
     with runs_lock:
         removed = runs.pop(state.run_id, None)
     if removed is not None:
-        active.release()
+        release_run_slot(state.run_scope)
 
 
 def publish_terminal(state: RunState, run, stop_reason: str | None) -> None:
@@ -211,7 +211,7 @@ async def _fault_close(
     _schedule_diagnostic(state, runs, session_id, run_id, reason)
     root.set_status("failed", reason)
     coordinator.close(run_id)
-    enter_fault_closure()
+    enter_fault_closure(state.run_scope)
     if work is not None and not work.done():
         work.add_done_callback(_consume_future)
     logger.error("运行进入故障封闭（%s/%s）", run_id, reason)
@@ -365,7 +365,7 @@ async def coordinate(
         state.mark_fault("terminal_persist_failed", None, state.tool_tracker.pending())
         _schedule_diagnostic(state, runs, session_id, run.id, "terminal_persist_failed")
         coordinator.close(str(run.id))
-        enter_fault_closure()
+        enter_fault_closure(state.run_scope)
         await trace.finish(store)
         raise
     await trace.finish(store)

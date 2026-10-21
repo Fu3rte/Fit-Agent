@@ -19,9 +19,11 @@ from app.application.session.runs import SessionRuns
 from app.application.session.runtime import (
     RunState,
     accepting_runs,
-    active,
+    acquire_run_slot,
+    current_run_scope,
     is_fault_closed,
     operation_lock,
+    release_run_slot,
     runs,
     runs_lock,
     session_gate,
@@ -93,14 +95,15 @@ async def admit_run(
                 "rate_limited", session_run_limits.retry_after(session_id),
             )
         model, tools, secrets, disconnected = await prepare()
-        if not active.acquire(blocking=False):
+        run_scope = current_run_scope()
+        if not acquire_run_slot(run_scope):
             raise AdmissionUnavailable("capacity_exceeded")
         slot_owned = True
         accepted_run = None
         try:
             outcome = await accept(service, tools, secrets)
             if not outcome.created:
-                active.release()
+                release_run_slot(run_scope)
                 slot_owned = False
                 return AdmissionResult(outcome)
             accepted_run = run = outcome.run
@@ -112,6 +115,7 @@ async def admit_run(
                 accepted_at=time_ns() // 1_000_000, accepted_perf=perf_counter(),
             )
             state = create_state(UUID(session_id), run_id=UUID(run.id))
+            state.run_scope = run_scope
             state.secrets = secrets
             state.operation_id = operation_id
             state.origin = origin
@@ -143,7 +147,7 @@ async def admit_run(
             SessionMismatch, SessionNotFound,
         ):
             if slot_owned:
-                active.release()
+                release_run_slot(run_scope)
             raise
         except BaseException:
             if slot_owned:
@@ -156,5 +160,5 @@ async def admit_run(
                                 error_message="执行失败，请重新发起请求。",
                             )
                 finally:
-                    active.release()
+                    release_run_slot(run_scope)
             raise
