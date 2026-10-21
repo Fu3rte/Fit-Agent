@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
+import { Eye, EyeOff } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
@@ -32,6 +33,7 @@ export function ProviderDialog({ onClose }: { onClose: () => void }) {
   const provider = useQuery(providerQueryOptions());
 
   const [form, setForm] = useState(() => providerFormState(provider.data));
+  const [showApiKey, setShowApiKey] = useState(false);
   const patch = (change: Partial<typeof form>) =>
     setForm((current) => ({ ...current, ...change }));
 
@@ -183,12 +185,24 @@ export function ProviderDialog({ onClose }: { onClose: () => void }) {
               >
                 API Key
               </label>
-              <Input
-                id="provider-api-key"
-                type="text"
-                value={form.api_key}
-                onChange={(event) => patch({ api_key: event.target.value })}
-              />
+              <div className="relative">
+                <Input
+                  id="provider-api-key"
+                  type={showApiKey ? "text" : "password"}
+                  className="pr-10"
+                  value={form.api_key}
+                  onChange={(event) => patch({ api_key: event.target.value })}
+                />
+                <button
+                  type="button"
+                  className="absolute inset-y-0 right-0 flex w-10 items-center justify-center rounded-r-md text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
+                  aria-label={showApiKey ? "隐藏 API Key" : "显示 API Key"}
+                  aria-pressed={showApiKey}
+                  onClick={() => setShowApiKey((current) => !current)}
+                >
+                  {showApiKey ? <EyeOff size={16} /> : <Eye size={16} />}
+                </button>
+              </div>
             </div>
 
             <div className="flex flex-wrap items-center justify-end gap-3">
