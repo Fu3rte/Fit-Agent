@@ -13,11 +13,11 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from threading import Lock
-from typing import Any
+from typing import Any, Literal, Self
 from uuid import UUID, uuid4, uuid5
 
 from dotenv import load_dotenv
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.agent.prompts import build_system_prompt
 from app.agent.tools.business import business_tool_declarations
@@ -46,6 +46,8 @@ from app.application.session.runtime import (
     RunState,
     accepting_runs,
     reset_fault_closure,
+    reset_run_scope,
+    set_run_scope,
 )
 from app.application.session.service import SessionService
 from app.application.session.steering import SteeringCoordinator
@@ -75,6 +77,7 @@ from evaluation.contracts import (
     BusinessProjection,
     CheckpointResult,
     ContextItem,
+    DatasetIdentity,
     EvidenceLink,
     GenerationCheckpoint,
     GenerationReference,
@@ -82,6 +85,8 @@ from evaluation.contracts import (
     MetricOutcome,
     ModelInputContext,
     ProposalBinding,
+    RerankEvidence,
+    Sha256,
     UserInputEvidence,
 )
 from evaluation.dataset import (
@@ -103,6 +108,7 @@ from evaluation.deterministic_assertions import (
     ToolResultEvidence,
     WorkoutSnapshotEvidence,
     evaluate_checkpoint,
+    parse_assertion,
 )
 from evaluation.generation_scoring import (
     GenerationMetricEvidence,
@@ -142,7 +148,7 @@ from evaluation.scenario_evidence import (
     search_evidence_from_tool,
     sha256_text,
     structured_answer,
-    tool_content_by_visible,
+    tool_nodes_by_visible,
 )
 
 SCENARIO_ROOT = BACKEND / "temp" / "evaluation-scenarios"
@@ -175,10 +181,19 @@ class ScenarioBlocked(ScenarioError):
         self.observed_checkpoints = 0
         self.context_gaps: list[str] = []
         self.artifact: ScenarioArtifact | None = None
+        self.execution: "ScenarioExecution | None" = None
         super().__init__(f"{scenario_id}/{event_id or '-'}: {reason}")
 
 
 class ScenarioModelUnavailable(ScenarioBlocked):
+    pass
+
+
+class ExecutionIdentityError(RuntimeError):
+    pass
+
+
+class ScoringResultExists(RuntimeError):
     pass
 
 
@@ -296,6 +311,18 @@ class SearchStageRecord(ArtifactModel):
     response_json: dict[str, Any]
     scores: list[float]
     threshold: float | None
+    # 历史记录缺少实验字段时按显式 RRF baseline 解释；新记录保存真实重排证据。
+    experiment: Literal["rrf_baseline", "rerank"] = "rrf_baseline"
+    rerank: RerankEvidence | None = None
+
+    @model_validator(mode="after")
+    def validate_experiment(self) -> Self:
+        if self.experiment == "rerank":
+            if self.rerank is None or self.rerank.mode != "rerank":
+                raise ValueError("重排实验记录必须携带重排证据")
+        elif self.rerank is not None:
+            raise ValueError("RRF baseline 记录不得携带重排证据")
+        return self
 
 
 class ScenarioArtifact(ArtifactModel):
@@ -313,6 +340,261 @@ class ScenarioArtifact(ArtifactModel):
     context_gaps: list[ContextGap] = Field(default_factory=list)
     runner_error: str | None = None
     blocked: str | None = None
+
+
+EXECUTION_SCHEMA = "fit-agent-scenario-execution-1"
+EXECUTION_FILENAME = "execution.json"
+
+
+def _require_execution_link(
+    link: EvidenceLink,
+    *,
+    run_id: str,
+    scenario_id: str,
+    event_id: str,
+    checkpoint_id: str,
+) -> None:
+    actual = (
+        link.run_id,
+        link.scenario_id,
+        link.event_id,
+        link.checkpoint_id,
+    )
+    if actual != (run_id, scenario_id, event_id, checkpoint_id):
+        raise ValueError("证据身份与执行结果不一致")
+
+
+def _require_assertion_links(
+    evidence: AssertionEvidence,
+    *,
+    run_id: str,
+    scenario_id: str,
+    event_id: str,
+    checkpoint_id: str,
+) -> None:
+    for group in (
+        evidence.profile_snapshots,
+        evidence.plan_snapshots,
+        evidence.workout_snapshots,
+        evidence.display_contents,
+        evidence.business_contents,
+        evidence.context_evidence,
+        evidence.tool_results,
+        evidence.rankings,
+        evidence.cancel_evidence,
+    ):
+        for item in group:
+            _require_execution_link(
+                item.checkpoint,
+                run_id=run_id,
+                scenario_id=scenario_id,
+                event_id=event_id,
+                checkpoint_id=checkpoint_id,
+            )
+    if evidence.parameter_target is not None:
+        _require_execution_link(
+            evidence.parameter_target.checkpoint,
+            run_id=run_id,
+            scenario_id=scenario_id,
+            event_id=event_id,
+            checkpoint_id=checkpoint_id,
+        )
+
+
+class AssertionCheckpointEvidence(ArtifactModel):
+    checkpoint_id: str
+    event_id: str
+    assertions: list[dict[str, Any]]
+    evidence: AssertionEvidence | None = None
+    binding_error: str | None = None
+    runner_error: str | None = None
+
+    @model_validator(mode="after")
+    def validate_entry(self) -> Self:
+        if not self.assertions:
+            raise ValueError("断言检查点必须保留断言定义")
+        for definition in self.assertions:
+            parsed = parse_assertion(definition)
+            if (
+                parsed.checkpoint_id != self.checkpoint_id
+                or parsed.event_id != self.event_id
+            ):
+                raise ValueError("断言定义与执行证据检查点不一致")
+        if self.binding_error is not None and self.runner_error is not None:
+            raise ValueError("断言检查点不能同时携带绑定错误与运行错误")
+        if (
+            self.evidence is None
+            and self.binding_error is None
+            and self.runner_error is None
+        ):
+            raise ValueError("断言检查点缺少证据或错误依据")
+        return self
+
+
+class GenerationCheckpointEvidence(ArtifactModel):
+    checkpoint_id: str
+    event_id: str
+    applicability: list[MetricApplicability]
+    checkpoint: GenerationCheckpoint | None = None
+    request_boundary: RequestBoundaryEvidence | None = None
+    runner_error: str | None = None
+
+    @model_validator(mode="after")
+    def validate_entry(self) -> Self:
+        metrics = sorted(row.metric for row in self.applicability)
+        if metrics != sorted(GENERATION_METRICS):
+            raise ValueError("生成检查点必须逐项声明 Faithfulness 与 FactualCorrectness")
+        if self.checkpoint is None:
+            if self.request_boundary is not None:
+                raise ValueError("缺失生成检查点时不得携带请求边界")
+            if self.runner_error is None and any(
+                row.applicable for row in self.applicability
+            ):
+                raise ValueError("缺失生成检查点时适用指标必须提供错误依据")
+            return self
+        if self.runner_error is not None:
+            raise ValueError("已构造生成检查点时不得携带执行错误")
+        if self.request_boundary is None:
+            raise ValueError("生成检查点必须携带请求边界")
+        if self.checkpoint.checkpoint.checkpoint_id != self.checkpoint_id or (
+            self.checkpoint.checkpoint.event_id != self.event_id
+        ):
+            raise ValueError("生成检查点身份与执行证据不一致")
+        expected = {
+            (row.metric, row.applicable, row.reason)
+            for row in self.checkpoint.applicability
+        }
+        actual = {
+            (row.metric, row.applicable, row.reason)
+            for row in self.applicability
+        }
+        if actual != expected:
+            raise ValueError("生成检查点适用性与冻结证据不一致")
+        return self
+
+
+class ScenarioExecution(ArtifactModel):
+    schema_version: str = EXECUTION_SCHEMA
+    run_id: str
+    scenario_id: str
+    dataset: DatasetIdentity
+    scenario_sha256: Sha256
+    execution_sha256: Sha256
+    status: str
+    error: str | None = None
+    session_ids: list[str]
+    initial_state_sha256: Sha256
+    initial_projection: BusinessProjection | None = None
+    expected_event_ids: list[str]
+    expected_checkpoint_ids: list[str]
+    events: list[EventCapture]
+    assertion_checkpoints: list[AssertionCheckpointEvidence] = Field(
+        default_factory=list
+    )
+    generation_checkpoints: list[GenerationCheckpointEvidence] = Field(
+        default_factory=list
+    )
+    retrieval: list[SearchStageRecord] = Field(default_factory=list)
+    proposal_bindings: dict[str, ProposalBinding]
+    generation_metrics: dict[str, list[str]] = Field(default_factory=dict)
+    cancel_evidence: list[CancelEvidence] = Field(default_factory=list)
+    context_gaps: list[ContextGap] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def validate_execution(self) -> Self:
+        if self.schema_version != EXECUTION_SCHEMA:
+            raise ValueError("执行结果版本不受支持")
+        if self.status not in {"completed", "blocked", "failed"}:
+            raise ValueError("执行状态必须为 completed、blocked 或 failed")
+        if self.status == "completed" and self.error is not None:
+            raise ValueError("完成执行不得携带错误依据")
+        if self.status != "completed" and self.error is None:
+            raise ValueError("失败或阻断执行必须保留错误依据")
+        if self.status == "completed" and not self.session_ids:
+            raise ValueError("完成执行必须保留会话标识")
+        if self.status == "completed" and self.initial_projection is None:
+            raise ValueError("完成执行必须保留初始状态")
+        observed_events = [event.event_id for event in self.events]
+        if observed_events != self.expected_event_ids[: len(observed_events)]:
+            raise ValueError("执行事件顺序与冻结计划不一致")
+        if self.status == "completed" and observed_events != self.expected_event_ids:
+            raise ValueError("完成执行的事件覆盖不完整")
+        events = {event.event_id: event for event in self.events}
+        if len(events) != len(self.events):
+            raise ValueError("执行结果事件 ID 不能重复")
+        for event in self.events:
+            if event.scenario_id != self.scenario_id:
+                raise ValueError("事件 scenario_id 与执行结果不一致")
+        assertion_keys: set[tuple[str, str]] = set()
+        for entry in self.assertion_checkpoints:
+            key = (entry.event_id, entry.checkpoint_id)
+            if key in assertion_keys:
+                raise ValueError("断言检查点身份不能重复")
+            assertion_keys.add(key)
+            if entry.event_id not in events:
+                raise ValueError("断言检查点事件不在执行结果中")
+            if entry.evidence is not None:
+                _require_execution_link(
+                    entry.evidence.checkpoint,
+                    run_id=self.run_id,
+                    scenario_id=self.scenario_id,
+                    event_id=entry.event_id,
+                    checkpoint_id=entry.checkpoint_id,
+                )
+                _require_assertion_links(
+                    entry.evidence,
+                    run_id=self.run_id,
+                    scenario_id=self.scenario_id,
+                    event_id=entry.event_id,
+                    checkpoint_id=entry.checkpoint_id,
+                )
+        generation_ids: set[str] = set()
+        for entry in self.generation_checkpoints:
+            if entry.checkpoint_id in generation_ids:
+                raise ValueError("生成检查点身份不能重复")
+            generation_ids.add(entry.checkpoint_id)
+            event = events.get(entry.event_id)
+            if event is None:
+                raise ValueError("生成检查点事件不在执行结果中")
+            if entry.checkpoint is not None:
+                _require_execution_link(
+                    entry.checkpoint.checkpoint,
+                    run_id=self.run_id,
+                    scenario_id=self.scenario_id,
+                    event_id=entry.event_id,
+                    checkpoint_id=entry.checkpoint_id,
+                )
+                boundary = entry.request_boundary
+                if boundary is None or (
+                    boundary.session_id != event.session_id
+                    or boundary.run_id != event.run_id
+                    or boundary.request_entry_id != event.request_entry_id
+                ):
+                    raise ValueError("请求边界与执行事件不一致")
+        if not generation_ids <= set(self.generation_metrics):
+            raise ValueError("生成检查点不在冻结指标覆盖中")
+        if self.status == "completed" and set(self.generation_metrics) != generation_ids:
+            raise ValueError("完成执行的生成指标覆盖不完整")
+        for entry in self.generation_checkpoints:
+            expected = [row.metric for row in entry.applicability]
+            if sorted(self.generation_metrics[entry.checkpoint_id]) != sorted(expected):
+                raise ValueError("生成指标与检查点适用性不一致")
+        covered = assertion_keys | {
+            (entry.event_id, entry.checkpoint_id)
+            for entry in self.generation_checkpoints
+        }
+        covered_ids = {checkpoint_id for _, checkpoint_id in covered}
+        if not covered_ids <= set(self.expected_checkpoint_ids):
+            raise ValueError("执行检查点不在冻结计划中")
+        if (
+            self.status == "completed"
+            and covered_ids != set(self.expected_checkpoint_ids)
+        ):
+            raise ValueError("完成执行的检查点覆盖不完整")
+        for record in self.retrieval:
+            if record.run_id != self.run_id or record.scenario_id != self.scenario_id:
+                raise ValueError("检索记录身份与执行结果不一致")
+        return self
 
 
 class CoverageArtifact(ArtifactModel):
@@ -396,6 +678,7 @@ class RuntimeHandle:
     executor: ThreadPoolExecutor | None = None
     steering: SteeringCoordinator | None = None
     call_recorder: EvaluationCallRecorder | None = None
+    scope_token: Any = None
     # 检索证据跨重启累积：序号按场景单调递增，事件绑定由 run_scenario 逐事件设置。
     event_id: str | None = None
     search_records: list[SearchStageRecord] = field(default_factory=list)
@@ -406,6 +689,10 @@ class RuntimeHandle:
         return self.root / "fit-agent.db"
 
     async def open(self) -> None:
+        # 场景执行使用独立容量与故障封闭作用域，避免并发场景互相重置或占用生产单槽。
+        self.scope_token = set_run_scope(
+            f"evaluation:{self.evaluation_run_id}:{self.scenario_id}"
+        )
         reset_fault_closure()
         self.database = await open_database(self.db_path)
         self.session_repository = SqliteSessionRepository(self.database)
@@ -463,6 +750,10 @@ class RuntimeHandle:
         self.executor = None
         self.steering = None
         self.call_recorder = None
+        if self.scope_token is not None:
+            reset_fault_closure()
+            reset_run_scope(self.scope_token)
+            self.scope_token = None
 
     async def projection(self, session_ids: Sequence[str]) -> BusinessProjection:
         return await read_business_projection_with_cancellations(
@@ -474,6 +765,39 @@ class RuntimeHandle:
             raise RuntimeError(
                 "检索观测缺少事件或工具调用身份: "
                 f"event={self.event_id} tool_call_id={observation.tool_call_id}"
+            )
+        result = observation.stage.rerank
+        identity = observation.stage.rerank_identity
+        if result is None:
+            experiment = "rrf_baseline"
+            rerank_evidence = None
+        else:
+            if identity is None:
+                raise RuntimeError(
+                    f"检索观测缺少重排身份: {observation.tool_call_id}"
+                )
+            experiment = "rerank"
+            rerank_evidence = RerankEvidence(
+                mode="rerank",
+                identity={
+                    "model": identity.model,
+                    "endpoint": identity.endpoint,
+                    "text_version": identity.text_version,
+                },
+                scored=[
+                    {
+                        "id": row.id,
+                        "rerank_score": row.rerank_score,
+                        "rrf_rank": row.rrf_rank,
+                    }
+                    for row in result.scored
+                ],
+                usage={
+                    "requests": result.usage.requests,
+                    "prompt_tokens": result.usage.prompt_tokens,
+                    "total_tokens": result.usage.total_tokens,
+                },
+                request_id=result.request_id,
             )
         record = SearchStageRecord(
             sequence=len(self.search_records),
@@ -490,6 +814,8 @@ class RuntimeHandle:
             response_json=observation.stage.response.model_dump(mode="json"),
             scores=[float(item.score) for item in observation.stage.candidate_pool],
             threshold=None if THRESHOLD is None else float(THRESHOLD),
+            experiment=experiment,
+            rerank=rerank_evidence,
         )
         with self.search_lock:
             self.search_records.append(record)
@@ -509,6 +835,182 @@ def _append_jsonl(path: Path, payload: Any) -> None:
         handle.write(
             json.dumps(payload, ensure_ascii=False, allow_nan=False) + "\n"
         )
+
+
+def _write_json_rows(path: Path, rows: Sequence[Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    text = "".join(
+        json.dumps(
+            row if isinstance(row, dict) else row.model_dump(mode="json"),
+            ensure_ascii=False,
+            allow_nan=False,
+        )
+        + "\n"
+        for row in rows
+    )
+    temporary = path.with_name(f"{path.name}.tmp-{os.getpid()}")
+    temporary.write_text(text, encoding="utf-8")
+    os.replace(temporary, path)
+
+
+def _context_rows(captures: Sequence[EventCapture]) -> list[dict[str, Any]]:
+    return [
+        {
+            "event_id": capture.event_id,
+            "tool_identity_map": capture.tool_identity_map,
+            "context_gaps": [
+                gap.model_dump(mode="json") for gap in capture.context_gaps
+            ],
+        }
+        for capture in captures
+    ]
+
+
+def _write_event_evidence(
+    scenario_root: Path, captures: Sequence[EventCapture]
+) -> None:
+    if not captures:
+        return
+    _write_json_rows(
+        scenario_root / "events.jsonl",
+        [capture.model_dump(mode="json") for capture in captures],
+    )
+    _write_json_rows(
+        scenario_root / "context.jsonl", _context_rows(captures)
+    )
+
+
+def _frozen_scenario_payload(scenario: dict) -> dict:
+    return {
+        key: value for key, value in scenario.items() if not key.startswith("_")
+    }
+
+
+def frozen_scenario_sha256(scenario: dict) -> str:
+    return sha256_text(canonical_json(_frozen_scenario_payload(scenario)))
+
+
+def _dataset_identity(dataset: EvaluationDataset) -> DatasetIdentity:
+    return DatasetIdentity(
+        version=dataset.version,
+        manifest_sha256=dataset.manifest_sha256,
+        content_sha256=dataset.content_sha256,
+        corpus_sha256=dataset.corpus_sha256,
+    )
+
+
+def _execution_digest(execution: ScenarioExecution) -> str:
+    payload = execution.model_dump(mode="json")
+    payload.pop("execution_sha256", None)
+    return sha256_text(canonical_json(payload))
+
+
+def _seal_execution(execution: ScenarioExecution) -> ScenarioExecution:
+    return execution.model_copy(update={"execution_sha256": _execution_digest(execution)})
+
+
+def verify_execution_identity(
+    execution: ScenarioExecution,
+    *,
+    expected_run_id: str | None = None,
+    expected_scenario_id: str | None = None,
+    expected_dataset: DatasetIdentity | None = None,
+    expected_scenario_sha256: str | None = None,
+) -> ScenarioExecution:
+    if _execution_digest(execution) != execution.execution_sha256:
+        raise ExecutionIdentityError("执行结果摘要不一致")
+    if expected_run_id is not None and execution.run_id != expected_run_id:
+        raise ExecutionIdentityError("执行结果 run_id 不一致")
+    if (
+        expected_scenario_id is not None
+        and execution.scenario_id != expected_scenario_id
+    ):
+        raise ExecutionIdentityError("执行结果 scenario_id 不一致")
+    if expected_dataset is not None and execution.dataset != expected_dataset:
+        raise ExecutionIdentityError("执行结果数据身份不一致")
+    if (
+        expected_scenario_sha256 is not None
+        and execution.scenario_sha256 != expected_scenario_sha256
+    ):
+        raise ExecutionIdentityError("执行结果场景身份不一致")
+    return execution
+
+
+def load_execution(
+    path: Path,
+    *,
+    expected_run_id: str | None = None,
+    expected_scenario_id: str | None = None,
+    expected_dataset: DatasetIdentity | None = None,
+    expected_scenario_sha256: str | None = None,
+) -> ScenarioExecution:
+    path = Path(path)
+    if path.is_dir():
+        path = path / EXECUTION_FILENAME
+    try:
+        execution = ScenarioExecution.model_validate_json(
+            path.read_text(encoding="utf-8")
+        )
+    except Exception as error:
+        raise ExecutionIdentityError(
+            f"执行结果无法解析: {type(error).__name__}: {error}"
+        ) from error
+    return verify_execution_identity(
+        execution,
+        expected_run_id=expected_run_id,
+        expected_scenario_id=expected_scenario_id,
+        expected_dataset=expected_dataset,
+        expected_scenario_sha256=expected_scenario_sha256,
+    )
+
+
+def write_scoring_result(
+    execution: ScenarioExecution,
+    artifact: ScenarioArtifact,
+    *,
+    path: Path,
+) -> None:
+    verify_execution_identity(execution)
+    if (
+        artifact.run_id != execution.run_id
+        or artifact.scenario_id != execution.scenario_id
+        or artifact.session_ids != execution.session_ids
+        or [event.event_id for event in artifact.events]
+        != [event.event_id for event in execution.events]
+    ):
+        raise ExecutionIdentityError("评分结果身份与执行结果不一致")
+    path = Path(path)
+    if path.exists():
+        raise ScoringResultExists(f"评分产物已存在，拒绝覆盖: {path}")
+    _write_json(path, artifact.model_dump(mode="json"))
+
+
+def _failure_artifact(
+    execution: ScenarioExecution, error_text: str
+) -> ScenarioArtifact:
+    return ScenarioArtifact(
+        run_id=execution.run_id,
+        scenario_id=execution.scenario_id,
+        session_ids=list(execution.session_ids),
+        events=list(execution.events),
+        assertions=[],
+        generation=[],
+        retrieval=list(execution.retrieval),
+        proposal_bindings=dict(execution.proposal_bindings),
+        generation_metrics=dict(execution.generation_metrics),
+        cancel_evidence=list(execution.cancel_evidence),
+        context_gaps=list(execution.context_gaps),
+        runner_error=sanitize_error_text(error_text),
+    )
+
+
+def _blocked_artifact(
+    execution: ScenarioExecution, error_text: str
+) -> ScenarioArtifact:
+    return _failure_artifact(execution, error_text).model_copy(update={
+        "blocked": sanitize_error_text(error_text),
+        "runner_error": None,
+    })
 
 
 def select_scenarios(
@@ -698,6 +1200,43 @@ def executed_index_identity(
             "query": json.loads(retrieval["query_vector_identity"]),
             "index_manifest_sha256": index_identity["manifest_sha256"],
         }))
+    # 重排身份只来自实际重排记录；历史全部为基线记录时不追加新身份。
+    rerank_records = [item for item in records if item.rerank is not None]
+    experiments = {item.experiment for item in records}
+    if rerank_records:
+        identities = {
+            (
+                item.rerank.identity.model,
+                item.rerank.identity.endpoint,
+                item.rerank.identity.text_version,
+            )
+            for item in rerank_records
+            if item.rerank is not None and item.rerank.identity is not None
+        }
+        if len(identities) > 1:
+            retrieval["rerank_conflict"] = canonical_json(
+                [
+                    {"model": model, "endpoint": endpoint, "text_version": version}
+                    for model, endpoint, version in sorted(identities)
+                ]
+            )
+            retrieval["missing"] = sorted(set(retrieval["missing"]) | {
+                "retrieval_rerank_identity:单次运行存在多个重排身份"
+            })
+        elif identities:
+            model, endpoint, version = next(iter(identities))
+            retrieval["rerank"] = canonical_json({
+                "model": model,
+                "endpoint": sha256_text(endpoint),
+                "text_version": version,
+            })
+        if experiments != {"rerank"}:
+            retrieval["missing"] = sorted(set(retrieval["missing"]) | {
+                "retrieval_rerank_identity:重排与基线记录混合"
+            })
+    retrieval["experiment"] = (
+        "rerank" if experiments == {"rerank"} else "rrf_baseline"
+    )
 
 
 def _retrieval_secret() -> str | None:
@@ -1467,14 +2006,14 @@ async def _assertion_evidence(
 
         for item in mapping.items:
             context_evidence.append(ContextEvidence(checkpoint=link, item=item))
-        full_by_visible = tool_content_by_visible(
+        full_by_visible = tool_nodes_by_visible(
             request_nodes.tool_nodes, call.api
         )
         for item in mapping.items:
             if item.source != "tool_result":
                 continue
-            full = full_by_visible.get(item.tool_call_id)
-            if full is None:
+            node = full_by_visible.get(item.tool_call_id)
+            if node is None:
                 raise ContextMappingError(
                     f"工具结果缺少完整持久化正文: {item.tool_call_id}"
                 )
@@ -1482,12 +2021,16 @@ async def _assertion_evidence(
                 checkpoint=link,
                 tool_call_id=item.tool_call_id,
                 tool_name=item.tool_name,
-                content=full,
+                content=node.content,
             ))
-            if item.tool_name == "search_exercises" and not item.truncated:
+            if (
+                item.tool_name == "search_exercises"
+                and not item.truncated
+                and not node.is_error
+            ):
                 try:
                     search = search_evidence_from_tool(
-                        full, item.tool_call_id
+                        node.content, item.tool_call_id
                     )
                 except (ValueError, KeyError) as error:
                     raise ContextMappingError(
@@ -1581,21 +2124,35 @@ def _relevant_contents(
     return []
 
 
-async def _evaluate_assertions(
+def _assertion_error_artifact(
+    checkpoint_id: str, event_id: str, error: AssertionInputError
+) -> AssertionCheckpointArtifact:
+    message = str(error)
+    binding_failure = "proposal_ref" in message or "绑定" in message
+    return AssertionCheckpointArtifact(
+        checkpoint_id=checkpoint_id,
+        event_id=event_id,
+        binding_error=message if binding_failure else None,
+        runner_error=None if binding_failure else message,
+    )
+
+
+async def _assertion_checkpoint_evidence(
     runtime: RuntimeHandle,
     dataset: EvaluationDataset,
     scenario: dict,
     event: dict,
     capture: EventCapture,
     bindings: dict[str, ProposalBinding],
-) -> list[AssertionCheckpointArtifact]:
+) -> list[AssertionCheckpointEvidence]:
     grouped: dict[str, list[dict]] = {}
     for assertion in scenario["assertions"]:
         if assertion["event_id"] != event["event_id"]:
             continue
         grouped.setdefault(assertion["checkpoint_id"], []).append(assertion)
-    artifacts = []
+    entries = []
     for checkpoint_id, assertions in grouped.items():
+        definitions = [dict(assertion) for assertion in assertions]
         try:
             evidence = await _assertion_evidence(
                 runtime,
@@ -1606,28 +2163,75 @@ async def _evaluate_assertions(
                 assertions,
                 bindings,
             )
-            outcomes = evaluate_checkpoint(assertions, evidence)
-            artifacts.append(AssertionCheckpointArtifact(
-                checkpoint_id=checkpoint_id,
-                event_id=event["event_id"],
-                outcomes=outcomes,
-            ))
         except AssertionInputError as error:
             message = str(error)
             binding_failure = "proposal_ref" in message or "绑定" in message
-            artifacts.append(AssertionCheckpointArtifact(
+            entries.append(AssertionCheckpointEvidence(
                 checkpoint_id=checkpoint_id,
                 event_id=event["event_id"],
+                assertions=definitions,
                 binding_error=message if binding_failure else None,
                 runner_error=None if binding_failure else message,
             ))
         except ContextMappingError as error:
-            artifacts.append(AssertionCheckpointArtifact(
+            entries.append(AssertionCheckpointEvidence(
                 checkpoint_id=checkpoint_id,
                 event_id=event["event_id"],
+                assertions=definitions,
                 runner_error=str(error),
             ))
-    return artifacts
+        else:
+            entries.append(AssertionCheckpointEvidence(
+                checkpoint_id=checkpoint_id,
+                event_id=event["event_id"],
+                assertions=definitions,
+                evidence=evidence,
+            ))
+    return entries
+
+
+def _evaluate_assertion_entry(
+    entry: AssertionCheckpointEvidence,
+) -> AssertionCheckpointArtifact:
+    if entry.binding_error is not None:
+        return AssertionCheckpointArtifact(
+            checkpoint_id=entry.checkpoint_id,
+            event_id=entry.event_id,
+            binding_error=entry.binding_error,
+        )
+    if entry.runner_error is not None:
+        return AssertionCheckpointArtifact(
+            checkpoint_id=entry.checkpoint_id,
+            event_id=entry.event_id,
+            runner_error=entry.runner_error,
+        )
+    if entry.evidence is None:
+        raise ExecutionIdentityError("断言检查点缺少可评分证据")
+    try:
+        outcomes = evaluate_checkpoint(entry.assertions, entry.evidence)
+    except AssertionInputError as error:
+        return _assertion_error_artifact(
+            entry.checkpoint_id, entry.event_id, error
+        )
+    return AssertionCheckpointArtifact(
+        checkpoint_id=entry.checkpoint_id,
+        event_id=entry.event_id,
+        outcomes=outcomes,
+    )
+
+
+async def _evaluate_assertions(
+    runtime: RuntimeHandle,
+    dataset: EvaluationDataset,
+    scenario: dict,
+    event: dict,
+    capture: EventCapture,
+    bindings: dict[str, ProposalBinding],
+) -> list[AssertionCheckpointArtifact]:
+    entries = await _assertion_checkpoint_evidence(
+        runtime, dataset, scenario, event, capture, bindings
+    )
+    return [_evaluate_assertion_entry(entry) for entry in entries]
 
 
 def generation_reference(scenario: dict, checkpoint_id: str) -> GenerationReference:
@@ -1731,20 +2335,7 @@ async def _generation_checkpoint(
             scenario["scenario_id"], event["event_id"],
             "真实请求未包含当前输入的用户正文，禁止填占位答案"
         )
-    rows = [
-        row
-        for row in scenario["metric_applicability"]
-        if row["checkpoint_id"] == checkpoint_id
-    ]
-    applicability = [
-        MetricApplicability(
-            metric=row["metric"],
-            applicable=row["applicable"],
-            reason=row["reason"],
-        )
-        for row in rows
-        if row["metric"] in {"faithfulness", "factual_correctness"}
-    ]
+    applicability = _frozen_generation_applicability(scenario, checkpoint_id)
     reference = (
         generation_reference(scenario, checkpoint_id)
         if any(row.applicable for row in applicability)
@@ -1781,6 +2372,88 @@ async def _generation_checkpoint(
         reference=reference,
         applicability=applicability,
     ), boundary
+
+
+def _frozen_generation_applicability(
+    scenario: dict, checkpoint_id: str
+) -> list[MetricApplicability]:
+    return [
+        MetricApplicability(
+            metric=row["metric"],
+            applicable=row["applicable"],
+            reason=row["reason"],
+        )
+        for row in scenario["metric_applicability"]
+        if row["checkpoint_id"] == checkpoint_id
+        and row["metric"] in GENERATION_METRICS
+    ]
+
+
+async def _generation_checkpoint_evidence(
+    runtime: RuntimeHandle,
+    scenario: dict,
+    event: dict,
+    capture: EventCapture,
+) -> list[GenerationCheckpointEvidence]:
+    entries: list[GenerationCheckpointEvidence] = []
+    covered: set[str] = set()
+    for reference in scenario["reference"]:
+        if reference["event_id"] != event["event_id"]:
+            continue
+        checkpoint_id = reference["checkpoint_id"]
+        applicability = _frozen_generation_applicability(
+            scenario, checkpoint_id
+        )
+        try:
+            checkpoint, boundary = await _generation_checkpoint(
+                runtime, scenario, event, capture, checkpoint_id
+            )
+        except ContextAmbiguousError as error:
+            entries.append(GenerationCheckpointEvidence(
+                checkpoint_id=checkpoint_id,
+                event_id=event["event_id"],
+                applicability=applicability,
+                runner_error=sanitize_error_text(str(error)),
+            ))
+        else:
+            entries.append(GenerationCheckpointEvidence(
+                checkpoint_id=checkpoint_id,
+                event_id=event["event_id"],
+                applicability=applicability,
+                checkpoint=checkpoint,
+                request_boundary=boundary,
+            ))
+        covered.add(checkpoint_id)
+    for row in scenario["metric_applicability"]:
+        if row["event_id"] != event["event_id"]:
+            continue
+        if row["metric"] not in GENERATION_METRICS:
+            continue
+        checkpoint_id = row["checkpoint_id"]
+        if checkpoint_id in covered:
+            continue
+        applicability = _frozen_generation_applicability(
+            scenario, checkpoint_id
+        )
+        if len(applicability) != len(GENERATION_METRICS):
+            raise ScenarioBlocked(
+                scenario["scenario_id"],
+                event["event_id"],
+                f"检查点缺少生成指标适用性记录: {checkpoint_id}",
+            )
+        if any(item.applicable for item in applicability):
+            raise ScenarioBlocked(
+                scenario["scenario_id"],
+                event["event_id"],
+                f"检查点声明生成指标适用但缺少 reference: {checkpoint_id}",
+            )
+        entries.append(GenerationCheckpointEvidence(
+            checkpoint_id=checkpoint_id,
+            event_id=event["event_id"],
+            applicability=applicability,
+        ))
+        covered.add(checkpoint_id)
+    return entries
 
 
 def _not_applicable_generation(
@@ -1837,32 +2510,100 @@ def _not_applicable_generation(
     )
 
 
-async def _score_generations(
-    runtime: RuntimeHandle,
-    scenario: dict,
-    capture: EventCapture,
-    checkpoints: Sequence[
-        tuple[str, GenerationCheckpoint, RequestBoundaryEvidence]
-    ],
+def _score_assertion_entries(
+    execution: ScenarioExecution,
+) -> list[AssertionCheckpointArtifact]:
+    return [
+        _evaluate_assertion_entry(entry)
+        for entry in execution.assertion_checkpoints
+    ]
+
+
+def _not_applicable_generation_artifact(
+    execution: ScenarioExecution,
+    entry: GenerationCheckpointEvidence,
+) -> GenerationCheckpointArtifact:
+    link = EvidenceLink(
+        run_id=execution.run_id,
+        scenario_id=execution.scenario_id,
+        event_id=entry.event_id,
+        checkpoint_id=entry.checkpoint_id,
+    )
+    return GenerationCheckpointArtifact(
+        checkpoint_id=entry.checkpoint_id,
+        event_id=entry.event_id,
+        checkpoint=None,
+        result=CheckpointResult(
+            checkpoint=link,
+            outcomes=[
+                MetricOutcome(
+                    metric=row.metric,
+                    status="not_applicable",
+                    reason=row.reason,
+                )
+                for row in entry.applicability
+            ],
+        ),
+    )
+
+
+async def _score_generation_entries(
+    execution: ScenarioExecution,
+    entries: Sequence[GenerationCheckpointEvidence],
     judge: JudgeConfig | None,
     timeout: float | None,
 ) -> list[GenerationCheckpointArtifact]:
     artifacts = []
-    if not checkpoints:
+    if not entries:
         return artifacts
-    applicable = any(
-        row.applicable
-        for _, checkpoint, _ in checkpoints
-        for row in checkpoint.applicability
+    applicable_entry = next(
+        (
+            entry
+            for entry in entries
+            if entry.checkpoint is not None
+            and entry.runner_error is None
+            and any(row.applicable for row in entry.applicability)
+        ),
+        None,
     )
-    if applicable and judge is None:
+    if applicable_entry is not None and judge is None:
         raise ScenarioModelUnavailable(
-            scenario["scenario_id"],
-            capture.event_id,
+            execution.scenario_id,
+            applicable_entry.event_id,
             "生成指标适用但缺少裁判配置",
         )
+    groups: dict[str, list[GenerationCheckpointEvidence]] = {}
+    for entry in entries:
+        groups.setdefault(entry.event_id, []).append(entry)
+    for group in groups.values():
+        artifacts.extend(
+            await _score_generation_group(execution, group, judge, timeout)
+        )
+    return artifacts
+
+
+async def _score_generation_group(
+    execution: ScenarioExecution,
+    entries: Sequence[GenerationCheckpointEvidence],
+    judge: JudgeConfig | None,
+    timeout: float | None,
+) -> list[GenerationCheckpointArtifact]:
+    artifacts = []
     async with GenerationScoringSession(judge, timeout=timeout) as session:
-        for checkpoint_id, checkpoint, boundary in checkpoints:
+        for entry in entries:
+            if entry.runner_error is not None:
+                artifacts.append(GenerationCheckpointArtifact(
+                    checkpoint_id=entry.checkpoint_id,
+                    event_id=entry.event_id,
+                    runner_error=entry.runner_error,
+                ))
+                continue
+            if entry.checkpoint is None:
+                artifacts.append(
+                    _not_applicable_generation_artifact(execution, entry)
+                )
+                continue
+            checkpoint = entry.checkpoint
             outcome_start = len(session.outcomes)
             evidence_start = len(session.evidence)
             try:
@@ -1870,13 +2611,13 @@ async def _score_generations(
                 evidence = list(session.evidence[evidence_start:])
                 attempts = _attempt_snapshots(session, checkpoint)
                 artifacts.append(GenerationCheckpointArtifact(
-                    checkpoint_id=checkpoint_id,
-                    event_id=capture.event_id,
+                    checkpoint_id=entry.checkpoint_id,
+                    event_id=entry.event_id,
                     checkpoint=checkpoint,
                     result=result,
                     evidence=evidence,
                     attempts=attempts,
-                    request_boundary=boundary,
+                    request_boundary=entry.request_boundary,
                 ))
             except Exception as error:
                 by_metric = {
@@ -1885,13 +2626,16 @@ async def _score_generations(
                 }
                 attempt = session.current_attempt
                 failed_metric = (
-                    None if attempt is None else attempt.plan.metric
+                    None
+                    if attempt is None
+                    or attempt.checkpoint.checkpoint != checkpoint.checkpoint
+                    else attempt.plan.metric
                 )
                 if failed_metric is None:
                     failed_metric = next(
                         (
                             row.metric
-                            for row in checkpoint.applicability
+                            for row in entry.applicability
                             if row.applicable and row.metric not in by_metric
                         ),
                         None,
@@ -1901,7 +2645,7 @@ async def _score_generations(
                         failed_metric, error
                     )
                 incomplete = []
-                for row in checkpoint.applicability:
+                for row in entry.applicability:
                     if row.metric in by_metric:
                         continue
                     if row.applicable:
@@ -1924,8 +2668,8 @@ async def _score_generations(
                     ).index(row.metric),
                 )
                 artifacts.append(GenerationCheckpointArtifact(
-                    checkpoint_id=checkpoint_id,
-                    event_id=capture.event_id,
+                    checkpoint_id=entry.checkpoint_id,
+                    event_id=entry.event_id,
                     checkpoint=checkpoint,
                     result=CheckpointResult(
                         checkpoint=checkpoint.checkpoint,
@@ -1933,11 +2677,42 @@ async def _score_generations(
                     ),
                     evidence=list(session.evidence[evidence_start:]),
                     attempts=_attempt_snapshots(session, checkpoint),
-                    request_boundary=boundary,
+                    request_boundary=entry.request_boundary,
                     runner_error=f"{type(error).__name__}: {error}",
                     incomplete_metrics=incomplete,
                 ))
     return artifacts
+
+
+async def score_execution(
+    execution: ScenarioExecution,
+    *,
+    judge: JudgeConfig | None = None,
+    judge_timeout: float | None = DEFAULT_JUDGE_TIMEOUT,
+) -> ScenarioArtifact:
+    verify_execution_identity(execution)
+    assertions = _score_assertion_entries(execution)
+    generation = await _score_generation_entries(
+        execution,
+        execution.generation_checkpoints,
+        judge,
+        judge_timeout,
+    )
+    return ScenarioArtifact(
+        run_id=execution.run_id,
+        scenario_id=execution.scenario_id,
+        session_ids=list(execution.session_ids),
+        events=list(execution.events),
+        assertions=assertions,
+        generation=generation,
+        retrieval=list(execution.retrieval),
+        proposal_bindings=dict(execution.proposal_bindings),
+        generation_metrics=dict(execution.generation_metrics),
+        cancel_evidence=list(execution.cancel_evidence),
+        context_gaps=list(execution.context_gaps),
+        blocked=execution.error if execution.status == "blocked" else None,
+        runner_error=execution.error if execution.status == "failed" else None,
+    )
 
 
 def _attempt_snapshots(session, checkpoint) -> list[ScoringAttemptSnapshot]:
@@ -2270,24 +3045,76 @@ async def _partial_artifact(
     )
 
 
-async def run_scenario(
+def _execution_checkpoint_count(
+    assertions: Sequence[AssertionCheckpointEvidence],
+    generation: Sequence[GenerationCheckpointEvidence],
+) -> int:
+    return len(
+        {
+            (entry.event_id, entry.checkpoint_id)
+            for entry in assertions
+            if entry.evidence is not None
+        }
+        | {
+            (entry.event_id, entry.checkpoint_id)
+            for entry in generation
+            if entry.checkpoint is not None
+        }
+    )
+
+
+def _require_execution_config(
+    scenario: dict,
+    *,
+    enable_model: bool,
+    judge: JudgeConfig | None,
+    judge_timeout: float | None,
+) -> None:
+    if not enable_model:
+        raise ScenarioModelUnavailable(
+            scenario["scenario_id"], None, "未显式启用真实模型调用"
+        )
+    prior_messages = scenario["input"]["prior_messages"]
+    needs_model = any(
+        event["type"] == "message" for event in scenario["events"]
+    ) or any(row["role"] == "assistant" for row in prior_messages)
+    model_available = True
+    if needs_model:
+        try:
+            load_model_config()
+        except ModelNotConfigured:
+            model_available = False
+    applicable = any(
+        row["applicable"]
+        for row in scenario["metric_applicability"]
+        if row["metric"] in GENERATION_METRICS
+    )
+    if applicable and model_available:
+        if judge is None:
+            raise ScenarioModelUnavailable(
+                scenario["scenario_id"], None, "生成指标适用但缺少裁判配置"
+            )
+        validate_timeout(judge_timeout)
+
+
+async def execute_scenario(
     dataset: EvaluationDataset,
     scenario: dict,
     *,
     run_id: str,
     root: Path,
     enable_model: bool,
-    judge: JudgeConfig | None,
-    judge_timeout: float | None,
-) -> ScenarioArtifact:
+) -> ScenarioExecution:
     if not enable_model:
         raise ScenarioModelUnavailable(
             scenario["scenario_id"], None, "未显式启用真实模型调用"
         )
+    scenario_sha256 = frozen_scenario_sha256(scenario)
     scenario = dict(scenario)
     scenario["_evaluation_run_id"] = run_id
     scenario["_session_ids"] = []
     scenario["_captures"] = []
+    plan = scenario_plan(scenario)
     scenario_root = root / scenario["scenario_id"]
     scenario_root.mkdir(parents=True, exist_ok=False)
     runtime = RuntimeHandle(
@@ -2296,12 +3123,12 @@ async def run_scenario(
         scenario_id=scenario["scenario_id"],
     )
     initial_now = parse_timestamp(scenario["initial_state"]["now"])
-    await runtime.open()
     captures: list[EventCapture] = []
-    assertion_artifacts: list[AssertionCheckpointArtifact] = []
-    generation_artifacts: list[GenerationCheckpointArtifact] = []
+    assertion_entries: list[AssertionCheckpointEvidence] = []
+    generation_entries: list[GenerationCheckpointEvidence] = []
     retrieval_records: list[SearchStageRecord] = []
     bindings: dict[str, ProposalBinding] = {}
+    initial_projection: BusinessProjection | None = None
     flushed_searches = 0
 
     def collect_search_records() -> list[SearchStageRecord]:
@@ -2314,7 +3141,49 @@ async def run_scenario(
         flushed_searches = len(runtime.search_records)
         return list(retrieval_records)
 
+    async def finish(
+        status: str, error: str | None
+    ) -> ScenarioExecution:
+        cancel_evidence: list[CancelEvidence] = []
+        if runtime.service is not None:
+            cancel_evidence = await read_cancel_evidence(
+                runtime.service.queries, scenario["_session_ids"]
+            )
+        execution = _seal_execution(ScenarioExecution(
+            run_id=run_id,
+            scenario_id=scenario["scenario_id"],
+            dataset=_dataset_identity(dataset),
+            scenario_sha256=scenario_sha256,
+            execution_sha256="0" * 64,
+            status=status,
+            error=error,
+            session_ids=list(scenario["_session_ids"]),
+            initial_state_sha256=sha256_text(
+                canonical_json(scenario["initial_state"])
+            ),
+            initial_projection=initial_projection,
+            expected_event_ids=list(plan.event_ids),
+            expected_checkpoint_ids=list(plan.checkpoint_ids),
+            events=list(captures),
+            assertion_checkpoints=list(assertion_entries),
+            generation_checkpoints=list(generation_entries),
+            retrieval=list(retrieval_records),
+            proposal_bindings=dict(bindings),
+            generation_metrics=dict(plan.generation_metrics),
+            cancel_evidence=cancel_evidence,
+            context_gaps=[
+                gap for capture in captures for gap in capture.context_gaps
+            ],
+        ))
+        _write_event_evidence(scenario_root, captures)
+        _write_json(
+            scenario_root / EXECUTION_FILENAME,
+            execution.model_dump(mode="json"),
+        )
+        return execution
+
     try:
+        await runtime.open()
         session_id = str(uuid4())
         await runtime.service.create_session_result(
             session_id, scenario["scenario_id"], credentials=()
@@ -2327,6 +3196,7 @@ async def run_scenario(
         initial = _verify_initial_projection(
             projection, scenario["initial_state"]
         )
+        initial_projection = projection
         _write_json(scenario_root / "initial-state.json", {
             "scenario_id": scenario["scenario_id"],
             "initial_state": scenario["initial_state"],
@@ -2432,6 +3302,10 @@ async def run_scenario(
                 scenario_root / "events.jsonl",
                 capture.model_dump(mode="json"),
             )
+            _append_jsonl(
+                scenario_root / "context.jsonl",
+                _context_rows([capture])[0],
+            )
             collect_search_records()
             runtime.event_id = None
             projection = await runtime.projection(
@@ -2440,7 +3314,7 @@ async def run_scenario(
             bindings = _bindings_for_projection(
                 runtime, projection, entry_to_event, operation_by_ref
             )
-            evaluated = await _evaluate_assertions(
+            event_assertions = await _assertion_checkpoint_evidence(
                 runtime,
                 dataset,
                 scenario,
@@ -2448,157 +3322,197 @@ async def run_scenario(
                 capture,
                 bindings,
             )
-            for artifact in evaluated:
-                assertion_artifacts.append(artifact)
+            for entry in event_assertions:
+                assertion_entries.append(entry)
                 _append_jsonl(
-                    scenario_root / "assertions.jsonl",
-                    artifact.model_dump(mode="json"),
+                    scenario_root / "assertion-evidence.jsonl",
+                    entry.model_dump(mode="json"),
                 )
-            generation = []
-            for reference in scenario["reference"]:
-                if reference["event_id"] != event["event_id"]:
-                    continue
-                checkpoint_id = reference["checkpoint_id"]
-                try:
-                    checkpoint, boundary = await _generation_checkpoint(
-                        runtime, scenario, event, capture, checkpoint_id
-                    )
-                except ContextAmbiguousError as error:
-                    gap_artifact = GenerationCheckpointArtifact(
-                        checkpoint_id=checkpoint_id,
-                        event_id=event["event_id"],
-                        runner_error=sanitize_error_text(str(error)),
-                    )
-                    generation_artifacts.append(gap_artifact)
-                    _append_jsonl(
-                        scenario_root / "generation.jsonl",
-                        gap_artifact.model_dump(mode="json"),
-                    )
-                    continue
-                generation.append((checkpoint_id, checkpoint, boundary))
-            if generation:
-                scored = await _score_generations(
-                    runtime,
-                    scenario,
-                    capture,
-                    generation,
-                    judge,
-                    judge_timeout,
-                )
-                for artifact in scored:
-                    generation_artifacts.append(artifact)
-                    _append_jsonl(
-                        scenario_root / "generation.jsonl",
-                        artifact.model_dump(mode="json"),
-                    )
-            covered = {checkpoint_id for checkpoint_id, _, _ in generation}
-            for row in scenario["metric_applicability"]:
-                if row["event_id"] != event["event_id"]:
-                    continue
-                if row["metric"] not in GENERATION_METRICS:
-                    continue
-                checkpoint_id = row["checkpoint_id"]
-                if checkpoint_id in covered:
-                    continue
-                artifact = _not_applicable_generation(
-                    scenario, event, checkpoint_id
-                )
-                covered.add(checkpoint_id)
-                generation_artifacts.append(artifact)
-                _append_jsonl(
-                    scenario_root / "generation.jsonl",
-                    artifact.model_dump(mode="json"),
-                )
-            _append_jsonl(scenario_root / "context.jsonl", {
-                "event_id": event["event_id"],
-                "tool_identity_map": capture.tool_identity_map,
-                "context_gaps": [
-                    gap.model_dump(mode="json")
-                    for gap in capture.context_gaps
-                ],
-            })
-        cancel_evidence = await read_cancel_evidence(
-            runtime.service.queries, scenario["_session_ids"]
-        )
-        context_gaps = [
-            gap for capture in captures for gap in capture.context_gaps
-        ]
-        result = ScenarioArtifact(
-            run_id=run_id,
-            scenario_id=scenario["scenario_id"],
-            purpose="validation",
-            session_ids=list(scenario["_session_ids"]),
-            events=captures,
-            assertions=assertion_artifacts,
-            generation=generation_artifacts,
-            retrieval=collect_search_records(),
-            proposal_bindings=bindings,
-            generation_metrics=scenario_plan(scenario).generation_metrics,
-            cancel_evidence=cancel_evidence,
-            context_gaps=context_gaps,
-        )
-        _write_json(
-            scenario_root / "scenario.json", result.model_dump(mode="json")
-        )
-        return result
-    except ScenarioError as error:
-        partial = await _partial_artifact(
-            runtime,
-            scenario,
-            run_id=run_id,
-            captures=captures,
-            assertions=assertion_artifacts,
-            generation=generation_artifacts,
-            bindings=bindings,
-            retrieval=collect_search_records(),
-            error=error,
-        )
-        if isinstance(error, ScenarioBlocked):
-            error.observed_events = len(captures)
-            error.observed_checkpoints = _observed_checkpoints(
-                assertion_artifacts, generation_artifacts
+            event_generation = await _generation_checkpoint_evidence(
+                runtime, scenario, event, capture
             )
-            error.context_gaps = [
-                f"{scenario['scenario_id']}:{gap.reason}"
-                for capture in captures
-                for gap in capture.context_gaps
-            ]
-            error.artifact = partial
-        _write_json(scenario_root / "blocked.json", {
-            "scenario_id": scenario["scenario_id"],
-            "error_type": type(error).__name__,
-            "reason": sanitize_error_text(str(error)),
-            "details": getattr(error, "details", None),
-            "observed_events": getattr(error, "observed_events", 0),
-            "observed_checkpoints": getattr(error, "observed_checkpoints", 0),
-        })
-        _write_json(scenario_root / "partial.json", partial.model_dump(mode="json"))
+            for entry in event_generation:
+                generation_entries.append(entry)
+                _append_jsonl(
+                    scenario_root / "generation-input.jsonl",
+                    entry.model_dump(mode="json"),
+                )
+            _write_event_evidence(scenario_root, captures)
+        return await finish("completed", None)
+    except ScenarioError as error:
+        execution = await finish(
+            "blocked", sanitize_error_text(str(error))
+        )
+        error.execution = execution
+        error.observed_events = len(captures)
+        error.observed_checkpoints = _execution_checkpoint_count(
+            assertion_entries, generation_entries
+        )
+        error.context_gaps = [
+            f"{scenario['scenario_id']}:{gap.reason}"
+            for capture in captures
+            for gap in capture.context_gaps
+        ]
         raise
     except Exception as error:
-        partial = await _partial_artifact(
-            runtime,
-            scenario,
-            run_id=run_id,
-            captures=captures,
-            assertions=assertion_artifacts,
-            generation=generation_artifacts,
-            bindings=bindings,
-            retrieval=collect_search_records(),
-            error=error,
+        execution = await finish(
+            "failed",
+            sanitize_error_text(f"{type(error).__name__}: {error}"),
         )
-        _write_json(scenario_root / "failure.json", {
-            "scenario_id": scenario["scenario_id"],
-            "error_type": type(error).__name__,
-            "reason": sanitize_error_text(str(error)),
-            "observed_events": len(captures),
-            "observed_checkpoints": _observed_checkpoints(
-                assertion_artifacts, generation_artifacts
-            ),
-        })
-        _write_json(scenario_root / "partial.json", partial.model_dump(mode="json"))
+        error.execution = execution
         raise
     finally:
         await runtime.close()
+
+
+def _write_jsonl(path: Path, rows: Sequence[ArtifactModel]) -> None:
+    _write_json_rows(path, rows)
+
+
+def _write_scoring_jsonl(
+    scenario_root: Path, artifact: ScenarioArtifact
+) -> None:
+    if artifact.assertions:
+        _write_jsonl(scenario_root / "assertions.jsonl", artifact.assertions)
+    if artifact.generation:
+        _write_jsonl(scenario_root / "generation.jsonl", artifact.generation)
+
+
+async def run_scenario(
+    dataset: EvaluationDataset,
+    scenario: dict,
+    *,
+    run_id: str,
+    root: Path,
+    enable_model: bool,
+    judge: JudgeConfig | None,
+    judge_timeout: float | None,
+) -> ScenarioArtifact:
+    _require_execution_config(
+        scenario,
+        enable_model=enable_model,
+        judge=judge,
+        judge_timeout=judge_timeout,
+    )
+    scenario_root = root / scenario["scenario_id"]
+    try:
+        execution = await execute_scenario(
+            dataset,
+            scenario,
+            run_id=run_id,
+            root=root,
+            enable_model=enable_model,
+        )
+    except ScenarioError as error:
+        execution = getattr(error, "execution", None)
+        if execution is None:
+            raise
+        try:
+            partial = await score_execution(
+                execution, judge=judge, judge_timeout=judge_timeout
+            )
+        except Exception as scoring_error:
+            partial = _blocked_artifact(
+                execution,
+                f"{type(scoring_error).__name__}: {scoring_error}",
+            )
+        if isinstance(error, ScenarioBlocked):
+            error.observed_events = len(partial.events)
+            error.observed_checkpoints = _observed_checkpoints(
+                partial.assertions, partial.generation
+            )
+            error.context_gaps = [
+                f"{execution.scenario_id}:{gap.reason}"
+                for gap in partial.context_gaps
+            ]
+            error.artifact = partial
+        _write_json(scenario_root / "blocked.json", {
+            "scenario_id": execution.scenario_id,
+            "error_type": type(error).__name__,
+            "reason": sanitize_error_text(str(error)),
+            "details": getattr(error, "details", None),
+            "observed_events": len(partial.events),
+            "observed_checkpoints": _observed_checkpoints(
+                partial.assertions, partial.generation
+            ),
+        })
+        _write_json(scenario_root / "partial.json", partial.model_dump(mode="json"))
+        _write_scoring_jsonl(scenario_root, partial)
+        raise
+    except Exception as error:
+        execution = getattr(error, "execution", None)
+        if execution is None:
+            raise
+        try:
+            partial = await score_execution(
+                execution, judge=judge, judge_timeout=judge_timeout
+            )
+        except Exception as scoring_error:
+            partial = _failure_artifact(
+                execution,
+                f"{type(scoring_error).__name__}: {scoring_error}",
+            )
+        _write_json(scenario_root / "failure.json", {
+            "scenario_id": execution.scenario_id,
+            "error_type": type(error).__name__,
+            "reason": sanitize_error_text(str(error)),
+            "observed_events": len(partial.events),
+            "observed_checkpoints": _observed_checkpoints(
+                partial.assertions, partial.generation
+            ),
+        })
+        _write_json(scenario_root / "partial.json", partial.model_dump(mode="json"))
+        _write_scoring_jsonl(scenario_root, partial)
+        raise
+    try:
+        artifact = await score_execution(
+            execution, judge=judge, judge_timeout=judge_timeout
+        )
+    except ScenarioBlocked as error:
+        partial = _blocked_artifact(execution, str(error))
+        error.artifact = partial
+        error.observed_events = len(partial.events)
+        error.observed_checkpoints = _execution_checkpoint_count(
+            execution.assertion_checkpoints,
+            execution.generation_checkpoints,
+        )
+        error.context_gaps = [
+            f"{execution.scenario_id}:{gap.reason}"
+            for gap in partial.context_gaps
+        ]
+        _write_json(scenario_root / "blocked.json", {
+            "scenario_id": execution.scenario_id,
+            "error_type": type(error).__name__,
+            "reason": sanitize_error_text(str(error)),
+            "details": getattr(error, "details", None),
+            "observed_events": len(partial.events),
+            "observed_checkpoints": error.observed_checkpoints,
+        })
+        _write_json(scenario_root / "partial.json", partial.model_dump(mode="json"))
+        _write_scoring_jsonl(scenario_root, partial)
+        raise
+    except Exception as error:
+        partial = _failure_artifact(
+            execution, f"{type(error).__name__}: {error}"
+        )
+        _write_json(scenario_root / "failure.json", {
+            "scenario_id": execution.scenario_id,
+            "error_type": type(error).__name__,
+            "reason": sanitize_error_text(str(error)),
+            "observed_events": len(execution.events),
+            "observed_checkpoints": _execution_checkpoint_count(
+                execution.assertion_checkpoints,
+                execution.generation_checkpoints,
+            ),
+        })
+        _write_json(scenario_root / "partial.json", partial.model_dump(mode="json"))
+        _write_scoring_jsonl(scenario_root, partial)
+        raise
+    _write_json(
+        scenario_root / "scenario.json", artifact.model_dump(mode="json")
+    )
+    _write_scoring_jsonl(scenario_root, artifact)
+    return artifact
 
 
 def _incomplete_items(artifact: ScenarioArtifact) -> list[str]:

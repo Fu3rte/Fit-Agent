@@ -4,7 +4,7 @@ from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path, PurePosixPath
-from typing import Any, Iterable
+from typing import Any, Collection, Iterable, Mapping
 
 import jsonlines
 from jsonpointer import JsonPointerException, resolve_pointer
@@ -315,6 +315,19 @@ def retrieval_corpus_identity(corpus: RetrievalCorpus) -> str:
     return _sha256_text(_canonical(payload))
 
 
+def unreviewed_candidates(
+    reviewed: Mapping[str, Collection[str]],
+    rankings: Mapping[str, Iterable[str]],
+) -> dict[str, list[str]]:
+    unknown: dict[str, list[str]] = {}
+    for query_id, ids in rankings.items():
+        seen = reviewed.get(query_id, ())
+        missing = [corpus_id for corpus_id in ids if corpus_id not in seen]
+        if missing:
+            unknown[query_id] = missing
+    return unknown
+
+
 @dataclass(frozen=True)
 class EvaluationDataset:
     version_dir: Path
@@ -371,14 +384,7 @@ class EvaluationDataset:
         return reviewed
 
     def unreviewed_candidates(self, rankings: dict[str, list[str]]) -> dict[str, list[str]]:
-        reviewed = self.reviewed_corpus_ids()
-        unknown: dict[str, list[str]] = {}
-        for query_id, ids in rankings.items():
-            seen = reviewed.get(query_id, set())
-            missing = [corpus_id for corpus_id in ids if corpus_id not in seen]
-            if missing:
-                unknown[query_id] = missing
-        return unknown
+        return unreviewed_candidates(self.reviewed_corpus_ids(), rankings)
 
     def attachment_hashes(self, scenario: dict) -> dict[str, str]:
         return {asset_id: _sha256_file(self.assets[asset_id]) for asset_id in sorted(_scenario_asset_ids(scenario))}

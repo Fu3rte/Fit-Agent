@@ -20,6 +20,7 @@ from evaluation.contracts import (
     MetricOutcome,
     ModelInputContext,
     ProposalBinding,
+    RerankEvidence,
     SavedBusinessData,
     SavedDataComparison,
     StateComparison,
@@ -66,6 +67,7 @@ from evaluation.scenarios import (
     RunAggregate,
     RunSummary,
     ScenarioArtifact,
+    ScenarioPlan,
     SearchStageRecord,
     _model_call,
     _write_json,
@@ -83,6 +85,7 @@ from evaluation.summary import (
     REPORT_NAME,
     SUMMARY_NAME,
     _validate_context_projection,
+    _validate_retrieval,
     build_summary,
     write_summary,
 )
@@ -176,7 +179,7 @@ def _evidence(
         metric_version=sha256_text(f"metric-version:{metric}"),
         ragas_version="0.3.1",
         dependency_versions={"ragas": "0.3.1", "openai": "3.13.0"},
-        judge_model="step-5-preview",
+        judge_model="decision-model-preview",
         judge_base_url="https://judge.invalid/v1",
         judge_timeout_seconds=300.0,
         judge_sdk_max_retries=0,
@@ -1027,7 +1030,7 @@ def test_evidence_score_tamper_blocks_release(formal_run, run_copy):
     )
 
 
-def test_prompt_and_model_tamper_blocks_release(formal_run, run_copy):
+def test_prompt_tamper_blocks_release(formal_run, run_copy):
     target = run_copy
     plan = json.loads((formal_run / "plan.json").read_text(encoding="utf-8"))
     scenario_id = plan["scenarios"][0]["scenario_id"]
@@ -1038,7 +1041,6 @@ def test_prompt_and_model_tamper_blocks_release(formal_run, run_copy):
         for evidence in row["evidence"]:
             if evidence["metric"] == metric:
                 evidence["prompt_digest"] = sha256_text("tampered-prompt")
-                evidence["judge_model"] = "step-3.7-flash"
 
     _edit_generation(scenario_root, checkpoint_id, mutate)
     summary = build_summary(target)
@@ -1135,6 +1137,39 @@ def test_checkpoint_source_binding_tamper_blocks_release(formal_run, run_copy):
         ]
 
     tamper(change_prior, "检查点历史输入偏离冻结数据")
+
+
+def test_attempt_judge_call_mismatch_still_blocks_release(run_copy):
+    plan = json.loads((run_copy / "plan.json").read_text(encoding="utf-8"))
+    scenario_root = run_copy / plan["scenarios"][0]["scenario_id"]
+    checkpoint_id, _ = _first_succeeded_checkpoint(scenario_root)
+
+    def recorded_call(prompt_name: str) -> dict:
+        prompt = "真实保存的裁判提示"
+        return {
+            "sequence": 0,
+            "parent_run_id": "replay-chain",
+            "prompt_name": prompt_name,
+            "prompt": prompt,
+            "prompt_sha256": sha256_text(prompt),
+            "output": "{}",
+            "error": None,
+        }
+
+    def change_judge_calls(row):
+        evidence = row["evidence"][0]
+        attempt = next(
+            item for item in row["attempts"] if item["metric"] == evidence["metric"]
+        )
+        evidence["judge_calls"] = [recorded_call("statement_generator_prompt")]
+        attempt["judge_calls"] = [recorded_call("n_l_i_statement_prompt")]
+
+    _edit_generation(scenario_root, checkpoint_id, change_judge_calls)
+    issues = build_summary(run_copy)["release"]["blocking_issues"]
+    assert any(
+        "成功证据与评分尝试不一致" in issue and "judge_calls" in issue
+        for issue in issues
+    ), issues
 
 
 def _projection_checkpoint(items, message: str) -> GenerationCheckpoint:
@@ -1751,3 +1786,152 @@ def test_retrieval_publish_gate_requires_staged_coverage():
         },
     }
     assert publishable(legacy) is True
+
+
+RERANK_POOL = ["0001", "0002", "0003", "0004", "0005", "0006"]
+RERANK_FINAL = ["0003", "0001", "0005"]
+RERANK_ORDER = [2, 0, 4, 1, 5, 3]
+RERANK_MANIFEST = '{"build_id":"rerank-build","compatibility":{}}'
+
+
+def _rerank_rows(order: list[int]) -> list[dict]:
+    # 分数严格降序，rrf_rank 指向该名次在原始候选池中的位置。
+    return [
+        {
+            "id": RERANK_POOL[rank],
+            "rerank_score": round(0.9 - 0.1 * position, 4),
+            "rrf_rank": rank,
+        }
+        for position, rank in enumerate(order)
+    ]
+
+
+def _rerank_record(
+    rows: list[dict],
+    *,
+    pool: list[str] = RERANK_POOL,
+    final: list[str] = RERANK_FINAL,
+) -> SearchStageRecord:
+    return SearchStageRecord(
+        sequence=0,
+        run_id="rerank-run",
+        scenario_id="s-rerank",
+        event_id="e01",
+        tool_call_id="rerank-tool",
+        index_collection="rerank-collection",
+        index_manifest_sha256=sha256_text(RERANK_MANIFEST),
+        index_manifest_json=RERANK_MANIFEST,
+        arguments={"purpose": "lookup"},
+        candidate_pool=pool,
+        final_model_input=final,
+        response_json={
+            "items": [
+                {
+                    "id": item,
+                    "name": item,
+                    "equipment": "barbell",
+                    "target": "chest",
+                    "matches": [],
+                }
+                for item in final
+            ],
+            "has_more": len(pool) > len(final),
+        },
+        scores=[float(len(pool) - index) for index in range(len(pool))],
+        threshold=0.0,
+        experiment="rerank",
+        rerank=RerankEvidence(
+            mode="rerank",
+            identity={
+                "model": "summary-rerank",
+                "endpoint": "https://rerank.invalid/text-rerank",
+                "text_version": "retrieval-text-2026-10-14.2",
+            },
+            scored=rows,
+            usage={
+                "requests": 1 if rows else 0,
+                "prompt_tokens": 120 if rows else 0,
+                "total_tokens": 120 if rows else 0,
+            },
+            request_id="rerank-request" if rows else None,
+        ),
+    )
+
+
+def _retrieval_issues(record: SearchStageRecord) -> list[str]:
+    plan = ScenarioPlan(
+        scenario_id="s-rerank",
+        event_ids=["e01"],
+        checkpoint_ids=[],
+        generation_checkpoint_ids=[],
+        generation_metrics={},
+        event_types={"e01": "message"},
+        tags=["rerank-test"],
+    )
+    artifact = ScenarioArtifact(
+        run_id="rerank-run",
+        scenario_id="s-rerank",
+        session_ids=["rerank-session"],
+        events=[],
+        assertions=[],
+        generation=[],
+        retrieval=[record],
+        proposal_bindings={},
+    )
+    issues: list[str] = []
+    _validate_retrieval(plan, artifact, "rerank-run", issues, "rerank", [])
+    return [item.split(":", 1)[1] for item in issues]
+
+
+def test_valid_rerank_record_passes_summary_gate():
+    assert _retrieval_issues(_rerank_record(_rerank_rows(RERANK_ORDER))) == []
+
+
+def test_empty_pool_rerank_record_keeps_zero_request_semantics():
+    record = _rerank_record([], pool=[], final=[])
+    assert _retrieval_issues(record) == []
+    assert record.rerank.usage.requests == 0
+    assert record.rerank.request_id is None
+
+
+def _rank_beyond_pool() -> SearchStageRecord:
+    # 池内 3 条候选，其中一条原排名越出候选池长度但仍落在字段上限内。
+    return _rerank_record(
+        [
+            {"id": "0003", "rerank_score": 0.9, "rrf_rank": 5},
+            {"id": "0001", "rerank_score": 0.8, "rrf_rank": 0},
+            {"id": "0002", "rerank_score": 0.7, "rrf_rank": 1},
+        ],
+        pool=["0001", "0002", "0003"],
+        final=["0003", "0001"],
+    )
+
+
+def _swapped_rank_binding() -> list[dict]:
+    # 保持名次与分数不变，只把首尾两行的动作 ID 对调，使原排名指向其他候选。
+    rows = _rerank_rows(RERANK_ORDER)
+    rows[0]["id"], rows[-1]["id"] = rows[-1]["id"], rows[0]["id"]
+    return rows
+
+
+@pytest.mark.parametrize(
+    ("build", "expected"),
+    [
+        (
+            lambda: _rerank_record(_rerank_rows(RERANK_ORDER)[:4]),
+            ["重排结果数量与候选池不一致", "重排结果未完整覆盖候选池"],
+        ),
+        (
+            lambda: _rerank_record(_swapped_rank_binding()),
+            ["重排原排名与候选池不一致", "最终输入未按重排顺序排列"],
+        ),
+        (
+            lambda: _rerank_record(_rerank_rows([0, 2, 4, 1, 5, 3])),
+            ["最终输入未按重排顺序排列"],
+        ),
+        (_rank_beyond_pool, ["重排原排名越界"]),
+    ],
+    ids=["scored_count", "rank_binding", "final_order", "rank_range"],
+)
+def test_summary_rejects_rerank_evidence_broken_against_candidate_pool(build, expected):
+    assert _retrieval_issues(build()) == expected

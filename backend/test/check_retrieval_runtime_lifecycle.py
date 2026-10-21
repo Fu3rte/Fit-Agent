@@ -78,6 +78,7 @@ async def cancel_cases(root: Path, evidence: dict) -> None:
     except FuturesCancelled:
         raised = True
     assert raised and runtime._stack is None and runtime._retriever is None
+    assert runtime._rerank is None and runtime._rerank_identity is None
     evidence["precancelled_no_init"] = True
 
     # 2) 初始化期间取消：等待当前 RPC 收尾后释放临时资源，不记录伪就绪。
@@ -88,6 +89,7 @@ async def cancel_cases(root: Path, evidence: dict) -> None:
     except FuturesCancelled:
         raised = True
     assert raised and runtime._stack is None and runtime._retriever is None
+    assert runtime._rerank is None and runtime._rerank_identity is None
     evidence["init_cancel_released"] = True
 
     # 3) 校验返回后取消：不进入编码，真实 Embedding usage 保持 0 请求。
@@ -146,6 +148,9 @@ async def lifecycle_cases() -> dict:
     retriever = await runtime._ensure()
     assert runtime._retriever is not None
     db, embedding = retriever.db, retriever.embedding
+    rerank = runtime._rerank
+    identity = runtime._rerank_identity
+    assert rerank is not None and identity is not None
     assert await runtime._ensure() is retriever, "连续调用未复用同一 retriever 实例"
 
     # 异循环关闭：明确失败，且原有客户端与关闭入口保持。
@@ -166,13 +171,16 @@ async def lifecycle_cases() -> dict:
     thread.join()
     assert outcome["value"] == "incompatible"
     assert runtime._stack is not None and runtime._retriever is retriever, "异循环关闭不得清空状态"
+    assert runtime._rerank is rerank and runtime._rerank_identity is identity
     aliases = await db.call("list_aliases")
     assert "fit_agent_actions_current" in aliases["aliases"], "异循环关闭后原资源仍应可用"
 
-    # 所属循环关闭：两个客户端真实关闭，成功后才清空状态；重复关闭安全。
+    # 所属循环关闭：全部客户端真实关闭，成功后才清空状态；重复关闭安全。
     await runtime.close()
     assert runtime._stack is None and runtime._retriever is None
+    assert runtime._rerank is None and runtime._rerank_identity is None
     assert embedding._client is None, "Embedding 客户端应真实关闭"
+    assert rerank._client is None, "重排客户端应真实关闭"
     await runtime.close()
     closed = False
     try:

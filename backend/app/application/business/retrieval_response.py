@@ -1,5 +1,7 @@
 import json
+import math
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 from app.application.business.catalog import Catalog
 from app.application.business.retrieval_conditions import EvaluatedConditions
@@ -12,6 +14,9 @@ from app.domain.business.models import (
     ExerciseMatch,
     ExerciseSearchResult,
 )
+
+if TYPE_CHECKING:
+    from app.application.business.retrieval_rerank import RerankIdentity, RerankResult
 
 # 候选池与最终模型输入的独立上限：20 条候选参与 Recall@20，最多 5 条进入模型。
 CANDIDATE_POOL_LIMIT = 20
@@ -27,6 +32,8 @@ class SearchStage:
     candidate_pool: tuple[RetrievalCandidate, ...]
     final_input: tuple[RetrievalCandidate, ...]
     response: ExerciseSearchResult
+    rerank: "RerankResult | None"
+    rerank_identity: "RerankIdentity | None"
 
 
 @dataclass(frozen=True)
@@ -78,19 +85,76 @@ def build_search_result(
     )
 
 
+def _reranked_candidates(
+    pool: tuple[RetrievalCandidate, ...], rerank: "RerankResult"
+) -> list[RetrievalCandidate]:
+    # 重排结果必须完整覆盖候选池：按 rrf_rank 还原原候选，并核验完整顺序与同分次序。
+    scored = rerank.scored
+    if not isinstance(scored, tuple):
+        raise ValueError("重排结果必须为元组")
+    if len(scored) != len(pool):
+        raise ValueError("重排结果数量与候选池不一致")
+    by_id: dict[str, RetrievalCandidate] = {}
+    for candidate in pool:
+        if candidate.id in by_id:
+            raise ValueError(f"候选池 ID 重复: {candidate.id}")
+        by_id[candidate.id] = candidate
+    seen_ids: set[str] = set()
+    seen_ranks: set[int] = set()
+    previous: tuple[float, int] | None = None
+    ordered: list[RetrievalCandidate] = []
+    for row in scored:
+        exercise_id = row.id
+        score = row.rerank_score
+        rank = row.rrf_rank
+        if not isinstance(exercise_id, str) or exercise_id not in by_id:
+            raise ValueError(f"重排结果关联候选池外动作: {exercise_id}")
+        if exercise_id in seen_ids:
+            raise ValueError(f"重排结果 ID 重复: {exercise_id}")
+        if isinstance(rank, bool) or not isinstance(rank, int) or rank < 0 or rank >= len(pool):
+            raise ValueError(f"重排原排名越界: {rank}")
+        if rank in seen_ranks:
+            raise ValueError(f"重排原排名重复: {rank}")
+        if pool[rank].id != exercise_id:
+            raise ValueError(f"重排原排名与候选不符: {rank}")
+        if isinstance(score, bool) or not isinstance(score, (int, float)):
+            raise ValueError("重排分数必须为数值")
+        value = float(score)
+        if not math.isfinite(value) or not 0.0 <= value <= 1.0:
+            raise ValueError("重排分数必须为 0 到 1 之间的有限值")
+        if previous is not None:
+            if value > previous[0]:
+                raise ValueError("重排结果未按分数降序排列")
+            if value == previous[0] and rank < previous[1]:
+                raise ValueError("重排同分未保持原 RRF 顺序")
+        previous = (value, rank)
+        seen_ids.add(exercise_id)
+        seen_ranks.add(rank)
+        ordered.append(by_id[exercise_id])
+    if seen_ids != set(by_id) or len(seen_ranks) != len(pool):
+        raise ValueError("重排结果未完整覆盖候选池")
+    return ordered
+
+
 def build_search_stage(
     candidates: list[RetrievalCandidate],
     evaluated: EvaluatedConditions,
     *,
+    rerank: "RerankResult | None",
     threshold: float | None,
     limit: int = SEARCH_LIMIT,
     budget: int = SEARCH_BUDGET,
+    rerank_identity: "RerankIdentity | None" = None,
 ) -> SearchStage:
-    # 候选池取门槛与响应预算裁剪前的实际 RRF 排名前 20 条；最终输入从同一候选池产生。
+    # 候选池取门槛与响应预算裁剪前的实际 RRF 排名前 20 条；重排只改变最终顺序。
+    # 缺省重排结果仅用于显式 RRF baseline 调用；生产入口必须传入本次真实重排结果与配置身份。
+    if (rerank is None) != (rerank_identity is None):
+        raise ValueError("重排结果与配置身份必须同时提供")
     pool = tuple(candidates[:CANDIDATE_POOL_LIMIT])
+    ordered = list(pool) if rerank is None else _reranked_candidates(pool, rerank)
     eligible = [
         candidate
-        for candidate in pool
+        for candidate in ordered
         if threshold is None or candidate.score >= threshold
     ]
     response = build_search_result(eligible, evaluated, limit=limit, budget=budget)
@@ -99,6 +163,8 @@ def build_search_stage(
         candidate_pool=pool,
         final_input=tuple(eligible[: len(response.items)]),
         response=response,
+        rerank=rerank,
+        rerank_identity=rerank_identity,
     )
 
 

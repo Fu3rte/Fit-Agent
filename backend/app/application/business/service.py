@@ -71,7 +71,11 @@ class BusinessService:
             signal=signal,
         )
         stage = build_search_stage(
-            execution.candidates, evaluated, threshold=retrieval_frozen.THRESHOLD
+            execution.candidates,
+            evaluated,
+            rerank=execution.rerank,
+            rerank_identity=execution.rerank_identity,
+            threshold=retrieval_frozen.THRESHOLD,
         )
         if self._search_observer is not None:
             self._search_observer(SearchObservation(

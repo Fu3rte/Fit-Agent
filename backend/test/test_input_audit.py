@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from evaluation.dataset import DatasetError, load_for_evaluation, load_for_review
+from evaluation.dataset import load_for_evaluation, load_for_review
 from evaluation.input_audit import audit_dataset, scan_text
 from evaluation.review_report import render
 
@@ -141,12 +141,11 @@ def test_draft_dataset_user_inputs_have_no_catalog_ids():
     assert report.catalog_size == 1321
 
 
-def test_review_material_covers_current_draft():
-    dataset = load_for_review(VERSION)
+def test_review_material_covers_approved_version():
+    dataset = load_for_evaluation(VERSION)
     document = render(VERSION, None)
     assert document.count("<article id=") == len(dataset.queries) + len(dataset.scenarios)
     assert all(query["query_id"] in document for query in dataset.queries)
     assert all(scenario["scenario_id"] in document for scenario in dataset.scenarios)
     assert "<td>命中项</td><td>0</td>" in document
-    with pytest.raises(DatasetError):
-        load_for_evaluation(VERSION)
+    assert dataset.review["ready"] is True

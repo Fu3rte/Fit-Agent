@@ -2,7 +2,9 @@ import asyncio
 import math
 import os
 import socket
+import uuid
 from contextlib import asynccontextmanager, suppress
+from types import SimpleNamespace
 
 import numpy as np
 import openai
@@ -20,6 +22,7 @@ from evaluation.contracts import (
     EvidenceLink,
     GenerationCheckpoint,
     GenerationReference,
+    JudgeIdentity,
     MetricApplicability,
     MetricOutcome,
     ModelInputContext,
@@ -58,7 +61,7 @@ from evaluation.generation_scoring import (
 )
 
 JUDGE = JudgeConfig(
-    model="step-5-preview",
+    model="decision-model-preview",
     base_url="https://example.invalid/v1",
     api_key="sk-sentinel-value",
 )
@@ -278,24 +281,18 @@ def test_timeout_accepts_finite_positive_values():
     assert validate_timeout(0.25) == 0.25
 
 
-def test_judge_model_environment_value_supports_explicit_switch():
-    assert (
-        load_judge_model({"FIT_AGENT_EVAL_JUDGE_MODEL": "step-5-preview"})
-        == "step-5-preview"
-    )
-    assert (
-        load_judge_model({"FIT_AGENT_EVAL_JUDGE_MODEL": "step-3.7-flash"})
-        == "step-3.7-flash"
-    )
-    assert (
-        load_judge_model({"FIT_AGENT_EVAL_JUDGE_MODEL": "deepseek-v4.1-flash"})
-        == "deepseek-v4.1-flash"
-    )
-    assert (
-        load_judge_model({"FIT_AGENT_EVAL_JUDGE_MODEL": "qwen3.6-flash"})
-        == "qwen3.6-flash"
-    )
-    for value in (None, "", "   ", "unknown-judge", "step-5-preview-extra"):
+def test_judge_model_environment_value_accepts_configured_model():
+    for value in (
+        "decision-model-preview",
+        "step-5-preview",
+        "qwen3.6-flash",
+        "qwen3.6-plus",
+        "unknown-judge",
+    ):
+        assert (
+            load_judge_model({"FIT_AGENT_EVAL_JUDGE_MODEL": value}) == value
+        )
+    for value in (None, "", "   "):
         source = (
             {}
             if value is None
@@ -305,39 +302,45 @@ def test_judge_model_environment_value_supports_explicit_switch():
             load_judge_model(source)
 
 
-def test_judge_config_rejects_wrong_model_and_invalid_endpoint():
+def test_judge_config_rejects_blank_model_and_invalid_endpoint():
     JudgeConfig(
-        model="step-3.7-flash",
+        model="decision-model-preview",
         base_url="https://example.invalid/v1",
         api_key="x",
     )
+    JudgeConfig(
+        model="unknown-judge",
+        base_url="https://example.invalid/v1",
+        api_key="x",
+    )
+    for model in ("", "   ", " decision-model-preview"):
+        with pytest.raises(InvalidJudgeConfig):
+            JudgeConfig(
+                model=model,
+                base_url="https://example.invalid/v1",
+                api_key="x",
+            )
     with pytest.raises(InvalidJudgeConfig):
         JudgeConfig(
-            model="unknown-judge",
-            base_url="https://example.invalid/v1",
-            api_key="x",
-        )
-    with pytest.raises(InvalidJudgeConfig):
-        JudgeConfig(
-            model="step-5-preview",
+            model="decision-model-preview",
             base_url="not-a-url",
             api_key="x",
         )
     with pytest.raises(InvalidJudgeConfig):
         JudgeConfig(
-            model="step-5-preview",
+            model="decision-model-preview",
             base_url="ftp://example.invalid/v1",
             api_key="x",
         )
     with pytest.raises(InvalidJudgeConfig):
         JudgeConfig(
-            model="step-5-preview",
+            model="decision-model-preview",
             base_url="https://example.invalid/v1",
             api_key="   ",
         )
     with pytest.raises(InvalidJudgeConfig):
         JudgeConfig(
-            model="step-5-preview",
+            model="decision-model-preview",
             base_url=" https://example.invalid/v1",
             api_key="x",
         )
@@ -347,9 +350,9 @@ def test_judge_config_from_environment_requires_model_variable():
     config = JudgeConfig.from_environment(
         base_url="https://example.invalid/v1",
         api_key="x",
-        environ={"FIT_AGENT_EVAL_JUDGE_MODEL": "step-5-preview"},
+        environ={"FIT_AGENT_EVAL_JUDGE_MODEL": "decision-model-preview"},
     )
-    assert config.model == "step-5-preview"
+    assert config.model == "decision-model-preview"
     with pytest.raises(JudgeConfigError):
         JudgeConfig.from_environment(
             base_url="https://example.invalid/v1",
@@ -401,7 +404,7 @@ def test_dependency_versions_pin_locked_ragas_identity():
 
 
 @pytest.mark.parametrize(
-    "model_name", ["step-5-preview", "step-3.7-flash", "deepseek-v4.1-flash"]
+    "model_name", ["decision-model-preview"]
 )
 def test_evidence_records_prompt_metric_and_run_configuration(model_name):
     judge = JudgeConfig(model=model_name, base_url=JUDGE.base_url, api_key=JUDGE.api_key)
@@ -600,7 +603,7 @@ def test_run_judge_identity_combines_real_prompt_and_metric_digests():
         score=0.5,
     )
     identity = run_judge_identity([faithfulness, factual])
-    assert identity.model == "step-5-preview"
+    assert identity.model == "decision-model-preview"
     assert len(identity.prompt_version) == 64
     assert len(identity.metric_version) == 64
     assert identity.prompt_version != identity.metric_version
@@ -685,7 +688,7 @@ def test_endpoint_sanitizer_removes_userinfo_query_and_fragment():
 def test_judge_config_rejects_credentials_in_endpoint(base_url):
     with pytest.raises(InvalidJudgeConfig):
         JudgeConfig(
-            model="step-5-preview",
+            model="decision-model-preview",
             base_url=base_url,
             api_key="x",
         )
@@ -696,7 +699,7 @@ def test_evidence_serialization_strips_embedded_endpoint_credentials():
     plan = build_metric_plan(item)[0]
     # 绕过配置校验，验证证据层仍按统一规则脱敏。
     unsafe = object.__new__(JudgeConfig)
-    object.__setattr__(unsafe, "model", "step-5-preview")
+    object.__setattr__(unsafe, "model", "decision-model-preview")
     object.__setattr__(unsafe, "base_url", CREDENTIAL_ENDPOINT)
     object.__setattr__(unsafe, "api_key", "sk-sentinel-value")
     evidence = build_metric_evidence(
@@ -798,7 +801,7 @@ def test_ragas_tracking_is_forced_off_after_cached_false(monkeypatch, preset):
 
 
 @pytest.mark.parametrize(
-    "model_name", ["step-5-preview", "step-3.7-flash", "deepseek-v4.1-flash"]
+    "model_name", ["decision-model-preview"]
 )
 def test_attempt_snapshot_is_available_before_scoring(model_name):
     judge = JudgeConfig(model=model_name, base_url=JUDGE.base_url, api_key=JUDGE.api_key)
@@ -836,6 +839,114 @@ def test_attempt_snapshot_is_available_before_scoring(model_name):
     assert failed_evidence.judge_calls == []
 
 
+def test_saved_judge_identity_keeps_historical_model_separate_from_config():
+    identity = JudgeIdentity(
+        model="qwen3.6-flash",
+        prompt_version="prompt-version",
+        metric_version="metric-version",
+    )
+    assert identity.model == "qwen3.6-flash"
+    with pytest.raises(ValidationError):
+        JudgeIdentity(
+            model="   ",
+            prompt_version="prompt-version",
+            metric_version="metric-version",
+        )
+    config = JudgeConfig(
+        model="qwen3.6-flash",
+        base_url=JUDGE.base_url,
+        api_key=JUDGE.api_key,
+    )
+    assert config.model == "qwen3.6-flash"
+    assert (
+        load_judge_model({"FIT_AGENT_EVAL_JUDGE_MODEL": "qwen3.6-flash"})
+        == "qwen3.6-flash"
+    )
+
+
+# 真实运行 20261020T011423Z-0d87c272 中 s-action-verification-01/cp1/faithfulness 的调用链身份。
+REPLAY_CHAINS = (
+    ("01a156e0-5984-7381-a1c3-89564b00fe9c", None, "faithfulness"),
+    (
+        "01a156e0-5985-7a23-91d0-2d2d9973fd76",
+        "01a156e0-5984-7381-a1c3-89564b00fe9c",
+        "statement_generator_prompt",
+    ),
+    (
+        "01a156e0-bfa2-73f1-a9f1-3262a66e5819",
+        "01a156e0-5984-7381-a1c3-89564b00fe9c",
+        "n_l_i_statement_prompt",
+    ),
+)
+REPLAY_CALLS = (
+    ("01a156e0-5985-7a23-91d0-2d2d9973fd76", "真实保存的陈述生成提示"),
+    ("01a156e0-bfa2-73f1-a9f1-3262a66e5819", "真实保存的语句级判断提示"),
+)
+
+
+def _replay_recorded_attempt() -> ScoringAttempt:
+    item = checkpoint()
+    plan = build_metric_plan(item)[0]
+    tracer = RagasTracer()
+    recorder = JudgeCallRecorder()
+    for run_id, parent_run_id, name in REPLAY_CHAINS:
+        tracer.on_chain_start(
+            {"name": name},
+            {"data": {"replay": name}},
+            run_id=uuid.UUID(run_id),
+            parent_run_id=uuid.UUID(parent_run_id) if parent_run_id else None,
+        )
+    for index, (chain_id, prompt) in enumerate(REPLAY_CALLS):
+        call_id = uuid.uuid4()
+        recorder.on_chat_model_start(
+            {},
+            [[SimpleNamespace(text=prompt)]],
+            run_id=call_id,
+            parent_run_id=uuid.UUID(chain_id),
+        )
+        recorder.on_chat_model_end(
+            SimpleNamespace(generations=[[SimpleNamespace(text=f'{{"replay": {index}}}')]]),
+            run_id=call_id,
+        )
+    for run_id, _, name in REPLAY_CHAINS:
+        tracer.on_chain_end({"output": name}, run_id=uuid.UUID(run_id))
+    attempt = ScoringAttempt(
+        checkpoint=item,
+        plan=plan,
+        metric=Faithfulness(),
+        judge=JUDGE,
+        run_config=RunConfig(timeout=5),
+        timeout=5,
+        recorder=recorder,
+        tracer=tracer,
+    )
+    attempt.succeed(0.5)
+    return attempt
+
+
+@pytest.mark.parametrize("snapshot_first", [False, True])
+def test_success_exports_share_synchronized_prompt_names(snapshot_first):
+    attempt = _replay_recorded_attempt()
+    if snapshot_first:
+        snapshot = attempt.snapshot()
+        evidence = attempt.to_evidence()
+    else:
+        evidence = attempt.to_evidence()
+        snapshot = attempt.snapshot()
+    assert [call.prompt_name for call in evidence.judge_calls] == [
+        "statement_generator_prompt",
+        "n_l_i_statement_prompt",
+    ]
+    evidence_dump = evidence.model_dump(mode="json")
+    snapshot_dump = snapshot.model_dump(mode="json")
+    for field_name, value in snapshot_dump.items():
+        if field_name == "status":
+            continue
+        assert evidence_dump[field_name] == value, field_name
+    assert attempt.to_evidence().model_dump(mode="json") == evidence_dump
+    assert attempt.snapshot().model_dump(mode="json") == snapshot_dump
+
+
 def _closed_endpoint() -> str:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
         sock.bind(("127.0.0.1", 0))
@@ -870,7 +981,7 @@ async def test_local_transport_failure_preserves_attempt_evidence(monkeypatch):
     monkeypatch.setenv("NO_PROXY", "127.0.0.1")
     monkeypatch.setenv("no_proxy", "127.0.0.1")
     judge = JudgeConfig(
-        model="step-5-preview",
+        model="decision-model-preview",
         base_url=_closed_endpoint(),
         api_key="test-key",
     )
@@ -899,7 +1010,7 @@ async def test_timeout_preserves_attempt_evidence(monkeypatch):
     monkeypatch.setenv("no_proxy", "127.0.0.1")
     async with _hanging_endpoint() as base_url:
         judge = JudgeConfig(
-            model="step-5-preview",
+            model="decision-model-preview",
             base_url=base_url,
             api_key="test-key",
         )
@@ -928,7 +1039,7 @@ async def test_cancellation_preserves_attempt_evidence(monkeypatch):
     monkeypatch.setenv("no_proxy", "127.0.0.1")
     async with _hanging_endpoint() as base_url:
         judge = JudgeConfig(
-            model="step-5-preview",
+            model="decision-model-preview",
             base_url=base_url,
             api_key="test-key",
         )

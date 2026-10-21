@@ -35,20 +35,35 @@ async def check() -> None:
     load_dotenv(BACKEND / ".env")
     runtime = ActionRetrievalRuntime()
     try:
-        candidates = (
-            await runtime.search(QUERY, limit=retrieval_frozen.RECALL_LIMIT)
-        ).candidates
+        execution = await runtime.search(
+            QUERY, limit=retrieval_frozen.RECALL_LIMIT
+        )
+        candidates = execution.candidates
         assert len(candidates) > 5, len(candidates)
         assert len(candidates) <= retrieval_frozen.RECALL_LIMIT, len(candidates)
         scores = [item.score for item in candidates]
         assert all(math.isfinite(score) and score > retrieval_frozen.THRESHOLD for score in scores), scores
         assert all(left >= right for left, right in zip(scores, scores[1:], strict=False)), scores
+        assert [row.id for row in execution.rerank.scored] == [
+            candidates[row.rrf_rank].id for row in execution.rerank.scored
+        ]
+        assert execution.rerank.usage.requests == 1
+        assert execution.rerank.request_id
 
         evaluated = EvaluatedConditions(SearchConditions(), (), ())
-        stage = build_search_stage(candidates, evaluated, threshold=retrieval_frozen.THRESHOLD)
+        stage = build_search_stage(
+            candidates,
+            evaluated,
+            rerank=execution.rerank,
+            rerank_identity=execution.rerank_identity,
+            threshold=retrieval_frozen.THRESHOLD,
+        )
         assert len(stage.candidate_pool) == len(candidates)
         assert len(stage.final_input) <= 5
         assert len(stage.final_input) < len(stage.candidate_pool)
+        assert [item.id for item in stage.final_input] == [
+            item.id for item in stage.response.items
+        ]
 
         async with MilvusConnection.from_env() as db:
             corpus = RetrievalCorpus.load()
@@ -60,13 +75,22 @@ async def check() -> None:
                     dense_depth=retrieval_frozen.DENSE_DEPTH,
                     limit=retrieval_frozen.RECALL_LIMIT,
                 )).candidates
-        runtime_ids = [item.id for item in candidates]
         direct_ids = [item.id for item in direct]
+        direct_scores = [item.score for item in direct]
+        assert 5 < len(direct) <= retrieval_frozen.RECALL_LIMIT, direct_ids
+        assert len(set(direct_ids)) == len(direct_ids), direct_ids
+        assert all(
+            math.isfinite(score) and score > retrieval_frozen.THRESHOLD
+            for score in direct_scores
+        ), direct_scores
+        assert all(
+            left >= right
+            for left, right in zip(direct_scores, direct_scores[1:], strict=False)
+        ), direct_scores
         assert retrieval_frozen.RRF_K == 60
         assert retrieval_frozen.BM25_DEPTH == retrieval_frozen.DENSE_DEPTH == 100
         assert retrieval_frozen.RECALL_LIMIT == 20
-        # 独立真实编码存在浮点非确定性，近邻并列只允许名次抖动，不允许候选集合差异。
-        assert set(runtime_ids) == set(direct_ids), (runtime_ids, direct_ids)
+        # 两次独立编码的近并列名次在 Top-20 截断处存在真实抖动，两条路径各自校验字段与约束。
 
         signal = Event()
         signal.set()

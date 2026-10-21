@@ -544,6 +544,27 @@ def _validate_retrieval(
             for value in record.scores
         ):
             _add(issues, f"{prefix}:候选分数非有限值")
+        if record.experiment == "rerank":
+            if record.rerank is None:
+                _add(issues, f"{prefix}:重排实验缺少重排证据")
+            else:
+                rows = record.rerank.scored
+                if len(rows) != len(record.candidate_pool):
+                    _add(issues, f"{prefix}:重排结果数量与候选池不一致")
+                if any(row.rrf_rank >= len(record.candidate_pool) for row in rows):
+                    _add(issues, f"{prefix}:重排原排名越界")
+                elif [row.id for row in rows] != [
+                    record.candidate_pool[row.rrf_rank] for row in rows
+                ]:
+                    _add(issues, f"{prefix}:重排原排名与候选池不一致")
+                if {row.id for row in rows} != set(record.candidate_pool):
+                    _add(issues, f"{prefix}:重排结果未完整覆盖候选池")
+                order = {row.id: index for index, row in enumerate(rows)}
+                positions = [order[item] for item in record.final_model_input if item in order]
+                if len(positions) != len(record.final_model_input) or positions != sorted(positions):
+                    _add(issues, f"{prefix}:最终输入未按重排顺序排列")
+        elif record.rerank is not None:
+            _add(issues, f"{prefix}:RRF baseline 包含重排证据")
         response = record.response_json
         if set(response) != {"items", "has_more"}:
             _add(issues, f"{prefix}:公开检索响应字段非法")
@@ -1148,6 +1169,41 @@ def _validate_identity(
                         _add(layout.issues, "identity:物理索引身份与检索记录不一致")
         elif index:
             _add(layout.issues, "identity:未执行检索但运行身份包含物理索引")
+        rerank_records = [
+            record for record in retrieval_records if record.rerank is not None
+        ]
+        if rerank_records:
+            if any(record.experiment != "rerank" for record in retrieval_records):
+                _add(layout.issues, "identity:重排与基线检索记录混合")
+            identities = {
+                (
+                    record.rerank.identity.model,
+                    sha256_text(record.rerank.identity.endpoint),
+                    record.rerank.identity.text_version,
+                )
+                for record in rerank_records
+                if record.rerank is not None and record.rerank.identity is not None
+            }
+            if len(identities) > 1:
+                _add(layout.issues, "identity:检索记录存在多个重排身份")
+            recorded = retrieval.get("rerank")
+            if not recorded:
+                _add(layout.issues, "identity:检索记录存在但运行身份缺少重排配置")
+            elif identities:
+                try:
+                    parsed = json.loads(recorded)
+                except ValueError:
+                    _add(layout.issues, "identity:重排身份不是合法 JSON")
+                else:
+                    model, endpoint_sha256, version = next(iter(identities))
+                    if (
+                        parsed.get("model") != model
+                        or parsed.get("endpoint") != endpoint_sha256
+                        or parsed.get("text_version") != version
+                    ):
+                        _add(layout.issues, "identity:重排身份与检索记录不一致")
+        elif retrieval.get("rerank"):
+            _add(layout.issues, "identity:未执行重排但运行身份包含重排配置")
 
 
 def _aggregate(layout: RunLayout) -> dict[str, Any]:
@@ -1423,6 +1479,9 @@ def _retrieval_summary(
         "scenarios_with_search": len(
             {aggregate.scenario_id for aggregate in layout.aggregates.values() if aggregate.artifact and aggregate.artifact.retrieval}
         ),
+        "experiment": identity.get("experiment") if isinstance(identity, dict) else None,
+        "rerank": identity.get("rerank") if isinstance(identity, dict) else None,
+        "rerank_conflict": identity.get("rerank_conflict") if isinstance(identity, dict) else None,
         "candidate_pool_limit": CANDIDATE_POOL_LIMIT,
         "final_input_limit": SEARCH_LIMIT,
         "character_budget": SEARCH_BUDGET,

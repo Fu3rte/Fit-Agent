@@ -3,7 +3,7 @@ import math
 from contextlib import suppress
 from dataclasses import dataclass
 from threading import Event
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 from pymilvus import AnnSearchRequest, RRFRanker
 
@@ -20,6 +20,9 @@ from app.application.business.retrieval_index import (
     validate_index,
     validated_manifest,
 )
+
+if TYPE_CHECKING:
+    from app.application.business.retrieval_rerank import RerankIdentity, RerankResult
 
 
 @dataclass(frozen=True)
@@ -70,11 +73,21 @@ class RetrievalCandidate:
 
 
 @dataclass(frozen=True)
-class SearchExecution:
-    # 每次调用独立携带实际命中的物理集合与清单：别名切换或并发调用不得共用其它调用的身份。
+class SearchRecall:
+    # 每次召回独立携带实际命中的物理集合与清单：别名切换或并发调用不得共用其它调用的身份。
     candidates: list[RetrievalCandidate]
     collection: str
     manifest_json: str
+
+
+@dataclass(frozen=True)
+class SearchExecution:
+    # 生产单次执行结果：原 RRF 候选池与本次重排结果、配置身份一同返回，不进入跨查询共享状态。
+    candidates: list[RetrievalCandidate]
+    collection: str
+    manifest_json: str
+    rerank: "RerankResult"
+    rerank_identity: "RerankIdentity"
 
 
 def validate_parameters(query: str, rrf_k: int, limit: int, bm25_depth: int, dense_depth: int) -> str:
@@ -209,7 +222,7 @@ class HybridRetriever:
         dense_depth: int = 50,
         limit: int = 10,
         signal: Event | None = None,
-    ) -> SearchExecution:
+    ) -> SearchRecall:
         # 校验发布索引后排除互斥硬条件；阶段之间传播取消，编码在途可被真实任务取消中止。
         check_cancelled(signal)
         query = validate_parameters(query, rrf_k, limit, bm25_depth, dense_depth)
@@ -221,8 +234,8 @@ class HybridRetriever:
         )
         check_cancelled(signal)
         if not has_eligible_exercises:
-            return SearchExecution(candidates=[], collection=collection, manifest_json=manifest_json)
+            return SearchRecall(candidates=[], collection=collection, manifest_json=manifest_json)
         vector = await _encode_cancellable(self.embedding, query, signal)
         check_cancelled(signal)
         candidates = await search_vectors(self.db, collection, self.corpus.catalog, query, vector, conditions=conditions, rrf_k=rrf_k, bm25_depth=bm25_depth, dense_depth=dense_depth, limit=limit)
-        return SearchExecution(candidates=candidates, collection=collection, manifest_json=manifest_json)
+        return SearchRecall(candidates=candidates, collection=collection, manifest_json=manifest_json)

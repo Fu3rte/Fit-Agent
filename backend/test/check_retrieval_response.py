@@ -58,7 +58,7 @@ def search_cases() -> dict:
     catalog = Catalog.load()
     evidence: dict = {}
     recalled = candidate_rows(catalog, 12)
-    stage = build_search_stage(recalled, evaluated(), threshold=0.0)
+    stage = build_search_stage(recalled, evaluated(), rerank=None, threshold=0.0)
     limit_budget = stage.response
     assert len(stage.candidate_pool) == 12
     assert len(limit_budget.items) <= 5
@@ -83,7 +83,7 @@ def search_cases() -> dict:
     assert len(encoded(trimmed.model_dump())) <= 600
     evidence["trimmed"] = {"items": len(trimmed.items)}
 
-    empty_stage = build_search_stage([], evaluated(), threshold=0.0)
+    empty_stage = build_search_stage([], evaluated(), rerank=None, threshold=0.0)
     empty = empty_stage.response
     assert empty.items == [] and empty.has_more is False
     return evidence

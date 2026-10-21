@@ -23,6 +23,14 @@ from app.application.business.retrieval_index import (
     json_text,
     sha256,
 )
+from app.application.business.retrieval_rerank import (
+    RerankClient,
+    RerankIdentity,
+    RerankResult,
+    RerankScored,
+    RerankUsage,
+    build_request,
+)
 from app.application.business.retrieval_response import (
     CANDIDATE_POOL_LIMIT,
     SEARCH_BUDGET,
@@ -31,10 +39,11 @@ from app.application.business.retrieval_response import (
     build_search_stage,
     encoded_length,
 )
-from app.application.business.retrieval_search import HybridRetriever
+from app.application.business.retrieval_search import HybridRetriever, search_vectors
 from app.domain.business.models import CatalogSearchArguments, ProfileContent
 from evaluation.contracts import (
     ModelVisibleSearch,
+    RerankEvidence,
     SearchResponseEvidence,
     VisibleExercise,
 )
@@ -54,6 +63,8 @@ REQUAL_LEDGER_PATH = REQUAL_ROOT / "executions.json"
 FROZEN_CONFIG_PATH = BACKEND / "app/application/business/retrieval_frozen.py"
 OUTPUT_ROOT = BACKEND / "temp" / "retrieval-mteb"
 RECALL_LIMIT = CANDIDATE_POOL_LIMIT
+EXPERIMENT_BASELINE = "rrf_baseline"
+EXPERIMENT_RERANK = "rerank"
 # 历史入口保持原 11→10 单阶段身份，不接入两阶段候选池。
 LEGACY_RETRIEVAL_LIMIT = 10
 LEGACY_RECALL_LIMIT = LEGACY_RETRIEVAL_LIMIT + 1
@@ -83,6 +94,30 @@ def load_queries(split: str) -> list[dict]:
     selected = [item for item in query_documents() if item["split"] == split]
     if not selected:
         raise EvaluationBlocked(f"拆分 {split} 没有查询")
+    return selected
+
+
+PURPOSES = ("lookup", "generation", "replacement")
+
+
+def select_validation_queries(dataset) -> list[dict]:
+    # 定向验证固定为每个用途各取第一条有答案与第一条无答案查询；本地与 LangSmith 共用。
+    rows = sorted(dataset.queries, key=lambda item: item["query_id"])
+    selected = []
+    for purpose in PURPOSES:
+        for expect_empty in (False, True):
+            matches = [
+                item
+                for item in rows
+                if item["purpose"] == purpose and item["expect_empty"] is expect_empty
+            ]
+            if not matches:
+                raise EvaluationBlocked(
+                    f"用途 {purpose} 缺少 expect_empty={expect_empty} 的批准查询"
+                )
+            selected.append(matches[0])
+    if len(selected) != 6 or len({item["query_id"] for item in selected}) != 6:
+        raise EvaluationBlocked("定向验收必须选择 6 条唯一查询")
     return selected
 
 
@@ -196,17 +231,114 @@ def _conditions_payload(evaluated: EvaluatedConditions) -> dict:
     }
 
 
+def _rerank_payload(
+    result: RerankResult | None, identity: RerankIdentity | None
+) -> dict | None:
+    # 证据与生产阶段同源；写入前用契约模型拒绝缺身份、空结果与非降序排序。
+    if result is None:
+        if identity is not None:
+            raise ValueError("缺少重排结果时不得提供配置身份")
+        return None
+    if identity is None:
+        raise ValueError("缺少重排配置身份")
+    evidence = RerankEvidence(
+        mode=EXPERIMENT_RERANK,
+        identity={
+            "model": identity.model,
+            "endpoint": identity.endpoint,
+            "text_version": identity.text_version,
+        },
+        scored=[
+            {
+                "id": row.id,
+                "rerank_score": row.rerank_score,
+                "rrf_rank": row.rrf_rank,
+            }
+            for row in result.scored
+        ],
+        usage={
+            "requests": result.usage.requests,
+            "prompt_tokens": result.usage.prompt_tokens,
+            "total_tokens": result.usage.total_tokens,
+        },
+        request_id=result.request_id,
+    )
+    return evidence.model_dump(mode="json")
+
+
+def rebuild_rerank(evidence: object) -> tuple[RerankResult, RerankIdentity]:
+    # 回放只消费已保存数据：重建共享类型，由 build_search_stage 复核覆盖与顺序。
+    parsed = RerankEvidence.model_validate(evidence)
+    if parsed.mode != EXPERIMENT_RERANK:
+        raise ValueError("回放重排必须使用 rerank 实验身份")
+    if parsed.identity is None or parsed.usage is None:
+        raise ValueError("重排证据缺少身份或用量")
+    result = RerankResult(
+        scored=tuple(
+            RerankScored(row.id, row.rerank_score, row.rrf_rank)
+            for row in parsed.scored
+        ),
+        usage=RerankUsage(
+            requests=parsed.usage.requests,
+            prompt_tokens=parsed.usage.prompt_tokens,
+            total_tokens=parsed.usage.total_tokens,
+        ),
+        request_id=parsed.request_id,
+    )
+    identity = RerankIdentity(
+        model=parsed.identity.model,
+        endpoint=parsed.identity.endpoint,
+        text_version=parsed.identity.text_version,
+    )
+    return result, identity
+
+
+def public_rerank_evidence(evidence: dict | None) -> dict | None:
+    # 上传与 LangSmith 只暴露模型、文本版本、地址摘要、排序、用量与 request_id。
+    if evidence is None:
+        return None
+    identity = evidence["identity"]
+    return {
+        "mode": evidence["mode"],
+        "identity": {
+            "model": identity["model"],
+            "endpoint": sha256_text(identity["endpoint"]),
+            "text_version": identity["text_version"],
+        },
+        "scored": evidence["scored"],
+        "usage": evidence["usage"],
+        "request_id": evidence["request_id"],
+    }
+
+
 def project_response(
     catalog: Catalog,
     query_id: str,
     recalled: list,
     evaluated: EvaluatedConditions,
     threshold: float | None,
+    *,
+    rerank: RerankResult | None = None,
+    rerank_identity: RerankIdentity | None = None,
+    experiment: str | None = None,
 ) -> dict:
     # 生产与评测共用同一阶段构造：门槛前候选池与公开最终输入来自同一次检索。
     if any(not math.isfinite(item.score) for item in recalled):
         raise ValueError("候选分数非有限值")
-    stage = build_search_stage(recalled, evaluated, threshold=threshold)
+    mode = experiment or (
+        EXPERIMENT_RERANK if rerank is not None else EXPERIMENT_BASELINE
+    )
+    if mode == EXPERIMENT_BASELINE and rerank is not None:
+        raise ValueError("RRF baseline 不得携带重排结果")
+    if mode == EXPERIMENT_RERANK and rerank is None:
+        raise ValueError("重排实验必须携带真实重排结果")
+    stage = build_search_stage(
+        recalled,
+        evaluated,
+        rerank=rerank,
+        rerank_identity=rerank_identity,
+        threshold=threshold,
+    )
     payload = stage.response.model_dump()
     chars = encoded_length(payload)
     evidence = SearchResponseEvidence(
@@ -230,6 +362,8 @@ def project_response(
         [item.id for item in stage.final_input]
     )
     return {
+        "experiment": mode,
+        "rerank": _rerank_payload(stage.rerank, stage.rerank_identity),
         "recalled": [item.id for item in recalled],
         "candidate_pool": [item.id for item in stage.candidate_pool],
         "final_model_input": [item.id for item in stage.final_input],
@@ -280,6 +414,134 @@ def project_legacy_response(
         "budget_compliant": chars <= SEARCH_BUDGET
         and len(result.items) <= LEGACY_RETRIEVAL_LIMIT,
     }
+
+
+async def recall_query(
+    db: MilvusConnection,
+    collection: str,
+    corpus: RetrievalCorpus,
+    mappings: dict,
+    query: dict,
+    vector: list[float],
+    *,
+    group: str,
+    rrf_k: int,
+    bm25_depth: int,
+    dense_depth: int,
+) -> tuple[EvaluatedConditions, list]:
+    # 同池对照只调用一次真实召回；候选顺序与 RRF 分数由该次调用唯一确定。
+    evaluated = dataset_conditions(query, corpus.catalog, mappings)
+    recalled = await search_vectors(
+        db,
+        collection,
+        corpus.catalog,
+        query["query"],
+        vector,
+        conditions=evaluated.conditions,
+        rrf_k=rrf_k,
+        bm25_depth=bm25_depth,
+        dense_depth=dense_depth,
+        limit=RECALL_LIMIT,
+        mode=group,
+    )
+    return evaluated, recalled
+
+
+async def execute_query(
+    db: MilvusConnection,
+    collection: str,
+    corpus: RetrievalCorpus,
+    mappings: dict,
+    query: dict,
+    vector: list[float],
+    *,
+    group: str,
+    rrf_k: int,
+    bm25_depth: int,
+    dense_depth: int,
+    threshold: float | None,
+) -> dict:
+    # 旧全量入口与 LangSmith target 共用同一真实单查询执行与阶段构造。
+    evaluated, recalled = await recall_query(
+        db,
+        collection,
+        corpus,
+        mappings,
+        query,
+        vector,
+        group=group,
+        rrf_k=rrf_k,
+        bm25_depth=bm25_depth,
+        dense_depth=dense_depth,
+    )
+    return project_response(
+        corpus.catalog,
+        query["query_id"],
+        recalled,
+        evaluated,
+        threshold if group == "hybrid" else None,
+        experiment=EXPERIMENT_BASELINE,
+    )
+
+
+async def execute_comparison_query(
+    db: MilvusConnection,
+    collection: str,
+    corpus: RetrievalCorpus,
+    mappings: dict,
+    query: dict,
+    vector: list[float],
+    *,
+    group: str,
+    rrf_k: int,
+    bm25_depth: int,
+    dense_depth: int,
+    threshold: float | None,
+    rerank_client: RerankClient,
+    rerank_identity: RerankIdentity,
+) -> dict[str, dict]:
+    # 同一候选池上的显式对照：先冻结 RRF Top-20，再构造基线响应与真实重排响应。
+    if group != "hybrid":
+        raise ValueError("重排实验只接受 hybrid 候选池")
+    evaluated, recalled = await recall_query(
+        db,
+        collection,
+        corpus,
+        mappings,
+        query,
+        vector,
+        group=group,
+        rrf_k=rrf_k,
+        bm25_depth=bm25_depth,
+        dense_depth=dense_depth,
+    )
+    baseline = project_response(
+        corpus.catalog,
+        query["query_id"],
+        recalled,
+        evaluated,
+        threshold,
+        experiment=EXPERIMENT_BASELINE,
+    )
+    pool = recalled[:CANDIDATE_POOL_LIMIT]
+    request = build_request(query["query"], pool, corpus.records)
+    result = await rerank_client.rerank(request)
+    reranked = project_response(
+        corpus.catalog,
+        query["query_id"],
+        recalled,
+        evaluated,
+        threshold,
+        rerank=result,
+        rerank_identity=rerank_identity,
+        experiment=EXPERIMENT_RERANK,
+    )
+    if (
+        baseline["candidate_pool"] != reranked["candidate_pool"]
+        or baseline["scores"] != reranked["scores"]
+    ):
+        raise ValueError("同池对照的候选池或 RRF 分数不一致")
+    return {EXPERIMENT_BASELINE: baseline, EXPERIMENT_RERANK: reranked}
 
 
 def sha256_text(text: str) -> str:

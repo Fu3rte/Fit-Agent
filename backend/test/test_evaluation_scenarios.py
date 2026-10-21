@@ -75,6 +75,7 @@ from evaluation.deterministic_assertions import (
     EventTarget,
     ToolResultEvidence,
     evaluate_checkpoint,
+    load_catalog,
 )
 from evaluation.generation_scoring import (
     JudgeConfig,
@@ -100,7 +101,7 @@ from evaluation.scenario_evidence import (
     sanitize_error_text,
     search_evidence_from_tool,
     sha256_text,
-    tool_content_by_visible,
+    tool_nodes_by_visible,
 )
 from evaluation.scenarios import (
     DEFAULT_JUDGE_TIMEOUT,
@@ -115,6 +116,7 @@ from evaluation.scenarios import (
     ScenarioBlocked,
     SearchStageRecord,
     ToolCallCapture,
+    _assertion_evidence,
     _attachments_for_event,
     _cancel_driving_capture,
     _current_input_text,
@@ -141,6 +143,7 @@ from evaluation.scenarios import (
 MODEL = type("EvaluationModel", (), {
     "api": "openai-completions",
     "provider": "evaluation",
+    "id": "evaluation-model",
     "model": "evaluation-model",
     "api_key": "not-a-secret",
 })()
@@ -1128,10 +1131,250 @@ def test_tool_evidence_conflict_is_rejected():
         )
 
 
+async def seed_search_request(runtime, *, include_success: bool):
+    session_id = str(uuid4())
+    await runtime.service.create_session_result(session_id, "search")
+    run_id = str(uuid4())
+    now = 1_760_000_000_000
+    user_id = str(uuid4())
+    assistant_id = str(uuid4())
+    answer_id = str(uuid4())
+    exercise = load_catalog().all()[0]
+    calls = []
+    if include_success:
+        calls.append({
+            "items": [{
+                "id": exercise.id,
+                "name": exercise.name,
+                "equipment": exercise.equipment,
+                "target": exercise.target,
+                "matches": [f"equipment={exercise.equipment}"],
+            }],
+            "has_more": False,
+        })
+    calls.append({
+        "code": "invalid_search_condition",
+        "message": "body_part 取值无法映射到动作目录",
+    })
+    calls.append({
+        "code": "invalid_search_condition",
+        "message": "muscle_group 取值无法映射到动作目录",
+    })
+    request_calls = []
+    result_entries = []
+    for index, payload in enumerate(calls):
+        call_id = f"call-search-{index}"
+        text = json.dumps(payload, ensure_ascii=False)
+        request_calls.append({"id": call_id, "name": "search_exercises", "text": text})
+    async with runtime.session_repository.transaction():
+        session = await runtime.service.queries.require_session(session_id)
+        user_text = "请按条件检索动作"
+        await runtime.session_repository.insert_entry(SessionMessageEntry(
+            session_id=session_id, id=user_id, parent_id=None, run_id=None,
+            type="message", messages=[UserMessage(
+                role="user", content=user_text, timestamp=now
+            )], created_at=now,
+        ))
+        await runtime.session_repository.insert_run(SessionRun(
+            session_id=session_id,
+            id=run_id,
+            request_entry_id=user_id,
+            last_entry_id=None,
+            status="running",
+            started_at=now,
+            finished_at=None,
+            error_code=None,
+            error_message=None,
+            stop_reason=None,
+            stop_diagnostic=None,
+        ))
+        await runtime.session_repository.insert_entry(SessionMessageEntry(
+            session_id=session_id, id=assistant_id, parent_id=user_id,
+            run_id=run_id, type="message", messages=[AssistantMessage(
+                role="assistant",
+                content=[
+                    ToolCall(
+                        type="toolCall",
+                        id=call["id"],
+                        name=call["name"],
+                        arguments={},
+                    )
+                    for call in request_calls
+                ],
+                api="openai-completions",
+                provider="evaluation",
+                model="evaluation-model",
+                usage=Usage(
+                    input=0, output=0, cache_read=0, cache_write=0,
+                    total_tokens=0,
+                ),
+                stop_reason="toolUse",
+                timestamp=now,
+            )], created_at=now,
+        ))
+        parent_id = assistant_id
+        for call, payload in zip(request_calls, calls):
+            entry = SessionMessageEntry(
+                session_id=session_id, id=str(uuid4()), parent_id=parent_id,
+                run_id=run_id, type="message", messages=[ToolResultMessage(
+                    role="toolResult",
+                    tool_call_id=call["id"],
+                    tool_name=call["name"],
+                    content=[TextContent(type="text", text=call["text"])],
+                    is_error="code" in payload,
+                    timestamp=now,
+                )], created_at=now,
+            )
+            await runtime.session_repository.insert_entry(entry)
+            result_entries.append(entry)
+            parent_id = entry.id
+        await runtime.session_repository.insert_entry(SessionMessageEntry(
+            session_id=session_id, id=answer_id, parent_id=parent_id,
+            run_id=run_id, type="message", messages=[AssistantMessage(
+                role="assistant",
+                content=[TextContent(type="text", text="已按条件检索")],
+                api="openai-completions",
+                provider="evaluation",
+                model="evaluation-model",
+                usage=Usage(
+                    input=0, output=0, cache_read=0, cache_write=0,
+                    total_tokens=0,
+                ),
+                stop_reason="stop",
+                timestamp=now,
+            )], created_at=now,
+        ))
+        await set_leaf(runtime.session_repository, session, answer_id, now)
+    request = {
+        "model": "evaluation-model",
+        "messages": [
+            {"role": "user", "content": user_text},
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": call["id"],
+                        "type": "function",
+                        "function": {
+                            "name": call["name"],
+                            "arguments": "{}",
+                        },
+                    }
+                    for call in request_calls
+                ],
+            },
+            *[
+                {
+                    "role": "tool",
+                    "tool_call_id": call["id"],
+                    "content": call["text"],
+                }
+                for call in request_calls
+            ],
+        ],
+    }
+    sequence = runtime.call_recorder.record_request(
+        request, MODEL, "answer", answer_id, None
+    )
+    runtime.call_recorder.record_outcome(sequence, "stop", None)
+    capture = EventCapture(
+        run_id=run_id,
+        scenario_id="s-tool-error",
+        event_id="e01",
+        event_type="message",
+        source_event_id=None,
+        session_id=session_id,
+        operation_id=None,
+        request_entry_id=user_id,
+        terminal_status="completed",
+        terminal_event="message_end",
+        before=BusinessProjection(),
+        after=BusinessProjection(),
+        answer_message_id=answer_id,
+    )
+    return capture, {
+        call["id"]: call["text"] for call in request_calls
+    }
+
+
+def search_assertions() -> list[dict]:
+    return [
+        {
+            "checkpoint_id": "cp1",
+            "event_id": "e01",
+            "kind": "evidence_present",
+            "evidence_kind": "ranking",
+            "min_count": 1,
+        },
+        {
+            "checkpoint_id": "cp1",
+            "event_id": "e01",
+            "kind": "state_unchanged",
+            "business_kind": "all",
+        },
+    ]
+
+
+async def test_failed_search_output_stays_in_context_without_ranking(root):
+    async with open_runtime(root) as runtime:
+        capture, contents = await seed_search_request(
+            runtime, include_success=True
+        )
+        success_id, *error_ids = contents
+        assertions = search_assertions()
+        evidence = await _assertion_evidence(
+            runtime,
+            {"_evaluation_run_id": "run-eval", "scenario_id": "s-tool-error"},
+            {"event_id": "e01", "type": "message"},
+            capture,
+            "cp1",
+            assertions,
+            {},
+        )
+        assert [entry.tool_call_id for entry in evidence.rankings] == [success_id]
+        assert {
+            entry.tool_call_id: entry.content for entry in evidence.tool_results
+        } == contents
+        contexts = {
+            item.item.tool_call_id: item.item.content
+            for item in evidence.context_evidence
+            if item.item.source == "tool_result"
+        }
+        assert contexts == contents
+        outcomes = evaluate_checkpoint(assertions, evidence)
+        assert [outcome.passed for outcome in outcomes] == [True, True]
+
+
+async def test_ranking_assertion_keeps_real_failure_without_success_search(root):
+    async with open_runtime(root) as runtime:
+        capture, contents = await seed_search_request(
+            runtime, include_success=False
+        )
+        assertions = search_assertions()
+        evidence = await _assertion_evidence(
+            runtime,
+            {"_evaluation_run_id": "run-eval", "scenario_id": "s-tool-error"},
+            {"event_id": "e01", "type": "message"},
+            capture,
+            "cp1",
+            assertions,
+            {},
+        )
+        assert evidence.rankings == []
+        assert {
+            entry.tool_call_id: entry.content for entry in evidence.tool_results
+        } == contents
+        outcomes = evaluate_checkpoint(assertions, evidence)
+        assert outcomes[0].passed is False
+        assert "rankings=0" in outcomes[0].evidence
+        assert outcomes[1].passed is True
+
+
 def test_tool_content_map_uses_full_text():
     original = "tool id with spaces"
     visible = normalize_tool_id(original, "openai-completions")
-    content = tool_content_by_visible(
+    nodes = tool_nodes_by_visible(
         [ToolNode(
             tool_call_id=original,
             tool_name="search_exercises",
@@ -1142,7 +1385,8 @@ def test_tool_content_map_uses_full_text():
         )],
         "openai-completions",
     )
-    assert content[visible] == "完整正文"
+    assert nodes[visible].content == "完整正文"
+    assert nodes[visible].is_error is False
 
 
 def test_identity_endpoints_are_sanitized():
@@ -1166,36 +1410,37 @@ def test_identity_endpoints_are_sanitized():
     assert "SENTINEL_SECRET" not in text
 
 
-def test_judge_model_supports_explicit_step_37_flash():
-    assert load_judge_model({
-        "FIT_AGENT_EVAL_JUDGE_MODEL": "step-3.7-flash"
-    }) == "step-3.7-flash"
+def test_judge_model_accepts_configured_model():
+    for model in ("decision-model-preview", "qwen3.6-plus", "unknown-judge"):
+        assert load_judge_model({
+            "FIT_AGENT_EVAL_JUDGE_MODEL": model
+        }) == model
     with pytest.raises(Exception):
-        load_judge_model({"FIT_AGENT_EVAL_JUDGE_MODEL": "unknown-judge"})
+        load_judge_model({"FIT_AGENT_EVAL_JUDGE_MODEL": "   "})
     config = JudgeConfig(
-        model="step-3.7-flash",
+        model="qwen3.6-plus",
         base_url="https://example.invalid/v1",
         api_key="synthetic-key",
     )
-    assert config.model == "step-3.7-flash"
+    assert config.model == "qwen3.6-plus"
     evidence = [
         type("Evidence", (), {
-            "judge_model": "step-3.7-flash",
+            "judge_model": "decision-model-preview",
             "prompt_digest": "a" * 64,
             "metric": "faithfulness",
             "metric_version": "b" * 64,
         })(),
         type("Evidence", (), {
-            "judge_model": "step-5-preview",
+            "judge_model": "decision-model-preview",
             "prompt_digest": "a" * 64,
-            "metric": "factual_correctness",
-            "metric_version": "b" * 64,
+            "metric": "faithfulness",
+            "metric_version": "c" * 64,
         })(),
     ]
-    with pytest.raises(ValueError, match="多个裁判模型身份"):
+    with pytest.raises(ValueError, match="同一指标的配置版本冲突"):
         run_judge_identity(evidence)
     identity = run_judge_identity(evidence[:1])
-    assert identity.model == "step-3.7-flash"
+    assert identity.model == "decision-model-preview"
 
 
 def _forbid_generation_model_config(monkeypatch):
@@ -1209,7 +1454,7 @@ def _forbid_generation_model_config(monkeypatch):
 
 def test_judge_config_reads_all_fields_from_environment(monkeypatch):
     _forbid_generation_model_config(monkeypatch)
-    monkeypatch.setenv("FIT_AGENT_EVAL_JUDGE_MODEL", "qwen3.6-flash")
+    monkeypatch.setenv("FIT_AGENT_EVAL_JUDGE_MODEL", "decision-model-preview")
     monkeypatch.setenv(
         "FIT_AGENT_EVAL_JUDGE_BASE_URL",
         "https://judge.example.invalid/compatible-mode/v1",
@@ -1217,7 +1462,7 @@ def test_judge_config_reads_all_fields_from_environment(monkeypatch):
     monkeypatch.setenv("FIT_AGENT_EVAL_JUDGE_API_KEY", "judge-synthetic-key")
     judge, timeout = _judge_config()
     assert judge is not None
-    assert judge.model == "qwen3.6-flash"
+    assert judge.model == "decision-model-preview"
     assert judge.base_url == "https://judge.example.invalid/compatible-mode/v1"
     assert judge.api_key == "judge-synthetic-key"
     assert timeout == DEFAULT_JUDGE_TIMEOUT
@@ -1226,7 +1471,7 @@ def test_judge_config_reads_all_fields_from_environment(monkeypatch):
 def test_judge_config_requires_dedicated_base_url(monkeypatch):
     _forbid_generation_model_config(monkeypatch)
     monkeypatch.setenv("FIT_AGENT_EVAL_JUDGE_API_KEY", "judge-synthetic-key")
-    monkeypatch.setenv("FIT_AGENT_EVAL_JUDGE_MODEL", "qwen3.6-flash")
+    monkeypatch.setenv("FIT_AGENT_EVAL_JUDGE_MODEL", "decision-model-preview")
     monkeypatch.delenv("FIT_AGENT_EVAL_JUDGE_BASE_URL", raising=False)
     assert _judge_config() == (None, None)
     for blank in ("", "   "):
@@ -1235,13 +1480,15 @@ def test_judge_config_requires_dedicated_base_url(monkeypatch):
     monkeypatch.setenv("FIT_AGENT_EVAL_JUDGE_BASE_URL", "https://judge.example.invalid/v1")
     monkeypatch.delenv("FIT_AGENT_EVAL_JUDGE_MODEL", raising=False)
     assert _judge_config() == (None, None)
-    monkeypatch.setenv("FIT_AGENT_EVAL_JUDGE_MODEL", "unknown-judge")
-    assert _judge_config() == (None, None)
+    monkeypatch.setenv("FIT_AGENT_EVAL_JUDGE_MODEL", "qwen3.6-plus")
+    judge, _ = _judge_config()
+    assert judge is not None
+    assert judge.model == "qwen3.6-plus"
 
 
 def test_judge_config_requires_dedicated_api_key(monkeypatch):
     _forbid_generation_model_config(monkeypatch)
-    monkeypatch.setenv("FIT_AGENT_EVAL_JUDGE_MODEL", "qwen3.6-flash")
+    monkeypatch.setenv("FIT_AGENT_EVAL_JUDGE_MODEL", "decision-model-preview")
     monkeypatch.setenv(
         "FIT_AGENT_EVAL_JUDGE_BASE_URL",
         "https://judge.example.invalid/compatible-mode/v1",
@@ -1435,6 +1682,7 @@ def executed_observation(tool_call_id, collection="collection-a"):
             body_part="back", target="lats", muscle_group="back",
         )],
         EvaluatedConditions(SearchConditions(), (), ()),
+        rerank=None,
         threshold=0.0,
     )
     return SearchObservation(
@@ -2114,9 +2362,12 @@ async def test_projection_nodes_follow_compaction_range(root):
         assert summary_node.content == (
             COMPACTION_SUMMARY_PREFIX + summary + COMPACTION_SUMMARY_SUFFIX
         )
-        assert tool_content_by_visible(
-            at_checkpoint.tool_nodes, "openai-completions"
-        ) == {shared_call_id: "压缩后的新结果"}
+        assert {
+            key: node.content
+            for key, node in tool_nodes_by_visible(
+                at_checkpoint.tool_nodes, "openai-completions"
+            ).items()
+        } == {shared_call_id: "压缩后的新结果"}
         mapping = map_request(
             [
                 {"role": "user", "content": summary_node.content},
@@ -2178,7 +2429,7 @@ def test_reused_tool_call_id_is_an_identity_conflict():
     assert mapping.gaps[0].ambiguous is True
     assert "多份持久化结果" in mapping.gaps[0].reason
     with pytest.raises(ContextMappingError, match="多份持久化结果"):
-        tool_content_by_visible(nodes, "openai-completions")
+        tool_nodes_by_visible(nodes, "openai-completions")
     single = map_request(
         [{"role": "tool", "tool_call_id": "call-1", "content": "第一次结果"}],
         [],

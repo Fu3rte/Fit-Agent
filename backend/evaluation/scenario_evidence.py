@@ -715,11 +715,11 @@ async def read_request_nodes(
     return RequestNodes(nodes=nodes, tool_nodes=tool_nodes)
 
 
-def tool_content_by_visible(
+def tool_nodes_by_visible(
     tool_nodes: Sequence[ToolNode], api: str
-) -> dict[str, str]:
-    """持久化完整工具正文按模型可见 ID 建索引；同一 ID 的多份结果属身份冲突。"""
-    contents: dict[str, str] = {}
+) -> dict[str, ToolNode]:
+    """持久化工具节点按模型可见 ID 建索引；同一 ID 的多份结果属身份冲突。"""
+    nodes: dict[str, ToolNode] = {}
     owners: dict[str, str] = {}
     for node in tool_nodes:
         visible = normalize_tool_id(node.tool_call_id, api)
@@ -728,9 +728,9 @@ def tool_content_by_visible(
             raise ContextMappingError(
                 f"同一工具调用 ID 存在多份持久化结果: {visible}"
             )
-        contents[visible] = node.content
+        nodes[visible] = node
         owners[visible] = node.entry_id
-    return contents
+    return nodes
 
 
 def _cancel_source_call(

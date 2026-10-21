@@ -93,16 +93,6 @@ RETRIEVAL_METRIC_STAGES: dict[str, tuple[RetrievalStage, int]] = {
 }
 RETRIEVAL_METRICS: tuple[str, ...] = tuple(RETRIEVAL_METRIC_STAGES)
 GENERATION_METRICS: tuple[str, ...] = ("faithfulness", "factual_correctness")
-JUDGE_MODEL = "step-5-preview"
-JUDGE_MODELS = (
-    "step-5-preview",
-    "step-3.7-flash",
-    "deepseek-v4.1-flash",
-    "qwen3.6-flash",
-)
-JudgeModel = Literal[
-    "step-5-preview", "step-3.7-flash", "deepseek-v4.1-flash", "qwen3.6-flash"
-]
 
 
 def _require_unique_ids(items: list[str], label: str) -> None:
@@ -159,7 +149,9 @@ class RetrievalMetric(EvaluationContract):
     def validate_stage(self) -> Self:
         expected_stage, expected_k = RETRIEVAL_METRIC_STAGES[self.name]
         if self.stage != expected_stage or self.k != expected_k:
-            raise ValueError(f"{self.name} 必须绑定 {expected_stage} 阶段且 k={expected_k}")
+            raise ValueError(
+                f"{self.name} 必须绑定 {expected_stage} 阶段且 k={expected_k}"
+            )
         return self
 
 
@@ -201,7 +193,9 @@ class RetrievalResult(EvaluationContract):
         if not self.candidate_pool and values["recall@20"] != 0.0:
             raise ValueError("候选池为空时 Recall@20 必须为 0")
         if not self.final_model_input:
-            if any(values[name] != 0.0 for name in RETRIEVAL_METRICS if name != "recall@20"):
+            if any(
+                values[name] != 0.0 for name in RETRIEVAL_METRICS if name != "recall@20"
+            ):
                 raise ValueError("有金标空返回时四项 @5 指标必须为 0")
         return self
 
@@ -220,7 +214,9 @@ class ModelVisibleSearch(EvaluationContract):
 
     @field_validator("items")
     @classmethod
-    def validate_unique_items(cls, value: list[VisibleExercise]) -> list[VisibleExercise]:
+    def validate_unique_items(
+        cls, value: list[VisibleExercise]
+    ) -> list[VisibleExercise]:
         _require_unique_ids([item.exercise_id for item in value], "模型可见动作 ID")
         return value
 
@@ -264,6 +260,67 @@ class SearchResponseEvidence(EvaluationContract):
         visible = [item.exercise_id for item in self.model_visible.items]
         if visible != final_model_input:
             raise ValueError("模型可见结果与评分列表不一致")
+
+
+RerankExperiment = Literal["rrf_baseline", "rerank"]
+
+
+class RerankIdentityEvidence(EvaluationContract):
+    model: NonEmptyText
+    endpoint: NonEmptyText
+    text_version: NonEmptyText
+
+
+class RerankUsageEvidence(EvaluationContract):
+    requests: int = Field(ge=0)
+    prompt_tokens: int = Field(ge=0)
+    total_tokens: int = Field(ge=0)
+
+
+class RerankScoredEvidence(EvaluationContract):
+    id: ExerciseId
+    rerank_score: float = Field(ge=0, le=1)
+    rrf_rank: int = Field(ge=0, lt=20)
+
+
+class RerankEvidence(EvaluationContract):
+    # 重排实验证据只保存可离线回放的数据；基线不携带重排字段。
+    mode: RerankExperiment
+    identity: RerankIdentityEvidence | None = None
+    scored: list[RerankScoredEvidence] = Field(default_factory=list, max_length=20)
+    usage: RerankUsageEvidence | None = None
+    request_id: NonEmptyText | None = None
+
+    @model_validator(mode="after")
+    def validate_mode(self) -> Self:
+        if self.mode == "rrf_baseline":
+            if (
+                self.identity is not None
+                or self.scored
+                or self.usage is not None
+                or self.request_id is not None
+            ):
+                raise ValueError("RRF baseline 不得携带重排证据")
+            return self
+        if self.identity is None or self.usage is None:
+            raise ValueError("重排实验必须提供配置身份与用量")
+        _require_unique_ids([row.id for row in self.scored], "重排动作 ID")
+        ranks = [row.rrf_rank for row in self.scored]
+        _require_unique_ids([str(rank) for rank in ranks], "重排原排名")
+        previous: tuple[float, int] | None = None
+        for row in self.scored:
+            if previous is not None:
+                if row.rerank_score > previous[0]:
+                    raise ValueError("重排结果必须按分数降序")
+                if row.rerank_score == previous[0] and row.rrf_rank < previous[1]:
+                    raise ValueError("重排同分必须保持原 RRF 顺序")
+            previous = (row.rerank_score, row.rrf_rank)
+        if self.scored:
+            if self.usage.requests != 1 or self.request_id is None:
+                raise ValueError("非空重排必须记录一次请求与 request_id")
+        elif self.usage.requests != 0 or self.request_id is not None:
+            raise ValueError("空候选池必须记录零请求与空 request_id")
+        return self
 
 
 class EvidenceLink(EvaluationContract):
@@ -310,7 +367,9 @@ class SavedBusinessData(EvaluationContract):
 
 class BusinessProjection(SavedBusinessData):
     proposals: list[PendingProposal] = Field(default_factory=list)
-    confirmation_operations: list[SaveConfirmationOperation] = Field(default_factory=list)
+    confirmation_operations: list[SaveConfirmationOperation] = Field(
+        default_factory=list
+    )
     cancellations: list[PendingProposalCancellation] = Field(default_factory=list)
 
     @model_validator(mode="after")
@@ -363,7 +422,10 @@ class ProposalBinding(EvaluationContract):
         kind, separator, source = self.proposal_ref.partition("-proposal-")
         if not separator or not source or kind != self.business_kind:
             raise ValueError("proposal_ref 的业务类型必须与 business_kind 一致")
-        if self.confirmation_operation_id is not None and self.confirmation_entry_id is None:
+        if (
+            self.confirmation_operation_id is not None
+            and self.confirmation_entry_id is None
+        ):
             raise ValueError("确认操作必须绑定确认入口")
         return self
 
@@ -509,7 +571,9 @@ class GenerationCheckpoint(EvaluationContract):
     def validate_applicability(self) -> Self:
         metrics = [row.metric for row in self.applicability]
         if sorted(metrics) != sorted(GENERATION_METRICS):
-            raise ValueError("生成检查点必须逐项声明 Faithfulness 与 FactualCorrectness")
+            raise ValueError(
+                "生成检查点必须逐项声明 Faithfulness 与 FactualCorrectness"
+            )
         applicable = any(row.applicable for row in self.applicability)
         if applicable and self.reference is None:
             raise ValueError("生成指标适用时必须提供审阅 reference")
@@ -576,7 +640,9 @@ class ScenarioResult(EvaluationContract):
         _require_unique_ids(
             [item.checkpoint.checkpoint_id for item in self.checkpoints], "检查点 ID"
         )
-        if any(item.checkpoint.scenario_id != self.scenario_id for item in self.checkpoints):
+        if any(
+            item.checkpoint.scenario_id != self.scenario_id for item in self.checkpoints
+        ):
             raise ValueError("检查点的 scenario_id 必须与场景一致")
         return self
 
@@ -608,7 +674,7 @@ class GenerationIdentity(EvaluationContract):
 
 
 class JudgeIdentity(EvaluationContract):
-    model: JudgeModel = JUDGE_MODEL
+    model: NonEmptyText
     prompt_version: NonEmptyText
     metric_version: NonEmptyText
 
@@ -643,7 +709,9 @@ class EvaluationRun(EvaluationContract):
 
     @model_validator(mode="after")
     def validate_coverage(self) -> Self:
-        _require_unique_ids([scenario.scenario_id for scenario in self.scenarios], "场景 ID")
+        _require_unique_ids(
+            [scenario.scenario_id for scenario in self.scenarios], "场景 ID"
+        )
         if len(self.scenarios) != self.coverage.observed_scenarios:
             raise ValueError("实际场景数与 coverage 不一致")
         checkpoints = sum(len(scenario.checkpoints) for scenario in self.scenarios)

@@ -27,8 +27,6 @@ from ragas.run_config import RunConfig
 from app.agent.cache_observation import sanitize_endpoint
 from evaluation.contracts import (
     GENERATION_METRICS,
-    JUDGE_MODEL,
-    JUDGE_MODELS,
     CheckpointResult,
     ContextItem,
     EvaluationContract,
@@ -36,7 +34,6 @@ from evaluation.contracts import (
     GenerationCheckpoint,
     GenerationMetric,
     JudgeIdentity,
-    JudgeModel,
     MetricApplicability,
     MetricName,
     MetricOutcome,
@@ -93,10 +90,8 @@ class JudgeConfig:
     api_key: str = field(repr=False)
 
     def __post_init__(self) -> None:
-        if self.model not in JUDGE_MODELS:
-            raise InvalidJudgeConfig(
-                f"裁判模型必须为 {JUDGE_MODELS} 之一，实际为 {self.model}"
-            )
+        if not self.model or self.model != self.model.strip():
+            raise InvalidJudgeConfig("裁判模型必须为非空白内容")
         if not self.base_url or self.base_url != self.base_url.strip():
             raise InvalidJudgeConfig("裁判服务地址必须为非空白内容")
         if not self.api_key or self.api_key != self.api_key.strip():
@@ -138,10 +133,6 @@ def load_judge_model(environ: Mapping[str, str] | None = None) -> str:
     value = (source.get(JUDGE_MODEL_VARIABLE) or "").strip()
     if not value:
         raise JudgeConfigError(f"缺少裁判模型配置: {JUDGE_MODEL_VARIABLE}")
-    if value not in JUDGE_MODELS:
-        raise JudgeConfigError(
-            f"{JUDGE_MODEL_VARIABLE} 必须为 {JUDGE_MODELS} 之一，实际为 {value}"
-        )
     return value
 
 
@@ -283,7 +274,7 @@ class GenerationMetricEvidence(EvaluationContract):
     metric_version: Sha256
     ragas_version: NonEmptyText
     dependency_versions: dict[str, NonEmptyText]
-    judge_model: JudgeModel = JUDGE_MODEL
+    judge_model: NonEmptyText
     judge_base_url: NonEmptyText
     judge_timeout_seconds: float = Field(gt=0)
     judge_sdk_max_retries: int = Field(ge=0)
@@ -365,7 +356,7 @@ class ScoringAttemptSnapshot(EvaluationContract):
     metric_version: Sha256
     ragas_version: NonEmptyText
     dependency_versions: dict[str, NonEmptyText]
-    judge_model: JudgeModel = JUDGE_MODEL
+    judge_model: NonEmptyText
     judge_base_url: NonEmptyText
     judge_timeout_seconds: float = Field(gt=0)
     judge_sdk_max_retries: int = Field(ge=0)
@@ -569,6 +560,8 @@ class ScoringAttempt:
     def snapshot(self) -> ScoringAttemptSnapshot:
         if self.plan.scoring_input is None:
             raise MissingScoringInput(f"指标未准备评分输入: {self.plan.metric}")
+        # 两个导出视图必须先落到同一份同步后的调用状态。
+        self._sync_prompt_names()
         parameters = metric_parameters(self.metric)
         fingerprints = prompt_fingerprints(self.metric)
         if self.plan.metric == "faithfulness":
@@ -609,6 +602,7 @@ class ScoringAttempt:
     def to_evidence(self) -> GenerationMetricEvidence:
         if self.status == "in_progress":
             raise RuntimeError("评分尝试尚未结束")
+        self._sync_prompt_names()
         return build_metric_evidence(
             self.checkpoint,
             self.plan,
