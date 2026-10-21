@@ -1,6 +1,6 @@
 ## 1. 交付状态
 
-A 部分已落地共享输入输出契约与评测依赖；任务 1 至 5 已实现两阶段检索指标计算、生产阶段构造、证据、报告与上传兼容接线、确定性业务断言引擎、Ragas 生成评分模块、冻结 80 场景的真实运行器与本地证据采集，以及任务 5 的本地汇总、诊断报告、生成评测显式上传和发布门禁。策略替换尚未实现；正式 baseline、正式 80 场景全量评测与 LangSmith 生成评测上传尚未执行。已执行单检查点真实 `step-5-preview` Ragas 集成检查、`step-3.7-flash` 真实裁判兼容检查、场景运行器离线业务链路测试与任务 5 离线汇总/门禁回归。
+A 部分已落地共享输入输出契约与评测依赖；任务 1 至 5 已实现两阶段检索指标计算、生产阶段构造、证据、报告与上传兼容接线、确定性业务断言引擎、Ragas 生成评分模块、冻结 80 场景的真实运行器与本地证据采集，以及任务 5 的本地汇总、诊断报告、生成评测显式上传和发布门禁。策略替换尚未实现；正式 baseline、正式 80 场景全量评测与 LangSmith 生成评测上传尚未执行。已执行单检查点真实 Ragas 集成检查、真实裁判兼容检查、场景运行器离线业务链路测试与任务 5 离线汇总/门禁回归。文档以配置项描述模型选择，实际模型身份以各次运行原始证据为准；既有检查不代表当前新配置已经验证。
 
 共享契约唯一导入路径：
 
@@ -36,6 +36,8 @@ from evaluation.contracts import (
 有金标空返回时只约束四项 @5 指标为 0；Recall@20 保持候选阶段独立语义，候选池为空时必须为 0。无答案查询不填排序指标，`false_return` 按最终模型输入阶段判定。Precision@5 固定分母 5；nDCG@5 使用 `2^grade-1` 增益。
 
 `SearchResponseEvidence` 承载完整公开搜索响应 JSON 与模型可见元信息。`ModelVisibleSearch` 最多 5 条、动作 ID 唯一，只包含 `items` 与 `has_more`，不接受 `remaining_ids` 等内部候选池字段；契约同时核验公开响应与模型可见条目逐项一致。模型可见 ID 必须与参与评分的 `final_model_input` 一致。
+
+`RerankEvidence` 承载重排实验的可离线回放数据：`mode` 为 `rrf_baseline` 或 `rerank`；重排模式要求 `identity{model,endpoint,text_version}`、完整 `scored`、`usage` 与 `request_id`。`scored` 每项保存 `id`、`rerank_score` 与从 0 开始的原 RRF `rrf_rank`，按分数降序排列，同分保持原 RRF 次序；空候选池必须记录零请求与空 `request_id`。基线模式不得携带重排字段，历史缺少该证据的投影按显式基线解释。
 
 评测编排层不信任投影中的 `budget_compliant` 与 `hard_constraint_violations` 标记：按生产序列化重算完整公开响应字符数，校验固定预算与保存的长度字段；从已批准查询和真实目录重建条件，重做整个候选池的硬约束；再用共享阶段构造核对门槛、裁剪和最终响应。
 
@@ -96,7 +98,7 @@ from evaluation.contracts import (
 - 实际代码提交、锁文件摘要与工作区状态。
 - 检索策略、模型、编码规则版本与查询向量身份属于配置身份；物理索引身份（集合名、构建清单摘要、build_id、兼容性清单）只由实际执行检索的调用产生，逐次写入 `<scenario>/retrieval.jsonl`。一次运行出现多个物理索引身份时登记 `retrieval.index_conflict` 并进入 `missing`，运行保持 incomplete；未执行真实检索时索引身份记为缺失，禁止用运行结束后的新客户端补填。
 - 生成模型与提示版本。
-- 裁判模型（显式配置的 `step-5-preview`、`step-3.7-flash` 或 `deepseek-v4.1-flash`）、裁判提示与指标版本。
+- 裁判模型（由当前 `FIT_AGENT_EVAL_JUDGE_MODEL` 显式指定）、裁判提示与指标版本。
 
 凭据、API Key 与受保护配置不进入契约。`EvaluationRun.blocking_issues()` 将覆盖不完整、执行失败和仍为 `applicable` 的指标列为阻塞项；发布器与上传白名单不在本部分实现。
 
@@ -265,9 +267,8 @@ async with GenerationScoringSession(judge, timeout=timeout) as session:
 
 裁判接入：
 
-- 裁判模型支持 `step-5-preview`、`step-3.7-flash` 与 `deepseek-v4.1-flash`；`load_judge_model()` 只在运行时读取 `FIT_AGENT_EVAL_JUDGE_MODEL`，模块导入不读取配置、不创建客户端。模型切换只能由显式环境变量完成，失败后自动切换被禁止；旧运行的原始证据与身份保持不变。
-- `deepseek-v4.1-flash` 本次仅同步模型白名单与证据类型；独立裁判服务地址/密钥环境变量的读取接线尚未实现，真实调用兼容性尚未验证。
-- 当前源码没有独立的裁判服务地址与凭据环境变量来源。`JudgeConfig(model, base_url, api_key)` 由调用者或任务 4/5 从现有受保护配置注入；不得猜测变量名、地址或借用其他服务凭据。集成检查使用受保护模型配置的服务地址与凭据，裁判模型名由 `FIT_AGENT_EVAL_JUDGE_MODEL` 指定，并由真实调用验证服务是否支持所选模型。
+- `load_judge_model()` 只在运行时读取 `FIT_AGENT_EVAL_JUDGE_MODEL`，模块导入不读取配置、不创建客户端。模型支持范围由当前代码契约校验，文档不固定模型名称列表。模型切换只能由显式配置完成，失败后禁止自动切换；旧运行的原始证据与身份保持不变。
+- 裁判服务地址与密钥分别从受保护配置 `FIT_AGENT_EVAL_JUDGE_BASE_URL`、`FIT_AGENT_EVAL_JUDGE_API_KEY` 读取，由调用者构造 `JudgeConfig(model, base_url, api_key)`。不得猜测地址或借用其他服务凭据。每次配置切换后核验当前模型契约、接口与凭据兼容性，真实调用结果以该次运行证据为准。
 - `run_judge_identity()` 从真实指标证据读取 `judge_model`；同一运行的证据出现多个裁判模型身份时拒绝生成身份。`RunIdentity` 记录实际的 `judge.model`、`judge_attempt_model` 与 `judge_same_as_generation`；`judge_same_as_generation` 在身份缺失时为 `null`，不得把“未记录”写成“不同模型”。
 - `JudgeConfig` 在配置边界拒绝含 userinfo、query 或 fragment 的地址；证据中的 `judge_base_url` 统一经 `sanitize_endpoint()` 移除 userinfo、query 与 fragment，避免地址内嵌凭据进入可序列化证据。
 - 客户端使用 `ChatOpenAI` + `LangchainLLMWrapper`，显式传入模型、Base URL、API Key 与 timeout；SDK `max_retries=0`，Ragas `RunConfig` 保留内置 `max_retries=10`、`max_wait=60`、`max_workers=16`，适配 OpenAI 后实际重试异常类型为 `RateLimitError`。不增加自研重试、降级或模型切换。
@@ -291,7 +292,7 @@ async with GenerationScoringSession(judge, timeout=timeout) as session:
 - 失败尝试通过 `session.current_attempt` 或 `session.attempts` 读取 `ScoringAttemptSnapshot`；快照包含实际评分输入、上下文、prompt 指纹与摘要、已产生的 `judge_calls`/`chain_steps`、`status`、`score` 与 `error`。需要落盘失败证据时使用 `attempt.to_evidence()`。
 - 将 evidence 写入 `backend/temp/` 等既有 gitignore 目录；聚合、发布门禁与上传由任务 5 负责。
 - 真实服务集成检查通过 `FIT_AGENT_GENERATION_SCORING_INTEGRATION=1` 显式启用，默认测试收集不会加载本地密钥或发起裁判调用。
-- 已执行：模块导入、Ruff、`compileall`、`pytest test/test_generation_scoring.py -q`，65 passed；真实 `step-5-preview` 集成检查通过，两项指标均 `succeeded`，评分 1.0/1.0，裁判调用 2/4 次，超时/取消资源释放通过，样例动作事实来自真实 Catalog `0001`。未执行：正式 80 场景、完整业务套件、全量检索与 LangSmith 上传。
+- 已执行：模块导入、Ruff、`compileall`、`pytest test/test_generation_scoring.py -q`，65 passed；真实裁判集成检查通过，两项指标均 `succeeded`，评分 1.0/1.0，裁判调用 2/4 次，超时/取消资源释放通过，样例动作事实来自真实 Catalog `0001`。未执行：正式 80 场景、完整业务套件、全量检索与 LangSmith 上传。
 
 ### 6.4 冻结场景运行器与真实证据采集
 
@@ -361,7 +362,7 @@ uv run python -m evaluation.scenarios --scenario-id s-plan-generation-01 --enabl
 - 真实取消在消息事件完成时，消息检查点使用该消息自身的 `before`/`after` 验证 `pending→invalidated`；后置 `cancel` 事件使用自身 `invalidated→invalidated` 边界并保留同一份真实取消证据。两个检查点分别读取自己的前后投影，禁止借用驱动事件的 `before`。消息检查点缺少目标、证据目标不匹配、证据来自其它运行、证据重复或事件身份缺失时，断言失败或场景阻断。
 - `GenerationCheckpoint` 的 reference 与 rubric 只进入评估器；模型输入不注入参考答案、未来事实或隐藏候选。
 - 生成检查点的 `UserInputEvidence.message` 取真实请求中绑定到本次运行用户节点的当前输入正文（纯附件回合即 `[附件]` 投影文本），历史回合仍由 `prior_messages` 表达；冻结事件正文与该正文不一致或该正文为空时记录 `ScenarioBlocked`，禁止用冻结字面量或空串填充。`UserInputEvidence.message` 的非空约束因此只由真实请求满足。
-- 生成评分使用 `GenerationScoringSession`，裁判由显式配置选择 `step-5-preview`、`step-3.7-flash` 或 `deepseek-v4.1-flash`，逐指标保留 `succeeded`、`failed`、`not_applicable` 与 `applicable`；失败不改为零分或不适用，`ScoringAttemptSnapshot` 与已成功证据分别保留。
+- 生成评分使用 `GenerationScoringSession`，裁判由运行启动时的 `FIT_AGENT_EVAL_JUDGE_MODEL` 显式选择，逐指标保留 `succeeded`、`failed`、`not_applicable` 与 `applicable`；失败不改为零分或不适用，`ScoringAttemptSnapshot` 与已成功证据分别保留。
 - 无 reference 的纯状态检查点直接产出两项 `not_applicable` 与冻结 reason，不创建假回答、假上下文或评分请求。覆盖统计按预期检查点与指标集合核对 `expected_metrics`、`observed_metrics` 与 `missing_metrics`。
 - 模型输入来源按真实节点身份与会话顺序确定：候选节点逐条取自被评分请求自己的 canonical 投影（`SessionQueries.get_projection` 的 `context.messages` 与 `source_entry_ids`），投影 leaf 固定为回答节点的真实父节点——生产链在每次模型调用前按该 leaf 重放投影并以此作为助手节点的父亲，因此本次请求实际可见的节点集合与证据候选集合同源；请求之后的 Steering 消费、后续轮次与后续压缩都不改变候选集合，请求之前的历史节点也不会被后来的投影裁剪掉。正文就是模型实际收到的文本——附件引用行与压缩摘要固定前后缀都已包含在投影内，节点身份与顺序由 `source_entry_ids` 给出，`kind` 取来源节点类型；候选范围由该 leaf 的投影自身决定：最新压缩检查点的有效范围（摘要头、`first_kept_entry_id` 起的保留原文、检查点之后的新增节点）之外与 leaf 之后的分支都不进入候选。用户流与助手流各自按投影顺序消费，第一个可投影该正文的未消费节点即为其来源，来源与事实归属取自节点自身的 `kind`、`entry_id` 与 `has_attachments`；正文相同、包含 `<business_context>` 标签或带附件引用都不改变判定，匹配只按投影后全文精确进行。回答节点缺少父节点时视为无法定位请求边界，直接报上下文冲突。压缩摘要以 user 角色进入投影，绑定摘要节点身份并按系统事实记 `prior_message`，同时写入非歧义缺口说明其投影角色。当前输入由 `request_entry_id` 与同一运行的 Steering 节点身份识别，其余用户节点为 `prior_message`。无法绑定唯一节点身份时写入 `ambiguous` 缺口，该检查点停止断言与生成评分并记 `runner_error`，缺口仍逐条写入 `context.jsonl` 并计入 `coverage.context_gaps`。
 - `ToolResultEvidence` 使用持久化完整工具正文，`ContextItem` 保留实际发送文本与裁剪元数据；模型可见工具 ID 与持久化原始 ID 的映射写入 `tool_identity_map`，工具结果节点同时保留 `run_id`。工具候选与完整正文索引只来自同一请求投影的节点：已被压缩移出本次请求的历史同名调用不进入冲突域，本次请求内一个可见 ID 对应多份持久化结果时才按身份冲突处理——映射阶段写入 `ambiguous` 缺口并停止该检查点评分，完整正文索引直接报冲突。正文冲突或缺少完整原文时阻断相关断言与生成评分。
@@ -391,12 +392,12 @@ uv run python -m evaluation.scenarios --scenario-id s-plan-generation-01 --enabl
 
 已验证：
 
-- `pytest test/test_evaluation_scenarios.py test/test_deterministic_assertions.py test/test_generation_scoring.py test/test_evaluation_contracts.py test/test_retrieval_stages.py -q --basetemp=backend/temp/task4-followup/pytest-offline`：退出码 0，170 passed in 54.32s。覆盖取消证据与 invalidated 状态区分、实际取消边界阻断、工具完整正文与可见裁剪、工具 ID 规范化映射、纯工具调用缺口、纯状态检查点 N/A、逐指标覆盖、身份端点脱敏、`step-3.7-flash` 显式切换与混合裁判身份拒绝，同文用户消息与业务投影的身份顺序、历史与当前输入的 `prior_message`/`user_message` 区分、未绑定节点触发 `ambiguous` 并停止评分、跨会话节点与工具结果隔离、检索记录的事件/工具调用/索引身份绑定、重启后序号继续、单一运行索引身份聚合与多身份冲突、阻塞场景保留已完成指标计数；本轮新增真实 SQLite 用户节点正文等于生产投影（含 `[附件]` 引用行）并绑定 `attachment` 来源、候选池按回答节点父节点固定到被评分请求边界（请求边界之后的节点既不入池，后续投影也不裁剪请求之前的历史节点）、压缩后请求只含有效范围节点且摘要按前后缀全文绑定为系统事实、已被压缩移出本次请求的历史同名工具调用不进入冲突域而本次请求内的重复 ID 仍判歧义并停止评分、同运行压缩后复用同名取消调用 ID 时两份结果沿真实父链各自绑定发起助手节点与目标提案、来源参数与目标不一致的结果不被绑定、驱动事件按会话与运行复合身份匹配、普通异常的部分产物经 `partial.json` 进入运行汇总、裁判尝试模型冲突进入 `missing` 与 `incomplete`、离线运行汇总的缺失清单完整列出 `generation`/`judge`/`retrieval`、生成检查点的当前输入正文只由请求内 `user_message`/`attachment` 项拼合且忽略业务投影与历史项。
+- `pytest test/test_evaluation_scenarios.py test/test_deterministic_assertions.py test/test_generation_scoring.py test/test_evaluation_contracts.py test/test_retrieval_stages.py -q --basetemp=backend/temp/task4-followup/pytest-offline`：退出码 0，170 passed in 54.32s。覆盖取消证据与 invalidated 状态区分、实际取消边界阻断、工具完整正文与可见裁剪、工具 ID 规范化映射、纯工具调用缺口、纯状态检查点 N/A、逐指标覆盖、身份端点脱敏、裁判配置显式切换与混合裁判身份拒绝，同文用户消息与业务投影的身份顺序、历史与当前输入的 `prior_message`/`user_message` 区分、未绑定节点触发 `ambiguous` 并停止评分、跨会话节点与工具结果隔离、检索记录的事件/工具调用/索引身份绑定、重启后序号继续、单一运行索引身份聚合与多身份冲突、阻塞场景保留已完成指标计数；本轮新增真实 SQLite 用户节点正文等于生产投影（含 `[附件]` 引用行）并绑定 `attachment` 来源、候选池按回答节点父节点固定到被评分请求边界（请求边界之后的节点既不入池，后续投影也不裁剪请求之前的历史节点）、压缩后请求只含有效范围节点且摘要按前后缀全文绑定为系统事实、已被压缩移出本次请求的历史同名工具调用不进入冲突域而本次请求内的重复 ID 仍判歧义并停止评分、同运行压缩后复用同名取消调用 ID 时两份结果沿真实父链各自绑定发起助手节点与目标提案、来源参数与目标不一致的结果不被绑定、驱动事件按会话与运行复合身份匹配、普通异常的部分产物经 `partial.json` 进入运行汇总、裁判尝试模型冲突进入 `missing` 与 `incomplete`、离线运行汇总的缺失清单完整列出 `generation`/`judge`/`retrieval`、生成检查点的当前输入正文只由请求内 `user_message`/`attachment` 项拼合且忽略业务投影与历史项。
 - `python temp/task4-rereview/repro_mapping.py` 与 `python temp/task4-rereview/repro_followup.py`：退出码均为 0，五个映射用例（同文身份、历史与当前输入、未绑定歧义、跨会话歧义、纯工具调用助手）全部通过；真实 SQLite 双会话同名 `tool_call_id` 取消各自保留（`single_counts=[1, 1]`、`combined=2`、`projection.cancellations=2`），跨事件检索序号为 `[0, 1]` 且重启后为 `[0, 1, 2]`。日志在 `backend/temp/task4-followup/`。
 - `python -m evaluation.scenarios --all`：退出码 0，输出 80 场景、134 事件、127 检查点、254 个生成指标条目；`s-confirmation-cancellation-state-04` 计划为 3 检查点、6 个生成指标。
 - `ruff check evaluation/ app/ test/test_evaluation_scenarios.py`、`compileall -q evaluation app`、`git diff --check`：全部通过。`ruff check test/` 全量运行另有 37 项未改动文件的既有告警（I001/E402/F401/F841 与 `test/test_stability_task2.py:504` 的 `AssistantMessage` 未定义名），属本轮范围外。
 - `RunSummary.incomplete` 逐场景汇总绑定失败、运行器装配错误、失败指标、尚无结果的适用指标与身份缺失；`context_gaps` 单独进入覆盖统计。CLI 与真实集成检查在存在 `incomplete`、阻塞、失败或指标缺失时返回非零。
-- 真实 `s-action-verification-01`（`step-3.7-flash`）：Agent 完成 5 次模型调用与 8 次工具调用（全部 `is_error=false`），检索证据为候选池 20、最终模型输入 5、公开条目 5、threshold=0.0；`state_unchanged` 与 `evidence_present` 两项断言通过；覆盖为 scenarios 1/1、events 1/1、checkpoints 1/1、metrics 2/2；`identity.index` 记录 collection、build_id、manifest_sha256 与兼容性清单；Faithfulness 在 180 s 内完成，得分 0.6667；FactualCorrectness 在 180 s 超时，保留 `failed`。同一真实检查点在独立评分中于 280 s 内完成 FactualCorrectness，得分 0.55，证据与尝试快照写入 `backend/temp/task4-fix/judge-compat/factual-compat.json`。两项指标均使用 `step-3.7-flash`，`judge_same_as_generation=true`。
+- 真实 `s-action-verification-01` 检查：Agent 完成 5 次模型调用与 8 次工具调用（全部 `is_error=false`），检索证据为候选池 20、最终模型输入 5、公开条目 5、threshold=0.0；`state_unchanged` 与 `evidence_present` 两项断言通过；覆盖为 scenarios 1/1、events 1/1、checkpoints 1/1、metrics 2/2；`identity.index` 记录 collection、build_id、manifest_sha256 与兼容性清单；Faithfulness 在 180 s 内完成，得分 0.6667；FactualCorrectness 在 180 s 超时，保留 `failed`。同一真实检查点在独立评分中于 280 s 内完成 FactualCorrectness，得分 0.55，证据与尝试快照写入 `backend/temp/task4-fix/judge-compat/factual-compat.json`。两项指标使用同一裁判，实际模型身份保留于原始运行证据，`judge_same_as_generation=true`。
 - 真实批次（`--enable-model`，run-id `flow-*`，产物在 `backend/temp/evaluation-scenarios/`，日志在 `backend/temp/task4-followup/`）：单场景逐个运行覆盖附件回合、检索工具、会话切换、多回合同文输入、确认与取消/重启。全部运行零 `ambiguous` 缺口，用户/助手/工具/业务投影正文均按真实节点身份绑定：`s-plan-import-file-06` 的 37 项模型输入为 system_prompt 1、attachment 1、business_projection 13、tool_result 22；`s-profile-update-07` 三回合的 cp3 为 24 项（prior_message 2、user_message 1、assistant_message 2、business_projection 9、tool_result 9、system_prompt 1），历史与当前输入按顺序区分。
 - 真实 `s-action-verification-01`（`--judge-timeout 120`，run-id `flow-act01-t120`）：`identity.missing=[]`、`identity.judge` 与 `cache_identity` 齐备，Faithfulness 成功得分 0.4359，FactualCorrectness 在第 3 次裁判调用处 `TimeoutError` 保留 `failed`，`incomplete` 仅两项评分相关；检索记录 1 条并绑定真实 `search_exercises` 的 `tool_call_id`、`event_id=e01` 与唯一 `(collection, manifest_sha256)`。
 - 修复验证：附件-only 回合此前在真实运行中终态为 `failed`，运行汇总逐字记录 `s-plan-import-file-04: ValidationError: 1 validation error for UserInputEvidence message Value error, 必须包含非空白内容 [input_value='', input_type=str]`（根因为冻结事件正文为空而该字段是 `NonEmptyText`），该 run 目录已按放行删除。修复后 `flow-att04b` 场景 completed、`user_input.message` 为 125 字符的 `[附件]` 投影、Faithfulness 得分 0.7059；`flow-att05` 两个纯附件回合（e01/e03）同样按投影正文计分，cp1 断言 `state_unchanged` 与 `evidence_present(context min_count=2 actual=10)` 通过。
@@ -405,7 +406,7 @@ uv run python -m evaluation.scenarios --scenario-id s-plan-generation-01 --enabl
 - 真实批次中的业务断言失败按真实状态保留：`s-replacement-constraints-03` cp1 `state_unchanged` 失败（模型创建 1 个 pending 提案），`s-profile-update-07` cp3 `evidence_present(snapshot min_count=2 actual=0)` 失败；两者均记录真实结果与证据，不做改写。
 - 裁判预算实测：`--judge-timeout 30` 下全部指标 `TimeoutError`；90 s 与 120 s 下 Faithfulness 完成并产出真实分数，FactualCorrectness 仍需更长预算（历史 280 s 完成）。
 - 运行器默认 `--judge-timeout 300`，按单项生成指标计时，并传入 Ragas、LLM 与 HTTP 客户端；可通过 CLI 显式覆盖。该预算不代表整个场景或批次的总时限，超时仍保留真实失败与尝试证据。
-- 未执行：正式 80 场景全量真实运行、`step-5-preview` 全量评分与 LangSmith 上传。
+- 未执行：正式 80 场景全量真实运行、全量裁判评分与 LangSmith 上传。
 
 ## 7. 依赖记录
 
@@ -421,9 +422,9 @@ uv run python -m evaluation.scenarios --scenario-id s-plan-generation-01 --enabl
 
 已执行 `pytest test/test_deterministic_assertions.py -q`，退出码 0，30 passed。新增用例覆盖消息检查点的 `pending→invalidated`、取消证据目标/运行/唯一性、后置 `invalidated→invalidated` 与缺少取消记录；同次静态检查为 Ruff、`compileall` 与 `git diff --check`。既有用例继续覆盖保存正文偏离准备快照、训练日期偏离、无法核验的动作身份、工具正文与上下文冲突、单次搜索超过 5 条、排名来源缺失与重复来源。
 
-任务 4 场景运行器已落地并按审查修复：`evaluation/scenarios.py` 提供 80 场景选择、真实生产链路装配、五类事件编排、全会话投影、本地证据与逐指标覆盖；`evaluation/scenario_evidence.py` 提供真实业务投影读取、真实取消证据、模型请求全文采集、按真实消息节点归因的 `ContextItem` 映射与完整工具正文。身份边界对生成、Embedding 与错误产物统一脱敏；检索身份绑定实际 collection、build_id 与兼容性清单。本次修订后离线回归：`pytest test/test_evaluation_scenarios.py -q` 49 passed；`pytest test/test_evaluation_dataset.py -q` 37 passed；`pytest test/test_evaluation_contracts.py test/test_evaluation_summary.py -q` 41 passed；`pytest test/test_retrieval_stages.py test/test_retrieval_mteb.py test/test_retrieval_rrf.py -q` 95 passed；`python -m evaluation.scenarios --all` 退出码 0。真实定向验收覆盖 `s-action-verification-01`、`s-confirmation-cancellation-state-04`、`s-profile-update-08` 与 `s-confirmation-cancellation-state-08`：检索、断言、确认、重复确认、会话切换与纯状态 N/A 均通过；`step-3.7-flash` 下 Faithfulness 得分 0.6667、FactualCorrectness 在 280 s 独立评分中得分 0.55；取消场景按消息回合真实迁移与后置真实边界验证。未执行正式 80 场景全量、全量裁判评分与 LangSmith 上传。
+任务 4 场景运行器已落地并按审查修复：`evaluation/scenarios.py` 提供 80 场景选择、真实生产链路装配、五类事件编排、全会话投影、本地证据与逐指标覆盖；`evaluation/scenario_evidence.py` 提供真实业务投影读取、真实取消证据、模型请求全文采集、按真实消息节点归因的 `ContextItem` 映射与完整工具正文。身份边界对生成、Embedding 与错误产物统一脱敏；检索身份绑定实际 collection、build_id 与兼容性清单。本次修订后离线回归：`pytest test/test_evaluation_scenarios.py -q` 49 passed；`pytest test/test_evaluation_dataset.py -q` 37 passed；`pytest test/test_evaluation_contracts.py test/test_evaluation_summary.py -q` 41 passed；`pytest test/test_retrieval_stages.py test/test_retrieval_mteb.py test/test_retrieval_rrf.py -q` 95 passed；`python -m evaluation.scenarios --all` 退出码 0。真实定向验收覆盖 `s-action-verification-01`、`s-confirmation-cancellation-state-04`、`s-profile-update-08` 与 `s-confirmation-cancellation-state-08`：检索、断言、确认、重复确认、会话切换与纯状态 N/A 均通过；真实定向评分中 Faithfulness 得分 0.6667、FactualCorrectness 在 280 s 独立评分中得分 0.55；取消场景按消息回合真实迁移与后置真实边界验证。未执行正式 80 场景全量、全量裁判评分与 LangSmith 上传。
 
-生成评分模块的静态检查已执行：Ruff 与 `compileall` 通过，模块导入与纯字段映射检查通过。已执行 `pytest test/test_generation_scoring.py -q`，退出码 0，65 passed，无警告。已执行 `FIT_AGENT_GENERATION_SCORING_INTEGRATION=1` 的真实服务集成检查：受保护模型服务接受 `step-5-preview`，Faithfulness 与 FactualCorrectness 均 `succeeded`，评分 1.0/1.0，裁判调用分别为 2 与 4 次，超时/取消路径完成客户端释放，样例动作事实来自真实 Catalog `0001`（`equipment=body weight`、`target=abs`）。真实调用出现 `langchain-openai` 关于自定义 httpx transport 的代理自动探测警告，非致命；代理环境下的连通性仍属集中验证范围。尚未执行完整业务测试套件、正式全量 150 查询检索、80 个业务场景、真实 Agent 或 LangSmith 上传；正式场景下的模型稳定性、长上下文与限流行为仍属集中验证范围。未执行的测试不得视为通过。
+生成评分模块的静态检查已执行：Ruff 与 `compileall` 通过，模块导入与纯字段映射检查通过。已执行 `pytest test/test_generation_scoring.py -q`，退出码 0，65 passed，无警告。已执行 `FIT_AGENT_GENERATION_SCORING_INTEGRATION=1` 的真实服务集成检查：受保护配置指定的裁判服务完成真实调用，Faithfulness 与 FactualCorrectness 均 `succeeded`，评分 1.0/1.0，裁判调用分别为 2 与 4 次，超时/取消路径完成客户端释放，样例动作事实来自真实 Catalog `0001`（`equipment=body weight`、`target=abs`）。真实调用出现 `langchain-openai` 关于自定义 httpx transport 的代理自动探测警告，非致命；代理环境下的连通性仍属集中验证范围。尚未执行完整业务测试套件、正式全量 150 查询检索、80 个业务场景、真实 Agent 或 LangSmith 上传；正式场景下的模型稳定性、长上下文与限流行为仍属集中验证范围。未执行的测试不得视为通过。
 
 ## 9. 汇总、报告、生成评测上传与发布门禁
 
@@ -475,3 +476,137 @@ uv run --locked --directory backend python -m evaluation.generation_upload uploa
 - Ruff、`compileall` 与 `git diff --check` 通过。
 - 真实产物对照：对已捕获的 `flow-att04b` 与 `validation-20261019T012723Z-4b26f748` 运行目录重算门禁，来源对照类诊断命中 0 条；两次运行自身的其余诊断（评分失败、覆盖缺失、代码身份漂移）保持原样。
 - 未执行：正式 150 查询检索、正式 80 场景全量运行、真实 LangSmith 生成评测上传。远端逐行回读、样例与分数反馈的实际返回结构、回执写入与中断恢复链路只经过离线比较函数验证，账号授权与真实云端行为仍未验证；未运行项不得视为通过。
+
+## 10. 场景执行与评分接缝（任务 2）
+
+### 10.1 公开接口
+
+```python
+from evaluation.scenarios import (
+    ExecutionIdentityError,
+    ScenarioExecution,
+    ScoringResultExists,
+    execute_scenario,
+    load_execution,
+    run_scenario,
+    score_execution,
+    verify_execution_identity,
+    write_scoring_result,
+)
+
+async def execute_scenario(
+    dataset: EvaluationDataset,
+    scenario: dict,
+    *,
+    run_id: str,
+    root: Path,
+    enable_model: bool,
+) -> ScenarioExecution
+
+def load_execution(
+    path: Path,
+    *,
+    expected_run_id: str | None = None,
+    expected_scenario_id: str | None = None,
+    expected_dataset: DatasetIdentity | None = None,
+    expected_scenario_sha256: str | None = None,
+) -> ScenarioExecution
+
+def verify_execution_identity(
+    execution: ScenarioExecution,
+    *,
+    expected_run_id: str | None = None,
+    expected_scenario_id: str | None = None,
+    expected_dataset: DatasetIdentity | None = None,
+    expected_scenario_sha256: str | None = None,
+) -> ScenarioExecution
+
+async def score_execution(
+    execution: ScenarioExecution,
+    *,
+    judge: JudgeConfig | None = None,
+    judge_timeout: float | None = 300.0,
+) -> ScenarioArtifact
+
+def write_scoring_result(
+    execution: ScenarioExecution,
+    artifact: ScenarioArtifact,
+    *,
+    path: Path,
+) -> None
+
+async def run_scenario(
+    dataset: EvaluationDataset,
+    scenario: dict,
+    *,
+    run_id: str,
+    root: Path,
+    enable_model: bool,
+    judge: JudgeConfig | None,
+    judge_timeout: float | None,
+) -> ScenarioArtifact
+```
+
+- `execute_scenario` 只执行场景并持久化证据。它不读取裁判配置、不调用裁判、不写评分产物。
+- `score_execution` 只消费 `ScenarioExecution`，不接收 runtime、数据库、服务或检索客户端；返回旧入口兼容的 `ScenarioArtifact`。
+- `run_scenario` 保持原签名，内部依次调用 `execute_scenario` 与 `score_execution`。
+
+### 10.2 执行结果模型
+
+`ScenarioExecution` 保存：
+
+- `schema_version`、`run_id`、`scenario_id`、`status`（`completed`、`blocked`、`failed`）与 `error`。
+- `dataset`：`DatasetIdentity`，绑定数据版本、manifest、内容与语料摘要。
+- `scenario_sha256`：冻结场景正文的 canonical SHA-256，排除运行时 `_` 字段。
+- `execution_sha256`：执行结果正文（排除该字段自身）的 canonical SHA-256。
+- `expected_event_ids`、`expected_checkpoint_ids`：冻结执行计划身份。
+- `session_ids`、`initial_state_sha256`、`initial_projection`。
+- `events`：原有 `EventCapture`，保留真实 before/after、工具调用、模型调用与上下文缺口。
+- `assertion_checkpoints`：逐检查点的原始断言定义与完整 `AssertionEvidence`，或明确的 `binding_error`/`runner_error`。
+- `generation_checkpoints`：逐检查点的 `GenerationCheckpoint`、`RequestBoundaryEvidence`、冻结适用性与执行阶段错误。
+- `retrieval`、`proposal_bindings`、`generation_metrics`、`cancel_evidence`、`context_gaps`。
+
+身份约束：
+
+- 所有 `EvidenceLink` 必须同时绑定本次 `run_id`、`scenario_id`、`event_id` 与 `checkpoint_id`。
+- 完成执行必须覆盖全部冻结事件与检查点；部分执行的事件必须是冻结顺序的前缀，检查点必须是冻结集合的子集。
+- `load_execution` 重新计算 `execution_sha256`；摘要不符、显式期望身份不符或证据身份错绑均明确失败。错场景、错事件或错检查点的链路在模型构造阶段由 Pydantic 拒绝。
+- 生成检查点的请求边界必须与所属事件的实际 `session_id`、业务 `run_id` 与请求入口一致。
+- 执行结果不包含 API Key、认证头、裁判配置、服务地址或开放连接。
+
+### 10.3 文件布局
+
+每个场景目录新增：
+
+- `execution.json`：完整执行结果，供磁盘重载与评分。
+- `assertion-evidence.jsonl`：逐事件追加的断言证据。
+- `generation-input.jsonl`：逐事件追加的生成评分输入与请求边界。
+
+旧入口继续输出原文件：
+
+- `events.jsonl`、`retrieval.jsonl`、`context.jsonl`、`initial-state.json`。
+- `scenario.json`、`partial.json`、`blocked.json`、`failure.json`。
+- `assertions.jsonl`、`generation.jsonl`。
+
+`write_scoring_result` 可把 `ScenarioArtifact` 写入独立评分文件；目标已存在时抛出 `ScoringResultExists`，不静默覆盖。`run_scenario` 使用新建场景目录，因此旧产物不会被覆盖。
+
+### 10.4 生命周期与失败流转
+
+- 执行阶段在 `execute_scenario` 内打开 runtime，逐事件采集证据，正常或失败后都在 `finally` 中关闭检索运行时、执行器与数据库连接。
+- 事件证据在所属事件边界采集；断言证据与生成检查点在写入 `events.jsonl`/`context.jsonl` 前完成，随后评分只读取磁盘上的真实证据。
+- 执行失败时仍写入 `execution.json`，保留已发生事件、初始投影、检索、取消证据与上下文缺口。
+- 旧入口在执行失败后对已持久化证据执行评分，再写 `blocked.json`/`failure.json` 与 `partial.json`；阻塞场景的 `ScenarioBlocked.artifact` 与观测计数保持原语义。
+- 适用生成指标缺少裁判配置或 timeout 无效时，`run_scenario` 在执行前拒绝，不发起业务模型请求。
+- 执行状态与评分状态分离：仅有 `execution.json` 的目录不构成完整场景产物，`summary` 与上传门禁不会视为有效评测结果。
+- 评分结果保留 `succeeded`、`failed`、`applicable`、`not_applicable`、失败尝试快照、评分证据、`runner_error` 与未完成指标；评分失败不会写成成功或零分。
+- 取消场景的 `pending→invalidated`、`invalidated→invalidated`、重复取消与重启边界沿用原生产证据逻辑，未改变证据采集时点。
+
+### 10.5 验证状态
+
+- `pytest test/test_scenario_execution_scoring.py -q`：9 passed。覆盖执行结果序列化与磁盘重载、摘要与身份篡改、事件边界前后状态、部分执行证据、N/A、缺裁判阻断、旧入口组合、评分结果不覆盖以及仅执行目录不构成完整产物。
+- `pytest test/test_evaluation_scenarios.py test/test_deterministic_assertions.py -q`：82 passed。
+- `pytest test/test_evaluation_contracts.py test/test_evaluation_summary.py -q`：41 passed。
+- `pytest test/test_generation_scoring.py test/test_evaluation_dataset.py -q`：首次因 `--basetemp` 父目录不存在产生 37 个 setup error；补建 `backend/temp/task2/` 后重跑 106 passed。
+- `uv run --locked python -m evaluation.scenarios --all`：退出码 0，输出 80 场景、134 事件、127 检查点、254 个生成指标条目。
+- Ruff、`compileall` 与 `git diff --check` 通过。
+- 未执行：真实模型、Embedding、Milvus、LangSmith、正式 80 场景全量 baseline 与真实裁判评分。未运行项不得视为通过。

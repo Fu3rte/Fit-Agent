@@ -35,6 +35,8 @@ MTEB 接入真实 BM25、dense、hybrid 检索结果及业务金标。候选池�
 - `backend/test/test_evaluation_dataset.py`：数据加载、审批、配额、引用、路径边界与发布门禁测试。
 - `backend/test/evaluation_fixtures.py`：使用真实动作目录、已批准补充数据与真实 Schema 构造的开发测试数据。
 - `quantitive-index/evaluation.md`：保留历史实际评测指标与实验身份；新数据版本的结果独立记录。
+- `backend/evaluation/langsmith_retrieval.py`：LangSmith SDK 检索实验入口，包含 `hybrid-rerank` 同池重排实验。
+- `backend/test/test_retrieval_rerank_evaluation.py`：重排证据、同池对照、离线回放、上传白名单与场景记录回归测试。
 - `backend/temp/retrieval-mteb/<run_id>/`：每轮 `evaluation.json`、`report.md` 与逐组 LangSmith 回执；历史 `backend/temp/retrieval-evaluation/`、`backend/temp/retrieval-ranx/` 原件保持原值。
 - `backend/pyproject.toml`、`backend/uv.lock`：固定 MTEB、jsonlines 及实际指标计算依赖；Ragas 依赖在生成评测实现时锁定。
 
@@ -138,6 +140,67 @@ uv run --locked --directory backend python -m evaluation.retrieval run --dataset
 
 当前耗时范围是“缓存向量搜索及响应构造”。它不包含在线 Embedding，也不等于完整 Agent 响应时间。
 
+## 3.1 LangSmith SDK 检索实验
+
+`backend/evaluation/langsmith_retrieval.py` 使用 LangSmith 公开 SDK 执行真实检索实验，复用 `search_vectors`、`project_response`、`RetrievalInput` 与 `retrieval_metrics.evaluate`。
+
+```powershell
+uv run --locked --env-file .env --directory backend python -m evaluation.langsmith_retrieval sync --dataset dataset/evaluation/rebuild-v1
+uv run --locked --env-file .env --directory backend python -m evaluation.langsmith_retrieval run --dataset dataset/evaluation/rebuild-v1 --groups bm25 dense hybrid --purpose validation
+uv run --locked --env-file .env --directory backend python -m evaluation.langsmith_retrieval run --dataset dataset/evaluation/rebuild-v1 --groups bm25 dense hybrid --purpose formal
+```
+
+数据集名称为 `fit-agent-retrieval-sdk-<version>-<content_sha256[:12]>`。每个 example 的 ID 由数据集名称与 `query_id` 稳定派生；`inputs` 只包含查询、用途与合成条件，`reference_outputs` 包含 `query_id`、`scenario_id`、`expect_empty` 与 `labels`，`metadata` 记录用途、标签、样本摘要与数据摘要。同步入口按名称与内容核验远端样例，缺失样例补齐，未知字段或内容冲突直接阻断。本地回执位于 `backend/temp/retrieval-langsmith/datasets/`。
+
+每个检索组独立创建实验，固定 `max_concurrency=6`、`num_repetitions=1`、`blocking=True`，三组依次执行。`purpose=validation` 按用途各取第一条有答案与第一条无答案查询，共 6 条；`purpose=formal` 覆盖 150 条。实验 metadata 记录本地 `run_id`、组名、用途、数据与 manifest 摘要、代码身份、冻结参数、物理索引身份、向量缓存身份、并发与样本范围。
+
+`run.json`、`<group>/result.json` 与 `<group>/samples/<query_id>.json` 位于 `backend/temp/retrieval-langsmith/<run_id>/`。覆盖核验读取远端 run 与 feedback，逐样本比对本地评分；远端落库延迟时有界重试。SDK feedback 保留 4 位小数，本地一致性容差为 `5e-5`。并发证据同时记录 target 在途数与底层 Milvus RPC 调用数；现有 `MilvusConnection` 仍按内部锁串行执行 RPC。
+
+候选审阅门禁沿用 `EvaluationDataset.reviewed_corpus_ids()` 与 `unreviewed_candidates` 规则，覆盖门槛与预算裁剪前的完整候选池。target 返回候选证据时写入 `review` 状态；evaluator 与 `expected_feedback` 在构造 `RetrievalInput` 前阻断；`parity_report`、`verify_group` 与 `sdk_summary` 在评分前再次核验。缺标组的 `run.json` 保留候选、`unknown_candidates` 与错误信息，组状态记为 `blocked_unreviewed_candidates`，实验文档状态保持 `incomplete`。空候选池继续按既有 `false_return` 口径处理。
+
+dense 与 hybrid 复用 `backend/temp/retrieval-evaluation/query-vectors/` 下的查询向量缓存。缓存缺失或身份不符时该组直接阻断并报告所需路径，不自动生成全量查询 Embedding。
+
+### 3.2 同一候选池上的 RRF 与重排对照
+
+`run --rerank` 在 `hybrid` 组内执行同池对照，并写入两个独立实验身份：
+
+```powershell
+uv run --locked --env-file .env --directory backend python -m evaluation.retrieval run --dataset dataset/evaluation/rebuild-v1 --groups hybrid --rerank
+```
+
+每个查询只调用一次真实召回，冻结门槛前 RRF Top-20；先构造显式 `hybrid` baseline 响应，再对该池执行一次 `RerankClient.rerank()`，用同一 `build_search_stage` 构造 `hybrid-rerank` 响应。`evaluation.json` 的 `groups.hybrid` 与 `groups.hybrid-rerank` 共享候选 ID、顺序、RRF 分数与门槛；`hybrid-rerank` 额外保存 `experiment=rerank` 与 `rerank` 证据：
+
+- `identity`：配置模型、完整请求地址、文本版本。
+- `scored`：按重排分数降序的 `id`、`rerank_score` 与从 0 开始的 `rrf_rank`。
+- `usage` 与 `request_id`；空池记录零请求与空 `request_id`。
+- 公开响应、`SearchResponseEvidence`、实际门槛、数量上限、预算与字符数。
+
+本地小规模核验使用与 LangSmith 验证一致的 6 条已批准查询：
+
+```powershell
+uv run --locked --env-file .env --directory backend python -m evaluation.retrieval run --dataset dataset/evaluation/rebuild-v1 --groups hybrid --rerank --sample validation
+```
+
+`--sample validation` 与 `--limit N` 写入 `sample_scope`，状态仅供本地验证；上传入口拒绝子集证据。正式全量仍使用不带子集参数的同一条命令。
+
+Recall@20 两个组完全相同；Hit@5、MRR@5、nDCG@5、Precision@5 只按重排后的公开顺序评分。发布门禁会拒绝两组候选或 RRF 分数不一致的证据。
+
+LangSmith SDK 入口使用独立组名：
+
+```powershell
+uv run --locked --env-file .env --directory backend python -m evaluation.langsmith_retrieval run --dataset dataset/evaluation/rebuild-v1 --groups hybrid hybrid-rerank --purpose validation
+```
+
+`hybrid-rerank` target 的每个样例同时返回重排证据与同池 baseline 的候选、最终输入与响应。实验 metadata 记录 `experiment`、`rerank_identity`（模型、文本版本、地址 SHA-256），`result.json` 的 `comparison` 保存逐查询换序统计。
+
+### 3.3 仅用保存证据离线回放
+
+```powershell
+uv run --locked --directory backend python -m evaluation.retrieval replay --source D:/repository/fit-agent/backend/temp/retrieval-mteb/<run_id>/evaluation.json
+```
+
+回放读取已保存的候选 ID、RRF 分数、重排结果、身份、用量与请求身份，重建 `RerankResult`、`RerankIdentity` 与共享阶段，逐项核对候选池、最终输入、公开条目、`has_more`、预算与逐查询指标。回放不调用重排服务、Embedding 或 Milvus。缺少重排结果或身份、ID 集合或原排名不符、越界、重复、非降序、同分次序错误与最终输入不一致均明确失败。历史缺少 `experiment` 与 `rerank` 字段的证据按显式 RRF baseline 回放；REBUILD 之前的单阶段证据继续使用 `rescore`。
+
 ## 4. 配置 LangSmith
 
 登录 LangSmith，在设置中创建 API Key，将其保存到已被 gitignore 排除的 `backend/.env`，变量名为 `LANGSMITH_API_KEY`。
@@ -146,7 +209,7 @@ uv run --locked --directory backend python -m evaluation.retrieval run --dataset
 
 本次授权上传范围为现有评测查询、合成条件、金标和候选 ID。上传入口按字段白名单构造内容，不上传真实个人画像、缓存向量、服务凭据或查询端点配置。
 
-上传不会开启生产 Trace，也不会改变原有 Trace 隐私契约。已授权生成评测将请求、回答、实际上下文及参考答案发送至 StepFun，并将样例内容、模型输出及评分结果上传 LangSmith。现有检索上传白名单保持不变；生成评测实现时按上述授权范围构造独立字段白名单，服务凭据保持本地。
+上传不会开启生产 Trace，也不会改变原有 Trace 隐私契约。已授权生成评测将请求、回答、实际上下文及参考答案发送至用户当前配置的裁判服务，并将样例内容、模型输出及评分结果上传 LangSmith。现有检索上传白名单保持不变；生成评测实现时按上述授权范围构造独立字段白名单，服务凭据保持本地。
 
 ## 5. 上传实验并在界面分析
 
@@ -158,7 +221,7 @@ uv run --locked --directory backend python -m evaluation.retrieval upload --sour
 
 上传采用 LangSmith 官方外部实验接口。每个检索组成为一个 experiment，共用同一版本的数据集。上传前重新执行真实两阶段评分与 `validate_projections()`，核验候选池、最终输入、公开响应与 SearchResponseEvidence 一致，并核对数据版本、manifest、内容摘要与语料摘要；按生产序列化重算完整公开响应字符数，从已批准查询条件重做整个候选池的硬约束，并用共享阶段构造核对门槛、裁剪与最终响应。投影自报的预算与硬约束标记不作为合规依据；存储评分与实际候选、金标或引擎身份不一致时拒绝上传。
 
-上传反馈分数按接口要求保留 4 位小数；本地原始指标保持完整精度。上传字段白名单包含查询、条件、用途、标签、家族、有序候选池、最终模型输入、候选原分数、公开搜索响应与证据、契约指标、硬约束、预算结果与 RRF 参数；不上传真实个人画像、缓存向量、服务凭据或查询端点配置。
+上传反馈分数按接口要求保留 4 位小数；本地原始指标保持完整精度。上传字段白名单包含查询、条件、用途、标签、家族、有序候选池、最终模型输入、候选原分数、公开搜索响应与证据、契约指标、硬约束、预算结果与 RRF 参数；重排实验额外包含 `experiment`、重排模型、文本版本、地址 SHA-256、重排排序、用量、`request_id` 与同池基线候选/最终输入/响应。完整请求地址、API Key、完整客户端配置、原始 HTTP 响应、真实个人画像、缓存向量与服务凭据保持本地。
 
 新数据的数据集名称为 `fit-agent-retrieval-<version>-<content_sha256[:12]>`；历史入口使用拆分、数据集哈希与用途适配哈希生成名称。每条查询的行 ID 使用 `uuid5(dataset_name + ":" + query_id)`，同一数据身份稳定，不同版本相互隔离。
 
@@ -200,6 +263,8 @@ uv run --locked --directory backend python -m evaluation.retrieval run --dataset
 
 参数选择由人工基于用途判断。入口不自动决定上线参数，也不改写 runtime 配置。
 
+重排实验在同一数据、金标、冻结参数与候选池上运行。对照时固定 `hybrid` 同池 baseline 与 `hybrid-rerank`，只观察最终 @5 的变化；Recall@20 必须一致。重排模型、完整请求地址、文本版本、用量与 `request_id` 进入独立实验身份，向量缓存目录与索引清单保持不变。
+
 ## 7. 版本冻结与全量回归
 
 选定实验后，以实验原件绑定参数、代码、数据和索引身份。在同一版本的全部检索请求与业务场景上运行回归，分别报告检索、生成和确定性业务规则结果。
@@ -231,7 +296,7 @@ uv run --locked --directory backend python -m evaluation.retrieval upload --sour
 
 检索动作 ID 金标继续用于 MTEB；生成事实正确性评测使用独立审阅的参考答案及标准。参考答案和审阅标准在构建生成测评集及语料库时编写。
 
-裁判模型确定为 StepFun `step-5-preview`。已在本地 `backend/.env` 预置 `FIT_AGENT_EVAL_JUDGE_MODEL=step-5-preview`；生成评测实现时读取该配置并通过 Ragas 调用模型服务 API，评分结果上传 LangSmith，并记录裁判模型、提示及指标版本。费用不设上限。凭据保留在本地受保护配置中，服务地址、凭据接入、模型可用性及接口兼容性需在接入时核验。
+裁判模型从运行启动时的受保护配置 `FIT_AGENT_EVAL_JUDGE_MODEL` 读取，服务地址与密钥分别使用 `FIT_AGENT_EVAL_JUDGE_BASE_URL`、`FIT_AGENT_EVAL_JUDGE_API_KEY`。通过 Ragas 调用配置指定的服务，评分结果记录到 LangSmith，并绑定实际裁判模型、提示及指标版本。费用不设上限，凭据保持本地。每次更换配置均需核验当前实现支持范围、模型可用性及接口兼容性；禁止失败后静默换模型。
 
 生成评分与检索评分分别展示。器械限制、禁用动作、响应预算、无答案误返回和保存授权继续通过项目确定性规则检查。生成评测须使用实际产物验证证据关联、指标输入、裁判调用及上传白名单。
 
@@ -244,6 +309,34 @@ uv run --locked --directory backend python -m evaluation.generation_upload uploa
 ```
 
 `summary` 与 `generation_upload check` 均只读本地产物，不加载密钥、不发起网络请求。生成指标逐检查点保留状态，场景内按成功检查点取均值，跨场景并列输出“含部分成功”与“仅完整成功”两套分母；有效发布只认完整成功口径。`upload` 仅消费通过正式全量门禁的运行，按独立字段白名单逐字段构造 payload，排除裁判地址、裁判调用原文、prompt 指纹原文、原始模型调用与本地路径，并保存源摘要和 payload 摘要回执。详细口径见 [共享契约](evaluation-contracts.md) 第 9 节。
+
+## 10. 任务五验收
+
+运行方法（真实服务入口，逐条顺序执行，配置由 `uv run --env-file .env` 加载。执行前需本机 Milvus 栈可用，判据是 `127.0.0.1:19530` 处于 LISTENING 且容器 `fit-agent-milvus-standalone` 状态为 healthy；服务缺失时脚本在建立连接处即失败，早于任何断言。`replay` 入口只读本地产物，不需要环境文件）：
+
+```powershell
+uv run --locked --env-file .env --directory backend python -m test.check_rerank_client_live
+uv run --locked --env-file .env --directory backend python -m test.check_retrieval_rerank_production
+uv run --locked --env-file .env --directory backend python -m test.check_retrieval_runtime_lifecycle
+uv run --locked --env-file .env --directory backend python -m test.check_retrieval_runtime_integration
+uv run --locked --env-file .env --directory backend python -m test.check_retrieval_toolchain
+uv run --locked --env-file .env --directory backend python -m evaluation.retrieval run --dataset dataset/evaluation/rebuild-v1 --groups hybrid --rerank --sample validation
+uv run --locked --directory backend python -m evaluation.retrieval replay --source <evaluation.json> --output <run_dir>/replay.json
+```
+
+- 实验身份：`hybrid` 为 `experiment=rrf_baseline`；`hybrid-rerank` 为 `experiment=rerank`。本地输出目录分别为 `backend/temp/retrieval-mteb/<run_id>/` 与 `backend/temp/retrieval-langsmith/<run_id>/<group>/`。
+- 证据字段：`experiment`、`rerank.identity{model,endpoint,text_version}`、`rerank.scored[{id,rerank_score,rrf_rank}]`、`rerank.usage`、`rerank.request_id`、`candidate_pool`、`scores`、`final_model_input`、`response`、`search_evidence`、`threshold`、`budget_chars`、`item_limit`、`serialized_chars`。
+- 上传字段：模型、文本版本、地址 SHA-256、排序、用量、`request_id`、同池基线证据；完整地址、密钥与原始 HTTP 响应不上传。新增字段未超出既有授权范围。
+- 场景证据：`SearchStageRecord` 增加 `experiment` 与 `rerank`；`executed_index_identity` 聚合实际重排身份并拒绝混合运行。
+- 开发验证运行：`backend/temp/retrieval-mteb/20261020T120245Z-c7542e56/evaluation.json`，6 条已批准验证查询（3 条非空、3 条空池）。`hybrid` 与 `hybrid-rerank` 的候选池、顺序、RRF 分数与门槛逐查询一致；该运行两组均为 `blocked_unreviewed_candidates`，`_validate_same_pool` 在算分分支之前返回，逐查询 Recall@20 数值未计算、两组间未执行数值比较，同池 Recall@20 相等的口径由 `test_retrieval_rerank_evaluation.py::test_same_pool_keeps_recall_and_rerank_changes_at_five` 在离线数据上断言；3 条非空查询发生真实重排，`usage.requests=3`、`prompt_tokens=14454`、`total_tokens=14454`，3 个唯一 `request_id`，空池均为零请求与空 `request_id`；3/6 查询最终 @5 顺序变化。两组预算、硬约束与字符数全部合规。
+- 任务五独立复验运行：`backend/temp/retrieval-mteb/20261020T140331Z-92009dc8/evaluation.json`，同一数据版本与同一 6 条验证查询。两组 `candidate_pool` 与 `scores` 逐查询字面相等，`requests=3`、`prompt_tokens=14454`、`total_tokens=14454`、3 个唯一 `request_id`、3 条空池零请求；两组均 `blocked_unreviewed_candidates`，缺标为 `q-lookup-001` 5 个、`q-generation-001` 6 个、`q-replacement-001` 14 个。逐查询耗时窗口：非空 406.1/167.3/164.1 毫秒、空池 23.9/16.2/16.3 毫秒，`hybrid` 与 `hybrid-rerank` 记录同一时间窗。
+- 回放验证：对新 artifact 执行 `replay --source … --output …` 退出码 0，`status=blocked`、`blocked_groups=["hybrid","hybrid-rerank"]`、两组 `metrics=null`，零模型零 Milvus 调用；对开发验证 artifact 的只读回放输出与新 artifact 逐字段相同。
+- 真实链路验证：客户端脚本完成 1 条与 20 条真实评分（`{1,220,220}` 与 `{1,4110,4110}`），在途与外层取消均传播且取消后可复用、关闭后 `post_close_tasks=0`；生产脚本经 `BusinessService.search_exercises` 验证 20 条候选池、公开顺序与 `final_input` 一致、器械与排除硬约束在全池成立、空池零请求零用量；生命周期脚本验证前置取消不初始化、初始化中取消释放资源、异循环关闭保留资源、所属循环关闭与重复/并发关闭正确；工具链脚本验证接入重排后工具封套仍为 `{items, has_more}` 且 `json.dumps` 字符数不超过 4000。
+- 门禁入口清单：审阅规则唯一落点为 `EvaluationDataset.reviewed_corpus_ids()` 与 `unreviewed_candidates`；生效位置为 `evaluation/retrieval.py:473`（本地算分）、`:615-628`（本地回放）、`:1122`（上传要求 `status=complete`）、`evaluation/langsmith_retrieval.py:376`（`retrieval_input`，即 evaluator 与 `expected_feedback`）、`:640`（target 审阅证据）、`:779`（远端覆盖核验）、`:911`（`parity_report`）、`evaluation/sdk_summary.py:481`（缺标集合）与 `:508`（跳过缺标样本）。
+- P1 独立复验：`q-lookup-001` 的 5 个真实未审阅候选 `0022, 0589, 0574, 0055, 0788` 在 SDK `expected_feedback`（重排组与同池基线组）、`retrieval_input`、`make_evaluator`、`parity_report` 与本地 `validate_group` 五处入口全部阻断，缺标集合与开发验证运行逐字一致；空池查询返回 `{"false_return": 0.0}`，含已审阅 `grade=0` 候选的完整审阅查询照常产出五项指标。
+- 已接受限制：离线入口的文档级 `rerank_identity` 与逐投影重排身份不做交叉比对；`run --rerank` 的 `hybrid` 组耗时窗口包含同池重排调用。两项按用户决定保持现状。
+- 测试与 lint：第一轮按批执行，清单内 12 个回归文件为批次 A `133 passed`、审阅门禁 `13 passed`、MTEB `72 passed`、LangSmith 检索 `17 passed`、SDK 汇总 `22 passed`、场景与汇总消费方 `76 passed`，合计 333 项、退出码全为 0；附加批次实测 `68 passed`、`28 passed` 与 `64 passed, 1 failed`。第二轮按放行补齐重排证据回归断言并修正陈旧断言后，`test_input_audit.py` 单文件 `8 passed`、`test_evaluation_summary.py` `28 passed`、`test_retrieval_rerank_evaluation.py` `20 passed`，`python -m test.check_retrieval_runtime_integration` 连续两次退出码 0；全量为 501 项通过、零失败（第一轮 493 项加失败节点修正 1 项与本轮新增 7 项）。`ruff` 对 16 个业务/评测文件与 14 个测试与脚本均 `All checks passed!`；`git diff --check` 零输出。逐条命令、退出码与证据位置见 `tmp/action-rerank-t5/acceptance.md` 的 D 节与 M 节。
+- 尚未执行：150 条正式检索、80 个业务场景、批量云端上传、LangSmith 提交与正式成绩。解除数据审阅阻塞需要用户扩充并批准 qrels；真实重排调用数与用量以当次运行入口输出为准，单价未经账单核验。
 
 ## 检索评分口径核对
 

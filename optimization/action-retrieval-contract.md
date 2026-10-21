@@ -72,8 +72,8 @@ Milvus 字段：
 ```
 
 - `items` 每项为 `{id, name, equipment, target, matches}`，最多 5 条，完整 JSON 上限 4000 字符。
-- 单次检索读取 20 个候选形成候选池；门槛及响应预算裁剪前的前 20 条为真实候选池，用于候选阶段评测。
-- 最终公开条目从同一候选池产生，按 RRF 顺序应用门槛与完整 JSON 预算，最多 5 条；预算不足时允许少于 5 条，禁止截断 JSON 或单条动作结构。
+- 单次检索读取 20 个候选形成候选池；门槛、重排及响应预算裁剪前的前 20 条为真实候选池，用于候选阶段评测。
+- 最终公开条目从同一候选池产生，按重排后的顺序应用 RRF 门槛与完整 JSON 预算，最多 5 条；预算不足时允许少于 5 条，禁止截断 JSON 或单条动作结构。
 - `has_more` 仅表示同一候选池中仍有通过门槛但被数量或预算裁剪的候选；不暴露内部剩余候选的 ID、名称或排名。
 - `matches` 仅描述可核实目录字段和用户条件；缺少词项证据时不得宣称某路精确命中。
 - 无可用候选或未通过返回门槛时返回合法空结果。
@@ -98,6 +98,57 @@ Milvus 字段：
 - 实际参数随代码、数据和索引身份记录。门槛作用于 RRF 分数；融合分数仅表示排序依据，零门槛不保证无答案拦截。
 - 目录向量预计算，在线仅编码查询；BM25 直接提交文本，由 Milvus 生成 sparse 表示。
 
+### 5.1 重排输入与排序语义
+
+共享类型位于 `app/application/business/retrieval_rerank.py`，配置位于 `retrieval_config.py`。
+
+- `RerankDocument {id: str, text: str}`：`id` 为目录 canonical 动作 ID；`text` 逐字复用已发布 `RetrievalCorpus.records` 的 `text`，禁止重新拼接、截断或改写。生命周期为单次检索请求。
+- `RerankRequest {query: str, documents: tuple[RerankDocument, ...]}`：`query` 为规范化后的原始查询；`documents` 按原 RRF 顺序排列，最多 20 条。
+- `candidate_pool: tuple[RetrievalCandidate, ...]`：门槛、重排与预算裁剪前的 RRF 前 20 条，保留原 `score`（RRF 分数）与顺序，归属单次 `SearchStage`。
+- `RerankItem {index: int, score: float}`：服务原始返回项；`index` 指向输入 `documents` 的位置。
+- `RerankUsage {requests: int, prompt_tokens: int, total_tokens: int}`：单次成功调用的真实用量；失败尝试不计数。
+- `RerankScored {id: str, rerank_score: float, rrf_rank: int}`：`rerank_score` 独立保存，不覆盖原 RRF 分数；`rrf_rank` 为输入顺序。
+- `RerankResult {scored: tuple[RerankScored, ...], usage: RerankUsage, request_id: str | None}`：`scored` 为覆盖同一候选集合的完整排序。
+- `RerankIdentity {model: str, endpoint: str, text_version: str}`：单次检索的配置身份，不含 API Key 与超时。
+- `SearchExecution {candidates, collection, manifest_json, rerank, rerank_identity}`：生产单次执行结果；`candidates` 为门槛前的原 RRF 候选池，重排结果与物理集合、清单身份随同一次调用返回。
+- `SearchStage {candidate_pool, final_input, response, rerank, rerank_identity}`：阶段构造产物；基线构造显式传入 `rerank=None` 与 `rerank_identity=None`。
+- `final_input: tuple[RetrievalCandidate, ...]`：通过 RRF 门槛并容纳于完整 JSON 预算的公开候选，按重排顺序排列，最多 5 条。
+- 阶段构造签名：`build_search_stage(candidates, evaluated, *, rerank, rerank_identity=None, threshold, limit=5, budget=4000)`；生产入口显式传入本次真实重排结果与身份，缺失或失败直接传播。
+- 证据身份：配置模型标识、完整请求地址、文本版本 `retrieval-text-2026-10-14.2`、语料 `sources` 及实际 `request_id`。密钥禁止进入任何证据。
+
+语义要求：
+
+- 候选池内所有候选均提交评分；空候选池跳过模型调用并返回空结果。
+- 返回索引必须唯一、位于 `0..len(documents)-1` 且完整覆盖输入；缺失、重复、越界或数量不符明确失败。
+- 分数必须有限且位于 0.0 到 1.0；按分数降序排列，同分保留原 RRF 相对顺序。
+- 门槛语义保持不变：`threshold=0.0` 作用于原 RRF 分数；重排分数不参与门槛，本次不增加重排拒答门槛。
+- 最终最多 5 条，完整 JSON 最多 4000 字符；`has_more` 继续描述同一候选池中通过门槛但被数量或预算裁剪的剩余候选。
+- 公开结构保持 `items` 与 `has_more`；硬过滤与输出复核继续有效，重排分数不能覆盖硬约束。
+
+### 5.2 重排配置与请求协议
+
+- `RERANKER_MODEL`、`RERANKER_BASE_URL`、`RERANKER_API_KEY` 为必需配置，缺失或空白时 `load_rerank_config()` 抛出 `MissingRerankConfig` 并在发请求前失败。
+- `RERANKER_BASE_URL` 是完整请求地址；运行时按该地址直接请求，不拼接路径。当前北京地域地址为 `https://{WorkspaceId}.cn-beijing.maas.aliyuncs.com/api/v1/services/rerank/text-rerank/text-rerank`。
+- `RERANKER_TIMEOUT` 可选，未配置时使用 `DEFAULT_RERANK_TIMEOUT = 10.0` 秒；取值必须为有限正数。URL 使用 Pydantic `AnyHttpUrl` 校验，并拒绝非 https、用户凭据、查询参数、片段与空路径。
+- 鉴权为 `Authorization: Bearer {RERANKER_API_KEY}`，`Content-Type: application/json`。
+- 请求方法为 `POST`，请求体为 `{"model": ..., "input": {"query": ..., "documents": [...]}}`；不发送 `top_n`、`return_documents` 与 `instruct`。`top_n` 省略时返回全部候选，`instruct` 省略时沿用服务默认问答检索指令。
+- 官方限制：最多 500 个文档；单条 Query 或 Document 最多 30,000 Token；单次请求建议不超过 120,000 Token；单项超限返回 HTTP 400 且不截断。本地限制候选最多 20 条、查询最多 4,000 字符、单条文档 UTF-8 最多 4,096 字节；Token 级超限以服务 HTTP 400 为准。
+- 响应 `output.results` 按 `relevance_score` 降序，`index` 为输入位置，`relevance_score` 范围 0.0 到 1.0。`qwen3.7-text-rerank` 的 `usage` 含 `prompt_tokens` 与 `total_tokens`；响应无独立模型版本字段，记录配置模型与 `request_id`。
+- 配置只在检索资源初始化时读取；模块导入、画像、历史浏览及有效快照确认不要求重排服务可用。
+- 客户端接口为 `RerankClient(config)`、`RerankClient.from_env()`、只读 `config` 与 `await client.rerank(request, signal=None)`；`validate_request()` 与 `parse_response()` 为输入与响应结构的纯校验入口。
+- `parse_response()` 校验顶层、`output.results`、`usage` 与 `request_id` 的实际结构，保留原始索引与分数类型后交给 `parse_result()`。
+
+### 5.3 重排失败与生命周期
+
+- 配置错误：`MissingRerankConfig` / `RetrievalConfigError`；输入错误：`RerankInputError`；非法响应：`RerankResponseError`。服务非 2xx、超时、连接错误与非法 JSON 原样传播，不转换为空候选。
+- 不自动重试、不替换模型、不降级为纯 RRF 结果，禁止伪造成功响应。
+- 客户端使用 `httpx` 异步调用，创建、请求与关闭必须属于同一事件循环；关闭由检索资源上下文栈负责，取消时中止在途请求并等待协程收尾。
+- `rerank()` 顺序为输入校验、上下文与所属循环校验、空池处理、取消检查；非空请求使用 `config.timeout`，传输层自动重试为 0。
+- 空候选池返回空 `scored`、零 `usage` 与 `None` `request_id`，不构造 HTTP 请求。
+- `usage.requests` 仅在响应完整合法后计为 1；`prompt_tokens` 与 `total_tokens` 取服务真实整数，缺失或非法直接失败。
+- 取消沿用 `threading.Event`：前置取消不发起请求；在途取消中止 HTTP 协程并等待任务收尾；外层协程取消继续传播。
+- 重排耗时与用量独立于聊天、摘要与 Embedding；生产 Trace 遵守既有字段白名单，不记录查询、画像、候选、分数或凭据。
+
 ## 6. 索引校验与发布
 
 - 清单记录目录哈希、补充数据版本、API 服务地址、模型、维度、编码、analyzer、索引参数、服务与 SDK 版本。
@@ -110,22 +161,28 @@ Milvus 字段：
 - collection description 上限 1024 字节，清单应用容量上限 4096 字节。
 - 目录、模型、编码或索引配置变化后重建；禁止混用向量空间。索引缺失、清单损坏或版本不兼容直接失败，禁止自动模型替换或检索降级。
 - 重启复用兼容索引。探针仅操作明确归属的集合，在连接和删除前校验目标归属；正式、保留集合及卷受保护。
+- 重排是在线查询依赖，不写入索引清单、不改变集合兼容性、不触发向量索引重建。
 
-## 7. Embedding 配置与生命周期
+## 7. Embedding 与重排配置及生命周期
 
-配置模块为 `app/application/business/retrieval_config.py`，客户端为 `retrieval_embedding.py`，接口包括 `load_embedding_config()`、`EmbeddingClient.from_env()`、上下文内 `encode_query/encode_batch` 及 `validate_embedding_data()`。
+配置模块为 `app/application/business/retrieval_config.py`。Embedding 客户端为 `retrieval_embedding.py`，接口包括 `load_embedding_config()`、`EmbeddingClient.from_env()`、上下文内 `encode_query/encode_batch` 及 `validate_embedding_data()`。重排配置接口为 `load_rerank_config()`，共享类型与纯校验位于 `retrieval_rerank.py`。
 
 - `DASHSCOPE_API_KEY`、`DASHSCOPE_WORKSPACE_ID` 为必需后端配置，缺失或空值立即报错。
 - Base URL：`https://{WorkspaceId}.cn-beijing.maas.aliyuncs.com/compatible-mode/v1`。
-- `FIT_AGENT_EMBEDDING_MODEL=qwen3.7-text-embedding-flash`。
+- 模型由当前受保护配置中的 `FIT_AGENT_EMBEDDING_MODEL` 指定；实际值进入索引与缓存身份，切换后必须校验向量空间兼容性。
 - `FIT_AGENT_EMBEDDING_DIMENSIONS=1024`。
 - 使用 OpenAI Python SDK 异步 `embeddings.create`，请求 `dimensions=1024`、`encoding_format="float"`，每批最多 20 条。
 - 校验返回数量、index 对齐、1024 维、有限值及非零范数。
 - 创建、请求和关闭必须属于同一事件循环，通过异步上下文释放资源。显式 timeout 为有限正数；SDK 默认 connect 5 秒、read/write 600 秒。
 - `HybridRetriever.search` 接收取消 signal，编码期间每 0.05 秒检查 Event，取消时 `task.cancel` 并等待编码协程收尾。
 - `usage.requests` 仅统计成功响应，失败尝试单独记录。
-- 根 `package.json` 的 `dev:backend` 使用 `uv run --env-file .env`，仅后端子进程加载已忽略的 `backend/.env`。Embedding 与聊天模型配置独立。
+- 根 `package.json` 的 `dev:backend` 使用 `uv run --env-file .env`，仅后端子进程加载已忽略的 `backend/.env`。Embedding、重排与聊天模型配置独立。
+- 重排配置由 `load_rerank_config()` 读取 `RERANKER_MODEL`、`RERANKER_BASE_URL`、`RERANKER_API_KEY` 与可选 `RERANKER_TIMEOUT`；默认超时 10 秒。配置对象隐藏密钥表示与校验输入。
 - 禁止密钥进入前端、日志、索引、评测证据或 Trace；只发送检索所需文本，画像限制在后端转换为结构化过滤。
+- 任务三接入：`RerankClient.from_env()` 与 `EmbeddingClient`、`MilvusConnection` 同栈放入检索资源 `AsyncExitStack`，上下文由运行时持有；`ActionRetrievalRuntime.search` 在召回后取门槛前原 RRF 候选池，以 `build_request(query, pool, corpus.records)` 构造请求并执行 `await client.rerank(request, signal=signal)`，返回 `SearchExecution`。`BusinessService.search_exercises` 将同一候选池、重排结果与身份显式交给 `build_search_stage`，公开响应结构保持不变。
+- 任务四交接：`evaluation/retrieval_support.project_response` 支持显式 `experiment=rrf_baseline|rerank` 与真实重排结果、身份；`execute_comparison_query` 在一次召回上同时构造基线响应与重排响应。`evaluation/retrieval.py` 的 `run --rerank` 保存 `hybrid` 与 `hybrid-rerank` 两个实验身份，`replay` 入口只使用已保存证据重建阶段并校验候选、原排名、重排排序、最终输入与预算。`evaluation/langsmith_retrieval.py` 新增 `hybrid-rerank` target、同池 baseline 输出与地址摘要 metadata。`evaluation/scenarios.SearchStageRecord` 保存 `experiment`、重排排序、用量与请求身份，运行身份聚合实际重排配置。
+- 取消传递：检索入口的同一个 `threading.Event` 直接传给 `rerank()`；前置与在途取消均抛出 `concurrent.futures.CancelledError`，由既有运行取消语义继续传播。
+- 结果使用：`result.scored` 已按分数降序且同分保持原 RRF 顺序；按 `id` 关联候选、以 `rrf_rank` 读取原候选顺序；`result.usage` 为本次调用真实用量，`result.request_id` 进入证据身份。最终顺序取 `result.scored`，门槛继续作用于原 RRF 分数，响应数量与字符预算规则保持不变。
 
 ## 8. Milvus 部署与失败语义
 
@@ -152,8 +209,8 @@ Milvus 字段：
 ## 10. Trace
 
 - 沿用 `run_tool_batch` 的准备、执行、后处理 Span 及 `_execute_with_cancel` 的取消收尾生命周期。
-- 检索耗时进入 tool Span 和根运行耗时；Embedding 不加入聊天或摘要 model Span 及其用量统计。
-- tool 属性遵循白名单，禁止查询原文、画像、候选及凭据。
+- 检索与重排耗时进入 tool Span 和根运行耗时；Embedding 与重排不加入聊天或摘要 model Span 及其用量统计。
+- tool 属性遵循白名单，不新增重排属性，禁止查询原文、画像、候选、分数及凭据。
 - 保留根终态提交、观测收尾、通知及确认授权和幂等顺序。
 - 沿用显式父上下文、callback 恰好执行一次和被动观测语义。
 
@@ -161,10 +218,10 @@ Milvus 字段：
 
 - 评测覆盖标准名称、别名、英文、中英混合、描述、条件、多动作别名、禁用及无答案，人工审阅别名和相关性标注，按意图与别名家族拆分数据。
 - 名称、BM25、dense、hybrid 对照使用同一提交及可比语料、别名与预算，单独记录别名补充及裁剪贡献。
-- 候选阶段使用 Recall@20：前 20 条候选命中相关 ID 数除以金标全部正相关 ID 数；候选池为空时为零。
-- 最终模型输入阶段使用 Hit@5、MRR@5、nDCG@5、Precision@5：只按实际公开的前 5 条及其顺序评分；Precision@5 固定分母 5；nDCG 使用增益 `2^grade−1`、折扣 `log2(rank+1)`；MRR 无命中为零。
-- 无答案误返回率只按最终模型输入是否非空统计；有金标空返回的四项 @5 为零，Recall@20 保持候选阶段真实值。
-- 保存 query、约束、金标 ID、候选 ID、分数、模型和版本及逐例退化证据；动作身份及硬约束由程序核验。
+- 候选阶段使用 Recall@20：前 20 条候选命中相关 ID 数除以金标全部正相关 ID 数；候选池为空时为零。Recall@20 固定消费重排前候选池。
+- 最终模型输入阶段使用 Hit@5、MRR@5、nDCG@5、Precision@5：只按实际公开的前 5 条及其重排后顺序评分；Precision@5 固定分母 5；nDCG 使用增益 `2^grade−1`、折扣 `log2(rank+1)`；MRR 无命中为零。
+- 无答案误返回率只按最终模型输入是否非空统计；有金标空返回的四项 @5 为零，Recall@20 保持候选阶段真实值。本次不增加重排拒答门槛。
+- 保存 query、约束、金标 ID、候选 ID、RRF 分数、重排分数、重排配置与请求身份及逐例退化证据；动作身份及硬约束由程序核验。
 - 显式硬约束违反数为零；候选数、批量、字符预算、完整 JSON 和完整条目全部合规。
 - 覆盖真实接口及索引构建、对齐、重启复用、失败发布保护、取消和资源释放。
 - 业务覆盖动作核实、生成、替换、限制保存与解除、查询刷新、跨会话、重启、重复确认、未确认零提交、授权及提案依据有效性。

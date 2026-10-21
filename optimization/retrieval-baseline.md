@@ -75,4 +75,19 @@ RRF 正式成绩需要后续实际运行并绑定对应数据、配置及 run_id
 
 本次未执行 150 条正式检索、80 个业务场景、生成裁判或 LangSmith 上传。验证证明本次 RRF 接入及上述范围正确，正式质量成绩保持待运行状态。
 
-20→5 两阶段接入新增的契约、指标、阶段构造与证据测试代码尚未执行；功能测试待整体补齐后的统一验证阶段执行，未执行的测试不得视为通过。
+20→5 两阶段接入及重排评测的契约、指标、阶段构造、证据、回放与 LangSmith 适配测试已执行；任务五独立复验第一轮清单内 12 个回归文件共 333 项通过、退出码全为 0，附加 6 个评测文件 160 项通过、1 项失败（`test_input_audit.py` 一条与重排无关的 HEAD 既有红断言）；第二轮补齐 summary 与 scenarios 侧负向证据回归并修正该陈旧断言与真实服务集成脚本的跨调用集合断言后，全量 501 项通过、零失败，`ruff` 与 `git diff --check` 通过。逐批命令、退出码与证据位置见 `tmp/action-rerank-t5/acceptance.md` 的 D 节与 M 节。正式 baseline 成绩仍待实际全量运行。
+
+## F 重排实验边界
+
+原 RRF baseline 的融合算法、`rrf_k`、两路深度、门槛、候选池与最终输入上限保持冻结，历史实验身份与证据不变。
+
+重排实验在同一冻结数据、金标、阶段定义与候选池构造上运行，使用独立实验身份：
+
+- 重排模型 `qwen3.7-text-rerank`、完整请求地址 `RERANKER_BASE_URL`、文本版本 `retrieval-text-2026-10-14.2`、语料 `sources`、实际 `request_id` 与重排用量。
+- 仅重排同一候选池时 Recall@20 与原 RRF baseline 完全一致；Hit@5、MRR@5、nDCG@5、Precision@5 按重排后的公开顺序评分。
+- 不重建向量索引，不修改索引清单，不加入重排依赖；正式 alias 与冻结参数保持不变。
+- 重排实验的正式运行需要单独绑定数据、配置与 run_id；原 baseline 不因接入重排而重跑或改写。
+- 对照入口为 `evaluation.retrieval run --groups hybrid --rerank`，在一次召回上写入 `hybrid` 与 `hybrid-rerank` 两组证据；两组候选 ID、顺序、RRF 分数与门槛必须一致。`replay` 仅消费已保存证据重建阶段，不调用重排服务、Embedding 或 Milvus。
+- 证据字段包括 `experiment`、`rerank.identity{model,endpoint,text_version}`、`rerank.scored[{id,rerank_score,rrf_rank}]`、`rerank.usage`、`rerank.request_id`；历史缺少这些字段的证据按显式 RRF baseline 解释。LangSmith 上传使用地址 SHA-256，完整地址与密钥保持在本地。
+- 开发验证运行 `20261020T120245Z-c7542e56` 使用 6 条已批准验证查询：两组候选池、顺序、RRF 分数与门槛一致；`replay` 结构校验通过，状态为 `blocked_unreviewed_candidates`，25 个返回候选尚未完成 qrels 判定，逐查询 Recall@20 数值未计算、两组间未执行数值比较，同池 Recall@20 相等由离线测试断言；3 条非空查询发生真实重排，`usage.requests=3`、`prompt_tokens=14454`、`total_tokens=14454`，3 个唯一 `request_id`；空池零请求。正式成绩待补标批准后运行。
+- 任务五独立复验运行 `20261020T140331Z-92009dc8`（同一冻结数据版本 `rebuild-v1`、同一 6 条验证查询、同一 `--rerank` 入口）逐查询复现上述结论：两组 `candidate_pool` 与 `scores` 字面相等、`requests=3`、`prompt_tokens=total_tokens=14454`、3 个唯一 `request_id`、3 条空池零请求；两组均 `blocked_unreviewed_candidates`，缺标集合与开发验证运行完全相同。逐查询耗时窗口记录在两组同一 `timings` 中，非空查询为 406.1/167.3/164.1 毫秒、空池为 23.9/16.2/16.3 毫秒。原 RRF baseline 定义、冻结参数与历史成绩身份保持不变。
