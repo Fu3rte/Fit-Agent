@@ -44,10 +44,12 @@ from evaluation.contracts import (
     BusinessProjection,
     ContextItem,
     ContextSource,
+    MessageNode,
     ModelVisibleSearch,
     NonEmptyText,
     ProposalBinding,
     SearchResponseEvidence,
+    ToolNode,
     VisibleExercise,
 )
 from evaluation.deterministic_assertions import EventTarget
@@ -61,26 +63,6 @@ class ScenarioEvidenceModel(BaseModel):
 
 class ContextMappingError(ValueError):
     """模型可见正文与真实持久化内容无法一致表达。"""
-
-
-class MessageNode(ScenarioEvidenceModel):
-    entry_id: NonEmptyText
-    session_id: NonEmptyText
-    role: str
-    content: str
-    kind: str
-    has_attachments: bool = False
-    run_id: NonEmptyText | None = None
-
-
-class ToolNode(ScenarioEvidenceModel):
-    tool_call_id: NonEmptyText
-    tool_name: NonEmptyText
-    content: str
-    entry_id: NonEmptyText
-    session_id: NonEmptyText
-    run_id: NonEmptyText | None = None
-    is_error: bool
 
 
 class ContextGap(ScenarioEvidenceModel):
@@ -664,16 +646,6 @@ def _node_kind(entry: object) -> str:
 @dataclass(frozen=True)
 class RequestNodes:
     # 一次真实请求的候选池：消息正文、身份与工具结果全部来自同一投影边界。
-    nodes: list[MessageNode]
-    tool_nodes: list[ToolNode]
-
-
-class RequestBoundaryEvidence(ScenarioEvidenceModel):
-    # 被评分请求的节点边界：来源分类与当前输入只能沿这些真实节点身份复核。
-    api: NonEmptyText
-    session_id: NonEmptyText
-    run_id: NonEmptyText
-    request_entry_id: NonEmptyText | None = None
     nodes: list[MessageNode]
     tool_nodes: list[ToolNode]
 

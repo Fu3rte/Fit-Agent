@@ -14,7 +14,7 @@ from app.application.business.retrieval_response import (
     SEARCH_LIMIT,
     encoded_length,
 )
-from evaluation.contracts import GENERATION_METRICS
+from evaluation.contracts import GENERATION_METRICS, RequestBoundaryEvidence
 from evaluation.dataset import BACKEND, EvaluationDataset, load_for_evaluation
 from evaluation.generation_scoring import (
     GenerationMetricEvidence,
@@ -23,12 +23,13 @@ from evaluation.generation_scoring import (
 )
 from evaluation.scenario_evidence import (
     ContextMappingError,
-    RequestBoundaryEvidence,
     context_items_from_request,
     current_input_entry_ids,
     sha256_text,
 )
 from evaluation.scenarios import (
+    EXTERNAL_PROTOCOL_VERSION,
+    RAGAS_PROTOCOL_VERSION,
     AssertionCheckpointArtifact,
     EventCapture,
     ExecutionPlan,
@@ -998,6 +999,21 @@ def load_run(run_dir: Path, version_dir: Path | None = None) -> RunLayout:
     if not run_path.is_file() or not plan_path.is_file():
         raise SummaryError("运行目录缺少 run.json 或 plan.json")
     run = _read_json(run_path)
+    mode = run.get("scoring_mode")
+    protocol = run.get("protocol_version")
+    if mode == "external" or protocol == EXTERNAL_PROTOCOL_VERSION:
+        if mode != "external" or protocol != EXTERNAL_PROTOCOL_VERSION:
+            raise SummaryError("run.json 评分模式与协议版本不一致")
+        raise SummaryError(
+            "外部裁判运行仅支持 SDK 目录布局 (sdk-run.json)；"
+            "请使用 python -m evaluation.sdk_summary report/check"
+        )
+    if mode not in (None, "ragas"):
+        raise SummaryError(f"run.json 评分模式不受支持: {mode!r}")
+    if protocol is not None and protocol != RAGAS_PROTOCOL_VERSION:
+        raise SummaryError(
+            f"run.json 评分协议版本与评分模式不一致: {protocol!r}"
+        )
     plan = ExecutionPlan.model_validate(_read_json(plan_path))
     if run.get("run_id") != plan.run_id:
         raise SummaryError("run.json 与 plan.json 的 run_id 不一致")

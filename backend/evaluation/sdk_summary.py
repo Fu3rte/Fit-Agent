@@ -9,6 +9,7 @@ from pathlib import Path, PurePosixPath
 from statistics import mean
 from typing import Any, Sequence
 
+from evaluation import external_summary as es
 from evaluation import langsmith_retrieval as lr
 from evaluation import langsmith_scenarios as ls
 from evaluation import summary as sm
@@ -1166,6 +1167,14 @@ def load_scenario_source(path: Path, dataset: EvaluationDataset) -> ScenarioSour
         _add(source.issues, str(error))
         source.available = False
         return source
+    if source.feedback_version == ls.EXTERNAL_FEEDBACK_VERSION:
+        _add(
+            source.issues,
+            "外部裁判运行由 evaluation.sdk_summary 协议分发读取，"
+            "旧场景加载器不解析该反馈协议",
+        )
+        source.available = False
+        return source
     if not isinstance(source.run_id, str) or not source.run_id:
         _add(source.issues, "场景来源缺少 run_id")
     if source.purpose not in {"validation", "formal"}:
@@ -1562,13 +1571,153 @@ def _combined_issues(
     return issues
 
 
+def _scenario_protocol(path: Path) -> tuple[int, str] | None:
+    root, file, error = _resolve_source(path, "sdk-run.json")
+    if error:
+        return None
+    document, error = _read_json(file)
+    if error or not isinstance(document, dict):
+        return None
+    try:
+        version = ls.feedback_version(document)
+        mode = ls.run_scoring_mode(document)
+    except ls.ScenarioSDKError as error:
+        raise SDKSummaryError(str(error)) from None
+    if mode == "external" and version != ls.EXTERNAL_FEEDBACK_VERSION:
+        raise SDKSummaryError("外部评分模式与反馈版本不一致")
+    return version, mode
+
+
+def _external_combined_issues(
+    retrieval: RetrievalSource, source: es.ExternalScenarioSource
+) -> list[str]:
+    issues = []
+    if not retrieval.available or source.root is None:
+        return issues
+    document = source.document
+    if retrieval.dataset_identity != document.get("dataset"):
+        issues.append("检索与场景数据身份不一致")
+    code = document.get("code_identity") or {}
+    if retrieval.code_identity.get("head") != code.get("commit"):
+        issues.append("检索与场景代码提交不一致")
+    if retrieval.parameters.get("threshold") != 0.0:
+        issues.append("检索门槛与冻结基线不一致")
+    scenario_index = {
+        "collection": (document.get("index") or {}).get("collection"),
+        "manifest_sha256": (document.get("index") or {}).get("manifest_sha256"),
+    }
+    for group, result in retrieval.groups.items():
+        group_index = {
+            "collection": result.index.get("collection"),
+            "manifest_sha256": result.index.get("manifest_sha256"),
+        }
+        if group_index != scenario_index:
+            issues.append(f"{group} 组物理索引与场景运行不一致")
+    if retrieval.document.get("max_concurrency") != document.get(
+        "max_concurrency"
+    ):
+        issues.append("检索与场景并发配置不一致")
+    if retrieval.document.get("num_repetitions") != document.get(
+        "num_repetitions"
+    ):
+        issues.append("检索与场景重复次数不一致")
+    return issues
+
+
+def _external_retrieval_view(
+    retrieval: RetrievalSource,
+    dataset: EvaluationDataset,
+    source: es.ExternalScenarioSource,
+) -> tuple[dict, list[str]]:
+    selected_ids = [
+        scenario_id
+        for scenario_id in source.expected_scenario_ids
+        if scenario_id
+        in {scenario["scenario_id"] for scenario in dataset.scenarios}
+    ]
+    selected = select_scenarios(dataset, selected_ids)
+    run_id = source.run_id or ""
+    layout = sm.RunLayout(
+        run_dir=source.root or BACKEND,
+        run={},
+        plan=build_execution_plan(dataset, selected, run_id),
+        dataset=dataset,
+        dataset_scenarios={
+            item["scenario_id"]: item for item in dataset.scenarios
+        },
+        full_plan=build_execution_plan(dataset, list(dataset.scenarios), run_id),
+        aggregates={},
+    )
+    summary = sm._retrieval_summary(layout, [])
+    first_group = next(iter(retrieval.groups.values()), None)
+    searches = 0
+    with_search = 0
+    if source.evidence is not None:
+        for row in source.evidence.scenarios:
+            searches += len(row.execution.retrieval)
+            if row.execution.retrieval:
+                with_search += 1
+    summary.update(
+        {
+            "searches": searches,
+            "scenarios_with_search": with_search,
+            "experiment": retrieval.document.get("experiment"),
+            "rerank": retrieval.document.get("rerank_identity"),
+            "index": None if first_group is None else first_group.index,
+            "groups": {
+                group: _group_summary(result)
+                for group, result in retrieval.groups.items()
+            },
+            "overall_status": retrieval.recomputed_status,
+            "all_groups_complete": (
+                set(retrieval.groups) >= set(GROUP_ORDER)
+                and all(
+                    result.recomputed_status == "complete"
+                    for group, result in retrieval.groups.items()
+                    if group in GROUP_ORDER or group in OPTIONAL_GROUPS
+                )
+            ),
+            "expected_groups": [*GROUP_ORDER, *OPTIONAL_GROUPS],
+        }
+    )
+    blocking = list(retrieval.issues)
+    if source.purpose == "formal":
+        if not retrieval.available:
+            blocking.append("正式检索来源不可用")
+        elif retrieval.purpose != "formal":
+            blocking.append("正式检索来源必须为 formal")
+        else:
+            blocking.extend(_retrieval_formal_issues(retrieval, dataset))
+    blocking.extend(_external_combined_issues(retrieval, source))
+    return summary, sorted(set(blocking))
+
+
 def build_summary(
     retrieval_path: Path,
     scenario_path: Path,
     dataset_path: Path,
+    *,
+    scope: str = "auto",
 ) -> dict:
     dataset = load_for_evaluation(dataset_path)
     retrieval = load_retrieval_source(retrieval_path, dataset)
+    protocol = _scenario_protocol(scenario_path)
+    if protocol is not None and protocol[1] == "external":
+        source_path = (
+            scenario_path
+            if scenario_path.is_dir()
+            else scenario_path.parent
+        )
+        source = es.load_external_scenario_source(source_path, dataset)
+        retrieval_summary, retrieval_blocking = _external_retrieval_view(
+            retrieval, dataset, source
+        )
+        return es.build_summary(
+            source,
+            scope=scope,
+            retrieval=retrieval_summary,
+            retrieval_blocking=retrieval_blocking,
+        )
     scenario = load_scenario_source(scenario_path, dataset)
     selected = select_scenarios(dataset, scenario.expected_ids)
     run_id = scenario.run_id or ""
@@ -1617,7 +1766,7 @@ def build_summary(
             _add(layout.issues, f"generation:{metric} 存在尚无结果的适用检查点")
         if row["missing_checkpoints"]:
             _add(layout.issues, f"generation:{metric} 存在未执行检查点")
-    scope_name, plan_formal = sm._scope(layout, "auto")
+    scope_name, plan_formal = sm._scope(layout, scope)
     formal = (
         plan_formal
         and scope_name == "formal"
@@ -1950,6 +2099,8 @@ def _metric_row(name: str, stats: dict | None, status: str | None = None) -> lis
 
 
 def report_lines(summary: dict) -> list[str]:
+    if summary.get("schema") == es.EXTERNAL_SUMMARY_SCHEMA:
+        return es.report_lines(summary)
     sources = summary["sources"]
     release = summary["release"]
     run = summary["run"]
@@ -2295,6 +2446,12 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
         command.add_argument("--retrieval", type=Path, required=True, help="检索 SDK run.json 或运行目录")
         command.add_argument("--scenarios", type=Path, required=True, help="场景 SDK sdk-run.json 或运行目录")
         command.add_argument("--dataset", type=Path, required=True, help="批准数据版本目录")
+        command.add_argument(
+            "--scope",
+            choices=("auto", "formal", "validation"),
+            default="auto",
+            help="发布范围；定向范围始终不能作为有效发布",
+        )
         if name in {"report", "write-v3"}:
             command.add_argument("--output", type=Path, required=True, help="汇总输出目录")
         else:
@@ -2306,7 +2463,9 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parse_args(argv)
-    summary = build_summary(args.retrieval, args.scenarios, args.dataset)
+    summary = build_summary(
+        args.retrieval, args.scenarios, args.dataset, scope=args.scope
+    )
     if args.command == "report":
         paths = write_summary_files(args.output, summary)
         print(
@@ -2358,5 +2517,5 @@ if __name__ == "__main__":
         raise SystemExit(main())
     except DatasetError as error:
         raise SystemExit(f"评测数据未就绪: {error}") from None
-    except SDKSummaryError as error:
+    except (SDKSummaryError, es.ExternalSummaryError) as error:
         raise SystemExit(str(error)) from None

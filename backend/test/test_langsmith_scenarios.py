@@ -15,10 +15,9 @@ from evaluation.contracts import (
     EvidenceLink,
     MetricOutcome,
 )
-from evaluation.dataset import load_for_evaluation
+from evaluation.dataset import BACKEND, load_for_evaluation
 from evaluation.scenario_evidence import canonical_json, sha256_text
 from evaluation.scenarios import (
-    DEFAULT_VERSION_DIR,
     AssertionCheckpointArtifact,
     GenerationCheckpointArtifact,
     ScenarioArtifact,
@@ -26,7 +25,7 @@ from evaluation.scenarios import (
     frozen_scenario_sha256,
 )
 
-DATASET_PATH = DEFAULT_VERSION_DIR
+DATASET_PATH = BACKEND / "dataset" / "evaluation" / "rebuild-v2"
 
 
 @pytest.fixture(scope="module")
@@ -866,9 +865,15 @@ def test_feedback_versions_are_explicit():
         "factual_correctness",
         "scenario_status",
     )
+    assert ls.feedback_fields(ls.EXTERNAL_FEEDBACK_VERSION) == (
+        ls.EXTERNAL_FEEDBACK_FIELDS
+    )
     assert ls.feedback_version({}) == ls.LEGACY_FEEDBACK_VERSION
     assert ls.feedback_version({"feedback_version": 2}) == 2
-    for value in (0, 3, True, "2"):
+    assert ls.feedback_version({"feedback_version": 3}) == (
+        ls.EXTERNAL_FEEDBACK_VERSION
+    )
+    for value in (0, 4, True, "2"):
         with pytest.raises(ls.ScenarioSDKError, match="版本"):
             ls.feedback_version({"feedback_version": value})
     with pytest.raises(ls.ScenarioSDKError, match="版本"):
@@ -894,6 +899,21 @@ def test_feedback_versions_are_explicit():
         ls.LEGACY_FEEDBACK_VERSION,
         {"scenario_status", *ls.ASSERTION_FEEDBACK_FIELDS},
     )
+    assert ls.feedback_field_set_matches(
+        ls.EXTERNAL_FEEDBACK_VERSION, ls.EXTERNAL_FEEDBACK_FIELDS
+    )
+    assert not ls.feedback_field_set_matches(
+        ls.EXTERNAL_FEEDBACK_VERSION, ("scenario_status",)
+    )
+    assert ls.run_scoring_mode({}) == "ragas"
+    assert ls.run_scoring_mode({"feedback_version": 3}) == "external"
+    assert ls.run_scoring_mode(
+        {"feedback_version": 3, "scoring_mode": "external"}
+    ) == "external"
+    with pytest.raises(ls.ScenarioSDKError, match="模式"):
+        ls.run_scoring_mode({"feedback_version": 3, "scoring_mode": "ragas"})
+    with pytest.raises(ls.ScenarioSDKError, match="模式"):
+        ls.run_scoring_mode({"feedback_version": 2, "scoring_mode": "external"})
 
 
 def test_feedback_reports_each_failed_assertion_without_changing_status():
@@ -925,9 +945,15 @@ def test_feedback_reports_each_failed_assertion_without_changing_status():
         artifact, version=ls.LEGACY_FEEDBACK_VERSION
     ) == []
     with pytest.raises(ls.ScenarioSDKError, match="版本"):
-        ls.scenario_feedback(execution, artifact, version=3)
+        ls.scenario_feedback(execution, artifact, version=4)
     with pytest.raises(ls.ScenarioSDKError, match="版本"):
-        ls.incomplete_items(artifact, version=3)
+        ls.incomplete_items(artifact, version=4)
+    with pytest.raises(ls.ScenarioSDKError, match="外部协议"):
+        ls.scenario_feedback(
+            execution, artifact, version=ls.EXTERNAL_FEEDBACK_VERSION
+        )
+    with pytest.raises(ls.ScenarioSDKError, match="外部协议"):
+        ls.incomplete_items(artifact, version=ls.EXTERNAL_FEEDBACK_VERSION)
 
 
 def test_feedback_keeps_real_zero_and_omits_na_and_failed_metrics():

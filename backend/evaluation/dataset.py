@@ -58,6 +58,24 @@ SCENARIO_CATEGORIES = {
     "confirmation_cancellation_state": 8,
     "clarification_authorization_medical_risk": 8,
 }
+REBUILD_V3_SCENARIO_COUNT = 40
+REBUILD_V3_SCENARIO_CATEGORIES = {
+    "action_verification": 8,
+    "profile_update": 5,
+    "plan_import_file": 4,
+    "incomplete_plan_structure": 2,
+    "plan_generation": 4,
+    "replacement_constraints": 3,
+    "performance_adjustment": 3,
+    "workout_logging_query": 3,
+    "confirmation_cancellation_state": 5,
+    "clarification_authorization_medical_risk": 3,
+}
+SCENARIO_BASELINES = {
+    "rebuild-v1": (SCENARIO_COUNT, SCENARIO_CATEGORIES),
+    "rebuild-v2": (SCENARIO_COUNT, SCENARIO_CATEGORIES),
+    "rebuild-v3": (REBUILD_V3_SCENARIO_COUNT, REBUILD_V3_SCENARIO_CATEGORIES),
+}
 METRICS = ("faithfulness", "factual_correctness", "deterministic_rules")
 PROPOSAL_KINDS = ("profile", "plan", "workout")
 ASSERTION_KINDS = (
@@ -76,6 +94,11 @@ ASSERTION_KINDS = (
 SAVED_STATUS = "saved"
 INVALIDATED_STATUS = "invalidated"
 MESSAGE_ANSWER_MIN_CHARS = 8
+
+
+def scenario_baseline(version: str) -> tuple[int, dict[str, int]]:
+    # 已发布版本使用自身批准基线；历史测试数据沿用原全量规则。
+    return SCENARIO_BASELINES.get(version, (SCENARIO_COUNT, SCENARIO_CATEGORIES))
 
 
 class DatasetError(ValueError):
@@ -1061,9 +1084,10 @@ def _load(version_dir: Path) -> EvaluationDataset:
             issues.append(f"queries: {name} 无答案数量为 {quota['expect_empty'][name]}，正式配额为 {expected}")
     if counts["queries"] != QUERY_COUNT:
         issues.append(f"queries: 数量为 {counts['queries']}，正式要求 {QUERY_COUNT}")
-    if counts["scenarios"] != SCENARIO_COUNT:
-        issues.append(f"scenarios: 数量为 {counts['scenarios']}，正式要求 {SCENARIO_COUNT}")
-    for name, expected in SCENARIO_CATEGORIES.items():
+    scenario_count, scenario_categories = scenario_baseline(manifest["dataset_version"])
+    if counts["scenarios"] != scenario_count:
+        issues.append(f"scenarios: 数量为 {counts['scenarios']}，正式要求 {scenario_count}")
+    for name, expected in scenario_categories.items():
         if quota["scenario_categories"][name] != expected:
             issues.append(
                 f"scenarios: 类别 {name} 数量为 {quota['scenario_categories'][name]}，正式配额为 {expected}"
@@ -1071,7 +1095,7 @@ def _load(version_dir: Path) -> EvaluationDataset:
     if manifest["quotas"] != {
         "purposes": PURPOSE_QUOTAS,
         "expect_empty": EMPTY_QUOTAS,
-        "scenario_categories": SCENARIO_CATEGORIES,
+        "scenario_categories": scenario_categories,
     }:
         issues.append("manifest.json:quotas 与正式配额不一致")
     review_counts = {

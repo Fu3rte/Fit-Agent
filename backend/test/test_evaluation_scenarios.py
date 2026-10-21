@@ -61,11 +61,13 @@ from evaluation.contracts import (
     CheckpointResult,
     ContextItem,
     EvidenceLink,
+    MessageNode,
     MetricOutcome,
     ProfilePendingProposal,
     ProposalBinding,
+    ToolNode,
 )
-from evaluation.dataset import load_for_evaluation
+from evaluation.dataset import BACKEND, load_for_evaluation
 from evaluation.deterministic_assertions import (
     AssertionEvidence,
     AssertionInputError,
@@ -86,8 +88,6 @@ from evaluation.scenario_evidence import (
     CancelEvidence,
     ContextMappingError,
     EvaluationCallRecorder,
-    MessageNode,
-    ToolNode,
     build_proposal_bindings,
     canonical_json,
     context_items_from_request,
@@ -105,7 +105,6 @@ from evaluation.scenario_evidence import (
 )
 from evaluation.scenarios import (
     DEFAULT_JUDGE_TIMEOUT,
-    DEFAULT_VERSION_DIR,
     SCENARIO_ROOT,
     AssertionCheckpointArtifact,
     EventCapture,
@@ -156,7 +155,7 @@ def test_judge_timeout_default_and_override():
 
 @pytest.fixture(scope="module")
 def dataset():
-    return load_for_evaluation(DEFAULT_VERSION_DIR)
+    return load_for_evaluation(BACKEND / "dataset" / "evaluation" / "rebuild-v2")
 
 
 @pytest.fixture

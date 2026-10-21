@@ -1,8 +1,12 @@
+import math
+import numbers
+import re
 from typing import Annotated, Any, Literal, Self, TypeAlias
 
 from pydantic import (
     AfterValidator,
     BaseModel,
+    BeforeValidator,
     ConfigDict,
     Field,
     field_validator,
@@ -518,6 +522,36 @@ class ModelInputContext(EvaluationContract):
         return self
 
 
+class MessageNode(EvaluationContract):
+    entry_id: NonEmptyText
+    session_id: NonEmptyText
+    role: str
+    content: str
+    kind: str
+    has_attachments: bool = False
+    run_id: NonEmptyText | None = None
+
+
+class ToolNode(EvaluationContract):
+    tool_call_id: NonEmptyText
+    tool_name: NonEmptyText
+    content: str
+    entry_id: NonEmptyText
+    session_id: NonEmptyText
+    run_id: NonEmptyText | None = None
+    is_error: bool
+
+
+class RequestBoundaryEvidence(EvaluationContract):
+    # 被评分请求的节点边界：来源分类与当前输入只能沿这些真实节点身份复核。
+    api: NonEmptyText
+    session_id: NonEmptyText
+    run_id: NonEmptyText
+    request_entry_id: NonEmptyText | None = None
+    nodes: list[MessageNode]
+    tool_nodes: list[ToolNode]
+
+
 class ReferenceFact(EvaluationContract):
     fact_id: NonEmptyText
     text: NonEmptyText
@@ -735,3 +769,279 @@ class EvaluationRun(EvaluationContract):
                             f"指标尚无结果: {checkpoint.checkpoint.checkpoint_id}/{outcome.metric}"
                         )
         return issues
+
+
+# LangSmith 外部裁判：与 Ragas 生成契约并行，独立版本、独立指标身份、独立反馈状态。
+EXTERNAL_JUDGE_CHECKPOINT_SCHEMA_VERSION = "fit-agent-external-judge-checkpoint-1"
+EXTERNAL_JUDGE_FEEDBACK_SCHEMA_VERSION = "fit-agent-external-judge-feedback-1"
+ExternalJudgeCheckpointSchemaVersion = Literal[
+    "fit-agent-external-judge-checkpoint-1"
+]
+ExternalJudgeFeedbackSchemaVersion = Literal[
+    "fit-agent-external-judge-feedback-1"
+]
+ExternalJudgeMetric = Literal[
+    "evidence_supported_v1", "reference_requirements_met_v1"
+]
+EXTERNAL_JUDGE_METRICS: tuple[str, ...] = (
+    "evidence_supported_v1",
+    "reference_requirements_met_v1",
+)
+ExternalJudgeStatus = Literal["pending", "succeeded", "failed", "not_applicable"]
+
+
+def _probability_score(value: object) -> float:
+    if isinstance(value, bool) or not isinstance(value, numbers.Real):
+        raise ValueError("评分必须为实数")
+    number = float(value)
+    if not math.isfinite(number):
+        raise ValueError("评分必须为有限数值")
+    if number < 0.0 or number > 1.0:
+        raise ValueError("评分必须在 0 到 1 之间")
+    return number
+
+
+ProbabilityScore = Annotated[float, BeforeValidator(_probability_score)]
+
+
+def _require_external_metrics(metrics: list[str], label: str) -> None:
+    _require_unique_ids(metrics, label)
+    if set(metrics) != set(EXTERNAL_JUDGE_METRICS):
+        expected = "、".join(EXTERNAL_JUDGE_METRICS)
+        raise ValueError(f"{label}必须逐项且仅包含 {expected}")
+
+
+class ExternalJudgeApplicability(EvaluationContract):
+    metric: ExternalJudgeMetric
+    applicable: bool
+    reason: NonEmptyText | None = None
+
+    @model_validator(mode="after")
+    def validate_reason(self) -> Self:
+        if not self.applicable and self.reason is None:
+            raise ValueError("不适用指标必须写明原因")
+        return self
+
+
+class ExternalJudgeUserRequest(UserInputEvidence):
+    checkpoint: EvidenceLink
+
+
+class ExternalJudgeRetrievalEvidence(EvaluationContract):
+    tool_call_id: NonEmptyText
+    tool_name: NonEmptyText
+    search: SearchResponseEvidence
+    rerank: RerankEvidence | None = None
+
+    @model_validator(mode="after")
+    def validate_experiment(self) -> Self:
+        if self.rerank is None:
+            return self
+        if self.rerank.mode != "rerank":
+            raise ValueError("检索证据中的重排记录必须为重排实验")
+        # 出站只暴露地址摘要，原始服务地址不进入上传契约。
+        if re.fullmatch(r"[0-9a-f]{64}", self.rerank.identity.endpoint) is None:
+            raise ValueError("出站重排身份必须使用地址 SHA-256 摘要")
+        return self
+
+
+class ExternalJudgeContext(EvaluationContract):
+    items: list[ContextItem] = Field(min_length=1)
+    truncated: bool = False
+    omitted_chars: int | None = Field(default=None, ge=0)
+    request_boundary: RequestBoundaryEvidence
+    retrieval: list[ExternalJudgeRetrievalEvidence] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def validate_context(self) -> Self:
+        if self.truncated and self.omitted_chars is None:
+            raise ValueError("上下文整体裁剪必须记录省略字符数")
+        if not self.truncated and self.omitted_chars is not None:
+            raise ValueError("上下文未整体裁剪时不得记录省略字符数")
+        _require_unique_ids(
+            [row.tool_call_id for row in self.retrieval], "检索证据工具调用"
+        )
+        tools = {
+            (item.tool_call_id, item.tool_name)
+            for item in self.items
+            if item.source == "tool_result"
+        }
+        for row in self.retrieval:
+            if (row.tool_call_id, row.tool_name) not in tools:
+                raise ValueError("检索证据必须绑定实际上下文中的工具结果")
+        return self
+
+
+class ExternalJudgeCheckpointInputs(EvaluationContract):
+    user_request: ExternalJudgeUserRequest
+
+
+class ExternalJudgeCheckpointOutputs(EvaluationContract):
+    answer: AnswerEvidence
+    context: ExternalJudgeContext
+
+
+class ExternalJudgeReferenceOutputs(EvaluationContract):
+    reference: GenerationReference
+    applicability: list[ExternalJudgeApplicability] = Field(
+        min_length=2, max_length=2
+    )
+
+    @model_validator(mode="after")
+    def validate_applicability(self) -> Self:
+        _require_external_metrics(
+            [row.metric for row in self.applicability], "外部裁判适用性"
+        )
+        return self
+
+
+class ExternalJudgeMetadata(EvaluationContract):
+    dataset: DatasetIdentity
+    checkpoint: EvidenceLink
+    execution_sha256: Sha256
+
+
+class ExternalJudgeCheckpointUpload(EvaluationContract):
+    schema_version: ExternalJudgeCheckpointSchemaVersion
+    metadata: ExternalJudgeMetadata
+    inputs: ExternalJudgeCheckpointInputs
+    outputs: ExternalJudgeCheckpointOutputs
+    reference_outputs: ExternalJudgeReferenceOutputs
+
+    @model_validator(mode="after")
+    def validate_identity(self) -> Self:
+        if self.inputs.user_request.checkpoint != self.metadata.checkpoint:
+            raise ValueError("用户请求身份必须与元数据检查点一致")
+        return self
+
+
+class ExternalJudgeFeedback(EvaluationContract):
+    metric: ExternalJudgeMetric
+    status: ExternalJudgeStatus
+    score: ProbabilityScore | None = None
+    applicability_reason: NonEmptyText | None = None
+    failure_evidence: NonEmptyText | None = None
+
+    @model_validator(mode="after")
+    def validate_status(self) -> Self:
+        if self.status == "succeeded":
+            if self.score is None:
+                raise ValueError("成功反馈必须提供真实分数")
+            if self.failure_evidence is not None:
+                raise ValueError("成功反馈不得携带失败依据")
+        elif self.status == "failed":
+            if self.score is not None:
+                raise ValueError("失败反馈不得携带成功分数")
+            if self.failure_evidence is None:
+                raise ValueError("失败反馈必须保留失败依据")
+        elif self.status == "not_applicable":
+            if self.score is not None or self.failure_evidence is not None:
+                raise ValueError("不适用反馈不得携带分数或失败依据")
+            if self.applicability_reason is None:
+                raise ValueError("不适用反馈必须保留原因")
+        else:
+            if self.score is not None or self.failure_evidence is not None:
+                raise ValueError("待评分反馈不得携带分数或失败依据")
+        return self
+
+
+class ExternalJudgeFeedbackSet(EvaluationContract):
+    schema_version: ExternalJudgeFeedbackSchemaVersion
+    checkpoint: EvidenceLink
+    execution_sha256: Sha256
+    feedback: list[ExternalJudgeFeedback] = Field(min_length=2, max_length=2)
+
+    @model_validator(mode="after")
+    def validate_feedback(self) -> Self:
+        _require_external_metrics(
+            [row.metric for row in self.feedback], "外部裁判反馈"
+        )
+        return self
+
+
+class ReportedModelVersion(EvaluationContract):
+    kind: Literal["reported"]
+    version: NonEmptyText
+
+
+class UnreportedModelVersion(EvaluationContract):
+    kind: Literal["unreported"]
+
+
+ExternalJudgeModelVersion: TypeAlias = Annotated[
+    ReportedModelVersion | UnreportedModelVersion,
+    Field(discriminator="kind"),
+]
+
+
+class ExternalJudgeModelIdentity(EvaluationContract):
+    provider: NonEmptyText
+    evaluator: NonEmptyText
+    model_alias: NonEmptyText
+    model_version: ExternalJudgeModelVersion
+    config_sha256: Sha256
+
+
+class ExternalJudgeDefinitionIdentity(EvaluationContract):
+    question_id: NonEmptyText
+    question_sha256: Sha256
+    rubric_id: NonEmptyText | None = None
+    rubric_sha256: Sha256
+
+
+class ExternalJudgeExperimentIdentity(EvaluationContract):
+    experiment_id: NonEmptyText
+    experiment_name: NonEmptyText | None = None
+
+
+class ExternalJudgeFeedbackSource(EvaluationContract):
+    kind: Literal["api", "model", "evaluator", "annotation"]
+    identity: NonEmptyText | None = None
+
+
+class ExternalJudgeSource(EvaluationContract):
+    experiment: ExternalJudgeExperimentIdentity
+    run_id: NonEmptyText
+    example_id: NonEmptyText
+    feedback_source: ExternalJudgeFeedbackSource
+
+
+class ExternalJudgeOutboundProjection(EvaluationContract):
+    row_id: NonEmptyText
+    projection_sha256: Sha256
+
+
+class ExternalJudgeCloudFeedbackIdentity(EvaluationContract):
+    # 只承载 LangSmith 实际返回的反馈身份；自定义 run metadata 不作为回读依据。
+    experiment_id: NonEmptyText
+    run_id: NonEmptyText
+    feedback_id: NonEmptyText
+
+
+class ExternalJudgeScoringAttempt(EvaluationContract):
+    schema_version: ExternalJudgeFeedbackSchemaVersion
+    attempt_id: NonEmptyText
+    checkpoint: EvidenceLink
+    execution_sha256: Sha256
+    source: ExternalJudgeSource
+    model: ExternalJudgeModelIdentity
+    definition: ExternalJudgeDefinitionIdentity
+    outbound: ExternalJudgeOutboundProjection
+    feedback: ExternalJudgeFeedback
+    cloud_feedback: ExternalJudgeCloudFeedbackIdentity | None = None
+
+    @model_validator(mode="after")
+    def validate_attempt(self) -> Self:
+        cloud = self.cloud_feedback
+        if cloud is None:
+            if self.feedback.status != "pending":
+                raise ValueError("已完成的反馈必须绑定云端实际返回身份")
+            return self
+        if self.feedback.status == "pending":
+            raise ValueError("待评分反馈不得绑定云端实际返回身份")
+        if (
+            cloud.experiment_id != self.source.experiment.experiment_id
+            or cloud.run_id != self.source.run_id
+        ):
+            raise ValueError("云端反馈身份必须与评分来源一致")
+        return self

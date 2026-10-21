@@ -16,14 +16,17 @@ from evaluation.contracts import (
     ContextItem,
     EvidenceLink,
     GenerationCheckpoint,
+    MessageNode,
     MetricApplicability,
     MetricOutcome,
     ModelInputContext,
     ProposalBinding,
+    RequestBoundaryEvidence,
     RerankEvidence,
     SavedBusinessData,
     SavedDataComparison,
     StateComparison,
+    ToolNode,
     UserInputEvidence,
 )
 from evaluation.dataset import BACKEND, load_for_evaluation
@@ -54,9 +57,6 @@ from evaluation.generation_upload import (
 from evaluation.retrieval import SCHEMA_LEGACY, SCHEMA_STAGED, publishable
 from evaluation.scenario_evidence import (
     EvaluationCallRecorder,
-    MessageNode,
-    RequestBoundaryEvidence,
-    ToolNode,
     canonical_json,
     sha256_text,
 )

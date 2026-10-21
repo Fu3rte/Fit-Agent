@@ -27,6 +27,7 @@ from evaluation.dataset import (
     EvaluationDataset,
     load_for_evaluation,
     retrieval_corpus_identity,
+    scenario_baseline,
 )
 from evaluation.generation_scoring import (
     JudgeConfig,
@@ -36,9 +37,14 @@ from evaluation.generation_scoring import (
 from evaluation.scenario_evidence import canonical_json, sha256_text
 from evaluation.scenarios import (
     DEFAULT_JUDGE_TIMEOUT,
+    DEFAULT_VERSION_DIR,
+    EXTERNAL_PROTOCOL_VERSION,
+    EXTERNAL_SCORING_FILENAME,
     JUDGE_API_KEY_VARIABLE,
     JUDGE_BASE_URL_VARIABLE,
+    RAGAS_PROTOCOL_VERSION,
     ExecutionIdentityError,
+    ExternalScenarioScoring,
     ScenarioArtifact,
     ScenarioBlocked,
     ScenarioExecution,
@@ -47,15 +53,20 @@ from evaluation.scenarios import (
     frozen_scenario_sha256,
     generation_identity,
     load_execution,
+    load_external_scoring,
     scenario_plan,
     score_execution,
+    score_execution_external,
+    scoring_protocol,
     select_scenarios,
+    write_external_scoring_result,
     write_scoring_result,
 )
 
 SCHEMA = "fit-agent-scenario-langsmith-1"
 FEEDBACK_VERSION = 2
 LEGACY_FEEDBACK_VERSION = 1
+EXTERNAL_FEEDBACK_VERSION = 3
 FEEDBACK_VERSION_FIELD = "feedback_version"
 ASSERTION_FEEDBACK_FIELDS = (
     "assertions_passed",
@@ -80,6 +91,19 @@ EXECUTION_NAME = "execution.json"
 SCORING_NAME = "scoring.json"
 SCORING_STATE_NAME = "scoring-state.json"
 EVALUATION_NAME = "evaluation.json"
+EXTERNAL_SCORING_NAME = EXTERNAL_SCORING_FILENAME
+EXTERNAL_SCORING_STATE_NAME = "external-scoring-state.json"
+EXTERNAL_EVALUATION_NAME = "external-evaluation.json"
+EXTERNAL_RUN_STATUS = "awaiting_external_scoring"
+EXTERNAL_FEEDBACK_FIELDS = (
+    "execution_completed",
+    "assertion_passed",
+    "assertions_passed",
+    "assertions_failed",
+    "assertions_binding_errors",
+    "assertions_runner_errors",
+    "generation_scoring_completed",
+)
 SDK_RUN_NAME = "sdk-run.json"
 REQUIRED_SCENARIOS = (
     "s-confirmation-cancellation-state-05",
@@ -112,8 +136,26 @@ def feedback_version(document: Mapping) -> int:
     if isinstance(value, bool) or value not in (
         LEGACY_FEEDBACK_VERSION,
         FEEDBACK_VERSION,
+        EXTERNAL_FEEDBACK_VERSION,
     ):
         raise ScenarioSDKError(f"feedback 协议版本不受支持: {value!r}")
+    return value
+
+
+def run_scoring_mode(document: Mapping) -> str:
+    # 历史运行没有模式字段：按已知 Ragas 协议解释；外部版本只由显式模式或反馈版本识别。
+    value = document.get("scoring_mode")
+    if value is None:
+        if feedback_version(document) == EXTERNAL_FEEDBACK_VERSION:
+            return "external"
+        return "ragas"
+    if value not in ("ragas", "external"):
+        raise ScenarioSDKError(f"scoring_mode 不受支持: {value!r}")
+    if feedback_version(document) == EXTERNAL_FEEDBACK_VERSION:
+        if value != "external":
+            raise ScenarioSDKError("外部反馈版本必须绑定 external 模式")
+    elif value != "ragas":
+        raise ScenarioSDKError("Ragas 反馈版本不得绑定 external 模式")
     return value
 
 
@@ -126,6 +168,8 @@ def feedback_fields(version: int) -> tuple[str, ...]:
             "scenario_status",
             *ASSERTION_FEEDBACK_FIELDS,
         )
+    if version == EXTERNAL_FEEDBACK_VERSION:
+        return EXTERNAL_FEEDBACK_FIELDS
     raise ScenarioSDKError(f"feedback 协议版本不受支持: {version!r}")
 
 
@@ -134,6 +178,8 @@ def feedback_required_fields(version: int) -> tuple[str, ...]:
     feedback_fields(version)
     if version == LEGACY_FEEDBACK_VERSION:
         return ("scenario_status",)
+    if version == EXTERNAL_FEEDBACK_VERSION:
+        return EXTERNAL_FEEDBACK_FIELDS
     return ("scenario_status", *ASSERTION_FEEDBACK_FIELDS)
 
 
@@ -144,7 +190,9 @@ def feedback_field_set_matches(version: int, fields: Iterable[str]) -> bool:
     )
 
 
-def assertion_statistics(artifact: ScenarioArtifact) -> dict[str, int]:
+def assertion_statistics(
+    artifact: ScenarioArtifact | ExternalScenarioScoring,
+) -> dict[str, int]:
     outcomes = [
         outcome
         for checkpoint in artifact.assertions
@@ -515,7 +563,8 @@ def select_validation_scenarios(
 
 def select_formal_scenarios(dataset: EvaluationDataset) -> list[dict]:
     scenarios = select_scenarios(dataset, None)
-    _require(len(scenarios) == 80, "正式运行必须覆盖 80 个批准场景")
+    expected = scenario_baseline(dataset.version)[0]
+    _require(len(scenarios) == expected, f"正式运行必须覆盖 {expected} 个批准场景")
     return scenarios
 
 
@@ -738,6 +787,8 @@ def scenario_feedback(
     *,
     version: int = FEEDBACK_VERSION,
 ) -> dict[str, float]:
+    if version == EXTERNAL_FEEDBACK_VERSION:
+        raise ScenarioSDKError("外部协议必须使用 external_scenario_feedback")
     feedback_fields(version)
     feedback: dict[str, float] = {}
     for metric in GENERATION_METRICS:
@@ -762,11 +813,35 @@ def scenario_feedback(
     return feedback
 
 
+def external_scenario_feedback(
+    record: ExternalScenarioScoring,
+) -> dict[str, float]:
+    # 只表达执行与确定性断言的真实状态；生成评分在外部模式下始终未完成。
+    statistics = assertion_statistics(record)
+    return {
+        "execution_completed": (
+            1.0 if record.execution_status == "completed" else 0.0
+        ),
+        "assertion_passed": 1.0 if record.assertion_status == "passed" else 0.0,
+        "assertions_passed": float(statistics["passed"]),
+        "assertions_failed": float(statistics["failed"]),
+        "assertions_binding_errors": float(statistics["binding_errors"]),
+        "assertions_runner_errors": float(statistics["runner_errors"]),
+        "generation_scoring_completed": 0.0,
+    }
+
+
+def external_incomplete_items(record: ExternalScenarioScoring) -> list[str]:
+    return list(record.incomplete)
+
+
 def incomplete_items(
     artifact: ScenarioArtifact,
     *,
     version: int = FEEDBACK_VERSION,
 ) -> list[str]:
+    if version == EXTERNAL_FEEDBACK_VERSION:
+        raise ScenarioSDKError("外部协议必须使用 external_incomplete_items")
     feedback_fields(version)
     items: list[str] = []
     for checkpoint in artifact.assertions:
@@ -848,6 +923,26 @@ def verify_existing_scoring(
     return artifact
 
 
+def verify_existing_external_scoring(
+    execution: ScenarioExecution, path: Path
+) -> ExternalScenarioScoring:
+    _require(path.is_file(), "外部评分产物缺失")
+    try:
+        record = load_external_scoring(
+            path, expected_execution_sha256=execution.execution_sha256
+        )
+    except Exception as error:
+        raise ScoringBlocked(
+            f"已有外部评分产物无法解析: {type(error).__name__}"
+        ) from error
+    _require(
+        record.run_id == execution.run_id
+        and record.scenario_id == execution.scenario_id,
+        "已有外部评分产物身份与执行结果不一致",
+    )
+    return record
+
+
 def _claim_state(path: Path, payload: dict) -> None:
     try:
         descriptor = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
@@ -859,9 +954,19 @@ def _claim_state(path: Path, payload: dict) -> None:
         json.dump(payload, handle, ensure_ascii=False, allow_nan=False)
 
 
-def scoring_guard(scoring_path: Path, state_path: Path) -> tuple[bool, str]:
+def scoring_guard(
+    scoring_path: Path,
+    state_path: Path,
+    *,
+    scoring_mode: str = "ragas",
+) -> tuple[bool, str]:
     state = _load_json(state_path) if state_path.is_file() else None
     if state is not None:
+        recorded_mode = state.get("scoring_mode")
+        if recorded_mode is None and scoring_mode != "ragas":
+            raise ScoringBlocked("评分状态缺少模式身份，禁止跨模式复用")
+        if recorded_mode is not None and recorded_mode != scoring_mode:
+            raise ScoringBlocked("评分状态属于其他模式，禁止复用")
         status = state.get("status")
         if status == "completed":
             _require(scoring_path.is_file(), "评分状态为 completed 但评分产物缺失")
@@ -874,6 +979,80 @@ def scoring_guard(scoring_path: Path, state_path: Path) -> tuple[bool, str]:
     return False, "initial"
 
 
+def _evaluator_execution(
+    *,
+    inputs: Any,
+    outputs: Any,
+    reference_outputs: Any,
+    rows: dict[str, dict],
+    run_id: str,
+    binding: dict,
+    expected_dataset: Any,
+    run_dir: Path,
+) -> tuple[dict, ScenarioExecution, PurePosixPath, Path]:
+    _require(isinstance(inputs, Mapping), "evaluator inputs 必须为对象")
+    scenario_id = inputs.get("scenario_id")
+    _require(
+        isinstance(scenario_id, str) and scenario_id in rows,
+        "evaluator inputs 引用未知场景",
+    )
+    row = rows[scenario_id]
+    _require(dict(inputs) == row["inputs"], "evaluator inputs 与批准样例不一致")
+    _require(
+        isinstance(reference_outputs, Mapping)
+        and dict(reference_outputs) == row["outputs"],
+        "evaluator reference_outputs 与批准样例不一致",
+    )
+    _require(isinstance(outputs, Mapping), "evaluator outputs 必须为对象")
+    _require(
+        outputs.get("run_id") == run_id, "target 输出 run_id 不一致"
+    )
+    _require(
+        outputs.get("scenario_id") == scenario_id,
+        "target 输出 scenario_id 不一致",
+    )
+    _require(
+        outputs.get("scenario_sha256") == row["inputs"]["scenario_sha256"],
+        "target 输出场景摘要不一致",
+    )
+    _require(
+        outputs.get("dataset") == binding, "target 输出数据身份不一致"
+    )
+    _require(
+        outputs.get("status") in {"completed", "blocked", "failed"},
+        "target 输出状态非法",
+    )
+    evidence = outputs.get("evidence")
+    _require(isinstance(evidence, Mapping), "target 输出缺少证据引用")
+    relative = _safe_relative(evidence.get("execution"), "execution")
+    expected = expected_execution_path(row["id"], scenario_id)
+    _require(relative == expected, "execution 引用与批准目录不一致")
+    path = (run_dir / relative).resolve()
+    _require(path.is_relative_to(run_dir.resolve()), "execution 路径越界")
+    _require(path.is_file(), "execution 文件不存在")
+    try:
+        execution = load_execution(
+            path,
+            expected_run_id=run_id,
+            expected_scenario_id=scenario_id,
+            expected_dataset=expected_dataset,
+            expected_scenario_sha256=row["inputs"]["scenario_sha256"],
+        )
+    except ExecutionIdentityError as error:
+        raise ScenarioSDKError(
+            f"执行结果身份校验失败（{scenario_id}）"
+        ) from error
+    _require(
+        execution.execution_sha256 == outputs.get("execution_sha256"),
+        "execution_sha256 与 target 输出不一致",
+    )
+    _require(
+        execution.status == outputs.get("status"),
+        "target 输出状态与执行结果不一致",
+    )
+    return row, execution, relative, path.parent
+
+
 def make_evaluator(
     *,
     dataset: EvaluationDataset,
@@ -882,76 +1061,145 @@ def make_evaluator(
     run_dir: Path,
     judge: JudgeConfig | None,
     judge_timeout: float = DEFAULT_JUDGE_TIMEOUT,
+    scoring_mode: str = "ragas",
 ):
+    _require(scoring_mode in ("ragas", "external"), "evaluator scoring_mode 非法")
     binding = dataset_binding(dataset)
     expected_dataset = dataset_identity(dataset)
 
     async def evaluator(inputs, outputs, reference_outputs):
-        _require(isinstance(inputs, Mapping), "evaluator inputs 必须为对象")
-        scenario_id = inputs.get("scenario_id")
-        _require(
-            isinstance(scenario_id, str) and scenario_id in rows,
-            "evaluator inputs 引用未知场景",
+        row, execution, relative, scenario_root = _evaluator_execution(
+            inputs=inputs,
+            outputs=outputs,
+            reference_outputs=reference_outputs,
+            rows=rows,
+            run_id=run_id,
+            binding=binding,
+            expected_dataset=expected_dataset,
+            run_dir=run_dir,
         )
-        row = rows[scenario_id]
-        _require(dict(inputs) == row["inputs"], "evaluator inputs 与批准样例不一致")
-        _require(
-            isinstance(reference_outputs, Mapping)
-            and dict(reference_outputs) == row["outputs"],
-            "evaluator reference_outputs 与批准样例不一致",
-        )
-        _require(isinstance(outputs, Mapping), "evaluator outputs 必须为对象")
-        _require(
-            outputs.get("run_id") == run_id, "target 输出 run_id 不一致"
-        )
-        _require(
-            outputs.get("scenario_id") == scenario_id,
-            "target 输出 scenario_id 不一致",
-        )
-        _require(
-            outputs.get("scenario_sha256") == row["inputs"]["scenario_sha256"],
-            "target 输出场景摘要不一致",
-        )
-        _require(
-            outputs.get("dataset") == binding, "target 输出数据身份不一致"
-        )
-        _require(
-            outputs.get("status") in {"completed", "blocked", "failed"},
-            "target 输出状态非法",
-        )
-        evidence = outputs.get("evidence")
-        _require(isinstance(evidence, Mapping), "target 输出缺少证据引用")
-        relative = _safe_relative(evidence.get("execution"), "execution")
-        expected = expected_execution_path(row["id"], scenario_id)
-        _require(relative == expected, "execution 引用与批准目录不一致")
-        path = (run_dir / relative).resolve()
-        _require(path.is_relative_to(run_dir.resolve()), "execution 路径越界")
-        _require(path.is_file(), "execution 文件不存在")
-        try:
-            execution = load_execution(
-                path,
-                expected_run_id=run_id,
-                expected_scenario_id=scenario_id,
-                expected_dataset=expected_dataset,
-                expected_scenario_sha256=row["inputs"]["scenario_sha256"],
+        scenario_id = execution.scenario_id
+        if scoring_mode == "external":
+            scoring_path = scenario_root / EXTERNAL_SCORING_NAME
+            state_path = scenario_root / EXTERNAL_SCORING_STATE_NAME
+            evaluation_path = scenario_root / EXTERNAL_EVALUATION_NAME
+            reused, binding_mode = scoring_guard(
+                scoring_path, state_path, scoring_mode="external"
             )
-        except ExecutionIdentityError as error:
-            raise ScenarioSDKError(
-                f"执行结果身份校验失败（{scenario_id}）"
-            ) from error
-        _require(
-            execution.execution_sha256 == outputs.get("execution_sha256"),
-            "execution_sha256 与 target 输出不一致",
-        )
-        _require(
-            execution.status == outputs.get("status"),
-            "target 输出状态与执行结果不一致",
-        )
-        scenario_root = path.parent
+            if reused:
+                if binding_mode == "state_completed":
+                    state = _load_json(state_path)
+                    _require(
+                        state.get("execution_sha256")
+                        == execution.execution_sha256,
+                        "已有评分状态与当前执行摘要不一致",
+                    )
+                record = verify_existing_external_scoring(
+                    execution, scoring_path
+                )
+            else:
+                _claim_state(
+                    state_path,
+                    {
+                        "status": "running",
+                        "scoring_mode": "external",
+                        "protocol_version": EXTERNAL_PROTOCOL_VERSION,
+                        "run_id": run_id,
+                        "scenario_id": scenario_id,
+                        "execution_sha256": execution.execution_sha256,
+                        "started_at": now(),
+                    },
+                )
+                try:
+                    record = score_execution_external(
+                        execution, row["outputs"]["assertions"]
+                    )
+                    write_external_scoring_result(
+                        execution, record, path=scoring_path
+                    )
+                except BaseException as error:
+                    _write_json(
+                        state_path,
+                        {
+                            "status": "failed",
+                            "scoring_mode": "external",
+                            "run_id": run_id,
+                            "scenario_id": scenario_id,
+                            "execution_sha256": execution.execution_sha256,
+                            "error_type": type(error).__name__,
+                            "error": str(error)[:2000],
+                            "finished_at": now(),
+                        },
+                    )
+                    raise ScenarioSDKError(
+                        f"{type(error).__name__}: 外部场景评分失败（{scenario_id}）"
+                    ) from error
+                _write_json(
+                    state_path,
+                    {
+                        "status": "completed",
+                        "scoring_mode": "external",
+                        "protocol_version": EXTERNAL_PROTOCOL_VERSION,
+                        "run_id": run_id,
+                        "scenario_id": scenario_id,
+                        "execution_sha256": execution.execution_sha256,
+                        "scoring_sha256": sha256_text(
+                            scoring_path.read_text(encoding="utf-8")
+                        ),
+                        "finished_at": now(),
+                    },
+                )
+            feedback = external_scenario_feedback(record)
+            evaluation = {
+                "schema": SCHEMA,
+                "feedback_version": EXTERNAL_FEEDBACK_VERSION,
+                "scoring_mode": "external",
+                "protocol_version": EXTERNAL_PROTOCOL_VERSION,
+                "run_id": run_id,
+                "example_id": row["id"],
+                "scenario_id": scenario_id,
+                "execution_sha256": execution.execution_sha256,
+                "execution_relative": str(relative),
+                "scoring_relative": str(
+                    PurePosixPath(str(relative)).parent
+                    / EXTERNAL_SCORING_NAME
+                ),
+                "scoring_sha256": sha256_text(
+                    scoring_path.read_text(encoding="utf-8")
+                ),
+                "reused": reused,
+                "scoring_binding": binding_mode,
+                "execution_status": record.execution_status,
+                "assertion_status": record.assertion_status,
+                "generation_scoring_status": record.generation_scoring_status,
+                "applicability_status": record.applicability_status,
+                "feedback": feedback,
+                "generation": [
+                    item.model_dump(mode="json") for item in record.generation
+                ],
+                "incomplete": external_incomplete_items(record),
+                "written_at": now(),
+            }
+            if evaluation_path.is_file():
+                existing = _load_json(evaluation_path)
+                _require(
+                    existing.get("scoring_sha256")
+                    == evaluation["scoring_sha256"],
+                    "已有外部评分摘要与当前评分产物不一致",
+                )
+            _write_json(evaluation_path, evaluation)
+            return {
+                "results": [
+                    {"key": key, "score": value}
+                    for key, value in feedback.items()
+                ]
+            }
         scoring_path = scenario_root / SCORING_NAME
         state_path = scenario_root / SCORING_STATE_NAME
         evaluation_path = scenario_root / EVALUATION_NAME
-        reused, binding_mode = scoring_guard(scoring_path, state_path)
+        reused, binding_mode = scoring_guard(
+            scoring_path, state_path, scoring_mode="ragas"
+        )
         if reused:
             if binding_mode == "state_completed":
                 state = _load_json(state_path)
@@ -965,6 +1213,7 @@ def make_evaluator(
                 state_path,
                 {
                     "status": "running",
+                    "scoring_mode": "ragas",
                     "run_id": run_id,
                     "scenario_id": scenario_id,
                     "execution_sha256": execution.execution_sha256,
@@ -981,6 +1230,7 @@ def make_evaluator(
                     state_path,
                     {
                         "status": "failed",
+                        "scoring_mode": "ragas",
                         "run_id": run_id,
                         "scenario_id": scenario_id,
                         "execution_sha256": execution.execution_sha256,
@@ -996,6 +1246,7 @@ def make_evaluator(
                 state_path,
                 {
                     "status": "completed",
+                    "scoring_mode": "ragas",
                     "run_id": run_id,
                     "scenario_id": scenario_id,
                     "execution_sha256": execution.execution_sha256,
@@ -1009,6 +1260,8 @@ def make_evaluator(
         evaluation = {
             "schema": SCHEMA,
             "feedback_version": FEEDBACK_VERSION,
+            "scoring_mode": "ragas",
+            "protocol_version": RAGAS_PROTOCOL_VERSION,
             "run_id": run_id,
             "example_id": row["id"],
             "scenario_id": scenario_id,
@@ -1050,14 +1303,32 @@ def experiment_metadata(
     dataset: EvaluationDataset,
     selections: list[dict],
     model_identity: dict,
-    judge: JudgeConfig,
+    judge: JudgeConfig | None,
     index_identity: dict,
     code: dict,
+    scoring_mode: str = "ragas",
 ) -> dict:
+    _require(scoring_mode in ("ragas", "external"), "experiment scoring_mode 非法")
+    if scoring_mode == "external":
+        feedback_version = EXTERNAL_FEEDBACK_VERSION
+        judge_metadata = {
+            # 裁判由 LangSmith 外部管理；具体 Evaluator 身份由后续上传与回收证据记录。
+            "ownership": "langsmith",
+            "configuration": "external",
+        }
+    else:
+        feedback_version = FEEDBACK_VERSION
+        _require(judge is not None, "Ragas 模式缺少裁判配置")
+        judge_metadata = {
+            "model": judge.model,
+            "endpoint_sha256": sha256_text(judge.base_url),
+        }
     return {
         "local_run_id": run_id,
         "purpose": purpose,
-        "feedback_version": FEEDBACK_VERSION,
+        "feedback_version": feedback_version,
+        "scoring_mode": scoring_mode,
+        "protocol_version": scoring_protocol(scoring_mode),
         "dataset": dataset_binding(dataset),
         "dataset_name": dataset_name(dataset),
         "code_identity": {
@@ -1068,10 +1339,7 @@ def experiment_metadata(
         },
         "sdk_module_sha256": sha256_text(Path(__file__).read_text(encoding="utf-8")),
         "generation": model_identity,
-        "judge": {
-            "model": judge.model,
-            "endpoint_sha256": sha256_text(judge.base_url),
-        },
+        "judge": judge_metadata,
         "index": index_identity,
         "max_concurrency": MAX_CONCURRENCY,
         "num_repetitions": NUM_REPETITIONS,
@@ -1082,7 +1350,7 @@ def experiment_metadata(
             "rule": (
                 "固定取消/重启场景 3 条，另按稳定 ID 顺序选择简单问答、生产检索与真实确认保存各 1 条"
                 if purpose == "validation"
-                else "批准全量 80 个场景"
+                else f"批准全量 {scenario_baseline(dataset.version)[0]} 个场景"
             ),
             "selection": selections,
         },
@@ -1096,6 +1364,8 @@ def verify_experiment_metadata(client: Any, experiment_id: str, expected: dict) 
         "local_run_id",
         "purpose",
         "feedback_version",
+        "scoring_mode",
+        "protocol_version",
         "dataset",
         "code_identity",
         "sdk_module_sha256",
@@ -1119,7 +1389,16 @@ def verify_runs(
     examples: list[Any],
     rows_by_example: dict[str, dict],
     run_dir: Path,
+    scoring_mode: str = "ragas",
 ) -> tuple[list[dict], dict]:
+    if scoring_mode == "external":
+        return _verify_external_runs(
+            client,
+            experiment_id=experiment_id,
+            examples=examples,
+            rows_by_example=rows_by_example,
+            run_dir=run_dir,
+        )
     runs = list(client.list_runs(project_id=experiment_id, is_root=True))
     by_example: dict[str, list[Any]] = {}
     for run in runs:
@@ -1259,6 +1538,173 @@ def verify_runs(
     }
 
 
+def _verify_external_runs(
+    client: Any,
+    *,
+    experiment_id: str,
+    examples: list[Any],
+    rows_by_example: dict[str, dict],
+    run_dir: Path,
+) -> tuple[list[dict], dict]:
+    runs = list(client.list_runs(project_id=experiment_id, is_root=True))
+    by_example: dict[str, list[Any]] = {}
+    for run in runs:
+        _require(
+            run.reference_example_id is not None,
+            f"运行缺少样例身份: {run.id}",
+        )
+        by_example.setdefault(str(run.reference_example_id), []).append(run)
+    samples = []
+    for example in examples:
+        example_id = str(example.id)
+        row = rows_by_example[example_id]
+        scenario_id = row["inputs"]["scenario_id"]
+        matched = by_example.get(example_id, [])
+        if len(matched) != NUM_REPETITIONS:
+            samples.append(
+                {
+                    "example_id": example_id,
+                    "scenario_id": scenario_id,
+                    "status": "missing" if not matched else "duplicate_runs",
+                    "run_ids": [str(run.id) for run in matched],
+                    "error": f"期望 {NUM_REPETITIONS} 次运行，实际 {len(matched)} 次",
+                }
+            )
+            continue
+        run = matched[0]
+        scenario_root = run_dir / "scenarios" / example_id / scenario_id
+        evaluation_path = scenario_root / EXTERNAL_EVALUATION_NAME
+        sample = {
+            "example_id": example_id,
+            "scenario_id": scenario_id,
+            "sdk_run_id": str(run.id),
+            "feedback_version": EXTERNAL_FEEDBACK_VERSION,
+            "scoring_mode": "external",
+            "run_error": run.error,
+            "run_start_time": run.start_time.isoformat() if run.start_time else None,
+            "run_end_time": run.end_time.isoformat() if run.end_time else None,
+        }
+        if run.error:
+            sample["status"] = "failed"
+            execution_path = scenario_root / EXECUTION_NAME
+            if execution_path.is_file():
+                execution = load_execution(execution_path)
+                sample["execution_status"] = execution.status
+                sample["execution_sha256"] = execution.execution_sha256
+            samples.append(sample)
+            continue
+        if not evaluation_path.is_file():
+            sample["status"] = "failed"
+            sample["error"] = "缺少本地外部评分结果"
+            samples.append(sample)
+            continue
+        evaluation = _load_json(evaluation_path)
+        try:
+            _require(
+                run_scoring_mode(evaluation) == "external",
+                "本地评分结果不是外部模式",
+            )
+            version = feedback_version(evaluation)
+            _require(
+                version == EXTERNAL_FEEDBACK_VERSION,
+                "本地外部评分反馈版本不受支持",
+            )
+            expected_feedback = {
+                key: float(value)
+                for key, value in evaluation["feedback"].items()
+            }
+            _require(
+                feedback_field_set_matches(version, expected_feedback),
+                "本地外部反馈字段集合与协议版本不一致",
+            )
+        except (ScenarioSDKError, KeyError, TypeError) as error:
+            sample["status"] = "failed"
+            sample["error"] = str(error)
+            samples.append(sample)
+            continue
+        feedback_rows = [
+            item
+            for item in client.list_feedback(run_ids=[str(run.id)])
+            if item.score is not None
+        ]
+        feedback = {item.key: float(item.score) for item in feedback_rows}
+        sample.update(
+            {
+                "execution_sha256": evaluation["execution_sha256"],
+                "execution_status": evaluation["execution_status"],
+                "assertion_status": evaluation["assertion_status"],
+                "generation_scoring_status": evaluation[
+                    "generation_scoring_status"
+                ],
+                "scoring_relative": evaluation["scoring_relative"],
+                "scoring_sha256": evaluation["scoring_sha256"],
+                "scoring_reused": evaluation["reused"],
+                "feedback_version": version,
+                "incomplete": list(evaluation["incomplete"]),
+                "feedback": feedback,
+                "expected_feedback": expected_feedback,
+                "outputs": run.outputs,
+            }
+        )
+        try:
+            _require(
+                len(feedback) == len(feedback_rows), "反馈指标重复"
+            )
+            _require(
+                set(feedback) == set(expected_feedback),
+                "远端反馈指标集合与本地外部评分不一致",
+            )
+            differences = {
+                key: abs(feedback[key] - expected_feedback[key])
+                for key in feedback
+            }
+            _require(
+                all(
+                    math.isclose(
+                        feedback[key],
+                        expected_feedback[key],
+                        rel_tol=0.0,
+                        abs_tol=REMOTE_SCORE_TOLERANCE,
+                    )
+                    for key in feedback
+                ),
+                "远端反馈与本地外部评分不一致",
+            )
+            _require(
+                isinstance(run.outputs, Mapping),
+                "运行缺少 outputs",
+            )
+            _require(
+                run.outputs.get("execution_sha256")
+                == evaluation["execution_sha256"],
+                "远端运行 execution_sha256 与本地不一致",
+            )
+            _require(
+                run.outputs.get("scenario_id") == scenario_id,
+                "远端运行 scenario_id 与本地不一致",
+            )
+            sample["status"] = "complete"
+            sample["max_feedback_difference"] = max(
+                differences.values(), default=0.0
+            )
+        except ScenarioSDKError as error:
+            sample["status"] = "failed"
+            sample["error"] = str(error)
+        samples.append(sample)
+    extra = sorted(set(by_example) - {str(example.id) for example in examples})
+    status = (
+        "complete"
+        if not extra and all(item["status"] == "complete" for item in samples)
+        else "incomplete"
+    )
+    return samples, {
+        "status": status,
+        "expected_runs": len(examples),
+        "observed_runs": len(runs),
+        "extra_example_ids": extra,
+    }
+
+
 async def verify_runs_until_complete(client: Any, **kwargs) -> tuple[list[dict], dict]:
     deadline = time.monotonic() + REMOTE_VERIFY_TIMEOUT_SECONDS
     while True:
@@ -1275,7 +1721,12 @@ def _write_group_evidence(run_dir: Path, samples: list[dict]) -> None:
         )
 
 
-def _run_status(coverage: dict, samples: list[dict], issues: list[str]) -> str:
+def _run_status(
+    coverage: dict,
+    samples: list[dict],
+    issues: list[str],
+    scoring_mode: str = "ragas",
+) -> str:
     if issues or coverage["status"] != "complete":
         return "incomplete"
     if any(item.get("execution_status") != "completed" for item in samples):
@@ -1287,11 +1738,27 @@ def _run_status(coverage: dict, samples: list[dict], issues: list[str]) -> str:
         for item in samples
     ):
         return "incomplete"
+    if scoring_mode == "external":
+        if any(
+            (item.get("feedback") or {}).get("generation_scoring_completed", 0)
+            > 0
+            for item in samples
+        ):
+            return "incomplete"
+        if any(
+            item.get("generation_scoring_status") != "pending_external"
+            for item in samples
+        ):
+            return "incomplete"
+        return EXTERNAL_RUN_STATUS
     return "complete"
 
 
 def _finalize_sample(
-    run_dir: Path, sample: dict, run_id: str | None
+    run_dir: Path,
+    sample: dict,
+    run_id: str | None,
+    scoring_mode: str = "ragas",
 ) -> tuple[dict, list[str] | None]:
     # 评分引用先核验再参与状态重算；原始 feedback 与 incomplete 保持记录原样。
     scoring = sample.get("scoring_relative")
@@ -1305,7 +1772,10 @@ def _finalize_sample(
             == sample.get("scoring_sha256"),
             "评分摘要与样本不一致",
         )
-        evaluation_path = path.parent / EVALUATION_NAME
+        evaluation_name = (
+            EXTERNAL_EVALUATION_NAME if scoring_mode == "external" else EVALUATION_NAME
+        )
+        evaluation_path = path.parent / evaluation_name
         _require(evaluation_path.is_file(), "评分摘要缺失")
         evaluation = _load_json(evaluation_path)
         _require(
@@ -1331,9 +1801,16 @@ def _finalize_sample(
             execution.status == sample.get("execution_status"),
             "执行状态与样本不一致",
         )
-        artifact = verify_existing_scoring(execution, path)
-        current_incomplete = incomplete_items(artifact)
-    return scenario_record(run_dir, sample), current_incomplete
+        if scoring_mode == "external":
+            record = verify_existing_external_scoring(execution, path)
+            current_incomplete = external_incomplete_items(record)
+        else:
+            artifact = verify_existing_scoring(execution, path)
+            current_incomplete = incomplete_items(artifact)
+    return (
+        scenario_record(run_dir, sample, scoring_mode=scoring_mode),
+        current_incomplete,
+    )
 
 
 def finalize_run(run_dir: Path) -> dict:
@@ -1342,6 +1819,7 @@ def finalize_run(run_dir: Path) -> dict:
     _require(
         document.get("schema") == SCHEMA, "运行摘要版本不受支持"
     )
+    scoring_mode = run_scoring_mode(document)
     version = feedback_version(document)
     samples = document.get("samples") or []
     coverage = document.get("coverage") or {}
@@ -1352,19 +1830,26 @@ def finalize_run(run_dir: Path) -> dict:
             feedback_version(sample) == version,
             "样本反馈协议版本与运行摘要不一致",
         )
+        if scoring_mode == "external":
+            _require(
+                run_scoring_mode(sample) == "external",
+                "样本评分模式与运行摘要不一致",
+            )
     records = []
     status_samples = []
     for sample in samples:
         record, current_incomplete = _finalize_sample(
-            run_dir, sample, document.get("run_id")
+            run_dir, sample, document.get("run_id"), scoring_mode
         )
         records.append(record)
         if current_incomplete is None:
             status_samples.append(sample)
         else:
             status_samples.append({**sample, "incomplete": current_incomplete})
+    document["scoring_mode"] = scoring_mode
+    document["protocol_version"] = scoring_protocol(scoring_mode)
     document["status"] = _run_status(
-        coverage, status_samples, document.get("issues") or []
+        coverage, status_samples, document.get("issues") or [], scoring_mode
     )
     document["scenarios"] = records
     document.pop("error_type", None)
@@ -1376,6 +1861,8 @@ def finalize_run(run_dir: Path) -> dict:
 
 async def run_experiment(args) -> dict:
     load_dotenv(BACKEND / ".env", override=False)
+    scoring_mode = getattr(args, "scoring_mode", "ragas")
+    _require(scoring_mode in ("ragas", "external"), "scoring_mode 非法")
     dataset = load_for_evaluation(Path(args.dataset))
     if args.purpose == "validation":
         scenarios, selections = select_validation_scenarios(
@@ -1384,10 +1871,11 @@ async def run_experiment(args) -> dict:
     else:
         _require(not args.scenario_id, "正式运行不接受场景子集")
         scenarios = select_formal_scenarios(dataset)
+        formal_rule = f"批准全量 {scenario_baseline(dataset.version)[0]} 个场景"
         selections = [
             {
                 "scenario_id": scenario["scenario_id"],
-                "rule": "批准全量 80 个场景",
+                "rule": formal_rule,
             }
             for scenario in scenarios
         ]
@@ -1398,7 +1886,13 @@ async def run_experiment(args) -> dict:
         "schema": SCHEMA,
         "run_id": run_id,
         "purpose": args.purpose,
-        "feedback_version": FEEDBACK_VERSION,
+        "feedback_version": (
+            EXTERNAL_FEEDBACK_VERSION
+            if scoring_mode == "external"
+            else FEEDBACK_VERSION
+        ),
+        "scoring_mode": scoring_mode,
+        "protocol_version": scoring_protocol(scoring_mode),
         "status": "running",
         "started_at": now(),
         "dataset": dataset.identity(),
@@ -1421,7 +1915,8 @@ async def run_experiment(args) -> dict:
         _require(
             bool(os.environ.get("LANGSMITH_API_KEY")), "缺少 LANGSMITH_API_KEY"
         )
-        judge = judge_config()
+        # 外部模式的裁判由 LangSmith 管理，本地不读取任何裁判配置。
+        judge = judge_config() if scoring_mode == "ragas" else None
         model = load_model_config()
         model_identity = generation_identity(model)
         index_identity = await preflight_index(dataset)
@@ -1438,10 +1933,17 @@ async def run_experiment(args) -> dict:
                 "source_sha256": code["source_sha256"],
             },
             generation=model_identity,
-            judge={
-                "model": judge.model,
-                "endpoint_sha256": sha256_text(judge.base_url),
-            },
+            judge=(
+                {
+                    "ownership": "langsmith",
+                    "configuration": "external",
+                }
+                if judge is None
+                else {
+                    "model": judge.model,
+                    "endpoint_sha256": sha256_text(judge.base_url),
+                }
+            ),
             index=index_identity,
         )
         rows_list = example_rows(dataset)
@@ -1470,6 +1972,7 @@ async def run_experiment(args) -> dict:
             judge=judge,
             index_identity=index_identity,
             code=code,
+            scoring_mode=scoring_mode,
         )
         _write_json(run_dir / SDK_RUN_NAME, document)
         target = ScenarioTarget(
@@ -1485,6 +1988,7 @@ async def run_experiment(args) -> dict:
             run_dir=run_dir,
             judge=judge,
             judge_timeout=args.judge_timeout,
+            scoring_mode=scoring_mode,
         )
         execution_started = True
         results = await client.aevaluate(
@@ -1513,6 +2017,7 @@ async def run_experiment(args) -> dict:
             examples=examples,
             rows_by_example=rows_by_example,
             run_dir=run_dir,
+            scoring_mode=scoring_mode,
         )
         issues: list[str] = []
         try:
@@ -1527,12 +2032,17 @@ async def run_experiment(args) -> dict:
         document.update(
             {
                 "finished_at": now(),
-                "status": _run_status(coverage, samples, issues),
+                "status": _run_status(
+                    coverage, samples, issues, scoring_mode
+                ),
                 "concurrency": concurrency,
                 "coverage": coverage,
                 "samples": samples,
                 "scenarios": [
-                    scenario_record(run_dir, sample) for sample in samples
+                    scenario_record(
+                        run_dir, sample, scoring_mode=scoring_mode
+                    )
+                    for sample in samples
                 ],
                 "issues": issues,
             }
@@ -1559,6 +2069,10 @@ async def run_experiment(args) -> dict:
                             "scenario_id": sample["scenario_id"],
                             "status": sample["status"],
                             "execution_status": sample.get("execution_status"),
+                            "assertion_status": sample.get("assertion_status"),
+                            "generation_scoring_status": sample.get(
+                                "generation_scoring_status"
+                            ),
                             "feedback": sample.get("feedback"),
                             "incomplete": sample.get("incomplete"),
                             "error": sample.get("error")
@@ -1570,7 +2084,10 @@ async def run_experiment(args) -> dict:
                 ensure_ascii=False,
             )
         )
-        if document["status"] != "complete":
+        expected_status = (
+            EXTERNAL_RUN_STATUS if scoring_mode == "external" else "complete"
+        )
+        if document["status"] != expected_status:
             raise ScenarioSDKError(
                 "场景定向验收存在失败或不完整项，证据已保留在 "
                 + str(run_dir.relative_to(BACKEND))
@@ -1593,10 +2110,13 @@ def rows_by_scenario(rows: list[dict]) -> dict[str, dict]:
     return {row["inputs"]["scenario_id"]: row for row in rows}
 
 
-def scenario_record(run_dir: Path, sample: dict) -> dict:
+def scenario_record(
+    run_dir: Path, sample: dict, scoring_mode: str = "ragas"
+) -> dict:
     record = {
         "example_id": sample["example_id"],
         "scenario_id": sample["scenario_id"],
+        "scoring_mode": scoring_mode,
         "status": sample.get("status"),
         "execution_status": sample.get("execution_status"),
         "execution_sha256": sample.get("execution_sha256"),
@@ -1610,21 +2130,38 @@ def scenario_record(run_dir: Path, sample: dict) -> dict:
         "run_error": sample.get("run_error"),
         "error": sample.get("error"),
     }
+    if scoring_mode == "external":
+        record["assertion_status"] = sample.get("assertion_status")
+        record["generation_scoring_status"] = sample.get(
+            "generation_scoring_status"
+        )
     if "feedback_version" in sample:
         record["feedback_version"] = sample["feedback_version"]
     scoring = sample.get("scoring_relative")
     if isinstance(scoring, str):
         path = (run_dir / score_relative_path(scoring)).resolve()
         if path.is_relative_to(run_dir.resolve()) and path.is_file():
-            evaluation = _load_json(path.parent / EVALUATION_NAME)
+            evaluation_name = (
+                EXTERNAL_EVALUATION_NAME
+                if scoring_mode == "external"
+                else EVALUATION_NAME
+            )
+            evaluation = _load_json(path.parent / evaluation_name)
             record["scoring_binding"] = evaluation.get("scoring_binding") or (
                 "initial" if evaluation.get("reused") is False else ""
             )
-            record["checkpoints"] = evaluation.get("checkpoints", {})
-            artifact = ScenarioArtifact.model_validate_json(
-                path.read_text(encoding="utf-8")
-            )
-            record["assertions"] = assertion_statistics(artifact)
+            if scoring_mode == "external":
+                record_file = ExternalScenarioScoring.model_validate_json(
+                    path.read_text(encoding="utf-8")
+                )
+                record["assertions"] = assertion_statistics(record_file)
+                record["generation"] = evaluation.get("generation", [])
+            else:
+                record["checkpoints"] = evaluation.get("checkpoints", {})
+                artifact = ScenarioArtifact.model_validate_json(
+                    path.read_text(encoding="utf-8")
+                )
+                record["assertions"] = assertion_statistics(artifact)
     return record
 
 
@@ -1677,22 +2214,20 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="LangSmith 场景评测入口")
     commands = parser.add_subparsers(dest="command", required=True)
     sync = commands.add_parser("sync", help="同步批准场景集到 LangSmith")
-    sync.add_argument(
-        "--dataset",
-        type=Path,
-        default=BACKEND / "dataset" / "evaluation" / "rebuild-v1",
-    )
+    sync.add_argument("--dataset", type=Path, default=DEFAULT_VERSION_DIR)
     run = commands.add_parser("run", help="按场景执行 LangSmith SDK 实验")
-    run.add_argument(
-        "--dataset",
-        type=Path,
-        default=BACKEND / "dataset" / "evaluation" / "rebuild-v1",
-    )
+    run.add_argument("--dataset", type=Path, default=DEFAULT_VERSION_DIR)
     run.add_argument(
         "--purpose", choices=("validation", "formal"), default="validation"
     )
     run.add_argument("--scenario-id", action="append", default=None)
     run.add_argument("--judge-timeout", type=float, default=DEFAULT_JUDGE_TIMEOUT)
+    run.add_argument(
+        "--scoring-mode",
+        choices=("ragas", "external"),
+        default="ragas",
+        help="ragas 使用本地 Ragas 裁判；external 只执行确定性断言并等待 LangSmith 外部评分",
+    )
     finalize = commands.add_parser(
         "finalize", help="从本地样本重算运行摘要状态，不发起外部调用"
     )
