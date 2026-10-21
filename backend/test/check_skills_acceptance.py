@@ -44,17 +44,6 @@ PREPARATION_TOOLS = {
     "prepare_plan_import",
     "prepare_plan_adjustment",
 }
-BANNED_USER_TERMS = (
-    "ATP",
-    "磷酸肌酸",
-    "无机磷酸盐",
-    "钙离子",
-    "糖酵解",
-    "氧化磷酸化",
-    "交叉桥",
-    "兴奋—收缩耦联",
-    "代谢产物",
-)
 READ_CLAIM_MARKERS = ("已成功读取", "读取成功", "已读取到", "成功获取到")
 READ_FAILURE_MARKERS = ("失败", "无法读取", "不存在", "读取不了", "报错")
 
@@ -63,10 +52,10 @@ PROMPT_C2 = "是不是每组都要做到做不动才有效？"
 PROMPT_C3 = "我想提高一组能做的次数，怎么练？"
 
 PROMPT_D1 = (
-    "请先读取 skills/workout-planning/SKILL.md，并按照该文件里指向 "
-    "../training-theory/references/methodology.md 的相对引用，实际读取该引用文件。"
+    "请先读取 skills/training-theory/SKILL.md，并按照该文件里指向 "
+    "references/methodology.md 的相对引用，实际读取该引用文件。"
     "传给 read 的路径按规则归一化到 skills/ 命名空间。"
-    "最后只列出该文件「六步推理协议」的第 1 步和第 2 步标题。"
+    "最后只列出该文件「分析顺序」的第 1 步和第 2 步要点。"
 )
 PROMPT_D2 = (
     "请用 read 读取 skills/training-theory/references/training-variables.md，"
@@ -136,78 +125,6 @@ def read_failure_stated(answer: str) -> bool:
     return any(marker in answer for marker in READ_FAILURE_MARKERS)
 
 
-def banned_user_terms(text: str) -> list[str]:
-    return [term for term in BANNED_USER_TERMS if term in text]
-
-
-NUMERIC_DOSE_PATTERN = re.compile(
-    r"\d+(?:\s*[-–~至]\s*\d+)?\s*(?:组|次|公斤|kg)"
-)
-NUMERIC_CONTEXT_MARKERS = (
-    "建议",
-    "每周",
-    "每次",
-    "每组",
-    "每天",
-    "保留",
-    "留",
-    "至少",
-    "最多",
-    "控制在",
-    "先加",
-    "再加",
-    "加到",
-    "做到",
-)
-NEGATION_MARKERS = (
-    "不以此",
-    "不据此",
-    "不单独",
-    "不参与判定",
-    "不作为判定",
-    "不能单独",
-    "不用来判定",
-    "不会用",
-    "不用这个",
-    "而不是",
-)
-LOAD_MARKERS = ("负荷", "训练量", "练多少", "训练安排", "该练多重")
-SIGNAL_MARKERS = (
-    "疲劳",
-    "力竭",
-    "当次状态",
-    "单次",
-    "酸痛",
-    "信号",
-    "RIR",
-    "RPE",
-)
-JUDGMENT_MARKERS = ("决定", "调整", "判定", "判断", "确定")
-
-
-def numeric_prescription_terms(text: str) -> list[str]:
-    terms: list[str] = []
-    for sentence in re.split(r"[。；\n]", text):
-        if any(marker in sentence for marker in NUMERIC_CONTEXT_MARKERS):
-            terms.extend(
-                match.group(0) for match in NUMERIC_DOSE_PATTERN.finditer(sentence)
-            )
-    return terms
-
-
-def system_load_boundary(answer: str) -> bool:
-    for sentence in re.split(r"[。！？\n]", answer):
-        if not any(marker in sentence for marker in NEGATION_MARKERS):
-            continue
-        if any(marker in sentence for marker in LOAD_MARKERS):
-            return True
-        if any(marker in sentence for marker in SIGNAL_MARKERS) and any(
-            marker in sentence for marker in JUDGMENT_MARKERS
-        ):
-            return True
-    return False
-
-
 def endpoint_defined(answer: str) -> bool:
     return any(
         marker in answer
@@ -275,6 +192,8 @@ def read_records(tools: list[dict]) -> list[dict]:
                 "limit": arguments.get("limit", 200),
                 "is_error": tool.get("is_error"),
                 "continuation_offset": continuation_offset(content),
+                # 语义检查用完整内容；证据展示用截断预览。
+                "content": content,
                 "content_head": content[:600],
                 "content_tail": content[-400:],
             }
@@ -687,11 +606,9 @@ def scenario_c1(http, evidence: dict) -> None:
     entries = entry_reads(reads)
     references = reference_reads(reads)
 
-    check(evidence, "读取相关 SKILL.md", bool(entries), [item["path"] for item in entries])
+    check(evidence, "读取知识库入口", bool(entries), [item["path"] for item in entries])
     check(evidence, "按需读取 references", bool(references), [item["path"] for item in references])
     check(evidence, "回答非空", bool(answer.strip()), answer[:200])
-    terms = banned_user_terms(answer)
-    check(evidence, "无生物学禁用词", not terms, terms)
     check(
         evidence,
         "说明证据强度",
@@ -722,7 +639,7 @@ def scenario_c2(http, evidence: dict) -> None:
     entries = entry_reads(reads)
     references = reference_reads(reads)
 
-    check(evidence, "读取相关 SKILL.md", bool(entries), [item["path"] for item in entries])
+    check(evidence, "读取知识库入口", bool(entries), [item["path"] for item in entries])
     check(evidence, "按需读取 references", bool(references), [item["path"] for item in references])
     check(
         evidence,
@@ -750,9 +667,6 @@ def scenario_c2(http, evidence: dict) -> None:
         any(marker in answer for marker in ("代价", "恢复", "疲劳", "更慢")),
         answer,
     )
-    check(evidence, "说明系统不以此单独判定负荷", system_load_boundary(answer), answer)
-    terms = numeric_prescription_terms(answer)
-    check(evidence, "未输出数值处方", not terms, terms)
     check(
         evidence,
         "未产生业务准备或保存",
@@ -762,7 +676,6 @@ def scenario_c2(http, evidence: dict) -> None:
     evidence["observations"] = {
         "answer": answer,
         "read_paths": [item["path"] for item in reads],
-        "numeric_terms": terms,
     }
 
 
@@ -777,7 +690,7 @@ def scenario_c3(http, evidence: dict) -> None:
     entries = entry_reads(reads)
     references = reference_reads(reads)
 
-    check(evidence, "读取相关 SKILL.md", bool(entries), [item["path"] for item in entries])
+    check(evidence, "读取知识库入口", bool(entries), [item["path"] for item in entries])
     check(evidence, "按需读取 references", bool(references), [item["path"] for item in references])
     check(evidence, "给出终点定义", endpoint_defined(answer), answer)
     check(
@@ -792,8 +705,6 @@ def scenario_c3(http, evidence: dict) -> None:
     check(evidence, "说明不确定性", uncertainty_stated(answer), answer)
     promises = [phrase for phrase in ("保证提高", "一定会提高", "必然提高", "肯定能提高") if phrase in answer]
     check(evidence, "未承诺必然提高", not promises, promises)
-    terms = numeric_prescription_terms(answer)
-    check(evidence, "未输出数值处方", not terms, terms)
     check(
         evidence,
         "未产生业务准备或保存",
@@ -803,7 +714,6 @@ def scenario_c3(http, evidence: dict) -> None:
     evidence["observations"] = {
         "answer": answer,
         "read_paths": [item["path"] for item in reads],
-        "numeric_terms": terms,
     }
 
 
@@ -818,10 +728,10 @@ def scenario_d1(http, evidence: dict) -> None:
 
     check(
         evidence,
-        "读取 workout-planning SKILL.md",
+        "读取知识库入口",
         any(
             item["is_error"] is False
-            and item["path"] == "skills/workout-planning/SKILL.md"
+            and item["path"] == "skills/training-theory/SKILL.md"
             for item in reads
         ),
         paths,
@@ -832,13 +742,13 @@ def scenario_d1(http, evidence: dict) -> None:
         if item["is_error"] is False
         and item["path"] == "skills/training-theory/references/methodology.md"
     ]
-    check(evidence, "跨 Skill 相对引用归一化后读取成功", bool(normalized), paths)
+    check(evidence, "相对引用归一化后读取成功", bool(normalized), paths)
     check(evidence, "read 路径不含未归一化的 ..", all(skill_path_is_normalized(path) for path in paths), paths)
-    content = "\n".join(item.get("content_head") or "" for item in normalized)
-    check(evidence, "获得目标文件内容", "六步推理协议" in content, content[:300])
+    content = "\n".join(item.get("content") or "" for item in normalized)
+    check(evidence, "获得目标文件内容", "分析顺序" in content, content[:300])
     check(
         evidence,
-        "回答包含六步推理前两步标题",
+        "回答包含分析顺序前两步要点",
         "定终点" in result["answer"] and "列候选原因" in result["answer"],
         result["answer"],
     )
@@ -884,7 +794,7 @@ def scenario_d2(http, evidence: dict) -> None:
     check(
         evidence,
         "读到真实文件末行",
-        bool(reads) and expected_last in (reads[-1].get("content_tail") or ""),
+        bool(reads) and expected_last in (reads[-1].get("content") or ""),
         {"expected_last": expected_last, "tail": reads[-1].get("content_tail") if reads else None},
     )
     check(
@@ -892,7 +802,7 @@ def scenario_d2(http, evidence: dict) -> None:
         "回答使用续读内容",
         expected_last.strip() in result["answer"]
         or "周期化不是必需品" in result["answer"]
-        or "三条使用规则" in result["answer"],
+        or "四条使用规则" in result["answer"],
         result["answer"],
     )
     evidence["observations"] = {
@@ -952,10 +862,10 @@ def scenario_e_plan(http, evidence: dict) -> None:
     check(evidence, "读取画像", bool(successful(tools, "get_profile")), [tool["name"] for tool in tools])
     check(
         evidence,
-        "读取 workout-planning SKILL.md",
+        "读取知识库入口",
         any(
             item["is_error"] is False
-            and item["path"] == "skills/workout-planning/SKILL.md"
+            and item["path"] == "skills/training-theory/SKILL.md"
             for item in reads
         ),
         [item["path"] for item in reads],
@@ -1082,13 +992,10 @@ def scenario_e_adjust(http, evidence: dict) -> None:
     )
     check(
         evidence,
-        "读取计划相关 SKILL.md",
+        "读取计划相关主题",
         any(
             item["is_error"] is False
-            and item["path"] in {
-                "skills/workout-planning/SKILL.md",
-                "skills/plan-adjustment/SKILL.md",
-            }
+            and item["path"] == "skills/training-theory/SKILL.md"
             for item in reads
         ),
         [item["path"] for item in reads],

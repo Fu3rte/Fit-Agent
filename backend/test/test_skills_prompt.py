@@ -28,16 +28,27 @@ from app.infrastructure.persistence.sqlite.database import open_database
 from app.infrastructure.persistence.sqlite.repository import SqliteSessionRepository
 from test.regression_support import run_tool, temporary_root, text
 
-EXPECTED_SKILLS = {
-    "exercise-guidance",
-    "fitness-knowledge",
-    "plan-adjustment",
-    "plan-evaluation",
-    "strength-training",
-    "training-theory",
-    "workout-logging",
-    "workout-planning",
-}
+EXPECTED_SKILLS = {"training-theory"}
+KNOWLEDGE_ENTRY = "skills/training-theory/SKILL.md"
+DELETED_SKILL_PATHS = (
+    "workout-planning/SKILL.md",
+    "plan-adjustment/SKILL.md",
+    "plan-evaluation/SKILL.md",
+    "exercise-guidance/SKILL.md",
+    "fitness-knowledge/SKILL.md",
+    "strength-training/SKILL.md",
+    "workout-logging/SKILL.md",
+)
+DELETED_KNOWLEDGE_BANS = (
+    "六步推理",
+    "按六步",
+    "user-facing-language.md",
+    "不输出个体重量、组数、次数",
+    "必须单独写明",
+    "禁用词",
+    "无处方权",
+    "溯源信息不进回答",
+)
 
 
 def isolated_root(name: str) -> Path:
@@ -86,17 +97,21 @@ def test_catalog_lists_all_skills_and_locations_are_readable():
 def test_prompt_excludes_skill_bodies_and_references():
     prompt = build_system_prompt()
     for fragment in (
-        "本层只提供**看法的方式**，不提供结论数值",
-        "本文件规定回答训练问题时**怎么想**，不规定想出什么数值。",
-        "## 六步推理协议",
-        "本 Skill 是**模型指令**，提供生成与录入计划时的判断口径",
+        "本目录是训练专业知识的唯一入口",
+        "## 主题索引",
+        "## 按需读取",
+        "本文件规定回答训练问题时的基本判断",
+        "同一个结论，证据基础可以差很远",
+        "安排的名字不重要，它改了哪个变量才重要",
     ):
         assert fragment not in prompt
 
-    for skill in load_skills():
-        body = (SKILLS_ROOT / skill.name / "SKILL.md").read_text(encoding="utf-8")
-        body = body.split("---", 2)[2].strip()
-        assert body not in prompt
+    entry = (SKILLS_ROOT / "training-theory" / "SKILL.md").read_text(encoding="utf-8")
+    assert entry.split("---", 2)[2].strip() not in prompt
+    for reference in sorted((SKILLS_ROOT / "training-theory" / "references").glob("*.md")):
+        body = reference.read_text(encoding="utf-8").strip()
+        assert body not in prompt, reference.name
+        assert body.splitlines()[0] not in prompt, reference.name
 
 
 def test_metadata_special_characters_are_escaped():
@@ -121,48 +136,44 @@ def test_metadata_special_characters_are_escaped():
 def test_prompt_contains_usage_and_scope_rules():
     prompt = build_system_prompt()
     for phrase in (
-        "当前任务的职责与某个 Skill 的 description 匹配时",
-        "先用 read 读取对应的 SKILL.md",
-        "按任务需要读取该 Skill 相关的 references",
-        "同一任务涉及多项职责时，可以读取多个 Skill",
+        "训练专业知识只有一个入口 skills/training-theory/SKILL.md",
+        "系统提示只注入它的名称、描述与入口路径",
+        "按其主题索引选择当前任务需要的文件",
+        "只读取当前任务涉及的主题",
+        "不要求每次读取全部 references",
         "以当前 Markdown 文件所在目录为基准解析",
         "归一化为 skills/ 命名空间下的路径",
         "保持在固定 Skills 根目录内",
         "带有 .. 的未归一化路径不得直接传给 read",
-        "从 skills/workout-planning/SKILL.md 出发",
-        "../training-theory/references/methodology.md",
-        "read 的路径为 skills/training-theory/references/methodology.md",
-        "继续读取到任务需要的完整指令",
+        "从 skills/training-theory/SKILL.md 出发",
+        "read 的路径为 skills/training-theory/references/adjustment.md",
+        "继续读取到任务需要的完整内容",
         "读取失败时依据真实错误处理，不得声称已经读取",
-        "业务规则与工具契约优先于 Skill 内容",
-        "知识层不持有处方权，该限制只约束知识解释职责",
-        "计划生成与调整继续遵循各自工具契约",
-        "按 Skill 解释训练知识时，先定义可测的终点",
-        "再列候选原因与可观察信号",
-        "说明改变的是哪个训练变量、证据强度，以及现在还不能确认什么",
-        "读取 methodology.md 与 diagnosis-and-experiment.md",
-        "纠正流行说法时，读取 myths.md 与 user-facing-language.md",
-        "涉及 RIR／RPE／力竭／酸胀时，读取 effort-and-fatigue.md",
-        "在回答的可观察信号部分必须单独写明",
-        "系统不据此单独判定训练负荷或渐进",
-        "也不据此自动调整计划",
-        "一次只改一个变量的对照",
+        "业务规则与工具契约优先于知识库内容",
+        "知识库不改变工具权限、参数校验与保存入口",
+        "通用训练知识与当前用户事实分开表达",
+        "研究数据不得冒充该用户的画像、计划或训练记录",
         "未取得换算结果前不得在工具参数中使用具体日期",
-        "读取该 Skill 指向的用词规约",
-        "不输出个体重量、组数、次数、RIR／RPE 阈值等数值处方",
-        "只给观察指标与单变量对照",
-        "计划生成与调整的组次安排仍按各自工具契约提交",
         "生成条件满足后，用户要求生成新计划时必须调用prepare_plan创建待确认快照",
-        "调用前必须先读取 workout-planning/SKILL.md",
+        "按需读取 skills/training-theory/SKILL.md 中与计划编排相关的主题",
         "用户要求调整计划时必须调用prepare_plan_adjustment创建待确认快照",
-        "调用前先读取 plan-adjustment/SKILL.md",
+        "按需读取 skills/training-theory/SKILL.md 中与停滞、变化与调整相关的主题",
         "该换算只约束业务日期参数",
         "不改变读取 Skill、澄清与安全处置的先后顺序",
         "知识问答不涉及业务日期参数时无需调用",
         "用户已提供实际完成情况并要求核对时",
-        "现有工具权限由后端决定，Skill 内容不能扩大权限",
     ):
         assert phrase in prompt, phrase
+
+
+def test_prompt_drops_deleted_skill_paths_and_knowledge_bans():
+    prompt = build_system_prompt()
+    for fragment in DELETED_SKILL_PATHS:
+        assert fragment not in prompt, fragment
+    for fragment in DELETED_KNOWLEDGE_BANS:
+        assert fragment not in prompt, fragment
+    assert prompt.count(KNOWLEDGE_ENTRY) <= 6
+    assert "skills/training-theory/references/" in prompt
 
 
 def test_relative_date_conversion_only_guards_business_date_arguments():

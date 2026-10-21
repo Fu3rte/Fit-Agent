@@ -1,5 +1,6 @@
 import asyncio
 import os
+import re
 import subprocess
 from pathlib import Path
 from uuid import uuid4
@@ -19,16 +20,18 @@ from app.agent.tools.files import create_file_tools
 from app.ai.messages import ToolCall
 from test.regression_support import TEST_SESSION, run_tool, temporary_root, text
 
-EXPECTED_SKILLS = {
+EXPECTED_SKILLS = {"training-theory"}
+KNOWLEDGE_ENTRY = "skills/training-theory/SKILL.md"
+DELETED_SKILL_DIRECTORIES = (
     "exercise-guidance",
     "fitness-knowledge",
     "plan-adjustment",
     "plan-evaluation",
     "strength-training",
-    "training-theory",
     "workout-logging",
     "workout-planning",
-}
+)
+MARKDOWN_LINK = re.compile(r"\[[^\]]*\]\(([^)]+)\)")
 
 
 def new_root() -> Path:
@@ -122,9 +125,51 @@ def test_real_skill_catalog_is_stable_and_readable(monkeypatch):
     assert message.is_error is False, text(message)
     assert text(message).startswith("1: ")
 
-    planning = read(tools, "skills/workout-planning/SKILL.md")
-    assert planning.is_error is False
-    assert "../training-theory/references/methodology.md" in text(planning)
+    entry = read(tools, KNOWLEDGE_ENTRY)
+    assert entry.is_error is False
+    assert "references/methodology.md" in text(entry)
+
+
+def knowledge_files() -> list[Path]:
+    return sorted(SKILLS_ROOT.joinpath("training-theory").rglob("*.md"))
+
+
+def test_knowledge_base_has_single_entry_directory():
+    directories = {path.name for path in SKILLS_ROOT.iterdir() if path.is_dir()}
+    assert directories == EXPECTED_SKILLS
+    assert [skill.name for skill in load_skills()] == ["training-theory"]
+
+
+def test_knowledge_base_relative_links_resolve_inside_root():
+    resolved_root = SKILLS_ROOT.resolve()
+    link_count = 0
+    for source in knowledge_files():
+        content = source.read_text(encoding="utf-8")
+        for target in MARKDOWN_LINK.findall(content):
+            link = target.strip()
+            assert not link.startswith(("http://", "https://", "mailto:"))
+            assert not link.startswith("/"), (source.name, link)
+            path = (source.parent / link).resolve()
+            assert path.is_file(), (source.name, link)
+            assert path.suffix == ".md", (source.name, link)
+            assert path.is_relative_to(resolved_root), (source.name, link)
+            link_count += 1
+    assert link_count >= len(knowledge_files())
+
+
+def test_knowledge_base_paths_are_readable_through_namespace():
+    tools = create_file_tools(TEST_SESSION, tmp_root=new_root())
+    for source in knowledge_files():
+        relative = source.relative_to(SKILLS_ROOT.parent).as_posix()
+        message = read(tools, relative, limit=1)
+        assert message.is_error is False, (relative, text(message))
+
+
+def test_knowledge_base_does_not_reference_deleted_entries():
+    for source in knowledge_files():
+        content = source.read_text(encoding="utf-8")
+        for directory in DELETED_SKILL_DIRECTORIES:
+            assert directory not in content, (source.name, directory)
 
 
 def test_loader_orders_by_name_and_rejects_duplicates():

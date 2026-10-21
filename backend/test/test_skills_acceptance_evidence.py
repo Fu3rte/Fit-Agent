@@ -1,30 +1,33 @@
 from pathlib import Path
+from uuid import uuid4
 
+from app.agent.skills import SKILLS_ROOT
+from app.agent.tools.files import create_file_tools
 from test.check_skills_acceptance import (
-    banned_user_terms,
     continuation_offset,
     endpoint_defined,
     evidence_answer_digest,
     evidence_run_ids,
     finish,
     last_file_line,
-    numeric_prescription_terms,
     plan_payload_issues,
     read_claim,
     read_failure_stated,
     read_records,
     seeded_plan_matches,
     skill_path_is_normalized,
-    system_load_boundary,
     tool_records,
     uncertainty_stated,
     workout_sets_match,
 )
+from test.regression_support import TEST_SESSION, run_tool, temporary_root, text
+
+METHODOLOGY_PATH = "skills/training-theory/references/methodology.md"
 
 
 def test_skill_path_normalization_rejects_unresolved_traversal():
-    assert skill_path_is_normalized("skills/workout-planning/SKILL.md")
-    assert skill_path_is_normalized("skills\\workout-planning\\SKILL.md")
+    assert skill_path_is_normalized("skills/training-theory/SKILL.md")
+    assert skill_path_is_normalized("skills\\training-theory\\SKILL.md")
     assert not skill_path_is_normalized("../training-theory/references/methodology.md")
     assert not skill_path_is_normalized(
         "skills/../training-theory/references/methodology.md"
@@ -43,33 +46,41 @@ def test_continuation_offset_reads_tool_hint():
     assert continuation_offset(None) is None
 
 
-def test_banned_user_terms_match_only_biological_names():
-    assert banned_user_terms("ATP 与糖酵解") == ["ATP", "糖酵解"]
-    assert banned_user_terms("乳酸不是训练效果的读数") == []
+def test_read_preview_stays_truncated_while_full_content_is_kept():
+    payload = "x" * 599 + "分析顺序：先定终点"
+    tools = [
+        {
+            "name": "read",
+            "arguments": {"path": METHODOLOGY_PATH},
+            "is_error": False,
+            "content": payload,
+        }
+    ]
+    record = read_records(tools)[0]
+    assert len(record["content_head"]) == 600
+    assert "分析顺序" not in record["content_head"]
+    assert "分析顺序" in record["content"]
+    assert record["content"] == payload
 
 
-def test_numeric_prescription_detects_dose_contexts():
-    assert numeric_prescription_terms("保留 1-3 次的余力")
-    assert numeric_prescription_terms("先加 1–2 次")
-    assert numeric_prescription_terms("留 1–2 次的余量")
-    assert numeric_prescription_terms("建议每周练2次，每次3组，每组8次。")
-    assert numeric_prescription_terms("每周 2 次")
-    assert numeric_prescription_terms("酸痛高峰在 24—72 小时") == []
-    assert numeric_prescription_terms("都是做 40 次，分成 5×8") == []
-    assert numeric_prescription_terms("如果你还能完成 1–3 次") == []
-    assert numeric_prescription_terms("连续测 2–3 次") == []
-
-
-def test_system_load_boundary_rejects_multi_factor_only():
-    assert system_load_boundary("系统不会用这个信号单独判定你的训练负荷。")
-    assert system_load_boundary(
-        "是否需要接近力竭，应该由长期终点变化来调整，而不是由当次的疲劳感来决定。"
-    )
-    assert not system_load_boundary(
-        "它并不是唯一影响进展的变量；动作选择、总组数、每次重复的负荷、休息时长同样重要。"
-    )
-    assert not system_load_boundary("它们不能单独用来判断是否有效。")
-    assert not system_load_boundary("这个信号很好用，但训练负荷由计划流程决定。")
+def test_real_methodology_title_is_readable_through_file_tool():
+    root = temporary_root("skills-d1-content") / uuid4().hex
+    root.mkdir(parents=True)
+    tools = create_file_tools(TEST_SESSION, tmp_root=root)
+    message = run_tool(tools["read"], {"path": METHODOLOGY_PATH})
+    assert message.is_error is False, text(message)
+    record = read_records(
+        [
+            {
+                "name": "read",
+                "arguments": {"path": METHODOLOGY_PATH},
+                "is_error": message.is_error,
+                "content": text(message),
+            }
+        ]
+    )[0]
+    assert "分析顺序" in record["content"]
+    assert (SKILLS_ROOT / "training-theory" / "references" / "methodology.md").is_file()
 
 
 def _evidence_with_checks(answer: str = "回答") -> dict:
