@@ -685,8 +685,11 @@ def replay_command(args) -> None:
 def publishable(document: dict) -> bool:
     if not _structural_publishable(document):
         return False
-    if document.get("schema") != SCHEMA_STAGED:
+    schema = document.get("schema")
+    if schema == SCHEMA_LEGACY:
         return True
+    if schema != SCHEMA_STAGED:
+        return False
     try:
         _validate_staged_evidence(document)
     except (ValueError, DatasetError):
@@ -1159,6 +1162,17 @@ def main() -> None:
     live.add_argument("--frozen", type=Path)
     replay = commands.add_parser("rescore", help="对历史 compare.json 的实际候选按 MTEB 重新评分")
     replay.add_argument("--source", type=Path, required=True)
+    staged = commands.add_parser(
+        "rescore-staged",
+        help="对冻结的两阶段检索证据使用批准数据版本离线重评分并生成补标草案",
+    )
+    staged.add_argument("--source", type=Path, required=True)
+    staged.add_argument("--dataset", type=Path, required=True)
+    staged.add_argument(
+        "--output",
+        type=Path,
+        help="followup 根目录；必须位于源运行目录的 followup/ 下",
+    )
     offline = commands.add_parser("replay", help="仅使用已保存证据离线重建响应与评分，不调用模型或数据库检索")
     offline.add_argument("--source", type=Path, required=True)
     offline.add_argument("--output", type=Path)
@@ -1173,6 +1187,10 @@ def main() -> None:
         asyncio.run(collect_dataset(args) if args.dataset is not None else collect_legacy(args))
     elif args.command == "rescore":
         rescore(args)
+    elif args.command == "rescore-staged":
+        from evaluation.retrieval_rescore import rescore_staged
+
+        rescore_staged(args)
     elif args.command == "replay":
         replay_command(args)
     else:

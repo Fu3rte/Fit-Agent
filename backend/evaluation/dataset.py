@@ -75,6 +75,7 @@ SCENARIO_BASELINES = {
     "rebuild-v1": (SCENARIO_COUNT, SCENARIO_CATEGORIES),
     "rebuild-v2": (SCENARIO_COUNT, SCENARIO_CATEGORIES),
     "rebuild-v3": (REBUILD_V3_SCENARIO_COUNT, REBUILD_V3_SCENARIO_CATEGORIES),
+    "rebuild-v4": (REBUILD_V3_SCENARIO_COUNT, REBUILD_V3_SCENARIO_CATEGORIES),
 }
 METRICS = ("faithfulness", "factual_correctness", "deterministic_rules")
 PROPOSAL_KINDS = ("profile", "plan", "workout")

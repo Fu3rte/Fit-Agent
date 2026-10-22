@@ -277,7 +277,8 @@ class RerankIdentityEvidence(EvaluationContract):
 
 class RerankUsageEvidence(EvaluationContract):
     requests: int = Field(ge=0)
-    prompt_tokens: int = Field(ge=0)
+    # None 表示服务未返回该字段。
+    prompt_tokens: int | None = Field(default=None, ge=0)
     total_tokens: int = Field(ge=0)
 
 

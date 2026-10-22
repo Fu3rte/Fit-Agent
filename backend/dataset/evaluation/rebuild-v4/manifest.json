@@ -1,0 +1,148 @@
+{
+  "dataset_version": "rebuild-v4",
+  "schema_version": "evaluation-dataset-1",
+  "created_at": "2026-10-22T01:49:35Z",
+  "source": {
+    "catalog": {
+      "path": "backend/dataset/actions.agent.json",
+      "sha256": "d3fd22334038a8a3803ce191acf28847003cb1057673dbbb0a470d153fa80b30",
+      "count": 1321
+    },
+    "supplements": {
+      "path": "backend/dataset/action-supplements.published.json",
+      "sha256": "9429aa3c7cfaf9e89c267843f5e6d1adfa55b075a347996c9c8db7c095e949ec",
+      "version": "2026-10-18.1"
+    },
+    "mappings": {
+      "path": "backend/dataset/action-field-mappings.json",
+      "sha256": "e9a3f016b7e7b155cf61bbae2af1464d11b84c2b8eb88dd0123b616dd01fba77"
+    },
+    "encoding_rule_version": "retrieval-text-2026-10-14.2"
+  },
+  "schemas": {
+    "defs": {
+      "path": "backend/dataset/evaluation/schemas/defs.schema.json",
+      "sha256": "cb64625f8212ccda3e7f82779268ec846f3a8482df3b9bd03f48dac757df4ee2"
+    },
+    "manifest": {
+      "path": "backend/dataset/evaluation/schemas/manifest.schema.json",
+      "sha256": "7a9282459505b057a3584b439aaf88c4ab2ec13d85cd8be609dfdc76084bd8e9"
+    },
+    "corpus": {
+      "path": "backend/dataset/evaluation/schemas/corpus.schema.json",
+      "sha256": "3269d81a5ac85f01512db377c8c5c91056e19c7bff39b3082637020d7df89b26"
+    },
+    "queries": {
+      "path": "backend/dataset/evaluation/schemas/queries.schema.json",
+      "sha256": "d049b3456c97bdbc266048157050a03e192d11a4a76d95f6b5ac57686be7ea83"
+    },
+    "qrels": {
+      "path": "backend/dataset/evaluation/schemas/qrels.schema.json",
+      "sha256": "2e839d7693d4a241b0c385a4083811a92c0670febd0a04f65bbd5fd7495120a9"
+    },
+    "scenarios": {
+      "path": "backend/dataset/evaluation/schemas/scenarios.schema.json",
+      "sha256": "05fca6c1faad94927f0059012372c51fe28c6ef38ffa531107a22a878d0f5310"
+    }
+  },
+  "files": {
+    "corpus": {
+      "path": "corpus.jsonl",
+      "sha256": "8b0f689a2339ce7cca67c5580dbd56d405eb285cb4eb39344f5f1e99d8a87c7d"
+    },
+    "queries": {
+      "path": "queries.jsonl",
+      "sha256": "f03031aaab473ef5cacaf7cd69a1bc937ade0ddacd95859ece8edfcf9119d846"
+    },
+    "qrels": {
+      "path": "qrels.jsonl",
+      "sha256": "1b58cb5edb99932d8c64e73eceac6e21308e0a375f6db4e5d52008fafb50749a"
+    },
+    "scenarios": {
+      "path": "scenarios.jsonl",
+      "sha256": "2af412d09ae2775a4955061713f046a838bd0096c35077e70c3f045972978843"
+    }
+  },
+  "assets": [
+    {
+      "asset_id": "plan-attachment-instruction",
+      "path": "assets/plan-attachment-instruction.md",
+      "sha256": "63d4957e67c702472d19ff82b1c43a12a552c5c8fe38acbeb3e2cfa2304e5cfe"
+    },
+    {
+      "asset_id": "plan-cycle-only",
+      "path": "assets/plan-cycle-only.txt",
+      "sha256": "a357194b3cddd7dfdb2054b98ab51d1a9a0de39e04edb0c5b6cd822c10d239a5"
+    },
+    {
+      "asset_id": "plan-five-day-split",
+      "path": "assets/plan-five-day-split.md",
+      "sha256": "6b2c0a117ffff6e98e389f574ced0e4981d203f1ec0cde537badb056939e695e"
+    },
+    {
+      "asset_id": "plan-home-dumbbell",
+      "path": "assets/plan-home-dumbbell.md",
+      "sha256": "ad426ad1ef0534484ad4a59a3e8146f1dc0d8d76d848a44b9846e361182d5b46"
+    },
+    {
+      "asset_id": "plan-push-pull-legs",
+      "path": "assets/plan-push-pull-legs.md",
+      "sha256": "6b83e41a9f0c849d200412b21c7a2fa8433daae2ebdd05fc335986b8ca68c3fc"
+    },
+    {
+      "asset_id": "plan-upper-lower",
+      "path": "assets/plan-upper-lower.txt",
+      "sha256": "f4109c254dc6a796971e13fa9480c4fe1aad5353e4ccfc431cc408f36de0b4fc"
+    },
+    {
+      "asset_id": "workout-log-october",
+      "path": "assets/workout-log-october.txt",
+      "sha256": "dcd060ef0828fa32941cd69d3eb5a04f63ffd284bf28f5f0adc1b66c67a2ef03"
+    },
+    {
+      "asset_id": "workout-log-short",
+      "path": "assets/workout-log-short.txt",
+      "sha256": "28ee80d51e91cd7ce80c145ceaf6af4e0d5f0842ffb6a958bc146e122124ca77"
+    }
+  ],
+  "counts": {
+    "corpus": 1321,
+    "queries": 150,
+    "qrels": 3272,
+    "scenarios": 40,
+    "assets": 8
+  },
+  "quotas": {
+    "purposes": {
+      "lookup": 60,
+      "generation": 45,
+      "replacement": 45
+    },
+    "expect_empty": {
+      "lookup": 10,
+      "generation": 10,
+      "replacement": 10
+    },
+    "scenario_categories": {
+      "action_verification": 8,
+      "profile_update": 5,
+      "plan_import_file": 4,
+      "incomplete_plan_structure": 2,
+      "plan_generation": 4,
+      "replacement_constraints": 3,
+      "performance_adjustment": 3,
+      "workout_logging_query": 3,
+      "confirmation_cancellation_state": 5,
+      "clarification_authorization_medical_risk": 3
+    }
+  },
+  "release": {
+    "status": "approved",
+    "reviewer": "用户（委托Worker标注）",
+    "reviewer_type": "user",
+    "reviewed_at": "2026-10-22T01:49:35Z",
+    "comment": "用户授权Worker完成本轮冻结候选池补标；实际逐条语义标注者为Worker，用户未逐条亲自审阅。",
+    "content_sha256": "446c77982c47e78e770295526e8a606e0a4966a0b5fe8500ee58d59db4d33fb1",
+    "decision_ref": "optimization/evaluation-rebuild-v4-qrels-approval.md#用户授权"
+  }
+}

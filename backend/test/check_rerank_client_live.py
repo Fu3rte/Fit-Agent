@@ -47,7 +47,7 @@ async def score_case(
         request.documents[row.rrf_rank].id == row.id for row in result.scored
     )
     assert result.usage.requests == 1
-    assert result.usage.prompt_tokens > 0
+    assert result.usage.prompt_tokens is None or result.usage.prompt_tokens > 0
     assert result.usage.total_tokens > 0
     assert isinstance(result.request_id, str) and result.request_id.strip()
     return {

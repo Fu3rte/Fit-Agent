@@ -97,7 +97,11 @@ async def search_case(
         scores = [row.rerank_score for row in rows]
         require(scores == sorted(scores, reverse=True), "重排分数未降序")
         require(stage.rerank.usage.requests == 1, "重排用量未按单次调用记录")
-        require(stage.rerank.usage.prompt_tokens > 0, "重排 prompt_tokens 非正")
+        require(
+            stage.rerank.usage.prompt_tokens is None
+            or stage.rerank.usage.prompt_tokens > 0,
+            "重排 prompt_tokens 非正",
+        )
         require(stage.rerank.usage.total_tokens > 0, "重排 total_tokens 非正")
         require(bool(stage.rerank.request_id), "重排 request_id 缺失")
         require(

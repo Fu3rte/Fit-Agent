@@ -154,6 +154,28 @@ def test_parse_response_maps_indices_and_usage(corpus):
     assert result.request_id == "request-abc"
 
 
+def test_parse_response_accepts_missing_prompt_tokens(corpus):
+    request = build_request("卧推", candidates(corpus, 2), corpus.records)
+    result = parse_response(
+        request,
+        {
+            "output": {
+                "results": [
+                    {"index": 0, "relevance_score": 0.9},
+                    {"index": 1, "relevance_score": 0.2},
+                ]
+            },
+            "usage": {"total_tokens": 229},
+            "request_id": "request-missing-prompt",
+        },
+    )
+    assert result.usage.prompt_tokens is None
+    assert result.usage.total_tokens == 229
+    assert result.usage.requests == 1
+    assert result.request_id == "request-missing-prompt"
+    assert [row.rrf_rank for row in result.scored] == [0, 1]
+
+
 def test_parse_response_keeps_rrf_order_on_ties(corpus):
     request = build_request("卧推", candidates(corpus, 3), corpus.records)
     result = parse_response(
@@ -184,6 +206,7 @@ def test_parse_response_keeps_rrf_order_on_ties(corpus):
         {"output": {"results": [{"relevance_score": 0.5}]}, "usage": {"prompt_tokens": 1, "total_tokens": 1}, "request_id": "request-1"},
         {"output": {"results": []}, "usage": [], "request_id": "request-1"},
         {"output": {"results": []}, "usage": {"prompt_tokens": 1}, "request_id": "request-1"},
+        {"output": {"results": []}, "usage": {"prompt_tokens": None, "total_tokens": 1}, "request_id": "request-1"},
         {"output": {"results": []}, "usage": {"prompt_tokens": 1.0, "total_tokens": 1}, "request_id": "request-1"},
         {"output": {"results": []}, "usage": {"prompt_tokens": True, "total_tokens": 1}, "request_id": "request-1"},
         {"output": {"results": []}, "usage": {"prompt_tokens": 1, "total_tokens": "1"}, "request_id": "request-1"},

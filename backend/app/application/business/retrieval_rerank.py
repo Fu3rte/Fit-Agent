@@ -52,7 +52,8 @@ class RerankItem:
 @dataclass(frozen=True)
 class RerankUsage:
     requests: int = 0
-    prompt_tokens: int = 0
+    # None 表示服务未返回该字段。
+    prompt_tokens: int | None = 0
     total_tokens: int = 0
 
 
@@ -131,10 +132,17 @@ def build_request(
 
 
 def _require_usage(usage: RerankUsage) -> RerankUsage:
-    for name in ("requests", "prompt_tokens", "total_tokens"):
+    for name in ("requests", "total_tokens"):
         value = getattr(usage, name)
         if isinstance(value, bool) or not isinstance(value, int) or value < 0:
             raise RerankResponseError(f"重排 usage.{name} 必须为非负整数")
+    prompt_tokens = usage.prompt_tokens
+    if prompt_tokens is not None and (
+        isinstance(prompt_tokens, bool)
+        or not isinstance(prompt_tokens, int)
+        or prompt_tokens < 0
+    ):
+        raise RerankResponseError("重排 usage.prompt_tokens 必须为非负整数")
     return usage
 
 
@@ -226,10 +234,14 @@ def parse_response(request: RerankRequest, payload: object) -> RerankResult:
     usage_payload = payload.get("usage")
     if not isinstance(usage_payload, Mapping):
         raise RerankResponseError("重排响应 usage 必须为对象")
-    for name in ("prompt_tokens", "total_tokens"):
-        value = usage_payload.get(name)
-        if isinstance(value, bool) or not isinstance(value, int):
-            raise RerankResponseError(f"重排响应 usage.{name} 必须为整数")
+    total_tokens = usage_payload.get("total_tokens")
+    if isinstance(total_tokens, bool) or not isinstance(total_tokens, int):
+        raise RerankResponseError("重排响应 usage.total_tokens 必须为整数")
+    # 服务未返回 prompt_tokens 时记录 None；显式 null 与非法类型仍拒绝。
+    if "prompt_tokens" in usage_payload:
+        prompt_tokens = usage_payload["prompt_tokens"]
+        if isinstance(prompt_tokens, bool) or not isinstance(prompt_tokens, int):
+            raise RerankResponseError("重排响应 usage.prompt_tokens 必须为整数")
 
     request_id = payload.get("request_id")
     if not isinstance(request_id, str) or not request_id.strip():
@@ -237,8 +249,8 @@ def parse_response(request: RerankRequest, payload: object) -> RerankResult:
 
     usage = RerankUsage(
         requests=1,
-        prompt_tokens=usage_payload["prompt_tokens"],
-        total_tokens=usage_payload["total_tokens"],
+        prompt_tokens=usage_payload.get("prompt_tokens"),
+        total_tokens=total_tokens,
     )
     return parse_result(request, items, usage, request_id)
 

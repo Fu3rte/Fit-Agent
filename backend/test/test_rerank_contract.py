@@ -180,10 +180,33 @@ def test_parse_result_rejects_invalid_indices_or_scores(items):
         parse_result(request, items, RerankUsage(1, 30, 30), "request-id")
 
 
-def test_parse_result_rejects_invalid_usage():
+def test_parse_result_accepts_unreported_prompt_tokens():
+    request = build_request("卧推", [candidate(1)], records(3))
+    result = parse_result(
+        request,
+        [RerankItem(0, 0.9)],
+        RerankUsage(requests=1, prompt_tokens=None, total_tokens=10),
+        "request-id",
+    )
+    assert result.usage.prompt_tokens is None
+    assert result.usage.total_tokens == 10
+    assert result.usage.requests == 1
+    assert result.request_id == "request-id"
+
+
+@pytest.mark.parametrize(
+    "usage",
+    [
+        RerankUsage(requests=-1, prompt_tokens=30, total_tokens=30),
+        RerankUsage(requests=1, prompt_tokens=-1, total_tokens=30),
+        RerankUsage(requests=1, prompt_tokens=30, total_tokens=-1),
+        RerankUsage(requests=1, prompt_tokens=True, total_tokens=30),
+    ],
+)
+def test_parse_result_rejects_invalid_usage(usage):
     request = build_request("卧推", [candidate(1)], records(3))
     with pytest.raises(RerankResponseError):
-        parse_result(request, [RerankItem(0, 0.9)], RerankUsage(-1, 30, 30), "request-id")
+        parse_result(request, [RerankItem(0, 0.9)], usage, "request-id")
 
 
 def test_empty_pool_skips_model_result():

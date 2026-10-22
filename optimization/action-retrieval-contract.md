@@ -106,7 +106,7 @@ Milvus 字段：
 - `RerankRequest {query: str, documents: tuple[RerankDocument, ...]}`：`query` 为规范化后的原始查询；`documents` 按原 RRF 顺序排列，最多 20 条。
 - `candidate_pool: tuple[RetrievalCandidate, ...]`：门槛、重排与预算裁剪前的 RRF 前 20 条，保留原 `score`（RRF 分数）与顺序，归属单次 `SearchStage`。
 - `RerankItem {index: int, score: float}`：服务原始返回项；`index` 指向输入 `documents` 的位置。
-- `RerankUsage {requests: int, prompt_tokens: int, total_tokens: int}`：单次成功调用的真实用量；失败尝试不计数。
+- `RerankUsage {requests: int, prompt_tokens: int | None, total_tokens: int}`：单次成功调用的真实用量；`prompt_tokens` 为 `None` 表示服务未返回该字段；失败尝试不计数。
 - `RerankScored {id: str, rerank_score: float, rrf_rank: int}`：`rerank_score` 独立保存，不覆盖原 RRF 分数；`rrf_rank` 为输入顺序。
 - `RerankResult {scored: tuple[RerankScored, ...], usage: RerankUsage, request_id: str | None}`：`scored` 为覆盖同一候选集合的完整排序。
 - `RerankIdentity {model: str, endpoint: str, text_version: str}`：单次检索的配置身份，不含 API Key 与超时。
@@ -133,7 +133,7 @@ Milvus 字段：
 - 鉴权为 `Authorization: Bearer {RERANKER_API_KEY}`，`Content-Type: application/json`。
 - 请求方法为 `POST`，请求体为 `{"model": ..., "input": {"query": ..., "documents": [...]}}`；不发送 `top_n`、`return_documents` 与 `instruct`。`top_n` 省略时返回全部候选，`instruct` 省略时沿用服务默认问答检索指令。
 - 官方限制：最多 500 个文档；单条 Query 或 Document 最多 30,000 Token；单次请求建议不超过 120,000 Token；单项超限返回 HTTP 400 且不截断。本地限制候选最多 20 条、查询最多 4,000 字符、单条文档 UTF-8 最多 4,096 字节；Token 级超限以服务 HTTP 400 为准。
-- 响应 `output.results` 按 `relevance_score` 降序，`index` 为输入位置，`relevance_score` 范围 0.0 到 1.0。`qwen3.7-text-rerank` 的 `usage` 含 `prompt_tokens` 与 `total_tokens`；响应无独立模型版本字段，记录配置模型与 `request_id`。
+- 响应 `output.results` 按 `relevance_score` 降序，`index` 为输入位置，`relevance_score` 范围 0.0 到 1.0。`usage` 至少包含 `total_tokens`；服务返回 `prompt_tokens` 时记录实际值，未返回时记录为 `null`。响应无独立模型版本字段，记录配置模型与 `request_id`。
 - 配置只在检索资源初始化时读取；模块导入、画像、历史浏览及有效快照确认不要求重排服务可用。
 - 客户端接口为 `RerankClient(config)`、`RerankClient.from_env()`、只读 `config` 与 `await client.rerank(request, signal=None)`；`validate_request()` 与 `parse_response()` 为输入与响应结构的纯校验入口。
 - `parse_response()` 校验顶层、`output.results`、`usage` 与 `request_id` 的实际结构，保留原始索引与分数类型后交给 `parse_result()`。
@@ -145,7 +145,7 @@ Milvus 字段：
 - 客户端使用 `httpx` 异步调用，创建、请求与关闭必须属于同一事件循环；关闭由检索资源上下文栈负责，取消时中止在途请求并等待协程收尾。
 - `rerank()` 顺序为输入校验、上下文与所属循环校验、空池处理、取消检查；非空请求使用 `config.timeout`，传输层自动重试为 0。
 - 空候选池返回空 `scored`、零 `usage` 与 `None` `request_id`，不构造 HTTP 请求。
-- `usage.requests` 仅在响应完整合法后计为 1；`prompt_tokens` 与 `total_tokens` 取服务真实整数，缺失或非法直接失败。
+- `usage.requests` 仅在响应完整合法后计为 1；`total_tokens` 必须为服务真实整数，缺失或非法直接失败；`prompt_tokens` 缺失时记录 `None`，存在时必须为整数，非法直接失败。
 - 取消沿用 `threading.Event`：前置取消不发起请求；在途取消中止 HTTP 协程并等待任务收尾；外层协程取消继续传播。
 - 重排耗时与用量独立于聊天、摘要与 Embedding；生产 Trace 遵守既有字段白名单，不记录查询、画像、候选、分数或凭据。
 

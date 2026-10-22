@@ -185,6 +185,26 @@ def test_empty_pool_rerank_records_zero_request_and_no_id(dataset):
     assert reranked["response"] == {"items": [], "has_more": False}
 
 
+def test_rerank_evidence_accepts_unreported_prompt_tokens():
+    evidence = RerankEvidence(
+        mode="rerank",
+        identity={"model": "m", "endpoint": "https://e", "text_version": "v"},
+        scored=[
+            {"id": "0002", "rerank_score": 0.9, "rrf_rank": 1},
+            {"id": "0001", "rerank_score": 0.5, "rrf_rank": 0},
+        ],
+        usage={"requests": 1, "prompt_tokens": None, "total_tokens": 12},
+        request_id="request-unreported",
+    )
+    assert evidence.usage.prompt_tokens is None
+    assert evidence.usage.total_tokens == 12
+    rebuilt, _ = support.rebuild_rerank(evidence.model_dump(mode="json"))
+    assert rebuilt.usage.prompt_tokens is None
+    assert rebuilt.usage.total_tokens == 12
+    assert rebuilt.usage.requests == 1
+    assert rebuilt.request_id == "request-unreported"
+
+
 def test_validate_projections_rebuilds_rerank_stage(dataset):
     query = reviewed_query(dataset)
     catalog, evaluated, _, _, reranked = projections(dataset, query)
