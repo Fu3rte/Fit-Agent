@@ -203,7 +203,14 @@ async def _observed(
                 aborted = _cancelled(error, signal) and not (
                     timed_out is not None and timed_out[0]
                 )
-                observation.fail(aborted)
+                # 底层诊断仅采集免凭据的分类信号，不改重试与终局语义。
+                error_info = {
+                    "exception_type": type(error).__name__,
+                    "status_code": _status_code(error),
+                    "provider_code": _structured_type(error),
+                    "retryable": _is_retryable(error),
+                }
+                observation.fail(aborted, error_info)
             raise
         else:
             if observation is not None and not observation.finished:

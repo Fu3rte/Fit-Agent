@@ -118,6 +118,7 @@ class ModelCallObservation(Model):
     cache_read_tokens: int | None = None
     cache_write_tokens: int | None = None
     output_tokens: int | None = None
+    failure: dict | None = None
 
 
 class CallObservationHandle:
@@ -216,14 +217,15 @@ class CallObservationHandle:
         self._finished = True
         self._write(usage, status)
 
-    def fail(self, aborted: bool) -> None:
+    def fail(self, aborted: bool, error_info: dict | None = None) -> None:
         # 已发送但未取得完整结局：保留可核实状态，缺失用量保持缺失。
         if self._finished:
             return
         self._finished = True
-        self._write(None, "aborted" if aborted else "failed")
+        self._write(None, "aborted" if aborted else "failed", error_info)
 
-    def _write(self, usage: Usage | None, status: str) -> None:
+    def _write(self, usage: Usage | None, status: str,
+               failure: dict | None = None) -> None:
         record = self._record
         if record is None:
             # 未观测到最终投影（发送前取消或请求转换失败）：不产生记录。
@@ -235,7 +237,10 @@ class CallObservationHandle:
                 "cache_write_tokens": int(usage.cache_write),
                 "output_tokens": int(usage.output),
             })
-        self._record = record.model_copy(update={"status": status})
+        update: dict = {"status": status}
+        if failure is not None:
+            update["failure"] = failure
+        self._record = record.model_copy(update=update)
         try:
             self._owner.persist(self._record)
         finally:

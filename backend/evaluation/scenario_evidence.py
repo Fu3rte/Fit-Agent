@@ -109,6 +109,8 @@ class EvaluationCallRecord(ScenarioEvidenceModel):
     status: NonEmptyText | None = None
     input_tokens: int | None = Field(default=None, ge=0)
     output_tokens: int | None = Field(default=None, ge=0)
+    usage: dict[str, Any] | None = None
+    failure: dict[str, Any] | None = None
 
 
 def sha256_text(value: str) -> str:
@@ -196,13 +198,16 @@ class EvaluationCallRecorder:
                 handle.write(record.model_dump_json() + "\n")
             return sequence
 
-    def record_outcome(self, sequence: int, status: str, usage) -> None:
+    def record_outcome(self, sequence: int, status: str, usage,
+                       failure: dict | None = None) -> None:
         with self._lock:
             record = next(item for item in self._records if item.sequence == sequence)
             updated = record.model_copy(update={
                 "status": status,
                 "input_tokens": None if usage is None else int(usage.input),
                 "output_tokens": None if usage is None else int(usage.output),
+                "usage": None if usage is None else usage.model_dump(mode="json"),
+                "failure": failure,
             })
             position = self._records.index(record)
             self._records[position] = updated
@@ -255,12 +260,12 @@ class _EvaluationCallHandle(CallObservation):
             self._recorder.record_outcome(self._sequence, status, usage)
         self._inner.finish(usage, status)
 
-    def fail(self, aborted: bool) -> None:
+    def fail(self, aborted: bool, error_info: dict | None = None) -> None:
         if self._sequence is not None:
             self._recorder.record_outcome(
-                self._sequence, "aborted" if aborted else "failed", None
+                self._sequence, "aborted" if aborted else "failed", None, error_info
             )
-        self._inner.fail(aborted)
+        self._inner.fail(aborted, error_info)
 
 
 class EvaluationObserver(CacheObserver):
