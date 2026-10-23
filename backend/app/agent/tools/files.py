@@ -173,11 +173,14 @@ def iter_files(workspace: Workspace, path: str, signal=None):
 
 
 def create_file_tools(
-    session_id: str, *, tmp_root: Path = TMP_ROOT, skills_root: Path = SKILLS_ROOT
+    session_id: str, *, tmp_root: Path = TMP_ROOT, skills_root: Path = SKILLS_ROOT,
+    allow_skills: bool = True,
 ) -> dict[str, AgentTool]:
     workspace = Workspace(session_id, tmp_root)
 
     def read(tool_call_id, params: ReadArguments, signal, on_update) -> AgentToolResult:
+        if is_skill_path(params.path) and not allow_skills:
+            raise WorkspaceAccessDenied("当前运行未开放知识库读取")
         target = (
             resolve_skill_path(params.path, skills_root)
             if is_skill_path(params.path)
@@ -276,8 +279,12 @@ def create_file_tools(
         AgentTool(
             "read",
             "读取 UTF-8 文本；offset 从 1 开始，输出带行号并提示是否仍有后续内容。"
-            "相对路径以项目根目录 tmp 为根，只允许读取当前会话的附件与工作文件；"
-            "固定只读命名空间 skills/ 可读取 Skill 入口与其 Markdown 引用文件。",
+            + (
+                "相对路径以项目根目录 tmp 为根，只允许读取当前会话的附件与工作文件；"
+                "固定只读命名空间 skills/ 可读取 Skill 入口与其 Markdown 引用文件。"
+                if allow_skills else
+                "相对路径以项目根目录 tmp 为根，只允许读取当前会话的附件与工作文件。"
+            ),
             ReadArguments,
             read,
             execution_mode="parallel",

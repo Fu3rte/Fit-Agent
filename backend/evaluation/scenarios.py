@@ -1611,16 +1611,24 @@ async def _run_message_event(
     session_id: str,
     session_ids: Sequence[str],
     now: int,
+    *,
+    model=None,
+    file_tools=None,
+    system_prompt: str | None = None,
+    budget_seconds: float | None = None,
 ) -> EventCapture:
     before = await runtime.projection(session_ids)
     try:
-        model = load_model_config()
+        model = load_model_config() if model is None else model
     except ModelNotConfigured as error:
         raise ScenarioModelUnavailable(
             scenario["scenario_id"], event["event_id"], str(error)
         ) from error
     secrets = _active_secrets(model)
-    tools = create_file_tools(session_id, tmp_root=runtime.root / "tmp")
+    tools = (
+        create_file_tools(session_id, tmp_root=runtime.root / "tmp")
+        if file_tools is None else file_tools
+    )
     operation_id = str(uuid4())
     request = SendRequest(
         text=event["content"] or "",
@@ -1639,16 +1647,26 @@ async def _run_message_event(
                 session_id=session_id,
                 request=request,
             ),
-            system_message=_system_message(model, accepted_tools, now),
+            system_message=(
+                _system_message(model, accepted_tools, now)
+                if system_prompt is None else SystemMessage(
+                    role="system", content=system_prompt,
+                    tools_added=[tool.definition() for tool in accepted_tools.values()]
+                    + business_tool_declarations(), timestamp=now,
+                )
+            ),
             credentials=accepted_secrets,
             now=now,
         )
 
     sequence_start = len(runtime.call_recorder.records)
 
+    requested_budget = budget_seconds
+
     def create_state(session_uuid, *, run_id=None, budget_seconds=None):
         state = EvaluationRunState(
-            session_uuid, run_id=run_id, budget_seconds=budget_seconds
+            session_uuid, run_id=run_id,
+            budget_seconds=budget_seconds if requested_budget is None else requested_budget,
         )
         state.observation_factory = lambda: EvaluationObserver(
             session_id=session_id,
@@ -2030,6 +2048,22 @@ async def _assertion_evidence(
     if target is not None:
         references.add(target.proposal_ref)
     proposal_bindings = [_binding_for(bindings, ref) for ref in sorted(references)]
+    if not proposal_bindings and capture.request_entry_id is not None and any(
+        assertion["kind"]
+        in ("equipment_restriction", "forbidden_exercise", "parameter_preserved")
+        for assertion in assertions
+    ):
+        # 内容类断言不声明 proposal_ref；归属只认本事件请求入口创建的待确认提案。
+        proposal_bindings = [
+            binding
+            for binding in bindings.values()
+            if any(
+                proposal.business_kind == binding.business_kind
+                and proposal.proposal_id == binding.proposal_id
+                and proposal.request_entry_id == capture.request_entry_id
+                for proposal in capture.after.proposals
+            )
+        ]
     before = capture.before
     after = capture.after
     profile_snapshots = []
