@@ -4,19 +4,46 @@ Fit-Agent 是一个通过自然语言管理个人画像、训练计划和实际�
 
 产品定位、业务功能、业务规则及业务验收场景见 [PRODUCT.md](PRODUCT.md)。
 
-## 功能特性
+## 功能与使用
 
-- 对话驱动画像收集与更新、计划录入/生成/调整及训练记录整理；完整展示快照后，用户点击对应的“确认保存”按钮，后端直接落库。普通聊天文字不产生保存授权。
-- 会话支持历史查看、编辑与重新生成、运行中补充信息（Steering）、取消与删除。
-- 附件：一条消息可挂多个 UTF-8 编码的 `.md`、`.txt` 文件，总大小上限 100,000 字节，超限拒绝提交。详细约定见 `tmp/design/attachment-session-interaction.md`。
-- 训练计划在待确认、当前版本与历史版本统一使用只读看板：移动端单列，`lg` 断点起三列。展示约定见 `tmp/design/page-layout-display-conventions.md`。
-- 模型服务通过应用内弹窗配置，所有会话共用一套全局配置，支持 OpenAI Completions 与 Anthropic Messages 协议。
-- 运行预算与上下文压缩：每次正式运行最多发起 64 次模型请求，覆盖阈值压缩、溢出恢复及终态分类。细节见 `tmp/design/model-request-budget.md`。
-- 持久化 SQLite，会话与已确认业务数据在重新打开应用后可查看。
+### 画像、计划与训练记录
+
+在对话页描述训练目标、经验、器械条件、可投入时间与伤病情况，助手整理为画像快照并完整展示；点击该快照的“确认保存”后由后端直接保存。
+
+描述或粘贴训练安排，或随消息上传 `.md`、`.txt` 文件，助手整理为计划快照；点击“确认保存”保存为当前计划。只发送附件时，助手先完整读取内容，再询问处理要求。
+
+描述已完成的训练，助手整理训练日期、动作、实际组数、次数、重量与感受；核对后点击“确认保存”写入训练记录。
+
+计划生成与调整由对话发起。调整会参考最近 10 条训练记录，展示修改位置、原值、新值、理由与依据；确认后保存完整新版本。历史计划版本与已有训练记录保持完整。
+
+会话侧栏支持查看历史、编辑消息、重新生成回答、运行中补充文字或附件（Steering）、取消运行与删除会话。
+
+保存只接受对应快照的“确认保存”按钮。聊天文字、附件内容、工具结果与模型参数都不产生保存授权；多份内容待确认时逐份确认。
+
+### 独立页面
+
+- 画像页展示已保存画像与不可用器械清单。
+- 计划页按待确认、当前版本与历史版本展示训练日、动作、组次、重量与休息时间。
+- 训练记录页按训练日期展示已保存记录。
+- 侧栏设置配置模型服务与明暗主题。
+
+### 动作检索
+
+助手在查询动作、生成或调整计划时调用动作检索：输入名称、别名、英文名或描述，结合器械、训练部位与目标肌群筛选，先返回最多 5 条候选及匹配说明，再按动作 ID 读取完整步骤与重量口径。检索使用 Milvus 混合检索（BM25 稀疏向量 + 1024 维稠密向量）、RRF 融合与外部重排模型。检索服务未配置或不可用时，动作查询直接报错，画像、计划、记录与历史浏览继续可用。
+
+### 训练知识库
+
+内置 `training-theory` 技能，覆盖训练原理、计划编排、动作技术、渐进与记录、停滞与调整等主题。系统提示注入技能名称、描述与入口路径，助手按当前任务读取 `backend/skills/training-theory` 下的主题文件。
+
+### 运行约束
+
+每次正式运行最多发起 64 次模型请求，总预算 300 秒；达到上下文阈值时执行压缩，模型溢出时恢复。运行失败、取消或超时都会写入明确的停止原因。
 
 ## 快速开始
 
-前置环境：Python 3.13+、uv、Node.js 与 npm。在仓库根目录安装依赖：
+前置环境：Python 3.13+、uv、Node.js、npm。使用动作检索时需要 Docker 与可用的 Milvus 服务。
+
+在仓库根目录安装依赖：
 
 ```bash
 npm install
@@ -30,19 +57,59 @@ uv sync --project backend
 npm run dev
 ```
 
-打开 `http://localhost:5173`。后端监听 `127.0.0.1:8000`，Vite 将 `/api` 请求代理到后端。首次使用先通过侧栏配置入口保存模型配置。
+打开 `http://localhost:5173`。后端监听 `127.0.0.1:8000`，Vite 将 `/api` 请求代理到后端。首次使用先在侧栏配置模型服务。
+
+### 启动动作检索
+
+```bash
+docker compose -f deploy/milvus/docker-compose.yml up -d
+```
+
+在 `backend/.env` 中配置 Milvus、Embedding 与重排参数（见下文“检索配置”），然后构建并发布动作索引：
+
+```bash
+cd backend
+uv run --env-file .env python -m test.check_retrieval_index build
+```
+
+首次构建会调用 Embedding 服务批量编码全部动作，产生相应费用；已有正式索引时该命令直接复用。`npm run dev:backend` 同样读取 `backend/.env`。
 
 ## 配置
 
-### 模型配置
+### 模型服务
 
-- 弹窗必填协议、Base URL、模型 ID、API Key，可填服务标识 `provider`（如 `stepfun`、`openrouter`）。省略、空字符串或仅空白时使用所选协议值；有内容时去除首尾空白。保存、测试、正式运行与配置读取使用同一规则。
-- Base URL 允许 HTTP 和 HTTPS，可指向本机、局域网及公网。HTTP 明文传输 API Key 和对话数据，存在泄露风险。
-- 打开弹窗明文展示当前 Key；保存与测试均拒绝空 Key，更换 Base URL 时必须明确提交对应 Key。
-- 保存与测试独立。测试检查流式响应和工具调用并展示结果与耗时，不自动保存，不修改业务数据，失败保持已保存配置完整。测试可能产生费用。
-- 无有效模型配置时阻止新的模型运行，禁止自动切换服务；配置入口、业务数据浏览及有效快照的按钮确认仍可使用。确认保存不调用模型。
-- 清除凭据移除全部配置字段，保持业务数据与会话完整。配置重启后保留，运行期间修改只影响后续运行。
-- 本地访问保护及模型凭据保护属于基础要求。
+- 在侧栏设置中填写协议、Base URL、模型 ID 与 API Key，可填服务标识 `provider`（如 `stepfun`、`openrouter`）。协议为 `openai-completions` 或 `anthropic-messages`。
+- `provider` 省略、为空或仅空白时使用协议值；有内容时去除首尾空白。保存、测试、正式运行与配置读取使用同一规则。
+- Base URL 支持 HTTP 与 HTTPS，可指向本机、局域网或公网。HTTP 会明文传输 API Key 与对话数据。
+- 打开弹窗时 API Key 默认隐藏，可通过右侧按钮切换显示。保存与测试都要求非空 Key；修改 Base URL 时需一并提交对应 Key。
+- 保存与测试独立。测试检查流式响应与工具调用并展示结果和耗时，不保存配置、不修改业务数据；测试可能产生费用。
+- 未配置有效模型时阻止新的模型运行；配置入口、历史浏览与快照确认仍可使用。确认保存不调用模型。
+- 清除凭据移除全部配置字段，业务数据与会话保持完整。配置重启后保留，修改只影响后续运行。
+
+### 检索配置
+
+写入 `backend/.env`：
+
+| 变量 | 作用 |
+| --- | --- |
+| `FIT_AGENT_MILVUS_URI` | Milvus 地址，本机 Compose 部署为 `http://127.0.0.1:19530` |
+| `FIT_AGENT_MILVUS_TOKEN` | Milvus 令牌，本地部署可留空 |
+| `FIT_AGENT_MILVUS_TIMEOUT` | Milvus 连接超时秒数，必填且为正数 |
+| `DASHSCOPE_API_KEY` | Embedding 服务密钥 |
+| `DASHSCOPE_WORKSPACE_ID` | DashScope 工作空间 ID，用于生成 Embedding Base URL |
+| `FIT_AGENT_EMBEDDING_MODEL` | Embedding 模型，默认 `qwen3.7-text-embedding-flash` |
+| `FIT_AGENT_EMBEDDING_DIMENSIONS` | 向量维度，当前只支持 `1024` |
+| `RERANKER_MODEL` | 重排模型 |
+| `RERANKER_BASE_URL` | 重排完整请求地址 |
+| `RERANKER_API_KEY` | 重排服务密钥 |
+| `RERANKER_TIMEOUT` | 重排超时秒数，默认 `10` |
+
+索引清单绑定语料哈希、Embedding 模型、维度、编码规则与 Milvus 版本。配置不兼容、索引缺失或服务不可用时，检索入口直接给出明确错误。
+
+### 评测配置
+
+- 裁判模型：`FIT_AGENT_EVAL_JUDGE_MODEL`、`FIT_AGENT_EVAL_JUDGE_BASE_URL`、`FIT_AGENT_EVAL_JUDGE_API_KEY`。
+- LangSmith：`LANGSMITH_API_KEY`、`LANGSMITH_ENDPOINT`。
 
 ### 前端端口
 
@@ -67,36 +134,69 @@ npm run dev:frontend
 后端命令等价于在 `backend` 目录执行：
 
 ```bash
-uv run python -m uvicorn app.interfaces.http:app --reload --host 127.0.0.1 --port 8000
+uv run --env-file .env python -m uvicorn app.interfaces.http:app --reload --host 127.0.0.1 --port 8000
 ```
 
 ## 技术栈
 
-- **Agent：单 Agent Loop**。基于 ReAct 范式的最小执行循环及工具调用机制。
-- **后端：FastAPI**。提供对话执行、会话历史、编辑与重新生成、Steering、取消、会话删除及业务查询接口。Agent 使用查询和准备工具；独立确认 HTTP 接口负责结构化授权、直接保存与原操作状态查询。
+- **Agent：单 Agent Loop**。基于 ReAct 范式的执行循环、工具调用与固定技能库。
+- **后端：FastAPI**。提供对话执行、会话历史、编辑与重新生成、Steering、取消、会话删除及业务查询接口。Agent 使用查询、检索与准备工具；独立确认 HTTP 接口负责结构化授权、直接保存与原操作状态查询。
+- **动作检索：Milvus + pymilvus**。BM25 稀疏检索与稠密向量混合召回，RRF 融合，外部重排模型二次排序；索引按版本发布并保留既有集合。
 - **数据校验：Pydantic**。定义并校验接口输入、工具参数及业务数据结构。
-- **持久化：SQLite**。通过 aiosqlite 保存个人画像、只读动作目录、会话消息、运行与操作记录、画像快照及保存幂等结果。迁移按版本执行，外键和结构校验保持开启；启动恢复中断操作，业务保存使用事务。
-- **前端**。React、TypeScript、Vite 及 Shadcn 布局和组件。
+- **持久化：SQLite**。通过 aiosqlite 保存画像、会话消息、运行与操作记录、画像快照、计划、训练记录及保存幂等结果；观测数据独立写入 `backend/data/trace.db`。迁移按版本执行，外键与结构校验保持开启；启动恢复中断操作，业务保存使用事务。
+- **前端**。React、TypeScript、Vite、Tailwind CSS 及 Shadcn/Radix 组件。
+- **评测（开发依赖）**。MTEB 计算检索指标，LangSmith 管理实验与上传，Ragas 完成本地生成评分，外部裁判处理生成评分。
 
 ## 项目结构
 
 ```text
 backend/app/            FastAPI 接口、应用、领域、Agent、AI 及基础设施分层
-backend/dataset/        只读动作目录数据
-backend/skills/         Agent 技能定义
+backend/dataset/        只读动作目录与版本化评测数据
+backend/skills/         Agent 技能定义（training-theory）
+backend/evaluation/     检索、场景、技能评测与结果汇总
 backend/test/           pytest 测试与 check_* 自检脚本
+deploy/milvus/          Milvus Compose 部署
 frontend/src/           React 应用（app、components、features、lib）
+optimization/           方案、接口契约与操作说明
+quantitive-index/       评测口径、基线与结果记录
 scripts/dev.mjs         前后端统一启动与端口探测脚本
 tmp/                    本地设计与证据目录（gitignore）
 ```
 
 ## 开发与验证
 
-- 后端在 `backend` 目录执行 `uv run python -m pytest` 运行测试用例，`uv run ruff check .` 做静态检查。主题验证以 `test/check_*.py` 自检脚本逐个运行，形如 `uv run python -m test.check_compaction_core`；部分 `check_*` 端到端脚本依赖真实模型服务。
-- 前端执行 `npm --prefix frontend run build` 完成类型检查与构建；按主题的场景验证入口为 `verify:plan`、`verify:profile`、`verify:workout`、`verify:runs`、`verify:markdown` 等脚本。
+后端在 `backend` 目录执行：
+
+```bash
+uv run python -m pytest
+uv run ruff check .
+```
+
+主题验证以 `test/check_*.py` 自检脚本逐个运行，形如 `uv run python -m test.check_compaction_core`；部分 `check_*` 端到端脚本依赖真实模型服务与检索服务。
+
+评测入口位于 `backend/evaluation`，在 `backend` 目录执行，示例：
+
+```bash
+uv run --locked --env-file .env python -m evaluation.retrieval run --dataset dataset/evaluation/rebuild-v1 --groups hybrid --rerank
+uv run --locked --env-file .env python -m evaluation.langsmith_scenarios run --purpose validation --scoring-mode external
+uv run --locked python -m evaluation.summary report --source backend/temp/evaluation-scenarios/<run_id>
+```
+
+动作索引与检索的检查入口为 `python -m test.check_retrieval_index`、`python -m test.check_retrieval_rerank_production` 等模块。
+
+运行观测写入 `backend/data/trace.db`，报告命令在 `backend` 目录执行：
+
+```bash
+uv run python -m app.agent.trace_report metrics
+uv run python -m app.agent.trace_report show --run-id <UUID>
+uv run python -m app.agent.trace_report show --operation-id <UUID>
+```
+
+前端执行 `npm --prefix frontend run build` 完成类型检查与构建；按主题的验证脚本包括 `verify:bubble`、`verify:profile`、`verify:workout`、`verify:plan`、`verify:runs`、`verify:stability`、`verify:confirm`、`verify:confirm:http`、`verify:provider`、`verify:markdown`。
 
 ## 文档职责
 
 - [PRODUCT.md](PRODUCT.md)：产品定位、业务功能、业务规则及业务验收场景。
-- README.md：运行方式、配置、技术栈及验证入口。
-- [结构化保存确认方案](optimization/structured-save-confirmation.md)：已拍板的确认授权、HTTP、历史扩展及验收基线，待实现和联合验证。实现 Agent 只修改代码、迁移与测试，不修改文档。
+- [optimization](optimization)：方案、接口契约、评测操作与验收口径。
+- [quantitive-index](quantitive-index)：检索、场景与技能评测的口径、基线和结果记录。
+- README.md：运行方式、配置、功能使用、技术栈及验证入口。
