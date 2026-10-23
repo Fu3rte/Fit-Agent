@@ -31,11 +31,9 @@ export default function ProfilePage() {
           <Card>
             <CardHeader>
               <CardTitle>个人画像</CardTitle>
-              <CardDescription>
-                {profile.data.version === null
-                  ? "尚未建档"
-                  : `版本 ${profile.data.version}`}
-              </CardDescription>
+              {profile.data.version === null && (
+                <CardDescription>尚未建档</CardDescription>
+              )}
             </CardHeader>
             {profile.data.content !== null && (
               <CardContent>
