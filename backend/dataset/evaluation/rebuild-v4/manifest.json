@@ -5,17 +5,17 @@
   "source": {
     "catalog": {
       "path": "backend/dataset/actions.agent.json",
-      "sha256": "d3fd22334038a8a3803ce191acf28847003cb1057673dbbb0a470d153fa80b30",
-      "count": 1321
+      "sha256": "84cd7c1c30ff61d83e1bef650cfa7496da41f5fbc9def341fa1e577fc2d34d23",
+      "count": 1320
     },
     "supplements": {
       "path": "backend/dataset/action-supplements.published.json",
-      "sha256": "9429aa3c7cfaf9e89c267843f5e6d1adfa55b075a347996c9c8db7c095e949ec",
-      "version": "2026-10-18.1"
+      "sha256": "d44c5060875ecf19a8a72ad8f987605be89604bab375aa34b79dda10039494ca",
+      "version": "2026-10-26.2"
     },
     "mappings": {
       "path": "backend/dataset/action-field-mappings.json",
-      "sha256": "e9a3f016b7e7b155cf61bbae2af1464d11b84c2b8eb88dd0123b616dd01fba77"
+      "sha256": "24c7d1e2dbd93318fca06f24cdc94fd0c64f6de4ff8163b3d4a577f788587985"
     },
     "encoding_rule_version": "retrieval-text-2026-10-14.2"
   },
@@ -48,15 +48,15 @@
   "files": {
     "corpus": {
       "path": "corpus.jsonl",
-      "sha256": "8b0f689a2339ce7cca67c5580dbd56d405eb285cb4eb39344f5f1e99d8a87c7d"
+      "sha256": "aa5b259c2c83891d5fa47d50f9ffedcdbd174102be6479fab80b32c0b4d8d0e2"
     },
     "queries": {
       "path": "queries.jsonl",
-      "sha256": "f03031aaab473ef5cacaf7cd69a1bc937ade0ddacd95859ece8edfcf9119d846"
+      "sha256": "86b12ee40b43aa5cbbe592e893a8a1ae510ad235d0bb6e9e68f793b4ee6dd768"
     },
     "qrels": {
       "path": "qrels.jsonl",
-      "sha256": "1b58cb5edb99932d8c64e73eceac6e21308e0a375f6db4e5d52008fafb50749a"
+      "sha256": "e245597ccfc9c84c7fc146d93c8b63220fcabbca76693290fb06e6dca618dfc1"
     },
     "scenarios": {
       "path": "scenarios.jsonl",
@@ -106,9 +106,9 @@
     }
   ],
   "counts": {
-    "corpus": 1321,
+    "corpus": 1320,
     "queries": 150,
-    "qrels": 3272,
+    "qrels": 3266,
     "scenarios": 40,
     "assets": 8
   },
@@ -138,11 +138,11 @@
   },
   "release": {
     "status": "approved",
-    "reviewer": "用户（委托Worker标注）",
+    "reviewer": "本会话用户",
     "reviewer_type": "user",
-    "reviewed_at": "2026-10-22T01:49:35Z",
-    "comment": "用户授权Worker完成本轮冻结候选池补标；实际逐条语义标注者为Worker，用户未逐条亲自审阅。",
-    "content_sha256": "446c77982c47e78e770295526e8a606e0a4966a0b5fe8500ee58d59db4d33fb1",
-    "decision_ref": "optimization/evaluation-rebuild-v4-qrels-approval.md#用户授权"
+    "reviewed_at": "2026-10-26T03:15:09+00:00",
+    "comment": "深蹲类改名、字段更正与步骤重写导致来源哈希、语料文本与证据摘要变更；按用户授权统一重签。",
+    "content_sha256": "7464341838ddb38c1132601b4116fef85c16aa67c0e0df9d241f937f42238c17",
+    "decision_ref": "optimization/action-catalog-naming-cleanup.md#改名与条目删除"
   }
 }

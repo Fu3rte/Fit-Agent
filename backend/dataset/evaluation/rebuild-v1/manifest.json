@@ -5,17 +5,17 @@
   "source": {
     "catalog": {
       "path": "backend/dataset/actions.agent.json",
-      "sha256": "d3fd22334038a8a3803ce191acf28847003cb1057673dbbb0a470d153fa80b30",
-      "count": 1321
+      "sha256": "84cd7c1c30ff61d83e1bef650cfa7496da41f5fbc9def341fa1e577fc2d34d23",
+      "count": 1320
     },
     "supplements": {
       "path": "backend/dataset/action-supplements.published.json",
-      "sha256": "9429aa3c7cfaf9e89c267843f5e6d1adfa55b075a347996c9c8db7c095e949ec",
-      "version": "2026-10-18.1"
+      "sha256": "d44c5060875ecf19a8a72ad8f987605be89604bab375aa34b79dda10039494ca",
+      "version": "2026-10-26.2"
     },
     "mappings": {
       "path": "backend/dataset/action-field-mappings.json",
-      "sha256": "e9a3f016b7e7b155cf61bbae2af1464d11b84c2b8eb88dd0123b616dd01fba77"
+      "sha256": "24c7d1e2dbd93318fca06f24cdc94fd0c64f6de4ff8163b3d4a577f788587985"
     },
     "encoding_rule_version": "retrieval-text-2026-10-14.2"
   },
@@ -48,15 +48,15 @@
   "files": {
     "corpus": {
       "path": "corpus.jsonl",
-      "sha256": "8b0f689a2339ce7cca67c5580dbd56d405eb285cb4eb39344f5f1e99d8a87c7d"
+      "sha256": "aa5b259c2c83891d5fa47d50f9ffedcdbd174102be6479fab80b32c0b4d8d0e2"
     },
     "queries": {
       "path": "queries.jsonl",
-      "sha256": "8926d985fe78dc260da76bb04e06d51ccdb600880bd52cd95a8cdb53215cea47"
+      "sha256": "e1001160419ce5e5865d329842e5a96889621505946b474a9012acc733a9b678"
     },
     "qrels": {
       "path": "qrels.jsonl",
-      "sha256": "da3e55554d145fbc11bba6cd24e54825868c36aada63bcc9faeb99b6223d7c35"
+      "sha256": "28a704fba8e7a36436cd7f32193e41369b5d18edd247b41c5dfa25d33cec1819"
     },
     "scenarios": {
       "path": "scenarios.jsonl",
@@ -106,7 +106,7 @@
     }
   ],
   "counts": {
-    "corpus": 1321,
+    "corpus": 1320,
     "queries": 150,
     "qrels": 1079,
     "scenarios": 80,
@@ -138,11 +138,11 @@
   },
   "release": {
     "status": "approved",
-    "reviewer": "用户",
+    "reviewer": "本会话用户",
     "reviewer_type": "user",
-    "reviewed_at": "2026-10-19T12:03:15+00:00",
-    "comment": "用户授权直接修订取消检查点、相关状态断言及必要配套实现并重新审批；批准范围限于取消时点与状态断言。",
-    "content_sha256": "0b67ac8477536f5f3e6e8360adc2302808ee360e2ba39f71c9e015a34478c32b",
-    "decision_ref": "optimization/evaluation-rebuild-v1-cancellation-amendment.md#用户授权"
+    "reviewed_at": "2026-10-26T03:15:09+00:00",
+    "comment": "深蹲类改名、字段更正与步骤重写导致来源哈希、语料文本与证据摘要变更；按用户授权统一重签。",
+    "content_sha256": "54589eb442c4ac3dfaf05c620fe4f311c0d7b35179509764e3b6273e96f767f9",
+    "decision_ref": "optimization/action-catalog-naming-cleanup.md#改名与条目删除"
   }
 }

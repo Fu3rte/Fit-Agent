@@ -20,6 +20,7 @@ DATA_ROOT = BACKEND / "dataset/evaluation"
 PARENT = DATA_ROOT / "rebuild-v3"
 VERSION = DATA_ROOT / "rebuild-v4"
 DECISION_REF = "optimization/evaluation-rebuild-v4-qrels-approval.md#用户授权"
+RELEASE_DECISION_REF = "optimization/action-catalog-naming-cleanup.md#改名与条目删除"
 
 
 def rows(path):
@@ -39,19 +40,19 @@ def test_rebuild_v4_inherits_frozen_files_and_original_qrels():
         assert (VERSION / "assets" / asset.name).read_bytes() == asset.read_bytes()
     original = (PARENT / "qrels.jsonl").read_bytes()
     assert (VERSION / "qrels.jsonl").read_bytes().startswith(original)
-    assert rows(VERSION / "qrels.jsonl")[:1104] == rows(PARENT / "qrels.jsonl")
+    assert rows(VERSION / "qrels.jsonl")[:1103] == rows(PARENT / "qrels.jsonl")
 
 
 def test_rebuild_v4_complete_unique_grades_and_facts(dataset):
     assert dataset.review["ready"] is True
     assert len(dataset.queries) == 150
-    assert len(dataset.qrels) == 3272
+    assert len(dataset.qrels) == 3266
     keys = {(row["query_id"], row["corpus_id"]) for row in dataset.qrels}
-    assert len(keys) == 3272
-    added = dataset.qrels[1104:]
-    assert len(added) == 2168
-    assert len({row["query_id"] for row in added}) == 112
-    assert Counter(row["grade"] for row in added) == {0: 1402, 1: 594, 2: 171, 3: 1}
+    assert len(keys) == 3266
+    added = dataset.qrels[1103:]
+    assert len(added) == 2163
+    assert len({row["query_id"] for row in added}) == 110
+    assert Counter(row["grade"] for row in added) == {0: 1401, 1: 593, 2: 168, 3: 1}
     catalog = json.loads((BACKEND / "dataset/actions.agent.json").read_text(encoding="utf-8"))
     queries = {row["query_id"]: row for row in dataset.queries}
     for row in added:
@@ -70,14 +71,12 @@ def test_rebuild_v4_complete_unique_grades_and_facts(dataset):
 
 
 def test_rebuild_v4_preserves_query_business_and_updates_only_reviewed_scope(dataset):
-    changed = {row["query_id"] for row in dataset.qrels[1104:]}
+    changed = {row["query_id"] for row in dataset.qrels[1103:]}
     grouped = {}
     for row in dataset.qrels:
         grouped.setdefault(row["query_id"], []).append(row)
     old_rows = rows(PARENT / "queries.jsonl")
-    old_lines = (PARENT / "queries.jsonl").read_bytes().splitlines()
-    new_lines = (VERSION / "queries.jsonl").read_bytes().splitlines()
-    for old, new, old_line, new_line in zip(old_rows, dataset.queries, old_lines, new_lines, strict=True):
+    for old, new in zip(old_rows, dataset.queries, strict=True):
         assert {k: v for k, v in old.items() if k not in ("review", "judgement_scope")} == {
             k: v for k, v in new.items() if k not in ("review", "judgement_scope")
         }
@@ -87,7 +86,9 @@ def test_rebuild_v4_preserves_query_business_and_updates_only_reviewed_scope(dat
             assert new["review"]["content_sha256"] == query_digest(new, grouped[new["query_id"]])
             assert new["review"]["decision_ref"] == DECISION_REF
         else:
-            assert new_line == old_line
+            # 未新增判定的查询，业务字段在上一段已与父版本逐字段比对；
+            # 目录改名后继承判定的证据指针变化，判据摘要按当前内容重算。
+            assert new["review"]["content_sha256"] == query_digest(new, grouped[new["query_id"]])
 
 
 def test_rebuild_v4_explicit_scenario_quota_and_legacy_defaults(dataset):
@@ -102,11 +103,11 @@ def test_rebuild_v4_explicit_scenario_quota_and_legacy_defaults(dataset):
 def test_rebuild_v4_manifest_and_delegation_record(dataset):
     manifest = dataset.manifest
     assert manifest["release"]["content_sha256"] == release_digest(manifest)
-    assert manifest["release"]["decision_ref"] == DECISION_REF
+    assert manifest["release"]["decision_ref"] == RELEASE_DECISION_REF
     for ref in manifest["files"].values():
         assert hashlib.sha256((VERSION / ref["path"]).read_bytes()).hexdigest() == ref["sha256"]
-    record = (BACKEND.parent / DECISION_REF.split("#")[0]).read_text(encoding="utf-8")
-    for text in ("你派个worker补齐答案吧，随便修改", "授权所有改动", "用户没有逐条亲自审阅", "实际标注者为 **Worker**", "父版本：`rebuild-v3`"):
+    record = (BACKEND.parent / RELEASE_DECISION_REF.split("#")[0]).read_text(encoding="utf-8")
+    for text in ("用户在本会话指示执行改名与删除", "全量同步重签", "语义未重新人工复核", "1689 自重推拉"):
         assert text in record
 
 

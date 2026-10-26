@@ -5,17 +5,17 @@
   "source": {
     "catalog": {
       "path": "backend/dataset/actions.agent.json",
-      "sha256": "d3fd22334038a8a3803ce191acf28847003cb1057673dbbb0a470d153fa80b30",
-      "count": 1321
+      "sha256": "84cd7c1c30ff61d83e1bef650cfa7496da41f5fbc9def341fa1e577fc2d34d23",
+      "count": 1320
     },
     "supplements": {
       "path": "backend/dataset/action-supplements.published.json",
-      "sha256": "9429aa3c7cfaf9e89c267843f5e6d1adfa55b075a347996c9c8db7c095e949ec",
-      "version": "2026-10-18.1"
+      "sha256": "d44c5060875ecf19a8a72ad8f987605be89604bab375aa34b79dda10039494ca",
+      "version": "2026-10-26.2"
     },
     "mappings": {
       "path": "backend/dataset/action-field-mappings.json",
-      "sha256": "e9a3f016b7e7b155cf61bbae2af1464d11b84c2b8eb88dd0123b616dd01fba77"
+      "sha256": "24c7d1e2dbd93318fca06f24cdc94fd0c64f6de4ff8163b3d4a577f788587985"
     },
     "encoding_rule_version": "retrieval-text-2026-10-14.2"
   },
@@ -48,15 +48,15 @@
   "files": {
     "corpus": {
       "path": "corpus.jsonl",
-      "sha256": "8b0f689a2339ce7cca67c5580dbd56d405eb285cb4eb39344f5f1e99d8a87c7d"
+      "sha256": "aa5b259c2c83891d5fa47d50f9ffedcdbd174102be6479fab80b32c0b4d8d0e2"
     },
     "queries": {
       "path": "queries.jsonl",
-      "sha256": "95aec1be59fc0a0e657b1d2a8b15888f381919577bdd7c700b1a59f528f31972"
+      "sha256": "1c1582836ae2c01adc21010e0aca2287b79f9fbf99a0717dabe895911ef20ae2"
     },
     "qrels": {
       "path": "qrels.jsonl",
-      "sha256": "2ff595e2a5791b7ad9f1ce718ddfe257eb4727404c2fadcd8d4f77f04a04fa40"
+      "sha256": "7ff7c5e3f8a4a0d4d6fae1f8ec6495e9cde38fda4a6975f20a7b62e311afcc80"
     },
     "scenarios": {
       "path": "scenarios.jsonl",
@@ -106,9 +106,9 @@
     }
   ],
   "counts": {
-    "corpus": 1321,
+    "corpus": 1320,
     "queries": 150,
-    "qrels": 1104,
+    "qrels": 1103,
     "scenarios": 40,
     "assets": 8
   },
@@ -138,11 +138,11 @@
   },
   "release": {
     "status": "approved",
-    "reviewer": "用户",
+    "reviewer": "本会话用户",
     "reviewer_type": "user",
-    "reviewed_at": "2026-10-21T12:23:38.443302+00:00",
-    "comment": "用户授权将默认正式场景集由 80 条精简为 rebuild-v3 的 40 条，并同步正式基线与门禁。",
-    "decision_ref": "optimization/evaluation-rebuild-v3-scenarios-approval.md#用户授权",
-    "content_sha256": "07436be7737d02209bbd616f9028bb0534975640d148c246eba11e8704f40e80"
+    "reviewed_at": "2026-10-26T03:15:09+00:00",
+    "comment": "深蹲类改名、字段更正与步骤重写导致来源哈希、语料文本与证据摘要变更；按用户授权统一重签。",
+    "decision_ref": "optimization/action-catalog-naming-cleanup.md#改名与条目删除",
+    "content_sha256": "fdef497d2786c739e9073efe8ad42ce3760c0d3c46d0091e1dec45eb2860d489"
   }
 }

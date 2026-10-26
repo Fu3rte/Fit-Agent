@@ -1,9 +1,9 @@
 {
-  "version": "2026-10-18.1",
+  "version": "2026-10-26.2",
   "catalog": {
     "path": "backend/dataset/actions.agent.json",
-    "sha256": "d3fd22334038a8a3803ce191acf28847003cb1057673dbbb0a470d153fa80b30",
-    "count": 1321
+    "sha256": "84cd7c1c30ff61d83e1bef650cfa7496da41f5fbc9def341fa1e577fc2d34d23",
+    "count": 1320
   },
   "upstream": {
     "repo": "hasaneyldrm/exercises-dataset",
@@ -6524,7 +6524,7 @@
       },
       "aliases": [
         {
-          "text": "板凳引体向上",
+          "text": "水平引体向上",
           "lang": "zh",
           "family": "inverted-row",
           "source": "subagent:back",
@@ -12659,14 +12659,6 @@
         "note": "与目录动作变式、器械及中英文步骤逐条对齐校验，MIT 许可数据层字段 name。"
       },
       "aliases": [
-        {
-          "text": "哑铃弯举深蹲",
-          "lang": "zh",
-          "family": "biceps-curl",
-          "source": "subagent:upper-arms-a",
-          "review_status": "approved",
-          "note": "省略“二头肌”"
-        },
         {
           "text": "深蹲哑铃弯举",
           "lang": "zh",
@@ -21015,14 +21007,6 @@
       },
       "aliases": [
         {
-          "text": "大猩猩引体向上",
-          "lang": "zh",
-          "family": "gorilla",
-          "source": "subagent:waist",
-          "review_status": "approved",
-          "note": "全称"
-        },
-        {
           "text": "gorilla chin up",
           "lang": "en",
           "family": "gorilla",
@@ -21118,14 +21102,6 @@
         "note": "与目录动作变式、器械及中英文步骤逐条对齐校验，MIT 许可数据层字段 name。"
       },
       "aliases": [
-        {
-          "text": "半蹲",
-          "lang": "zh",
-          "family": "squat",
-          "source": "subagent:lower-cardio",
-          "review_status": "approved",
-          "note": "去掉性别标注"
-        },
         {
           "text": "半程深蹲",
           "lang": "zh",
@@ -25131,14 +25107,6 @@
       },
       "aliases": [
         {
-          "text": "腿举机坐姿提踵",
-          "lang": "zh",
-          "family": "calf-press",
-          "source": "subagent:lower-cardio",
-          "review_status": "approved",
-          "note": "省略“深蹲”"
-        },
-        {
           "text": "腿举机深蹲提踵",
           "lang": "zh",
           "family": "calf-press",
@@ -26486,16 +26454,7 @@
         "review_status": "approved",
         "note": "与目录动作变式、器械及中英文步骤逐条对齐校验，MIT 许可数据层字段 name。"
       },
-      "aliases": [
-        {
-          "text": "爆发式俯卧撑",
-          "lang": "zh",
-          "family": "push-up",
-          "source": "subagent:chest",
-          "review_status": "approved",
-          "note": null
-        }
-      ],
+      "aliases": [],
       "note": null
     },
     {
@@ -26662,14 +26621,6 @@
           "source": "subagent:back",
           "review_status": "approved",
           "note": "常见俗称/口语写法"
-        },
-        {
-          "text": "对握引体向上",
-          "lang": "zh",
-          "family": "pull-up",
-          "source": "subagent:back",
-          "review_status": "approved",
-          "note": "常见俗称/口语写法"
         }
       ],
       "note": null
@@ -26728,17 +26679,6 @@
           "note": "常见俗称/口语写法"
         }
       ],
-      "note": null
-    },
-    {
-      "id": "1689",
-      "english_name": {
-        "text": "push and pull bodyweight",
-        "source": "upstream:hasaneyldrm/exercises-dataset@7455efae41b330c265e7cd4b78dfa848e7ce5ebd:data/exercises.json",
-        "review_status": "approved",
-        "note": "与目录动作变式、器械及中英文步骤逐条对齐校验，MIT 许可数据层字段 name。"
-      },
-      "aliases": [],
       "note": null
     },
     {
@@ -27203,7 +27143,7 @@
       },
       "aliases": [
         {
-          "text": "窄握引体向上",
+          "text": "颈后引体",
           "lang": "zh",
           "family": "pull-up",
           "source": "subagent:back",
@@ -27935,16 +27875,7 @@
         "review_status": "approved",
         "note": "与目录动作变式、器械及中英文步骤逐条对齐校验，MIT 许可数据层字段 name。"
       },
-      "aliases": [
-        {
-          "text": "肩胛引体向上",
-          "lang": "zh",
-          "family": "scapular",
-          "source": "subagent:back",
-          "review_status": "approved",
-          "note": "常见俗称/口语写法"
-        }
-      ],
+      "aliases": [],
       "note": null
     },
     {
@@ -28216,14 +28147,6 @@
         "note": "与目录动作变式、器械及中英文步骤逐条对齐校验，MIT 许可数据层字段 name。"
       },
       "aliases": [
-        {
-          "text": "半蹲跳",
-          "lang": "zh",
-          "family": "jump",
-          "source": "subagent:lower-cardio",
-          "review_status": "approved",
-          "note": "去掉性别标注"
-        },
         {
           "text": "半程深蹲跳",
           "lang": "zh",
@@ -28579,16 +28502,7 @@
         "review_status": "approved",
         "note": "与目录动作变式、器械及中英文步骤逐条对齐校验，MIT 许可数据层字段 name。"
       },
-      "aliases": [
-        {
-          "text": "左右移动反握引体",
-          "lang": "zh",
-          "family": "chin-up",
-          "source": "subagent:back",
-          "review_status": "approved",
-          "note": "常见俗称/口语写法"
-        }
-      ],
+      "aliases": [],
       "note": null
     },
     {
@@ -28747,14 +28661,6 @@
           "source": "subagent:upper-legs",
           "review_status": "approved",
           "note": "英文名，略去性别标注"
-        },
-        {
-          "text": "手枪深蹲",
-          "lang": "zh",
-          "family": "pistol-squat",
-          "source": "subagent:upper-legs",
-          "review_status": "approved",
-          "note": "口语俗称"
         },
         {
           "text": "手枪蹲",
@@ -30554,16 +30460,7 @@
         "review_status": "approved",
         "note": "与目录动作变式、器械及中英文步骤逐条对齐校验，MIT 许可数据层字段 name。"
       },
-      "aliases": [
-        {
-          "text": "分腿蹲",
-          "lang": "zh",
-          "family": "split-squat",
-          "source": "subagent:upper-legs",
-          "review_status": "approved",
-          "note": "简称"
-        }
-      ],
+      "aliases": [],
       "note": null
     },
     {
@@ -32629,16 +32526,7 @@
         "review_status": "approved",
         "note": "与目录动作变式、器械及中英文步骤逐条对齐校验，MIT 许可数据层字段 name。"
       },
-      "aliases": [
-        {
-          "text": "宽距引体向上",
-          "lang": "zh",
-          "family": "pull-up",
-          "source": "subagent:back",
-          "review_status": "approved",
-          "note": "常见俗称/口语写法"
-        }
-      ],
+      "aliases": [],
       "note": null
     },
     {
@@ -32651,7 +32539,7 @@
       },
       "aliases": [
         {
-          "text": "宽握后引体",
+          "text": "宽距颈后引体",
           "lang": "zh",
           "family": "pull-up",
           "source": "subagent:back",
@@ -32669,16 +32557,7 @@
         "review_status": "approved",
         "note": "与目录动作变式、器械及中英文步骤逐条对齐校验，MIT 许可数据层字段 name。"
       },
-      "aliases": [
-        {
-          "text": "宽距俯卧撑",
-          "lang": "zh",
-          "family": "push-up",
-          "source": "subagent:chest",
-          "review_status": "approved",
-          "note": null
-        }
-      ],
+      "aliases": [],
       "note": null
     },
     {
@@ -32689,16 +32568,7 @@
         "review_status": "approved",
         "note": "与目录动作变式、器械及中英文步骤逐条对齐校验，MIT 许可数据层字段 name。"
       },
-      "aliases": [
-        {
-          "text": "宽握双杠臂屈伸",
-          "lang": "zh",
-          "family": "dip",
-          "source": "subagent:chest",
-          "review_status": "approved",
-          "note": null
-        }
-      ],
+      "aliases": [],
       "note": null
     },
     {

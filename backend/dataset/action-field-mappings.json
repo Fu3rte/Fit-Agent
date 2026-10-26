@@ -2,109 +2,546 @@
   "version": "2026-10-18.1",
   "catalog": {
     "path": "backend/dataset/actions.agent.json",
-    "sha256": "d3fd22334038a8a3803ce191acf28847003cb1057673dbbb0a470d153fa80b30",
-    "count": 1321
+    "sha256": "84cd7c1c30ff61d83e1bef650cfa7496da41f5fbc9def341fa1e577fc2d34d23",
+    "count": 1320
   },
   "source_note": "canonical 值由实际目录逐字段枚举得到，覆盖率由 check_retrieval_supplements.py 校验；zh 为统一检索文本中的显示形式，terms 为中文查询到 canonical 的规范化词表。synonym_groups 列出同义 canonical 值，仅这些值允许共享同一 zh 显示。",
   "review_status": "candidate",
   "synonym_groups": [
-    ["muscle_group", "trapezius", "traps"],
-    ["muscle_group", "latissimus dorsi", "lats"],
-    ["equipment", "leverage machine", "sled machine"]
+    [
+      "muscle_group",
+      "trapezius",
+      "traps"
+    ],
+    [
+      "muscle_group",
+      "latissimus dorsi",
+      "lats"
+    ],
+    [
+      "equipment",
+      "leverage machine",
+      "sled machine"
+    ]
   ],
   "fields": {
     "equipment": {
-      "dumbbell": {"zh": "哑铃", "terms": []},
-      "barbell": {"zh": "杠铃", "terms": []},
-      "ez barbell": {"zh": "曲杆杠铃", "terms": ["EZ杠铃", "EZ杆", "曲杠"]},
-      "olympic barbell": {"zh": "奥林匹克杠铃", "terms": ["奥杆", "奥杠"]},
-      "trap bar": {"zh": "六角杠铃", "terms": ["陷阱杠", "六角杠"]},
-      "smith machine": {"zh": "史密斯机", "terms": ["史密斯"]},
-      "leverage machine": {"zh": "杠杆式器械", "terms": ["器械", "固定器械"]},      "cable": {"zh": "绳索", "terms": ["龙门架", "绳索器械", "拉力器"]},
-      "kettlebell": {"zh": "壶铃", "terms": []},
-      "band": {"zh": "弹力带", "terms": ["橡皮带"]},
-      "resistance band": {"zh": "阻力带", "terms": []},
-      "medicine ball": {"zh": "药球", "terms": []},
-      "stability ball": {"zh": "健身球", "terms": ["瑞士球", "瑜伽球"]},
-      "bosu ball": {"zh": "波速球", "terms": ["BOSU球"]},
-      "body weight": {"zh": "徒手", "terms": ["自重", "无器械", "自身重量", "自身体重"]},
-      "weighted": {"zh": "负重", "terms": ["附加负重"]},
-      "assisted": {"zh": "辅助器械", "terms": ["辅助"]},
-      "sled machine": {"zh": "雪橇机", "terms": ["推雪橇", "雪橇", "器械", "固定器械"]},
-      "stationary bike": {"zh": "固定单车", "terms": ["动感单车", "健身车"]},
-      "elliptical machine": {"zh": "椭圆机", "terms": []},
-      "stepmill machine": {"zh": "登山机", "terms": ["爬楼机", "台阶机"]},
-      "skierg machine": {"zh": "滑雪机", "terms": ["滑雪测功仪"]},
-      "upper body ergometer": {"zh": "上肢功率车", "terms": ["上肢测功仪"]},
-      "rope": {"zh": "绳", "terms": ["战绳", "跳绳", "绳子"]},
-      "roller": {"zh": "滚轮", "terms": ["泡沫轴", "筋膜轮"]},
-      "wheel roller": {"zh": "健腹轮", "terms": ["腹肌轮"]},
-      "tire": {"zh": "轮胎", "terms": ["翻轮胎"]},
-      "hammer": {"zh": "大锤", "terms": []}
+      "dumbbell": {
+        "zh": "哑铃",
+        "terms": []
+      },
+      "barbell": {
+        "zh": "杠铃",
+        "terms": []
+      },
+      "ez barbell": {
+        "zh": "曲杆杠铃",
+        "terms": [
+          "EZ杠铃",
+          "EZ杆",
+          "曲杠"
+        ]
+      },
+      "olympic barbell": {
+        "zh": "奥林匹克杠铃",
+        "terms": [
+          "奥杆",
+          "奥杠"
+        ]
+      },
+      "trap bar": {
+        "zh": "六角杠铃",
+        "terms": [
+          "陷阱杠",
+          "六角杠"
+        ]
+      },
+      "smith machine": {
+        "zh": "史密斯机",
+        "terms": [
+          "史密斯"
+        ]
+      },
+      "leverage machine": {
+        "zh": "杠杆式器械",
+        "terms": [
+          "器械",
+          "固定器械"
+        ]
+      },
+      "cable": {
+        "zh": "绳索",
+        "terms": [
+          "龙门架",
+          "绳索器械",
+          "拉力器"
+        ]
+      },
+      "kettlebell": {
+        "zh": "壶铃",
+        "terms": []
+      },
+      "band": {
+        "zh": "弹力带",
+        "terms": [
+          "橡皮带"
+        ]
+      },
+      "resistance band": {
+        "zh": "阻力带",
+        "terms": []
+      },
+      "medicine ball": {
+        "zh": "药球",
+        "terms": []
+      },
+      "stability ball": {
+        "zh": "健身球",
+        "terms": [
+          "瑞士球",
+          "瑜伽球"
+        ]
+      },
+      "bosu ball": {
+        "zh": "波速球",
+        "terms": [
+          "BOSU球"
+        ]
+      },
+      "body weight": {
+        "zh": "徒手",
+        "terms": [
+          "自重",
+          "无器械",
+          "自身重量",
+          "自身体重"
+        ]
+      },
+      "weighted": {
+        "zh": "负重",
+        "terms": [
+          "附加负重"
+        ]
+      },
+      "assisted": {
+        "zh": "辅助器械",
+        "terms": [
+          "辅助"
+        ]
+      },
+      "sled machine": {
+        "zh": "雪橇机",
+        "terms": [
+          "推雪橇",
+          "雪橇",
+          "器械",
+          "固定器械"
+        ]
+      },
+      "stationary bike": {
+        "zh": "固定单车",
+        "terms": [
+          "动感单车",
+          "健身车"
+        ]
+      },
+      "elliptical machine": {
+        "zh": "椭圆机",
+        "terms": []
+      },
+      "stepmill machine": {
+        "zh": "登山机",
+        "terms": [
+          "爬楼机",
+          "台阶机"
+        ]
+      },
+      "skierg machine": {
+        "zh": "滑雪机",
+        "terms": [
+          "滑雪测功仪"
+        ]
+      },
+      "upper body ergometer": {
+        "zh": "上肢功率车",
+        "terms": [
+          "上肢测功仪"
+        ]
+      },
+      "rope": {
+        "zh": "绳",
+        "terms": [
+          "战绳",
+          "跳绳",
+          "绳子"
+        ]
+      },
+      "roller": {
+        "zh": "滚轮",
+        "terms": [
+          "泡沫轴",
+          "筋膜轮"
+        ]
+      },
+      "wheel roller": {
+        "zh": "健腹轮",
+        "terms": [
+          "腹肌轮"
+        ]
+      },
+      "tire": {
+        "zh": "轮胎",
+        "terms": [
+          "翻轮胎"
+        ]
+      },
+      "hammer": {
+        "zh": "大锤",
+        "terms": []
+      }
     },
     "body_part": {
-      "back": {"zh": "背部", "terms": ["背", "后背"]},
-      "cardio": {"zh": "有氧", "terms": ["心肺", "有氧运动"]},
-      "chest": {"zh": "胸部", "terms": ["胸"]},
-      "lower arms": {"zh": "前臂", "terms": ["小臂"]},
-      "lower legs": {"zh": "小腿", "terms": []},
-      "neck": {"zh": "颈部", "terms": ["脖子"]},
-      "shoulders": {"zh": "肩部", "terms": ["肩"]},
-      "upper arms": {"zh": "上臂", "terms": ["大臂"]},
-      "upper legs": {"zh": "大腿", "terms": ["腿"]},
-      "waist": {"zh": "腰腹", "terms": ["腰", "核心"]}
+      "back": {
+        "zh": "背部",
+        "terms": [
+          "背",
+          "后背"
+        ]
+      },
+      "cardio": {
+        "zh": "有氧",
+        "terms": [
+          "心肺",
+          "有氧运动"
+        ]
+      },
+      "chest": {
+        "zh": "胸部",
+        "terms": [
+          "胸"
+        ]
+      },
+      "lower arms": {
+        "zh": "前臂",
+        "terms": [
+          "小臂"
+        ]
+      },
+      "lower legs": {
+        "zh": "小腿",
+        "terms": []
+      },
+      "neck": {
+        "zh": "颈部",
+        "terms": [
+          "脖子"
+        ]
+      },
+      "shoulders": {
+        "zh": "肩部",
+        "terms": [
+          "肩"
+        ]
+      },
+      "upper arms": {
+        "zh": "上臂",
+        "terms": [
+          "大臂"
+        ]
+      },
+      "upper legs": {
+        "zh": "大腿",
+        "terms": [
+          "腿"
+        ]
+      },
+      "waist": {
+        "zh": "腰腹",
+        "terms": [
+          "腰",
+          "核心"
+        ]
+      }
     },
     "target": {
-      "abs": {"zh": "腹直肌", "terms": ["腹肌", "腹部", "核心"]},
-      "pectorals": {"zh": "胸大肌", "terms": ["胸肌", "胸"]},
-      "biceps": {"zh": "肱二头肌", "terms": ["二头肌", "二头"]},
-      "triceps": {"zh": "肱三头肌", "terms": ["三头肌", "三头"]},
-      "glutes": {"zh": "臀大肌", "terms": ["臀部", "臀"]},
-      "delts": {"zh": "三角肌", "terms": ["肩", "肩部"]},
-      "upper back": {"zh": "上背", "terms": ["上背部"]},
-      "lats": {"zh": "背阔肌", "terms": ["背阔"]},
-      "calves": {"zh": "小腿三头肌", "terms": ["小腿"]},
-      "quads": {"zh": "股四头肌", "terms": ["大腿前侧", "股四头"]},
-      "forearms": {"zh": "前臂", "terms": ["小臂"]},
-      "cardiovascular system": {"zh": "心血管系统", "terms": ["心肺"]},
-      "hamstrings": {"zh": "腘绳肌", "terms": ["大腿后侧", "腿后"]},
-      "spine": {"zh": "竖脊肌", "terms": ["下背", "脊柱"]},
-      "traps": {"zh": "斜方肌", "terms": ["斜方"]},
-      "adductors": {"zh": "内收肌", "terms": ["大腿内侧"]},
-      "abductors": {"zh": "外展肌", "terms": ["大腿外侧"]},
-      "serratus anterior": {"zh": "前锯肌", "terms": []},
-      "levator scapulae": {"zh": "肩胛提肌", "terms": []}
+      "abs": {
+        "zh": "腹直肌",
+        "terms": [
+          "腹肌",
+          "腹部",
+          "核心"
+        ]
+      },
+      "pectorals": {
+        "zh": "胸大肌",
+        "terms": [
+          "胸肌",
+          "胸"
+        ]
+      },
+      "biceps": {
+        "zh": "肱二头肌",
+        "terms": [
+          "二头肌",
+          "二头"
+        ]
+      },
+      "triceps": {
+        "zh": "肱三头肌",
+        "terms": [
+          "三头肌",
+          "三头"
+        ]
+      },
+      "glutes": {
+        "zh": "臀大肌",
+        "terms": [
+          "臀部",
+          "臀"
+        ]
+      },
+      "delts": {
+        "zh": "三角肌",
+        "terms": [
+          "肩",
+          "肩部"
+        ]
+      },
+      "upper back": {
+        "zh": "上背",
+        "terms": [
+          "上背部"
+        ]
+      },
+      "lats": {
+        "zh": "背阔肌",
+        "terms": [
+          "背阔"
+        ]
+      },
+      "calves": {
+        "zh": "小腿三头肌",
+        "terms": [
+          "小腿"
+        ]
+      },
+      "quads": {
+        "zh": "股四头肌",
+        "terms": [
+          "大腿前侧",
+          "股四头"
+        ]
+      },
+      "forearms": {
+        "zh": "前臂",
+        "terms": [
+          "小臂"
+        ]
+      },
+      "cardiovascular system": {
+        "zh": "心血管系统",
+        "terms": [
+          "心肺"
+        ]
+      },
+      "hamstrings": {
+        "zh": "腘绳肌",
+        "terms": [
+          "大腿后侧",
+          "腿后"
+        ]
+      },
+      "spine": {
+        "zh": "竖脊肌",
+        "terms": [
+          "下背",
+          "脊柱"
+        ]
+      },
+      "traps": {
+        "zh": "斜方肌",
+        "terms": [
+          "斜方"
+        ]
+      },
+      "adductors": {
+        "zh": "内收肌",
+        "terms": [
+          "大腿内侧"
+        ]
+      },
+      "abductors": {
+        "zh": "外展肌",
+        "terms": [
+          "大腿外侧"
+        ]
+      },
+      "serratus anterior": {
+        "zh": "前锯肌",
+        "terms": []
+      },
+      "levator scapulae": {
+        "zh": "肩胛提肌",
+        "terms": []
+      }
     },
     "muscle_group": {
-      "shoulders": {"zh": "肩部", "terms": ["肩"]},
-      "forearms": {"zh": "前臂", "terms": ["小臂"]},
-      "biceps": {"zh": "肱二头肌", "terms": ["二头肌"]},
-      "triceps": {"zh": "肱三头肌", "terms": ["三头肌"]},
-      "hamstrings": {"zh": "腘绳肌", "terms": ["大腿后侧"]},
-      "quadriceps": {"zh": "股四头肌", "terms": ["大腿前侧"]},
-      "glutes": {"zh": "臀部", "terms": ["臀"]},
-      "obliques": {"zh": "腹斜肌", "terms": ["侧腹"]},
-      "hip flexors": {"zh": "髋屈肌", "terms": ["髂腰肌"]},
-      "chest": {"zh": "胸部", "terms": ["胸"]},
-      "trapezius": {"zh": "斜方肌", "terms": ["斜方"]},
-      "traps": {"zh": "斜方肌", "terms": ["斜方"]},
-      "deltoids": {"zh": "三角肌", "terms": []},
-      "ankles": {"zh": "踝关节", "terms": ["踝"]},
-      "calves": {"zh": "小腿", "terms": []},
-      "core": {"zh": "核心", "terms": ["核心肌群"]},
-      "lower back": {"zh": "下背", "terms": ["腰"]},
-      "rotator cuff": {"zh": "肩袖", "terms": []},
-      "soleus": {"zh": "比目鱼肌", "terms": []},
-      "abdominals": {"zh": "腹肌", "terms": ["腹部"]},
-      "latissimus dorsi": {"zh": "背阔肌", "terms": ["背阔"]},
-      "rhomboids": {"zh": "菱形肌", "terms": []},
-      "wrist flexors": {"zh": "腕屈肌", "terms": []},
-      "wrist extensors": {"zh": "腕伸肌", "terms": []},
-      "wrists": {"zh": "腕部", "terms": ["腕"]},
-      "ankle stabilizers": {"zh": "踝稳定肌", "terms": []},
-      "hands": {"zh": "手部", "terms": ["手"]},
-      "lats": {"zh": "背阔肌", "terms": ["背阔"]},
-      "upper back": {"zh": "上背", "terms": []}
+      "shoulders": {
+        "zh": "肩部",
+        "terms": [
+          "肩"
+        ]
+      },
+      "forearms": {
+        "zh": "前臂",
+        "terms": [
+          "小臂"
+        ]
+      },
+      "biceps": {
+        "zh": "肱二头肌",
+        "terms": [
+          "二头肌"
+        ]
+      },
+      "triceps": {
+        "zh": "肱三头肌",
+        "terms": [
+          "三头肌"
+        ]
+      },
+      "hamstrings": {
+        "zh": "腘绳肌",
+        "terms": [
+          "大腿后侧"
+        ]
+      },
+      "quadriceps": {
+        "zh": "股四头肌",
+        "terms": [
+          "大腿前侧"
+        ]
+      },
+      "glutes": {
+        "zh": "臀部",
+        "terms": [
+          "臀"
+        ]
+      },
+      "obliques": {
+        "zh": "腹斜肌",
+        "terms": [
+          "侧腹"
+        ]
+      },
+      "hip flexors": {
+        "zh": "髋屈肌",
+        "terms": [
+          "髂腰肌"
+        ]
+      },
+      "chest": {
+        "zh": "胸部",
+        "terms": [
+          "胸"
+        ]
+      },
+      "trapezius": {
+        "zh": "斜方肌",
+        "terms": [
+          "斜方"
+        ]
+      },
+      "traps": {
+        "zh": "斜方肌",
+        "terms": [
+          "斜方"
+        ]
+      },
+      "deltoids": {
+        "zh": "三角肌",
+        "terms": []
+      },
+      "ankles": {
+        "zh": "踝关节",
+        "terms": [
+          "踝"
+        ]
+      },
+      "calves": {
+        "zh": "小腿",
+        "terms": []
+      },
+      "core": {
+        "zh": "核心",
+        "terms": [
+          "核心肌群"
+        ]
+      },
+      "lower back": {
+        "zh": "下背",
+        "terms": [
+          "腰"
+        ]
+      },
+      "rotator cuff": {
+        "zh": "肩袖",
+        "terms": []
+      },
+      "soleus": {
+        "zh": "比目鱼肌",
+        "terms": []
+      },
+      "abdominals": {
+        "zh": "腹肌",
+        "terms": [
+          "腹部"
+        ]
+      },
+      "latissimus dorsi": {
+        "zh": "背阔肌",
+        "terms": [
+          "背阔"
+        ]
+      },
+      "rhomboids": {
+        "zh": "菱形肌",
+        "terms": []
+      },
+      "wrist flexors": {
+        "zh": "腕屈肌",
+        "terms": []
+      },
+      "wrist extensors": {
+        "zh": "腕伸肌",
+        "terms": []
+      },
+      "wrists": {
+        "zh": "腕部",
+        "terms": [
+          "腕"
+        ]
+      },
+      "ankle stabilizers": {
+        "zh": "踝稳定肌",
+        "terms": []
+      },
+      "hands": {
+        "zh": "手部",
+        "terms": [
+          "手"
+        ]
+      },
+      "lats": {
+        "zh": "背阔肌",
+        "terms": [
+          "背阔"
+        ]
+      },
+      "upper back": {
+        "zh": "上背",
+        "terms": []
+      }
     }
   }
 }

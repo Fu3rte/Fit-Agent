@@ -76,7 +76,7 @@ BUSINESS_TOOLS = {GET_PROFILE, SEARCH_EXERCISES, GET_EXERCISE_DETAILS, CALCULATE
 
 async def check_catalog(directory: Path) -> dict:
     catalog = Catalog.load()
-    assert len(catalog) == 1321
+    assert len(catalog) == 1320
     first = catalog.get("0001")
     assert first is not None and first.id == "0001"
     assert first.steps.zh and first.steps.en
@@ -91,11 +91,11 @@ async def check_catalog(directory: Path) -> dict:
         assert await repository.count_exercises() == 0
         async with repository.transaction():
             await repository.replace_exercises(catalog.all())
-        assert await repository.count_exercises() == 1321
+        assert await repository.count_exercises() == 1320
         # 只读目录整体替换：重复导入不叠加行数。
         async with repository.transaction():
             await repository.replace_exercises(catalog.all())
-        assert await repository.count_exercises() == 1321
+        assert await repository.count_exercises() == 1320
     finally:
         await database.close()
     return {"count": len(catalog), "bench": [item.id for item in bench]}

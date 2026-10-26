@@ -68,7 +68,7 @@ EXPERIMENT_RERANK = "rerank"
 # 历史入口保持原 11→10 单阶段身份，不接入两阶段候选池。
 LEGACY_RETRIEVAL_LIMIT = 10
 LEGACY_RECALL_LIMIT = LEGACY_RETRIEVAL_LIMIT + 1
-APPROVED_INPUTS = {"queries": 128, "labels": 405, "dev": 61, "holdout": 67, "families": 22, "catalog": 1321}
+APPROVED_INPUTS = {"queries": 128, "labels": 405, "dev": 61, "holdout": 67, "families": 22, "catalog": 1320}
 
 
 class EvaluationBlocked(RuntimeError):
