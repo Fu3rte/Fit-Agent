@@ -1085,6 +1085,17 @@ function validateContent(value: unknown): void {
   }
 }
 
+/** 流级失败（Trace 契约 §6.2）：ended 表示未收到终止事件的断连，protocol 表示解析失败 */
+export class ReActStreamError extends Error {
+  constructor(
+    readonly kind: "ended" | "protocol",
+    message: string,
+  ) {
+    super(message);
+    this.name = "ReActStreamError";
+  }
+}
+
 export function createReActParser(
   onEvent: (event: ReActEvent) => void,
   runId: string,
@@ -1251,7 +1262,8 @@ export function createReActParser(
   return {
     feed: (chunk: string) => parser.feed(chunk),
     finish() {
-      if (!terminal) throw new Error("连接中断，未收到终止事件。");
+      if (!terminal)
+        throw new ReActStreamError("ended", "连接中断，未收到终止事件。");
     },
     get terminal() {
       return terminal;

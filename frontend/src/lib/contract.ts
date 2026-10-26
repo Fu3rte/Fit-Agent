@@ -188,6 +188,32 @@ export interface AgentStreamHeaders {
   request_entry_id: string;
 }
 
+/** 客户端发送观测终态（Trace 契约 §6.2）：与运行时状态机分离，仅用于诊断 */
+export type ClientTerminalKindWire =
+  | "completed"
+  | "failed"
+  | "cancelled"
+  | "disconnected"
+  | "unknown";
+
+/** 客户端发送观测请求（Trace 契约 §6.3）：缺失测量直接省略字段 */
+export interface ClientAttemptBody {
+  session_id: string;
+  operation_id: string;
+  run_id: string | null;
+  client_attempt_id: string;
+  attempt_kind: "send";
+  client_terminal_kind: ClientTerminalKindWire;
+  client_duration_ms?: number;
+  client_first_text_ms?: number;
+}
+
+/** 客户端发送观测回执（Trace 契约 §6.3）：三类回执均携带稳定 observation_id */
+export type ClientAttemptReceiptWire =
+  | { status: "recorded"; observation_id: string }
+  | { status: "duplicate"; observation_id: string }
+  | { status: "skipped"; observation_id: string; reason: "cloud_unavailable" };
+
 /* ===== 会话列表与当前分支历史（session-history-contract §2、§3）===== */
 
 /** GET /api/sessions：全量会话头（§2） */

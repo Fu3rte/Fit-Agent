@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from threading import Event
 from time import perf_counter
 
+from app.agent.cloud_trace import SpanExportSink
 from app.agent.telemetry import RunTrace, TraceSpan, TraceStore
 from app.ai.types import check_cancelled
 from app.application.business.profile import BUSINESS_TIMEZONE, business_date
@@ -113,6 +114,7 @@ class ConfirmationService:
     async def confirm(
         self, session_id: str, request: SaveConfirmationRequest, signal: Event | None = None,
         *, trace_store: TraceStore | None = None,
+        sink: SpanExportSink | None = None,
         contains: Callable[[object], bool] | None = None,
         now: int | None = None,
     ) -> SaveConfirmationOperation:
@@ -124,8 +126,8 @@ class ConfirmationService:
             # 本次请求不是执行负责人，不得启动保存、改写状态或覆盖原执行结果。
             return operation
         return await self._execute(
-            operation, request, signal, trace_store=trace_store, contains=contains,
-            now=effective_now,
+            operation, request, signal, trace_store=trace_store, sink=sink,
+            contains=contains, now=effective_now,
         )
 
     async def get(self, session_id: str, operation_id: str) -> SaveConfirmationOperation:
@@ -267,10 +269,11 @@ class ConfirmationService:
     async def _execute(
         self, operation: SaveConfirmationOperation, request: SaveConfirmationRequest,
         signal: Event | None, *, trace_store: TraceStore | None = None,
+        sink: SpanExportSink | None = None,
         contains: Callable[[object], bool] | None = None,
         now: int | None = None,
     ) -> SaveConfirmationOperation:
-        if trace_store is None:
+        if trace_store is None and sink is None:
             # 未提供观测依赖：沿用无记录语义，独立调用与测试路径行为不变。
             return await self._run_save(operation, request, signal, now=now)
         # 根身份取实际受理操作：session_id 与 operation_id 来自已受理操作，run_id 为空。
@@ -299,7 +302,7 @@ class ConfirmationService:
             )
         finally:
             # 成功、失败、取消与断连收尾都尝试写入并释放记录器；写入属后续开销边界。
-            await trace.finish(trace_store)
+            await trace.finish(trace_store, sink)
 
     # 保存执行：业务写入与确认操作成功终态在同一提交事务内落地。
 

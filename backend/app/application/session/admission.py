@@ -71,7 +71,7 @@ async def admit_run(
     prepare: Callable[[], Awaitable[tuple[ModelConfig, dict[str, AgentTool], tuple[str, ...], bool]]],
     accept: Callable[..., Awaitable[OperationOutcome]],
     coordinator: SteeringCoordinator, business: BusinessService,
-    executor: ThreadPoolExecutor, trace_store,
+    executor: ThreadPoolExecutor, trace_store, cloud_trace,
     create_state: Callable[..., RunState], create_events: Callable,
 ) -> AdmissionResult:
     async with operation_lock(operation_id), session_gate(session_id):
@@ -127,7 +127,8 @@ async def admit_run(
             loop = asyncio.get_running_loop()
             task = loop.create_task(coordinate(
                 run, state, session_id, tools, model, secrets,
-                queries, entries, run_lifecycle, business, coordinator, executor, loop, trace, trace_store,
+                queries, entries, run_lifecycle, business, coordinator, executor, loop,
+                trace, trace_store, cloud_trace,
                 create_events=create_events,
             ))
             state.task = task

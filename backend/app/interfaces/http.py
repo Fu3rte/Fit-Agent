@@ -6,6 +6,7 @@ from contextlib import asynccontextmanager
 from fastapi import Depends, FastAPI, HTTPException
 from fastapi.exceptions import RequestValidationError
 
+from app.agent.cloud_trace import CloudTraceExporter, load_cloud_trace_config
 from app.agent.prompts import SYSTEM_PROMPT as SYSTEM_PROMPT
 from app.agent.telemetry import connect_trace_store
 from app.agent.tool import CredentialDetectedError as CredentialDetectedError
@@ -63,7 +64,7 @@ from app.infrastructure.persistence.sqlite.business_repository import (
 )
 from app.infrastructure.persistence.sqlite.database import open_database
 from app.infrastructure.persistence.sqlite.repository import SqliteSessionRepository
-from app.interfaces.http_api import errors
+from app.interfaces.http_api import client_attempts, errors
 from app.interfaces.http_api.contracts import ProviderWriteBody as ProviderWriteBody
 from app.interfaces.http_api.contracts import RunRequest as RunRequest
 from app.interfaces.http_api.projections import (
@@ -146,9 +147,12 @@ async def lifespan(app: FastAPI):
         await business_repository.replace_exercises(catalog.all())
     # 观测连接在主事件循环获取：开库故障隔离为 None，业务服务沿用既有生命周期。
     trace_store = await connect_trace_store()
+    # Cloud 导出在开放业务受理前完成：读取配置、独立 provider、唯一 Langfuse 客户端。
+    cloud_trace = CloudTraceExporter.create(load_cloud_trace_config())
     loop = asyncio.get_running_loop()
     executor = ThreadPoolExecutor(max_workers=1)
     app.state.trace_store = trace_store
+    app.state.cloud_trace = cloud_trace
     app.state.session_service = service
     app.state.session_queries = service.queries
     app.state.session_entries = service.entries
@@ -187,7 +191,9 @@ async def lifespan(app: FastAPI):
                 break
             await asyncio.gather(*tasks, return_exceptions=True)
         await loop.run_in_executor(None, executor.shutdown, True)
-        # 运行与取消收尾排空后再在所属循环关闭检索客户端；随后关闭观测与业务库。
+        # 运行排空后先有界关闭 Cloud 导出器，再在所属循环关闭检索客户端、观测与业务库。
+        if cloud_trace is not None:
+            cloud_trace.close(cloud_trace.close_timeout_seconds)
         await retrieval.close()
         if trace_store is not None:
             await trace_store.close()
@@ -209,3 +215,4 @@ app.include_router(provider.router, dependencies=[Depends(check_boundary)])
 app.include_router(sessions.router, dependencies=[Depends(check_boundary)])
 app.include_router(business.router, dependencies=[Depends(check_boundary)])
 app.include_router(agent.router, dependencies=[Depends(check_boundary)])
+app.include_router(client_attempts.router, dependencies=[Depends(check_boundary)])

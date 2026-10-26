@@ -1,9 +1,9 @@
 {
-  "version": "2026-10-26.2",
+  "version": "2026-10-26.3",
   "catalog": {
     "path": "backend/dataset/actions.agent.json",
-    "sha256": "84cd7c1c30ff61d83e1bef650cfa7496da41f5fbc9def341fa1e577fc2d34d23",
-    "count": 1320
+    "sha256": "e6c3781611f4b9cda4b1646445f934200189d33f227c7a46c2b46890ce1bec26",
+    "count": 1321
   },
   "upstream": {
     "repo": "hasaneyldrm/exercises-dataset",
@@ -32690,6 +32690,34 @@
         }
       ],
       "note": null
+    },
+    {
+      "id": "9001",
+      "english_name": {
+        "text": "high pull-up",
+        "source": "local:fit-agent/street-workout@2026-10-26",
+        "review_status": "candidate",
+        "note": "街健进阶的垂直拉动作，终点高于胸触杠引体；本地新增，无上游对应条目。"
+      },
+      "aliases": [
+        {
+          "text": "高位引体",
+          "lang": "zh",
+          "family": "pull-up",
+          "source": "local:fit-agent/street-workout@2026-10-26",
+          "review_status": "candidate",
+          "note": "中文街健圈通行简称"
+        },
+        {
+          "text": "high pull up",
+          "lang": "en",
+          "family": "pull-up",
+          "source": "local:fit-agent/street-workout@2026-10-26",
+          "review_status": "candidate",
+          "note": "英文无连字符写法"
+        }
+      ],
+      "note": "本地新增动作，无上游英文名；目标接触点可随进度下移到下胸至腰际。"
     }
   ]
 }

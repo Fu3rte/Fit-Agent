@@ -18,6 +18,10 @@ QUERIES = DATASET / "action-retrieval-queries.json"
 QUERIES_SCHEMA = DATASET / "action-retrieval-queries.schema.json"
 REVIEWS = DATASET / "action-supplement-reviews.json"
 
+# 英文名称与别名的来源前缀：上游数据、subagent 生成、本地新增（无上游条目）。
+SOURCE_PREFIXES = ("upstream:", "local:fit-agent/")
+ALIAS_SOURCE_PREFIXES = ("subagent:", "local:fit-agent/")
+
 
 def load(path: Path) -> dict:
     return json.loads(path.read_text(encoding="utf-8"))
@@ -35,7 +39,7 @@ def check_catalog(catalog: Catalog) -> dict:
     records = load(DEFAULT_ACTIONS_PATH)
     sha = hashlib.sha256(DEFAULT_ACTIONS_PATH.read_bytes()).hexdigest()
     ids = [record["id"] for record in records]
-    assert len(ids) == len(set(ids)) == len(catalog) == 1320, "目录数量或唯一 ID 不符"
+    assert len(ids) == len(set(ids)) == len(catalog) == 1321, "目录数量或唯一 ID 不符"
     assert all(len(i) == 4 and i.isdigit() for i in ids), "ID 必须为 4 位零填充字符串"
     by_field = {
         field: Counter(record[field] for record in records)
@@ -59,7 +63,9 @@ def check_supplements(document: dict, catalog_ids: set[str]) -> None:
     with_alias = 0
     for entry in entries:
         assert entry["english_name"]["text"].strip(), f"{entry['id']} 英文名称为空"
-        assert entry["english_name"]["source"].startswith("upstream:"), "英文名称需记录上游来源"
+        assert entry["english_name"]["source"].startswith(SOURCE_PREFIXES), (
+            "英文名称需记录上游或本地新增来源"
+        )
         assert entry["english_name"]["review_status"] == "candidate"
         if entry["aliases"]:
             with_alias += 1
@@ -67,7 +73,7 @@ def check_supplements(document: dict, catalog_ids: set[str]) -> None:
             alias_texts[alias["text"]] += 1
             assert alias["text"].strip() == alias["text"], f"{entry['id']} 别名首尾空白"
             assert alias["review_status"] == "candidate"
-            assert alias["source"].startswith("subagent:")
+            assert alias["source"].startswith(ALIAS_SOURCE_PREFIXES)
             if alias["family"] is not None:
                 families.add(alias["family"])
     one_to_many = sum(1 for count in alias_texts.values() if count > 1)

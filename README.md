@@ -193,6 +193,19 @@ uv run python -m app.agent.trace_report show --run-id <UUID>
 uv run python -m app.agent.trace_report show --operation-id <UUID>
 ```
 
+真实业务 Trace 默认只写本地诊断库。需要导出到 Langfuse Cloud 时，在服务端环境显式开启后重启：
+
+```bash
+FIT_TRACE_CLOUD_ENABLED=true
+LANGFUSE_PUBLIC_KEY=<项目公钥>
+LANGFUSE_SECRET_KEY=<项目密钥>
+LANGFUSE_BASE_URL=<Langfuse 地址>
+FIT_TRACE_ENVIRONMENT=production   # 或 development
+FIT_TRACE_RELEASE=<可选版本标记>
+```
+
+开关关闭时不创建 Cloud 客户端、不校验上述凭据、不发起网络请求。同一进程只初始化一个业务客户端；评测 CLI 在独立进程中运行。Cloud 导出只上传白名单观测字段，队列满时整条 Trace 丢弃，关闭最多等待 5 秒。
+
 前端执行 `npm --prefix frontend run build` 完成类型检查与构建；按主题的验证脚本包括 `verify:bubble`、`verify:profile`、`verify:workout`、`verify:plan`、`verify:runs`、`verify:stability`、`verify:confirm`、`verify:confirm:http`、`verify:provider`、`verify:markdown`。
 
 ## 文档职责

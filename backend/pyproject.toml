@@ -22,6 +22,9 @@ dependencies = [
     "limits>=5,<6",
     "pyyaml>=6,<7",
     "jsonlines>=4,<5",
+    "langfuse>=5.0.4,<6",
+    "opentelemetry-api>=1.45.1,<2",
+    "opentelemetry-sdk>=1.45.1,<2",
 ]
 
 # 源码以 backend/ 下的 app namespace package 直接导入。
@@ -31,7 +34,6 @@ package = false
 [dependency-groups]
 dev = [
     "langchain-community>=0.4,<0.4.2",
-    "langfuse>=5.0.4,<6",
     "mteb>=2.26.7,<2.27",
     "pillow>=13,<14",
     "pytest>=9.1",

@@ -1,11 +1,11 @@
 {
-  "version": "2026-10-26.2",
+  "version": "2026-10-26.3",
   "candidate_file": "backend/dataset/action-supplements.candidates.json",
   "published_file": "backend/dataset/action-supplements.published.json",
   "reviewer": "本会话用户",
-  "reviewed_at": 1792984509,
+  "reviewed_at": 1793007771,
   "status": "approved",
-  "published_sha256": "d44c5060875ecf19a8a72ad8f987605be89604bab375aa34b79dda10039494ca",
+  "published_sha256": "ea568653cdc9ab3eac8d0a7dd440a236f8860e054537f16f28a5714565988e46",
   "checklist": [
     "英文名称与目录动作变式、器械及中英文步骤一致，未把通用动作名分配给不匹配的变式",
     "别名确为用户可能使用的表面形式（俗称、缩写、英文、中英混合），不是动作描述或使用场景",
@@ -17,22 +17,31 @@
   "decisions": [
     {
       "scope": "backend/dataset/action-supplements.candidates.json",
-      "coverage": "全部 1320 条动作条目（英文名称 1320，中文俗称随 2026-10-26 改名同步）",
-      "content_sha256": "31c6f8ca3235b1e8f3864baecc352705b9b378307529fb411fb4efe29a72d8fb",
+      "coverage": "全部 1321 条动作条目（英文名称 1321，其中 1 条为本地新增动作 9001）",
+      "content_sha256": "49a3bdbb44f84d36e127fb78a50820d63498ec0d3c8b1fc510f63ef266f20c75",
       "conclusion": "approved",
       "reviewer": "本会话用户",
-      "reviewed_at": 1792984509,
+      "reviewed_at": 1793007771,
       "note": "审阅人于本会话确认整份候选语料通过；reviewed_at 为确认时刻，非逐条时间。content_sha256 绑定被批准的文件内容。"
     },
     {
       "scope": "backend/dataset/action-retrieval-queries.json",
       "coverage": "全部 128 条查询与 405 条候选相关性标注",
-      "content_sha256": "c5933ca343894a08980583cb766fba6445f4db5853c867e6262e70153f9ef253",
+      "content_sha256": "4168ad208ad6db159c8f303442d931f1b05ed1624e268f6f0897f6349f31d603",
       "conclusion": "approved",
       "reviewer": "本会话用户",
       "reviewed_at": 1791944832,
       "note": "审阅人确认查询、标注等级与 dev/holdout 拆分通过；1791944832 轮按审阅人反馈修正 q-exact-003 与 q-cond-008/009/012 的筛选语义与标注后重新绑定哈希。content_sha256 绑定被批准的文件内容。"
+    },
+    {
+      "scope": "backend/dataset/actions.agent.json",
+      "coverage": "新增 1 条本地动作 9001 高位引体向上",
+      "content_sha256": "e6c3781611f4b9cda4b1646445f934200189d33f227c7a46c2b46890ce1bec26",
+      "conclusion": "approved",
+      "reviewer": "本会话用户",
+      "reviewed_at": 1793007771,
+      "note": "用户审阅条目内容后确认写入；无上游对应条目，字段取值与中英文步骤见 optimization/action-catalog-additions.md。"
     }
   ],
-  "notes": "英文名称源自 MIT 许可上游数据并逐条对齐，俗称由 subagent 生成后经本会话用户审阅通过；发布语料由候选语料按通过结论生成。 2026-10-26：目录修订 33 条中文命名并删除重复条目 1689，配套语料按新内容重签摘要。 2026-10-26 第二轮：深蹲类 26 条改名、5 条字段更正、6 条步骤重写，配套语料重签摘要。"
+  "notes": "英文名称源自 MIT 许可上游数据并逐条对齐，俗称由 subagent 生成后经本会话用户审阅通过；发布语料由候选语料按通过结论生成。 2026-10-26：目录修订 33 条中文命名并删除重复条目 1689，配套语料按新内容重签摘要。 2026-10-26 第二轮：深蹲类 26 条改名、5 条字段更正、6 条步骤重写，配套语料重签摘要。 2026-10-26 第三轮：新增街健动作 9001 高位引体向上，目录 1320 → 1321，配套语料按新内容重签摘要。"
 }

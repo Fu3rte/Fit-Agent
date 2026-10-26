@@ -133,13 +133,14 @@ async def create_confirmation(session_id: PathUUID, payload: SaveConfirmationWir
     )
     # 观测依赖显式传入：使用主事件循环已有 TraceStore 与现有凭据检查，不新增逐请求观测连接。
     trace_store = request.app.state.trace_store
+    sink = request.app.state.cloud_trace
     contains = CredentialFilter(request.app.state.active_secrets(session)).contains
 
     async def execute_new():
         # 后台执行：受理即登记处理中操作并直接调用业务保存；客户端断连不打断收尾，active 恰好释放一次。
         try:
             return await confirmations.confirm(
-                session, req, trace_store=trace_store, contains=contains
+                session, req, trace_store=trace_store, sink=sink, contains=contains
             )
         finally:
             active.release()
@@ -154,7 +155,7 @@ async def create_confirmation(session_id: PathUUID, payload: SaveConfirmationWir
             # 复用路径不新增记录器或根 Span：同键操作沿用原结果，观测边界保持不变。
             return _confirmation_post_response(
                 await confirmations.confirm(
-                    session, req, trace_store=trace_store, contains=contains
+                    session, req, trace_store=trace_store, sink=sink, contains=contains
                 ), request
             )
         if not accepting_runs.is_set():

@@ -2,8 +2,8 @@
   "version": "2026-10-18.1",
   "catalog": {
     "path": "backend/dataset/actions.agent.json",
-    "sha256": "84cd7c1c30ff61d83e1bef650cfa7496da41f5fbc9def341fa1e577fc2d34d23",
-    "count": 1320
+    "sha256": "e6c3781611f4b9cda4b1646445f934200189d33f227c7a46c2b46890ce1bec26",
+    "count": 1321
   },
   "source_note": "canonical 值由实际目录逐字段枚举得到，覆盖率由 check_retrieval_supplements.py 校验；zh 为统一检索文本中的显示形式，terms 为中文查询到 canonical 的规范化词表。synonym_groups 列出同义 canonical 值，仅这些值允许共享同一 zh 显示。",
   "review_status": "candidate",

@@ -1694,6 +1694,7 @@ async def _run_message_event(
         business=runtime.business,
         executor=runtime.executor,
         trace_store=None,
+        cloud_trace=None,
         create_state=create_state,
         create_events=_evaluation_events,
     )

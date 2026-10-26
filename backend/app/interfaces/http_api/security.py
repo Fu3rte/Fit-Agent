@@ -31,6 +31,11 @@ async def check_boundary(request: Request) -> None:
             reject(403, "origin_forbidden", "Origin 不允许")
 
 
+CLIENT_ATTEMPT_PATH = "/api/agent/client-attempts"
+CLIENT_ATTEMPT_BODY_LIMIT = 4096
+ATTACHMENT_BODY_LIMIT = 1048576
+
+
 class AttachmentBodyLimit:
     def __init__(self, app: ASGIApp) -> None:
         self.app = app
@@ -38,12 +43,17 @@ class AttachmentBodyLimit:
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         protected = scope["type"] == "http" and scope["method"] == "POST" and (
-            scope["path"] in ("/api/agent/run", "/api/agent/edit")
+            scope["path"] in ("/api/agent/run", "/api/agent/edit", CLIENT_ATTEMPT_PATH)
             or self.steering_path.fullmatch(scope["path"]) is not None
         )
         if not protected:
             await self.app(scope, receive, send)
             return
+        limit = (
+            CLIENT_ATTEMPT_BODY_LIMIT
+            if scope["path"] == CLIENT_ATTEMPT_PATH
+            else ATTACHMENT_BODY_LIMIT
+        )
         request = Request(scope, receive)
         try:
             await check_boundary(request)
@@ -51,8 +61,9 @@ class AttachmentBodyLimit:
             await JSONResponse({"detail": error.detail}, error.status_code, headers=NO_STORE)(scope, receive, send)
             return
         body = bytearray()
+        # 逐块累计，不信任 Content-Length；缺失或伪造该头同样按实际字节数判定。
         async for chunk in request.stream():
-            if len(body) + len(chunk) > 1048576:
+            if len(body) + len(chunk) > limit:
                 await JSONResponse({"detail": {
                     "code": "request_size_exceeded", "message": "请求体大小超过限制。",
                 }}, 413, headers=NO_STORE)(scope, receive, send)

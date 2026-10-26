@@ -100,7 +100,7 @@ def check_inputs(corpus: RetrievalCorpus) -> dict:
     else:
         raise AssertionError("raw filter 被接受")
     assert SearchConditions(available_equipment=()).expression(corpus.catalog) == "equipment in []"
-    assert len(corpus.records) == len(corpus.catalog.exercise_ids) == 1320
+    assert len(corpus.records) == len(corpus.catalog.exercise_ids) == 1321
     assert corpus.catalog.get("0001").id == "0001"
     return {"rejected_before_database": rejected, "count": len(corpus.records), "sources": corpus.sources, "utf8_maxima": corpus.maxima}
 
@@ -371,7 +371,7 @@ async def failures(corpus: RetrievalCorpus) -> None:
 async def boundaries(corpus: RetrievalCorpus) -> None:
     async with MilvusConnection.from_env() as db:
         collection = await published_collection(db)
-        operation = asyncio.create_task(db.call("query", collection, filter='id != ""', output_fields=["id"], limit=1320, consistency_level="Strong"))
+        operation = asyncio.create_task(db.call("query", collection, filter='id != ""', output_fields=["id"], limit=1321, consistency_level="Strong"))
         await asyncio.sleep(0)
         operation.cancel()
         try:

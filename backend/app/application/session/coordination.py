@@ -243,6 +243,7 @@ async def coordinate(
     loop,
     trace: RunTrace,
     store,
+    cloud_trace,
     *,
     create_events: Callable[..., RunEvents],
 ) -> None:
@@ -366,9 +367,9 @@ async def coordinate(
         _schedule_diagnostic(state, runs, session_id, run.id, "terminal_persist_failed")
         coordinator.close(str(run.id))
         enter_fault_closure(state.run_scope)
-        await trace.finish(store)
+        await trace.finish(store, cloud_trace)
         raise
-    await trace.finish(store)
+    await trace.finish(store, cloud_trace)
     if outcome is FAULT_CLOSED:
         return
     publish_terminal(state, outcome.run, stop_reason)

@@ -244,8 +244,11 @@ dependencies = [
     { name = "jsonlines" },
     { name = "jsonpointer" },
     { name = "jsonschema" },
+    { name = "langfuse" },
     { name = "limits" },
     { name = "openai" },
+    { name = "opentelemetry-api" },
+    { name = "opentelemetry-sdk" },
     { name = "pydantic" },
     { name = "pymilvus" },
     { name = "pyyaml" },
@@ -255,7 +258,6 @@ dependencies = [
 [package.dev-dependencies]
 dev = [
     { name = "langchain-community" },
-    { name = "langfuse" },
     { name = "mteb" },
     { name = "pillow" },
     { name = "pytest" },
@@ -273,8 +275,11 @@ requires-dist = [
     { name = "jsonlines", specifier = ">=4,<5" },
     { name = "jsonpointer", specifier = ">=3,<4" },
     { name = "jsonschema", specifier = ">=4" },
+    { name = "langfuse", specifier = ">=5.0.4,<6" },
     { name = "limits", specifier = ">=5,<6" },
     { name = "openai", specifier = ">=3,<4" },
+    { name = "opentelemetry-api", specifier = ">=1.45.1,<2" },
+    { name = "opentelemetry-sdk", specifier = ">=1.45.1,<2" },
     { name = "pydantic", specifier = ">=2,<3" },
     { name = "pymilvus", specifier = ">=3.0.2,<3.1" },
     { name = "pyyaml", specifier = ">=6,<7" },
@@ -284,7 +289,6 @@ requires-dist = [
 [package.metadata.requires-dev]
 dev = [
     { name = "langchain-community", specifier = ">=0.4,<0.4.2" },
-    { name = "langfuse", specifier = ">=5.0.4,<6" },
     { name = "mteb", specifier = ">=2.26.7,<2.27" },
     { name = "pillow", specifier = ">=13,<14" },
     { name = "pytest", specifier = ">=9.1" },

@@ -9,8 +9,11 @@ from enum import StrEnum
 from pathlib import Path
 from threading import Lock
 from time import perf_counter, time_ns
-from typing import Annotated, Any, Literal, Self
+from typing import TYPE_CHECKING, Annotated, Any, Literal, Self
 from uuid import uuid4
+
+if TYPE_CHECKING:
+    from app.agent.cloud_trace import SpanExportSink
 
 import aiosqlite
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -479,13 +482,26 @@ class RunTrace:
             self._spans = []
             self._released = True
 
-    async def finish(self, store: "TraceStore | None") -> None:
-        # 观测收尾边界：快照、整批写入与清理的普通故障全部隔离，允许整条 Trace 缺样。
+    async def finish(
+        self,
+        store: "TraceStore | None",
+        sink: "SpanExportSink | None" = None,
+    ) -> None:
+        # 观测收尾边界：快照只生成一次，本地写入与 Cloud 入队分别隔离，允许整条缺样。
         # 取消与进程退出沿用原有控制流；两条路径都释放记录器。
         try:
             records = self.records()
-            if store is not None and records:
-                await store.save(records)
+            if records:
+                if store is not None:
+                    try:
+                        await store.save(records)
+                    except Exception:
+                        pass
+                if sink is not None:
+                    try:
+                        sink.submit(records)
+                    except Exception:
+                        pass
         except Exception:
             pass
         finally:

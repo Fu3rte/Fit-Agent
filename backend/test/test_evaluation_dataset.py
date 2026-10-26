@@ -47,7 +47,7 @@ def test_review_and_formal_entries_accept_full_dataset(tmp_path):
     formal = load_for_evaluation(version_dir)
     assert review.review["ready"] is True
     assert formal.review["ready"] is True
-    assert review.review["counts"] == {"corpus": 1320, "queries": 150, "qrels": 390, "scenarios": 80, "assets": 1}
+    assert review.review["counts"] == {"corpus": 1321, "queries": 150, "qrels": 390, "scenarios": 80, "assets": 1}
     assert review.review["quotas"]["purposes"] == {"lookup": 60, "generation": 45, "replacement": 45}
     assert review.review["quotas"]["expect_empty"] == {"lookup": 10, "generation": 10, "replacement": 10}
     assert set(review.review["quotas"]["scenario_categories"].values()) == {8}

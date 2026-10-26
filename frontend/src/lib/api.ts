@@ -1,6 +1,8 @@
 import type {
   AgentStreamHeaders,
   AttachmentContentWire,
+  ClientAttemptBody,
+  ClientAttemptReceiptWire,
   CurrentPlanWire,
   EditRunBody,
   HistoryEntryWire,
@@ -68,6 +70,7 @@ import {
 } from "@/lib/business";
 import {
   ReActHttpError,
+  ReActStreamError,
   createReActParser,
   validMessageInput,
 } from "@/features/chat/utils/reactAgent";
@@ -413,14 +416,23 @@ export async function runReActStream(
   const reader = response.body.getReader();
   try {
     const decoder = new TextDecoder("utf-8", { fatal: true });
+    const decode = (value?: Uint8Array): string => {
+      try {
+        return value === undefined
+          ? decoder.decode()
+          : decoder.decode(value, { stream: true });
+      } catch {
+        throw new ReActStreamError("protocol", "响应流解码失败。");
+      }
+    };
     const parser = createReActParser(onEvent, headers.run_id);
     onOpen(headers);
     while (!parser.terminal) {
       const { done, value } = await reader.read();
       if (done) break;
-      parser.feed(decoder.decode(value, { stream: true }));
+      parser.feed(decode(value));
     }
-    if (!parser.terminal) parser.feed(decoder.decode());
+    if (!parser.terminal) parser.feed(decode());
     parser.finish();
   } finally {
     try {
@@ -430,6 +442,45 @@ export async function runReActStream(
     }
   }
   return null;
+}
+
+/** 客户端发送观测回执（Trace 契约 §6.3）：recorded 仅表示接口接受处理 */
+function parseClientAttemptReceipt(body: unknown): ClientAttemptReceiptWire {
+  if (!isObject(body)) throw new Error("客户端观测回执无效。");
+  const status = requireEnum(
+    body.status,
+    ["recorded", "duplicate", "skipped"] as const,
+    "status",
+  );
+  const observation_id = requireString(body.observation_id, "observation_id");
+  if (!/^[0-9a-f]{16}$/.test(observation_id))
+    throw new Error("客户端观测身份无效。");
+  if (status === "skipped") {
+    if (body.reason !== "cloud_unavailable")
+      throw new Error("客户端观测跳过原因无效。");
+    return { status, observation_id, reason: "cloud_unavailable" };
+  }
+  if (body.reason !== undefined)
+    throw new Error("客户端观测回执字段无效。");
+  return { status, observation_id };
+}
+
+/**
+ * 客户端发送观测上报（Trace 契约 §6.3）：固定同源路径，独立于业务 AbortSignal；
+ * keepalive 用于文档离开时的尽力上报。只发送已取得的身份、枚举与测量。
+ */
+export async function postClientAttempt(
+  body: ClientAttemptBody,
+  keepalive = false,
+): Promise<ClientAttemptReceiptWire> {
+  const response = await fetch("/api/agent/client-attempts", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+    keepalive,
+  });
+  if (!response.ok) throw await contractError(response);
+  return parseClientAttemptReceipt(await response.json());
 }
 
 /** 接收 Steering（§6.1）：首次 accepted，重复返回原输入当前持久化状态 */

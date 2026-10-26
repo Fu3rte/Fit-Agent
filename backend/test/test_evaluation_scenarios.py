@@ -51,6 +51,7 @@ from app.domain.session.attachments import (
     AttachmentMetadata,
     attachment_storage_ref,
 )
+from app.domain.session.errors import SessionNotFound
 from app.domain.session.models import (
     CompactionEntry,
     SessionMessageEntry,
@@ -124,6 +125,7 @@ from evaluation.scenarios import (
     _not_applicable_generation,
     _parse_args,
     _partial_artifact,
+    _run_message_event,
     _seed_initial_state,
     _seed_prior_messages,
     _verify_initial_projection,
@@ -212,6 +214,32 @@ def test_input_message_is_not_a_second_send(dataset):
     ]
     assert messages == [scenario["input"]["message"]]
     assert plan.event_ids == ["e01"]
+
+
+async def test_message_event_binds_admission_signature(dataset, root):
+    # 消息事件必须按受理签名完整绑定；未知会话在准入阶段直接返回会话不存在。
+    scenario = next(
+        item for item in dataset.scenarios
+        if item["scenario_id"] == "s-plan-generation-01"
+    )
+    index, event = next(
+        (index, item)
+        for index, item in enumerate(scenario["events"])
+        if item["type"] == "message"
+    )
+    async with open_runtime(root) as runtime:
+        with pytest.raises(SessionNotFound):
+            await _run_message_event(
+                runtime,
+                dataset,
+                scenario,
+                event,
+                index,
+                str(uuid4()),
+                [],
+                1_760_000_000_000,
+                model=MODEL,
+            )
 
 
 async def test_initial_state_distinguishes_missing_and_empty_profile(dataset, root):

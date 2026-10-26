@@ -138,7 +138,7 @@ def test_draft_dataset_user_inputs_have_no_catalog_ids():
     assert report.coverage["scenario_messages"] == len(dataset.scenarios) == 80
     assert report.coverage["event_messages"] == expected_events
     assert report.coverage["assets"] == len(dataset.assets) == 8
-    assert report.catalog_size == 1320
+    assert report.catalog_size == 1321
 
 
 def test_review_material_covers_approved_version():

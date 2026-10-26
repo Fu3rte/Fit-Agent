@@ -118,6 +118,7 @@ async def launch_run(
             coordinator=request.app.state.steering,
             business=request.app.state.business, executor=request.app.state.executor,
             trace_store=request.app.state.trace_store,
+            cloud_trace=request.app.state.cloud_trace,
             create_state=RunState, create_events=HttpRunEvents,
         )
         if result.state is None:

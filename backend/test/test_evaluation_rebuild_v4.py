@@ -20,7 +20,7 @@ DATA_ROOT = BACKEND / "dataset/evaluation"
 PARENT = DATA_ROOT / "rebuild-v3"
 VERSION = DATA_ROOT / "rebuild-v4"
 DECISION_REF = "optimization/evaluation-rebuild-v4-qrels-approval.md#用户授权"
-RELEASE_DECISION_REF = "optimization/action-catalog-naming-cleanup.md#改名与条目删除"
+RELEASE_DECISION_REF = "optimization/action-catalog-additions.md#街健动作补充"
 
 
 def rows(path):
@@ -107,7 +107,7 @@ def test_rebuild_v4_manifest_and_delegation_record(dataset):
     for ref in manifest["files"].values():
         assert hashlib.sha256((VERSION / ref["path"]).read_bytes()).hexdigest() == ref["sha256"]
     record = (BACKEND.parent / RELEASE_DECISION_REF.split("#")[0]).read_text(encoding="utf-8")
-    for text in ("用户在本会话指示执行改名与删除", "全量同步重签", "语义未重新人工复核", "1689 自重推拉"):
+    for text in ("逐步补充街健动作", "起为本地新增动作的保留编号段", "不含摆荡借力版本", "目录由 1320 条增至 1321 条"):
         assert text in record
 
 

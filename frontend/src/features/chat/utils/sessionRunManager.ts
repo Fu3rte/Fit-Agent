@@ -3,6 +3,7 @@ import {
   getOperation,
   getRun,
   getSaveConfirmation,
+  postClientAttempt,
   postSaveConfirmation,
   readSessionHistory,
   runReActStream,
@@ -42,6 +43,15 @@ import {
   retainedAttachmentDrafts,
   type AttachmentDraft,
 } from "./attachments";
+import {
+  clientAttemptBody,
+  isPermanentAttemptRejection,
+  observeFirstText,
+  settleClientAttempt,
+  startClientAttempt,
+  streamFailureAction,
+  type ClientAttempt,
+} from "./clientAttempt";
 import {
   attemptFromLedger,
   confirmationOccupying,
@@ -177,6 +187,7 @@ class SessionRunRecord {
     controller: AbortController;
     operation: PendingOperation;
     run_id?: string;
+    attempt?: ClientAttempt;
   } | null = null;
   private steering: AbortController | null = null;
   /** 确认提交在途控制器（确认契约 §7.2）：会话删除或页面卸载时关闭，服务端继续收尾原操作 */
@@ -198,6 +209,8 @@ class SessionRunRecord {
   private initialized = false;
   /** 已随会话删除移出管理层：迟到 SSE、查询与定时回调一律丢弃（session-delete-contract §5） */
   private removed = false;
+  /** 客户端发送观测（Trace 契约 §6.2、§6.3）：当前文档内存待报，回执或永久拒收后释放 */
+  private readonly attempts = new Map<string, ClientAttempt>();
 
   constructor(sessionId: string, isDraft: boolean) {
     this.sessionId = sessionId;
@@ -247,6 +260,7 @@ class SessionRunRecord {
     this.confirm?.abort();
     this.confirm = null;
     this.inquiry.abort();
+    this.attempts.clear();
     forgetConfirmationLedger(this.sessionId);
     this.listeners.clear();
   }
@@ -263,6 +277,71 @@ class SessionRunRecord {
   private setRounds(rounds: ReActRound[]): void {
     this.patch({ rounds });
     this.settleStopping();
+  }
+
+  /** 登记一次发送传输尝试（Trace 契约 §6.2）：只随当前浏览器文档存在 */
+  private trackAttempt(attempt: ClientAttempt): void {
+    this.attempts.set(attempt.client_attempt_id, attempt);
+  }
+
+  /** 上报已结算尝试（Trace 契约 §6.3）：回执或永久拒收后释放，临时失败保留待既有节奏重试 */
+  private reportAttempt(attempt: ClientAttempt, keepalive = false): void {
+    if (attempt.terminal_kind === null || this.removed) return;
+    if (attempt.reporting) {
+      // 在途期间的补报触发只保留一次，待该请求以可重试失败结束时立即消费。
+      attempt.pending_report = true;
+      return;
+    }
+    const body = clientAttemptBody(attempt);
+    if (body === null) return;
+    attempt.reporting = true;
+    void postClientAttempt(body, keepalive).then(
+      () => this.attempts.delete(attempt.client_attempt_id),
+      (failure: unknown) => {
+        attempt.reporting = false;
+        if (isPermanentAttemptRejection(failure)) {
+          this.attempts.delete(attempt.client_attempt_id);
+          return;
+        }
+        if (attempt.pending_report) {
+          attempt.pending_report = false;
+          this.reportAttempt(attempt, keepalive);
+        }
+      },
+    );
+  }
+
+  /** 补报由既有终态确认与历史刷新驱动（Trace 契约 §6.3）：不新增观测轮询或定时器 */
+  private flushAttempts(operationId?: string): void {
+    for (const attempt of this.attempts.values())
+      if (
+        attempt.terminal_kind !== null &&
+        (operationId === undefined || attempt.operation_id === operationId)
+      )
+        this.reportAttempt(attempt);
+  }
+
+  /** 运行终态由现有查询确认（Trace 契约 §6.2）：仅未知分类按查询恢复结算，已结算的耗时冻结 */
+  private confirmAttempts(runId: string, operationId?: string): void {
+    for (const attempt of this.attempts.values()) {
+      if (
+        attempt.run_id !== runId &&
+        (operationId === undefined || attempt.operation_id !== operationId)
+      )
+        continue;
+      if (attempt.run_id === null) attempt.run_id = runId;
+      if (attempt.terminal_kind === null)
+        settleClientAttempt(attempt, "unknown", performance.now(), false);
+    }
+    this.flushAttempts();
+  }
+
+  /** 实际离开文档（Trace 契约 §6.2）：活动测量尽力记录 unknown，完成时长缺失 */
+  settleForUnload(): void {
+    for (const attempt of this.attempts.values()) {
+      settleClientAttempt(attempt, "unknown", performance.now(), false);
+      this.reportAttempt(attempt, true);
+    }
   }
 
   /** 停止等待收敛（治理契约）：仅当运行轮次取得持久化终态或已移出展示时结束“正在停止” */
@@ -344,6 +423,7 @@ class SessionRunRecord {
     for (const item of recovery.query)
       this.confirmOperation(item.roundId, item.operation);
     this.applyConfirmations(history);
+    this.flushAttempts();
   }
 
   private loadHistory(signal: AbortSignal, mode: "initial" | "refresh"): void {
@@ -430,6 +510,7 @@ class SessionRunRecord {
           this.stopWatch();
           this.stopOperationWatchesForRound(roundId);
           this.patch({ stoppingRoundId: null });
+          this.confirmAttempts(run.run_id);
           this.loadHistory(signal, "refresh");
         },
         (failure: unknown) => {
@@ -870,6 +951,7 @@ class SessionRunRecord {
     if (this.view.stoppingRoundId === roundId)
       this.patch({ stoppingRoundId: null });
     this.stopWatch();
+    this.confirmAttempts(run.run_id, operationId);
   }
 
   private resolveRun(
@@ -1061,11 +1143,13 @@ class SessionRunRecord {
     operation: PendingOperation,
     endpoint: string,
     onSettle?: (accepted: boolean) => void,
+    attempt?: ClientAttempt,
   ): void {
     const current = {
       controller: new AbortController(),
       operation,
       run_id: undefined as string | undefined,
+      attempt,
     };
     this.exec = current;
     this.generation += 1;
@@ -1104,9 +1188,32 @@ class SessionRunRecord {
       body,
       (event) => {
         if (this.removed || this.exec !== current) return;
-        this.update(operation.operation_id, (round) =>
-          applyReActEvent(round, event),
-        );
+        try {
+          this.update(operation.operation_id, (round) =>
+            applyReActEvent(round, event),
+          );
+        } catch (error) {
+          // 业务投影拒绝该事件：客户端已无法确认终态，按解析失败结算一次。
+          if (current.attempt !== undefined) {
+            settleClientAttempt(
+              current.attempt,
+              "unknown",
+              performance.now(),
+            );
+            this.reportAttempt(current.attempt);
+          }
+          throw error;
+        }
+        if (current.attempt !== undefined) {
+          const now = performance.now();
+          observeFirstText(current.attempt, event, now);
+          if (event.event === "done")
+            settleClientAttempt(current.attempt, "completed", now);
+          else if (event.event === "error")
+            settleClientAttempt(current.attempt, event.data.status, now);
+          if (current.attempt.terminal_kind !== null)
+            this.reportAttempt(current.attempt);
+        }
         /* 业务查询刷新只由结构化确认的真实终态触发（确认契约 §7.6）：模型运行不再执行保存。 */
         if (event.event === "done" || event.event === "error") {
           this.exec = null;
@@ -1127,6 +1234,8 @@ class SessionRunRecord {
       (headers) => {
         if (this.removed || this.exec !== current) return;
         current.run_id = headers.run_id;
+        if (current.attempt !== undefined)
+          current.attempt.run_id = headers.run_id;
         if (operation.kind === "edit" || operation.kind === "regenerate")
           this.acceptExec(operation, headers.run_id, headers.request_entry_id);
         this.update(operation.operation_id, (round) => ({
@@ -1152,6 +1261,17 @@ class SessionRunRecord {
         if (repeat === null || this.exec !== current) return;
         this.exec = null;
         this.patch({ busy: false });
+        if (current.attempt !== undefined) {
+          // 重复受理只返回原运行状态，没有真实终态事件：按查询恢复记录 unknown，完成时长省略。
+          current.attempt.run_id = repeat.run_id;
+          settleClientAttempt(
+            current.attempt,
+            "unknown",
+            performance.now(),
+            false,
+          );
+          this.reportAttempt(current.attempt);
+        }
         this.handleRepeat(operation, repeat);
         onSettle?.(true);
       },
@@ -1159,6 +1279,19 @@ class SessionRunRecord {
         if (this.exec !== current) return;
         this.exec = null;
         this.patch({ busy: false });
+        if (current.attempt !== undefined) {
+          const action = streamFailureAction(failure);
+          if (action.report && action.kind !== null) {
+            settleClientAttempt(
+              current.attempt,
+              action.kind,
+              performance.now(),
+            );
+            this.reportAttempt(current.attempt);
+          } else if (!action.report) {
+            this.attempts.delete(current.attempt.client_attempt_id);
+          }
+        }
         this.handleFailure(
           operation.operation_id,
           operation,
@@ -1177,15 +1310,27 @@ class SessionRunRecord {
 
   /** 一次发送（§5、附件契约 §3.1）：先确认会话，再按服务端响应处理执行流；
    *  草稿标题在文本含非空白内容时沿用原文，纯文件消息按附件顺序以换行连接文件名 */
-  private dispatchSend(operation: PendingOperation): void {
+  private dispatchSend(
+    operation: PendingOperation,
+    startedAt = performance.now(),
+  ): void {
+    // 起点由调用方在提交门禁通过后冻结；草稿会话创建与网络等待都计入本次传输尝试。
+    const attempt = startClientAttempt(
+      this.sessionId,
+      operation.operation_id,
+      startedAt,
+    );
+    this.trackAttempt(attempt);
     const title = draftSessionTitle(operation.request, operation.attachments);
     if (!this.view.persistent) retainDraftTitle(this.sessionId, title);
     void this.ensureSession(title).then((outcome) => {
       if (this.removed) return;
       if (outcome.state === "created") {
-        this.beginExec(operation, EXEC_ENDPOINT.send);
+        this.beginExec(operation, EXEC_ENDPOINT.send, undefined, attempt);
         return;
       }
+      // 会话未创建或结果未知：业务发送请求未提交，不生成已关联的传输样本。
+      this.attempts.delete(attempt.client_attempt_id);
       this.patch({ error: outcome.message });
       if (outcome.state === "rejected") {
         this.stopOperationWatch(operation.operation_id);
@@ -1470,6 +1615,8 @@ class SessionRunRecord {
       this.view.stoppingRoundId !== null
     )
       return;
+    // 显式重发从本次重试提交入口计时；纯恢复查询不建立传输尝试。
+    const startedAt = performance.now();
     this.stopOperationWatch(operationId);
     this.patch({ error: undefined, retrying: operationId });
     void getOperation(this.sessionId, operationId, this.inquiry.signal).then(
@@ -1488,7 +1635,8 @@ class SessionRunRecord {
         }
         if (operation.kind === "steering")
           void this.dispatchSteering(roundId, operation);
-        else if (operation.kind === "send") this.dispatchSend(operation);
+        else if (operation.kind === "send")
+          this.dispatchSend(operation, startedAt);
         else this.beginExec(operation, EXEC_ENDPOINT[operation.kind]);
       },
       (failure: unknown) => {
@@ -1509,6 +1657,11 @@ class SessionRunRecord {
   stop = (): void => {
     const run = this.exec;
     if (run === null) return;
+    if (run.attempt !== undefined) {
+      // 用户停止在 stop 入口捕获中止时刻；后续中止异常不得改写该分类与耗时。
+      settleClientAttempt(run.attempt, "cancelled", performance.now());
+      this.reportAttempt(run.attempt);
+    }
     this.exec = null;
     run.controller.abort();
     this.patch({
@@ -1579,6 +1732,8 @@ class SessionRunRecord {
       !this.canStartRun()
     )
       return Promise.resolve(false);
+    // 计时起点：通过有效发送门禁后、创建操作身份前；覆盖草稿会话创建与网络等待。
+    const startedAt = performance.now();
     const operation: PendingOperation = {
       operation_id: crypto.randomUUID(),
       session_id: this.sessionId,
@@ -1606,7 +1761,7 @@ class SessionRunRecord {
         status: "running",
       },
     ]);
-    this.dispatchSend(operation);
+    this.dispatchSend(operation, startedAt);
     return Promise.resolve(true);
   };
 }
@@ -1635,6 +1790,11 @@ class SessionRunRegistry {
     this.records.delete(sessionId);
     record.dispose();
   }
+
+  /** 实际离开文档（Trace 契约 §6.2）：活动测量尽力记录 unknown，刷新或关闭允许丢失未上报记录 */
+  settleForUnload(): void {
+    for (const record of this.records.values()) record.settleForUnload();
+  }
 }
 
 const sessionRuns = new SessionRunRegistry();
@@ -1644,6 +1804,10 @@ if (typeof window !== "undefined") {
   window.addEventListener(SESSION_DELETED_EVENT, (event) =>
     sessionRuns.discard((event as CustomEvent<string>).detail),
   );
+  // 往返缓存保留活动测量；只有实际离开文档才结算未知终态。
+  window.addEventListener("pagehide", (event) => {
+    if (!event.persisted) sessionRuns.settleForUnload();
+  });
 }
 
 export { sessionRuns };
