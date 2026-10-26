@@ -10,8 +10,10 @@ from statistics import mean
 from typing import Any, Sequence
 
 from evaluation import external_summary as es
-from evaluation import langsmith_retrieval as lr
-from evaluation import langsmith_scenarios as ls
+from evaluation import langfuse_retrieval as lfr
+from evaluation import langfuse_scenarios as lfs
+from evaluation import langsmith_retrieval as lsr
+from evaluation import langsmith_scenarios as lss
 from evaluation import summary as sm
 from evaluation.contracts import RETRIEVAL_METRICS
 from evaluation.dataset import (
@@ -36,13 +38,49 @@ from evaluation.scenarios import (
 )
 
 SUMMARY_SCHEMA = sm.SUMMARY_SCHEMA
-RETRIEVAL_SCHEMA = lr.SCHEMA
-SCENARIO_SCHEMA = ls.SCHEMA
+RETRIEVAL_SCHEMA = lsr.SCHEMA
+SCENARIO_SCHEMA = lss.SCHEMA
+RETRIEVAL_PLATFORMS = {
+    lfr.SCHEMA: es.LANGFUSE_PLATFORM,
+    lsr.SCHEMA: es.LANGSMITH_PLATFORM,
+}
+SCENARIO_PLATFORMS = {
+    lfs.SCHEMA: es.LANGFUSE_PLATFORM,
+    lss.SCHEMA: es.LANGSMITH_PLATFORM,
+}
+PLATFORM_LABELS = es.PLATFORM_LABELS
 START_MARKER = "<!-- sdk-summary:start -->"
 END_MARKER = "<!-- sdk-summary:end -->"
 HEX64 = re.compile(r"^[0-9a-f]{64}$")
-GROUP_ORDER = tuple(lr.GROUPS)
-OPTIONAL_GROUPS = (lr.RERANK_GROUP,)
+GROUP_ORDER = tuple(lfr.GROUPS)
+OPTIONAL_GROUPS = (lfr.RERANK_GROUP,)
+
+
+def _retrieval_sdk_module(document: dict):
+    # 检索布局分发包判定：schema 决定平台模块；未知 schema 按历史模块口径产出阻断。
+    return (
+        lfr
+        if document.get("schema") == lfr.SCHEMA
+        else lsr
+    )
+
+
+def _scenario_sdk_module(document: dict):
+    # 场景布局分发包判定：schema 决定平台模块；未知 schema 按历史模块口径产出阻断。
+    return (
+        lfs
+        if document.get("schema") == lfs.SCHEMA
+        else lss
+    )
+
+
+def _sdk_label(sdk) -> str:
+    # 平台模块 -> 报告/阻断文案中的平台名。
+    return (
+        PLATFORM_LABELS[es.LANGFUSE_PLATFORM]
+        if sdk in (lfr, lfs)
+        else PLATFORM_LABELS[es.LANGSMITH_PLATFORM]
+    )
 
 
 class SDKSummaryError(RuntimeError):
@@ -82,6 +120,7 @@ class RetrievalSource:
     root: Path | None = None
     available: bool = False
     document: dict = field(default_factory=dict)
+    platform: str | None = None
     issues: list[str] = field(default_factory=list)
     run_id: str | None = None
     purpose: str | None = None
@@ -126,6 +165,7 @@ class ScenarioSource:
     root: Path | None = None
     available: bool = False
     document: dict = field(default_factory=dict)
+    platform: str | None = None
     issues: list[str] = field(default_factory=list)
     run_id: str | None = None
     purpose: str | None = None
@@ -269,6 +309,7 @@ def _expected_labels(dataset: EvaluationDataset, query_id: str) -> list[dict]:
 
 def _validate_retrieval_sample(
     *,
+    rm,
     dataset: EvaluationDataset,
     group: str,
     query_id: str,
@@ -292,8 +333,8 @@ def _validate_retrieval_sample(
         issues.append("样例 ID 与 SDK 数据集映射不一致")
     if outputs.get("strategy") != group:
         issues.append("outputs 检索组不一致")
-    if group == lr.RERANK_GROUP:
-        if outputs.get("experiment") != lr.support.EXPERIMENT_RERANK:
+    if group == rm.RERANK_GROUP:
+        if outputs.get("experiment") != rm.support.EXPERIMENT_RERANK:
             issues.append("outputs 重排实验身份不一致")
         baseline = outputs.get("baseline")
         if not isinstance(baseline, dict):
@@ -322,15 +363,15 @@ def _validate_retrieval_sample(
     if reference.get("scenario_id") != query["scenario_id"]:
         issues.append("reference_outputs 场景 ID 与批准数据不一致")
     try:
-        expected = lr.expected_feedback(
+        expected = rm.expected_feedback(
             group,
             {
                 "query_id": query_id,
-                "dataset": lr.dataset_binding(dataset),
+                "dataset": rm.dataset_binding(dataset),
             },
             outputs,
             reference,
-            lr.dataset_binding(dataset),
+            rm.dataset_binding(dataset),
             reviewed,
         )
     except Exception as error:
@@ -347,7 +388,7 @@ def _validate_retrieval_sample(
         for key in expected_keys & set(recorded)
     }
     for key, value in differences.items():
-        if value > lr.REMOTE_SCORE_TOLERANCE:
+        if value > rm.REMOTE_SCORE_TOLERANCE:
             issues.append(f"feedback 与重验结果不一致: {key}")
     return {
         "local": expected,
@@ -397,6 +438,7 @@ def _group_rows(rows: Sequence[dict], key: str) -> dict[str, dict]:
 
 def _retrieval_group(
     *,
+    rm,
     group: str,
     data: Any,
     dataset: EvaluationDataset,
@@ -445,11 +487,11 @@ def _retrieval_group(
         for key in ("experiment_id", "experiment_name", "experiment_url")
     }
     if not result.experiment["experiment_id"]:
-        _add(result.issues, "缺少 LangSmith 实验 ID")
+        _add(result.issues, f"缺少 {_sdk_label(rm)} 实验 ID")
     result.concurrency = data.get("concurrency") or {}
     result.milvus_rpc = data.get("milvus_rpc") or {}
     max_in_flight = result.concurrency.get("max_in_flight")
-    if not isinstance(max_in_flight, int) or max_in_flight > lr.MAX_CONCURRENCY:
+    if not isinstance(max_in_flight, int) or max_in_flight > rm.MAX_CONCURRENCY:
         _add(result.issues, "并发在途数超过冻结上限")
     raw_sample_count = len(data.get("samples") or []) if isinstance(data.get("samples"), list) else 0
     if raw_sample_count > 1 and max_in_flight is not None and max_in_flight <= 1:
@@ -510,6 +552,7 @@ def _retrieval_group(
             continue
         expected_example_id = example_ids.get(query_id)
         checked, sample_issues = _validate_retrieval_sample(
+            rm=rm,
             dataset=dataset,
             group=group,
             query_id=query_id,
@@ -559,8 +602,8 @@ def _retrieval_group(
     metrics = None
     if result.coverage["status"] == "complete":
         try:
-            corpus = lr.RetrievalCorpus.load()
-            parity = lr.parity_report(
+            corpus = rm.RetrievalCorpus.load()
+            parity = rm.parity_report(
                 dataset,
                 expected_rows,
                 complete_samples,
@@ -669,10 +712,14 @@ def load_retrieval_source(path: Path, dataset: EvaluationDataset) -> RetrievalSo
     source.recorded_status = document.get("status")
     source.started_at = document.get("started_at")
     source.finished_at = document.get("finished_at")
-    if document.get("schema") != RETRIEVAL_SCHEMA:
+    schema = document.get("schema")
+    platform = RETRIEVAL_PLATFORMS.get(schema)
+    if platform is None:
         _add(source.issues, "检索来源 Schema 不符")
         source.available = False
         return source
+    rm = lfr if platform == es.LANGFUSE_PLATFORM else lsr
+    source.platform = platform
     if not isinstance(source.run_id, str) or not source.run_id:
         _add(source.issues, "检索来源缺少 run_id")
     if source.purpose not in {"validation", "formal"}:
@@ -684,7 +731,7 @@ def load_retrieval_source(path: Path, dataset: EvaluationDataset) -> RetrievalSo
         _add(source.issues, message)
     source.parameters = document.get("parameters") if isinstance(document.get("parameters"), dict) else {}
     try:
-        expected_parameters = lr.validated_parameters()
+        expected_parameters = rm.validated_parameters()
     except Exception as error:
         expected_parameters = None
         _add(source.issues, f"冻结检索参数无法核验: {type(error).__name__}: {error}")
@@ -692,7 +739,7 @@ def load_retrieval_source(path: Path, dataset: EvaluationDataset) -> RetrievalSo
         _add(source.issues, "检索参数与冻结基线不一致")
     source.code_identity = document.get("code_identity") if isinstance(document.get("code_identity"), dict) else {}
     try:
-        current_code = lr.sdk_code_identity()
+        current_code = rm.sdk_code_identity()
     except Exception as error:
         current_code = None
         _add(source.issues, f"当前检索代码身份无法生成: {type(error).__name__}: {error}")
@@ -701,7 +748,7 @@ def load_retrieval_source(path: Path, dataset: EvaluationDataset) -> RetrievalSo
             source.code_identity, current_code, "检索代码身份", ("head", "files", "versions")
         ):
             _add(source.issues, message)
-    if document.get("dataset_name") != lr.dataset_name(dataset):
+    if document.get("dataset_name") != rm.dataset_name(dataset):
         _add(source.issues, "检索数据集名称与批准数据不一致")
     if not document.get("dataset_id"):
         _add(source.issues, "检索来源缺少 dataset_id")
@@ -711,20 +758,20 @@ def load_retrieval_source(path: Path, dataset: EvaluationDataset) -> RetrievalSo
         _add(source.issues, "检索来源缺少 example_ids")
     else:
         expected_example_ids = {
-            query["query_id"]: lr.stable_example_id(lr.dataset_name(dataset), query["query_id"])
+            query["query_id"]: rm.stable_example_id(rm.dataset_name(dataset), query["query_id"])
             for query in dataset.queries
         }
         if example_ids != expected_example_ids:
             _add(source.issues, "SDK 样例 ID 映射与批准数据不一致")
-    if document.get("max_concurrency") != lr.MAX_CONCURRENCY:
+    if document.get("max_concurrency") != rm.MAX_CONCURRENCY:
         _add(source.issues, "检索并发配置与冻结上限不一致")
-    if document.get("num_repetitions") != lr.NUM_REPETITIONS:
+    if document.get("num_repetitions") != rm.NUM_REPETITIONS:
         _add(source.issues, "检索重复次数与冻结配置不一致")
     try:
         expected_rows = (
-            lr.select_validation_queries(dataset)
+            rm.select_validation_queries(dataset)
             if source.purpose == "validation"
-            else lr.select_formal_queries(dataset)
+            else rm.select_formal_queries(dataset)
         )
     except Exception as error:
         _add(source.issues, f"检索样本范围无法生成: {type(error).__name__}: {error}")
@@ -754,6 +801,7 @@ def load_retrieval_source(path: Path, dataset: EvaluationDataset) -> RetrievalSo
         if group not in groups:
             continue
         source.groups[group] = _retrieval_group(
+            rm=rm,
             group=group,
             data=groups[group],
             dataset=dataset,
@@ -778,13 +826,13 @@ def load_retrieval_source(path: Path, dataset: EvaluationDataset) -> RetrievalSo
 
 
 def _scenario_expected_ids(
-    dataset: EvaluationDataset, purpose: str | None, issues: list[str]
+    sdk, dataset: EvaluationDataset, purpose: str | None, issues: list[str]
 ) -> list[str]:
     try:
         if purpose == "validation":
-            scenarios, _ = ls.select_validation_scenarios(dataset)
+            scenarios, _ = sdk.select_validation_scenarios(dataset)
         else:
-            scenarios = ls.select_formal_scenarios(dataset)
+            scenarios = sdk.select_formal_scenarios(dataset)
     except Exception as error:
         _add(issues, f"场景样本范围无法生成: {type(error).__name__}: {error}")
         scenarios = list(dataset.scenarios)
@@ -817,6 +865,7 @@ def _empty_aggregate(
 
 def _load_scenario_sample(
     *,
+    sdk,
     dataset: EvaluationDataset,
     source: ScenarioSource,
     sample: dict,
@@ -846,8 +895,8 @@ def _load_scenario_sample(
     expected_example_id = source.document.get("example_ids", {}).get(scenario_id)
     if example_id != expected_example_id:
         _add(issues, f"{prefix}: 样例 ID 与 SDK 数据集映射不一致")
-    expected_execution = ls.expected_execution_path(example_id, scenario_id)
-    expected_scoring = expected_execution.parent / ls.SCORING_NAME
+    expected_execution = sdk.expected_execution_path(example_id, scenario_id)
+    expected_scoring = expected_execution.parent / sdk.SCORING_NAME
     if sample.get("scoring_relative") != str(expected_scoring):
         _add(issues, f"{prefix}: scoring_relative 与批准目录不一致")
     try:
@@ -870,7 +919,7 @@ def _load_scenario_sample(
                 execution_path,
                 expected_run_id=source.run_id,
                 expected_scenario_id=scenario_id,
-                expected_dataset=ls.dataset_identity(dataset),
+                expected_dataset=sdk.dataset_identity(dataset),
                 expected_scenario_sha256=frozen_scenario_sha256(scenario),
             )
         except Exception as error:
@@ -886,7 +935,7 @@ def _load_scenario_sample(
         if sample.get("execution_status") != execution.status:
             _add(issues, f"{prefix}: 执行状态与执行结果不一致")
     evaluation = None
-    evaluation_path = expected_execution.parent / ls.EVALUATION_NAME
+    evaluation_path = expected_execution.parent / sdk.EVALUATION_NAME
     try:
         resolved_evaluation = _safe_relative(str(evaluation_path), source.root, "evaluation")
     except SDKSummaryError as error:
@@ -995,7 +1044,7 @@ def _load_scenario_sample(
     )
     version = None
     try:
-        version = ls.feedback_version(sample)
+        version = sdk.feedback_version(sample)
         if (
             source.feedback_version is not None
             and version != source.feedback_version
@@ -1004,7 +1053,7 @@ def _load_scenario_sample(
             _add(aggregate.issues, message)
             _add(checked.issues, message)
         if isinstance(evaluation, dict):
-            evaluation_version = ls.feedback_version(evaluation)
+            evaluation_version = sdk.feedback_version(evaluation)
             if evaluation_version != version:
                 message = f"{prefix}: feedback 协议版本与 evaluation 不一致"
                 _add(aggregate.issues, message)
@@ -1016,20 +1065,20 @@ def _load_scenario_sample(
                 message = f"{prefix}: evaluation feedback 协议版本与运行不一致"
                 _add(aggregate.issues, message)
                 _add(checked.issues, message)
-    except ls.ScenarioSDKError as error:
+    except sdk.ScenarioSDKError as error:
         _add(aggregate.issues, f"{prefix}: {error}")
         _add(checked.issues, f"{prefix}: {error}")
-    checked.incomplete = ls.incomplete_items(artifact)
+    checked.incomplete = sdk.incomplete_items(artifact)
     recorded_incomplete = sample.get("incomplete")
     recorded_feedback = sample.get("feedback")
     if not isinstance(recorded_feedback, dict):
         _add(aggregate.issues, f"{prefix}: 样本缺少 feedback")
         recorded_feedback = {}
     if version is not None:
-        checked.feedback = ls.scenario_feedback(
+        checked.feedback = sdk.scenario_feedback(
             execution, artifact, version=version
         )
-        recorded_incomplete = ls.incomplete_items(artifact, version=version)
+        recorded_incomplete = sdk.incomplete_items(artifact, version=version)
         if set(recorded_feedback) != set(checked.feedback):
             _add(aggregate.issues, f"{prefix}: feedback 指标集合与重算结果不一致")
         for key in set(recorded_feedback) & set(checked.feedback):
@@ -1040,7 +1089,7 @@ def _load_scenario_sample(
                 float(recorded_feedback[key]),
                 checked.feedback[key],
                 rel_tol=0.0,
-                abs_tol=ls.REMOTE_SCORE_TOLERANCE,
+                abs_tol=sdk.REMOTE_SCORE_TOLERANCE,
             ):
                 _add(aggregate.issues, f"{prefix}: feedback 与重算结果不一致: {key}")
     if checked.incomplete:
@@ -1060,8 +1109,8 @@ def _load_scenario_sample(
             aggregate.state = "failed"
     if record is not None:
         try:
-            record_version = ls.feedback_version(record)
-        except ls.ScenarioSDKError as error:
+            record_version = sdk.feedback_version(record)
+        except sdk.ScenarioSDKError as error:
             _add(aggregate.issues, f"{prefix}: {error}")
             _add(checked.issues, f"{prefix}: {error}")
         else:
@@ -1086,9 +1135,9 @@ def _load_scenario_sample(
         ):
             if record.get(key) != sample.get(key):
                 _add(aggregate.issues, f"{prefix}: SDK 场景记录不一致: {key}")
-        if record.get("checkpoints") != ls.checkpoint_records(artifact):
+        if record.get("checkpoints") != sdk.checkpoint_records(artifact):
             _add(aggregate.issues, f"{prefix}: SDK 检查点记录与评分产物不一致")
-        stats = ls.assertion_statistics(artifact)
+        stats = sdk.assertion_statistics(artifact)
         if record.get("assertions") != stats:
             _add(aggregate.issues, f"{prefix}: SDK 断言统计与评分产物不一致")
     if isinstance(evaluation, dict):
@@ -1104,10 +1153,10 @@ def _load_scenario_sample(
         ):
             if evaluation.get(key) != expected:
                 _add(aggregate.issues, f"{prefix}: evaluation 记录不一致: {key}")
-        if evaluation.get("checkpoints") != ls.checkpoint_records(artifact):
+        if evaluation.get("checkpoints") != sdk.checkpoint_records(artifact):
             _add(aggregate.issues, f"{prefix}: evaluation 检查点记录与评分产物不一致")
         if (
-            version == ls.FEEDBACK_VERSION
+            version == sdk.FEEDBACK_VERSION
             and evaluation.get("feedback_version") != version
         ):
             _add(aggregate.issues, f"{prefix}: evaluation 缺少反馈协议版本")
@@ -1157,17 +1206,21 @@ def load_scenario_source(path: Path, dataset: EvaluationDataset) -> ScenarioSour
     source.recorded_status = document.get("status")
     source.started_at = document.get("started_at")
     source.finished_at = document.get("finished_at")
-    if document.get("schema") != SCENARIO_SCHEMA:
+    schema = document.get("schema")
+    platform = SCENARIO_PLATFORMS.get(schema)
+    if platform is None:
         _add(source.issues, "场景来源 Schema 不符")
         source.available = False
         return source
+    sdk = lfs if platform == es.LANGFUSE_PLATFORM else lss
+    source.platform = platform
     try:
-        source.feedback_version = ls.feedback_version(document)
-    except ls.ScenarioSDKError as error:
+        source.feedback_version = sdk.feedback_version(document)
+    except sdk.ScenarioSDKError as error:
         _add(source.issues, str(error))
         source.available = False
         return source
-    if source.feedback_version == ls.EXTERNAL_FEEDBACK_VERSION:
+    if source.feedback_version == sdk.EXTERNAL_FEEDBACK_VERSION:
         _add(
             source.issues,
             "外部裁判运行由 evaluation.sdk_summary 协议分发读取，"
@@ -1191,7 +1244,7 @@ def load_scenario_source(path: Path, dataset: EvaluationDataset) -> ScenarioSour
     source.experiment = document.get("experiment") if isinstance(document.get("experiment"), dict) else {}
     source.concurrency = document.get("concurrency") if isinstance(document.get("concurrency"), dict) else {}
     source.coverage_recorded = document.get("coverage") if isinstance(document.get("coverage"), dict) else {}
-    if document.get("dataset_name") != ls.dataset_name(dataset):
+    if document.get("dataset_name") != sdk.dataset_name(dataset):
         _add(source.issues, "场景数据集名称与批准数据不一致")
     if not document.get("dataset_id"):
         _add(source.issues, "场景来源缺少 dataset_id")
@@ -1201,16 +1254,16 @@ def load_scenario_source(path: Path, dataset: EvaluationDataset) -> ScenarioSour
         _add(source.issues, "场景来源缺少 example_ids")
     else:
         expected_example_ids = {
-            scenario["scenario_id"]: ls.stable_example_id(
-                ls.dataset_name(dataset), scenario["scenario_id"]
+            scenario["scenario_id"]: sdk.stable_example_id(
+                sdk.dataset_name(dataset), scenario["scenario_id"]
             )
             for scenario in dataset.scenarios
         }
         if example_ids != expected_example_ids:
             _add(source.issues, "SDK 场景样例 ID 映射与批准数据不一致")
-    if document.get("max_concurrency") != ls.MAX_CONCURRENCY:
+    if document.get("max_concurrency") != sdk.MAX_CONCURRENCY:
         _add(source.issues, "场景并发配置与冻结上限不一致")
-    if document.get("num_repetitions") != ls.NUM_REPETITIONS:
+    if document.get("num_repetitions") != sdk.NUM_REPETITIONS:
         _add(source.issues, "场景重复次数与冻结配置不一致")
     try:
         current_code = scenario_code_identity()
@@ -1248,8 +1301,10 @@ def load_scenario_source(path: Path, dataset: EvaluationDataset) -> ScenarioSour
     if not source.index.get("collection") or not source.index.get("manifest_sha256"):
         _add(source.issues, "场景物理索引身份缺失")
     if not source.experiment.get("id"):
-        _add(source.issues, "场景来源缺少 LangSmith 实验 ID")
-    expected_ids = _scenario_expected_ids(dataset, source.purpose, source.issues)
+        _add(source.issues, f"场景来源缺少 {_sdk_label(sdk)} 实验 ID")
+    expected_ids = _scenario_expected_ids(
+        sdk, dataset, source.purpose, source.issues
+    )
     source.expected_ids = expected_ids
     scope = document.get("sample_scope")
     if not isinstance(scope, dict):
@@ -1312,6 +1367,7 @@ def load_scenario_source(path: Path, dataset: EvaluationDataset) -> ScenarioSour
             )
             continue
         checked, aggregate = _load_scenario_sample(
+            sdk=sdk,
             dataset=dataset,
             source=source,
             sample=sample,
@@ -1411,6 +1467,7 @@ def _retrieval_formal_issues(source: RetrievalSource, dataset: EvaluationDataset
     issues = []
     if not source.available:
         return ["正式检索来源不可用"]
+    rm = _retrieval_sdk_module(source.document)
     if source.purpose != "formal":
         issues.append("正式检索来源必须为 formal")
     all_ids = {query["query_id"] for query in dataset.queries}
@@ -1436,15 +1493,15 @@ def _retrieval_formal_issues(source: RetrievalSource, dataset: EvaluationDataset
         if result.vector_cache_required and not result.vector_cache_identity_sha256:
             issues.append(f"{group} 组缺少查询向量缓存身份")
         if not result.experiment.get("experiment_id"):
-            issues.append(f"{group} 组缺少 LangSmith 实验")
+            issues.append(f"{group} 组缺少 {_sdk_label(rm)} 实验")
         if result.concurrency.get("max_in_flight") is None or result.concurrency[
             "max_in_flight"
-        ] > lr.MAX_CONCURRENCY:
+        ] > rm.MAX_CONCURRENCY:
             issues.append(f"{group} 组并发证据非法")
         if not result.concurrency.get("overlap_pairs"):
             issues.append(f"{group} 组未观察到并发重叠")
     try:
-        expected_parameters = lr.validated_parameters()
+        expected_parameters = rm.validated_parameters()
     except Exception:
         expected_parameters = None
     if expected_parameters is not None and source.parameters != expected_parameters:
@@ -1519,11 +1576,12 @@ def _scenario_formal_issues(
             issues.append(f"正式场景指标 {metric} 存在身份冲突")
     if not source.index.get("collection") or not source.index.get("manifest_sha256"):
         issues.append("正式场景缺少物理索引身份")
+    sdk = _scenario_sdk_module(source.document)
     if not source.experiment.get("id"):
-        issues.append("正式场景缺少 LangSmith 实验")
+        issues.append(f"正式场景缺少 {_sdk_label(sdk)} 实验")
     if source.concurrency.get("max_in_flight") is None or source.concurrency[
         "max_in_flight"
-    ] > ls.MAX_CONCURRENCY:
+    ] > sdk.MAX_CONCURRENCY:
         issues.append("正式场景并发证据非法")
     if not source.concurrency.get("overlap_pairs"):
         issues.append("正式场景未观察到并发重叠")
@@ -1578,12 +1636,13 @@ def _scenario_protocol(path: Path) -> tuple[int, str] | None:
     document, error = _read_json(file)
     if error or not isinstance(document, dict):
         return None
+    sdk = _scenario_sdk_module(document)
     try:
-        version = ls.feedback_version(document)
-        mode = ls.run_scoring_mode(document)
-    except ls.ScenarioSDKError as error:
+        version = sdk.feedback_version(document)
+        mode = sdk.run_scoring_mode(document)
+    except (lss.ScenarioSDKError, lfs.ScenarioSDKError) as error:
         raise SDKSummaryError(str(error)) from None
-    if mode == "external" and version != ls.EXTERNAL_FEEDBACK_VERSION:
+    if mode == "external" and version != sdk.EXTERNAL_FEEDBACK_VERSION:
         raise SDKSummaryError("外部评分模式与反馈版本不一致")
     return version, mode
 
@@ -1941,6 +2000,7 @@ def _source_summary(source: RetrievalSource | ScenarioSource, dataset: Evaluatio
         "path": _display_path(source.path),
         "root": _display_path(source.root),
         "available": source.available,
+        "platform": source.platform,
         "run_id": source.run_id,
         "purpose": source.purpose,
         "recorded_status": source.recorded_status,
@@ -1966,6 +2026,8 @@ def _source_summary(source: RetrievalSource | ScenarioSource, dataset: Evaluatio
 def _sdk_evidence(
     retrieval: RetrievalSource, scenario: ScenarioSource, dataset: EvaluationDataset
 ) -> dict:
+    rm = _retrieval_sdk_module(retrieval.document)
+    smod = _scenario_sdk_module(scenario.document)
     group_evidence = {}
     for group, result in retrieval.groups.items():
         group_evidence[group] = {
@@ -1979,7 +2041,7 @@ def _sdk_evidence(
                 for key in ("calls", "max_in_flight", "overlap_pairs")
             },
             "experiment": result.experiment,
-            "remote_feedback_tolerance": lr.REMOTE_SCORE_TOLERANCE,
+            "remote_feedback_tolerance": rm.REMOTE_SCORE_TOLERANCE,
             "max_feedback_difference": max(
                 (
                     abs(result.remote_feedback[qid][key] - value)
@@ -2018,7 +2080,10 @@ def _sdk_evidence(
                 retrieval.started_at, retrieval.finished_at
             ),
             "groups": group_evidence,
-            "remote_verification": "来源记录 coverage/parity；本次未重连 LangSmith",
+            "remote_verification": (
+                "来源记录 coverage/parity；"
+                f"本次未重连 {_sdk_label(rm)}"
+            ),
         },
         "scenario": {
             "started_at": scenario.started_at,
@@ -2052,7 +2117,10 @@ def _sdk_evidence(
                 for key in ("calls", "max_in_flight", "overlap_pairs")
             },
             "experiment": scenario.experiment,
-            "remote_verification": "来源记录 coverage/与本地评分一致性；本次未重连 LangSmith",
+            "remote_verification": (
+                "来源记录 coverage/与本地评分一致性；"
+                f"本次未重连 {_sdk_label(smod)}"
+            ),
         },
         "dataset": dataset.identity(),
     }
@@ -2346,8 +2414,12 @@ def report_lines(summary: dict) -> list[str]:
         else:
             experiment = sources[kind].get("experiment") or summary["sdk"]["scenario"].get("experiment")
         if experiment:
+            platform = sources[kind].get("platform")
+            label = PLATFORM_LABELS.get(
+                platform, PLATFORM_LABELS[es.LANGSMITH_PLATFORM]
+            )
             lines.append(
-                f"- LangSmith {kind}：ID `{experiment.get('experiment_id') or experiment.get('id') or '未采集'}`；"
+                f"- {label} {kind}：ID `{experiment.get('experiment_id') or experiment.get('id') or '未采集'}`；"
                 f"链接 `{experiment.get('experiment_url') or experiment.get('url') or '未采集'}`。"
             )
     lines.append(f"- 远端核验：{sdk['retrieval']['remote_verification']}；{sdk['scenario']['remote_verification']}。")

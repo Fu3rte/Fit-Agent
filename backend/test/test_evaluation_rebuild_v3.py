@@ -9,7 +9,7 @@ import pytest
 
 from evaluation import decision_feedback as df
 from evaluation import generation_upload as gu
-from evaluation import langsmith_scenarios as ls
+from evaluation import langfuse_scenarios as ls
 from evaluation.dataset import (
     BACKEND,
     REBUILD_V3_SCENARIO_CATEGORIES,
@@ -92,7 +92,7 @@ def test_default_entry_points_use_rebuild_v3():
     assert gu._parse_args(["external-review", "--source", "x"]).dataset == V3
 
 
-def test_langsmith_cli_defaults_use_rebuild_v3(monkeypatch):
+def test_langfuse_cli_defaults_use_rebuild_v3(monkeypatch):
     seen = {}
 
     def fake_sync(args):
@@ -111,9 +111,9 @@ def test_langsmith_cli_defaults_use_rebuild_v3(monkeypatch):
     monkeypatch.setattr(ls, "run_experiment", fake_run)
     monkeypatch.setattr(ls.asyncio, "run", run_coroutine)
 
-    monkeypatch.setattr(sys, "argv", ["langsmith_scenarios", "sync"])
+    monkeypatch.setattr(sys, "argv", ["langfuse_scenarios", "sync"])
     ls.main()
-    monkeypatch.setattr(sys, "argv", ["langsmith_scenarios", "run"])
+    monkeypatch.setattr(sys, "argv", ["langfuse_scenarios", "run"])
     ls.main()
 
     assert seen == {"sync": V3, "run": V3}

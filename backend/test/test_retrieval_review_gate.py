@@ -1,6 +1,16 @@
 import json
+from datetime import UTC, datetime
+from uuid import uuid4
 
 import pytest
+from langfuse.api.commons.types.observation_level import ObservationLevel
+from langfuse.api.experiments.types.experiment_item import ExperimentItem
+from langfuse.api.experiments.types.experiment_items_response import (
+    ExperimentItemsResponse,
+)
+from langfuse.api.experiments.types.experiments_response_meta import (
+    ExperimentsResponseMeta,
+)
 
 from app.application.business import retrieval_text as rt
 from app.application.business.catalog import Catalog
@@ -11,7 +21,7 @@ from app.application.business.retrieval_rerank import (
     RerankUsage,
 )
 from app.application.business.retrieval_search import RetrievalCandidate
-from evaluation import langsmith_retrieval as lr
+from evaluation import langfuse_retrieval as lr
 from evaluation import retrieval_support as support
 from evaluation.dataset import load_for_evaluation
 from evaluation.retrieval import validate_group
@@ -321,7 +331,12 @@ async def test_evaluator_does_not_bypass_review_gate(dataset, reviewed, row):
         "hybrid", lr.dataset_binding(dataset), reviewed
     )
     with pytest.raises(support.EvaluationBlocked) as error:
-        await evaluator(row["inputs"], payload, row["outputs"])
+        await evaluator(
+            input=row["inputs"],
+            output=payload,
+            expected_output=row["outputs"],
+            metadata=None,
+        )
     assert error.value.missing == (UNREVIEWED,)
 
 
@@ -353,25 +368,38 @@ def test_parity_report_refuses_unreviewed_candidates(dataset, reviewed, row, que
     assert error.value.missing == (UNREVIEWED,)
 
 
-class BlockedRun:
-    def __init__(self, example_id: str, payload: dict) -> None:
-        self.id = "run-blocked"
-        self.reference_example_id = example_id
-        self.outputs = payload
-        self.error = "EvaluationBlocked: 存在未审阅候选"
-        self.start_time = None
-        self.end_time = None
+class BlockedItemApi:
+    def __init__(self, item) -> None:
+        self.item = item
+
+    @property
+    def experiments(self):
+        return self
+
+    def list_items(self, **kwargs):
+        return ExperimentItemsResponse(data=[self.item], meta=ExperimentsResponseMeta())
+
+
+def blocked_item(example_id: str, payload: dict):
+    start = datetime.now(UTC)
+    return ExperimentItem(
+        id=str(uuid4()),
+        trace_id=uuid4().hex,
+        start_time=start,
+        end_time=start,
+        level=ObservationLevel.DEFAULT,
+        environment="default",
+        experiment_id="experiment",
+        experiment_name="run-hybrid-validation",
+        experiment_item_id=example_id,
+        output=payload,
+        scores=[],
+    )
 
 
 class BlockedRunClient:
-    def __init__(self, run: BlockedRun) -> None:
-        self.run = run
-
-    def list_runs(self, *, project_id=None, is_root=None):
-        return [self.run]
-
-    def list_feedback(self, *, run_ids=None):
-        return []
+    def __init__(self, item) -> None:
+        self.api = BlockedItemApi(item)
 
 
 def test_verify_group_marks_review_blocked_evidence(dataset, reviewed, row):
@@ -386,13 +414,14 @@ def test_verify_group_marks_review_blocked_evidence(dataset, reviewed, row):
         "review": lr.review_evidence(reviewed, QUERY_ID, pool),
     }
     samples, coverage = lr.verify_group(
-        BlockedRunClient(BlockedRun(row["id"], payload)),
+        BlockedRunClient(blocked_item(row["id"], payload)),
         group="hybrid",
         dataset_identity=lr.dataset_binding(dataset),
         reviewed=reviewed,
         rows={row["id"]: row},
         selected_example_ids=[row["id"]],
         experiment_id="experiment",
+        from_start_time=datetime.now(UTC),
     )
     assert coverage["status"] == "incomplete"
     assert coverage["unknown_candidates"] == {QUERY_ID: [UNREVIEWED]}

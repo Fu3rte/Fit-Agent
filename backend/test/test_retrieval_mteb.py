@@ -561,6 +561,7 @@ def test_evidence_schema_identity_and_output_root():
     assert support.OUTPUT_ROOT.name == "retrieval-mteb"
     versions = identity()["versions"]
     assert "mteb" in versions and "ranx" not in versions
+    assert "langfuse" in versions and "langsmith" not in versions
 
 
 def test_score_groups_by_tags():
@@ -586,10 +587,13 @@ def test_upload_preserves_whitelisted_inputs(document_and_query):
     assert row["actual_outputs"]["candidate_pool"] == projection["candidate_pool"]
     assert row["actual_outputs"]["final_model_input"] == projection["final_model_input"]
     assert row["actual_outputs"]["search_evidence"]["response_json"] == projection["response"]
-    assert payload["dataset_name"].startswith(f"fit-agent-retrieval-{dataset.version}-")
+    assert payload["dataset_name"].startswith(f"fit-agent-retrieval-langfuse-{dataset.version}-")
+    assert payload["run_name"] == f"{document['run_id']}-hybrid"
+    assert payload["dataset_marker"]["marker"] == "fit-agent-retrieval-upload-langfuse-1"
+    assert payload["dataset_marker"]["example_count"] == len(payload["results"])
 
 
-def test_upload_rounds_feedback_without_changing_local_scores(document_and_query):
+def test_upload_keeps_full_precision_feedback(document_and_query):
     document, qid, _ = document_and_query
     metrics = document["groups"]["hybrid"]["metrics"]
     original = metrics["per_query"][qid]["scores"]["recall@20"]
@@ -597,30 +601,33 @@ def test_upload_rounds_feedback_without_changing_local_scores(document_and_query
     row = upload_row(payload, qid)
     uploaded = {item["key"]: item["score"] for item in row["evaluation_scores"]}
     summary = {item["key"]: item["score"] for item in payload["summary_experiment_scores"]}
-    assert uploaded["recall@20"] == round(original, 4)
-    assert uploaded["recall@20"] != original
-    assert summary["recall@20"] == round(metrics["overall"]["recall@20"], 4)
-    assert all(item["score"] == round(item["score"], 4) for item in row["evaluation_scores"])
-    assert all(item["score"] == round(item["score"], 4) for item in payload["summary_experiment_scores"])
+    assert uploaded["recall@20"] == original
+    assert summary["recall@20"] == metrics["overall"]["recall@20"]
+    assert all(
+        isinstance(item["score"], float)
+        for item in row["evaluation_scores"]
+        if item["key"] not in ("hard_constraint_violation", "budget_compliant")
+    )
+    assert {item["score"] for item in row["evaluation_scores"] if item["key"] in ("hard_constraint_violation", "budget_compliant")} == {0, 1}
     assert metrics["per_query"][qid]["scores"]["recall@20"] == original
     assert {item["key"] for item in row["evaluation_scores"]} == {
         "recall@20", "hit@5", "mrr@5", "ndcg@5", "precision@5"
     } | {"hard_constraint_violation", "budget_compliant"}
 
 
-def test_upload_uses_actual_group_time_bounds(document_and_query):
+def test_upload_records_replay_scope_and_original_timings(document_and_query):
     document, qid, _ = document_and_query
-    document["started_at"] = "2026-10-17T08:11:50+00:00"
-    document["finished_at"] = "2026-10-17T08:11:57+00:00"
     timing = {"start_time": "2026-10-17T08:11:55+00:00", "end_time": "2026-10-17T08:11:56+00:00"}
     for item in document["groups"]["hybrid"]["timings"]:
         document["groups"]["hybrid"]["timings"][item] = timing
     payload = upload_payload(document, "hybrid")
     row = upload_row(payload, qid)
-    assert payload["experiment_start_time"] == timing["start_time"]
-    assert payload["experiment_end_time"] == timing["end_time"]
     assert row["start_time"] == timing["start_time"]
     assert row["end_time"] == timing["end_time"]
+    assert row["run_metadata"]["timing_scope"] == document["timing_scope"]
+    assert payload["experiment_metadata"]["evidence_replay"] is True
+    assert payload["experiment_metadata"]["timing_scope"] == document["timing_scope"]
+    assert payload["experiment_metadata"]["dataset_name"] == payload["dataset_name"]
 
 
 @pytest.mark.parametrize("field", ["ranking", "labels", "metric", "engine"])

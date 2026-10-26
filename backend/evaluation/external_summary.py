@@ -4,22 +4,43 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from statistics import mean
-from typing import Any, Sequence
+from typing import Any, Literal, Self, Sequence
+
+from pydantic import Field, ValidationError, model_validator
 
 from evaluation.contracts import (
     EXTERNAL_JUDGE_METRICS,
+    DatasetIdentity,
+    EvaluationContract,
+    EvidenceLink,
     ExternalJudgeApplicability,
+    ExternalJudgeFeedbackSet,
+    ExternalJudgeLangfuseScoringAttempt,
+    ExternalJudgeMetric,
+    ExternalJudgeScoringAttempt,
+    NonEmptyText,
+    Sha256,
 )
 from evaluation.dataset import BACKEND, EvaluationDataset
 from evaluation.decision_feedback import (
     BLOCKING_CODES,
+    FEEDBACK_BATCH_DIR,
+    FEEDBACK_INDEX_SCHEMA,
     SOURCE_ASSURANCE,
     CheckpointFeedbackRecord,
     FeedbackCollectionBatch,
     FeedbackContext,
+    FeedbackCoverage,
+    FeedbackExperimentSummary,
     LoadedCollection,
     UploadBlocked,
+    _batch_content_sha256,
+    _batch_id,
+    feedback_dir,
+    feedback_index_path,
     load_verified_collection,
+    question_digest,
+    rubric_digest,
 )
 from evaluation.generation_upload import (
     ExternalRunEvidence,
@@ -29,26 +50,35 @@ from evaluation.generation_upload import (
     load_external_applicability,
     load_external_run,
 )
-from evaluation.langsmith_scenarios import (
+from evaluation.langfuse_scenarios import (
     EXTERNAL_FEEDBACK_VERSION,
+    EXTERNAL_PROTOCOL_VERSION,
     MAX_CONCURRENCY,
     NUM_REPETITIONS,
+    SCORING_PROTOCOLS,
     ScenarioSDKError,
     assertion_statistics,
     feedback_version,
     run_scoring_mode,
 )
-from evaluation.langsmith_scenarios import (
-    SCHEMA as SCENARIO_SCHEMA,
+from evaluation.langfuse_scenarios import (
+    SCHEMA as LANGFUSE_SCENARIO_SCHEMA,
 )
-from evaluation.scenario_evidence import canonical_json
+from evaluation.langsmith_scenarios import (
+    SCHEMA as LANGSMITH_SCENARIO_SCHEMA,
+)
+from evaluation.scenario_evidence import canonical_json, sha256_text
 from evaluation.scenarios import (
-    EXTERNAL_PROTOCOL_VERSION,
-    SCORING_PROTOCOLS,
-    scenario_plan,
+    EXTERNAL_PROTOCOL_VERSION as LEGACY_EXTERNAL_PROTOCOL_VERSION,
+)
+from evaluation.scenarios import (
+    SCORING_PROTOCOLS as LEGACY_SCORING_PROTOCOLS,
 )
 from evaluation.scenarios import (
     code_identity as scenario_code_identity,
+)
+from evaluation.scenarios import (
+    scenario_plan,
 )
 from evaluation.summary import (
     _answer_model_call,
@@ -56,8 +86,45 @@ from evaluation.summary import (
     _validate_context_projection,
 )
 
-EXTERNAL_SUMMARY_SCHEMA = "fit-agent-external-judge-summary-1"
+EXTERNAL_SUMMARY_SCHEMA = "fit-agent-external-judge-summary-langfuse-1"
 HEX64_LENGTH = 64
+LANGFUSE_PLATFORM = "langfuse"
+LANGSMITH_PLATFORM = "langsmith"
+PLATFORM_LABELS = {LANGFUSE_PLATFORM: "Langfuse", LANGSMITH_PLATFORM: "LangSmith"}
+SCENARIO_PLATFORMS = {
+    LANGFUSE_SCENARIO_SCHEMA: LANGFUSE_PLATFORM,
+    LANGSMITH_SCENARIO_SCHEMA: LANGSMITH_PLATFORM,
+}
+EXTERNAL_PROTOCOLS = {
+    LANGFUSE_PLATFORM: EXTERNAL_PROTOCOL_VERSION,
+    LANGSMITH_PLATFORM: LEGACY_EXTERNAL_PROTOCOL_VERSION,
+}
+HISTORICAL_COLLECTION_SCHEMA = "fit-agent-external-judge-feedback-collection-1"
+HISTORICAL_INDEX_SCHEMA = "fit-agent-external-judge-feedback-index-1"
+HISTORICAL_BINDING_SCHEMA = "fit-agent-external-judge-feedback-binding-1"
+HISTORICAL_EXCLUSION_REASONS = Literal[
+    "unmapped_key",
+    "source_not_decision_model",
+    "source_gap",
+    "invalid_score",
+    "not_applicable_metric",
+    "malformed_cloud_feedback",
+]
+HISTORICAL_DIAGNOSTIC_CODES = Literal[
+    "awaiting_feedback",
+    "feedback_without_terminal_score",
+    "cloud_failure",
+    "checkpoint_missing_upload",
+    "invalid_score",
+    "source_gap",
+    "feedback_conflict",
+    "feedback_content_drift",
+    "feedback_history_conflict",
+    "malformed_cloud_feedback",
+    "unexpected_not_applicable_feedback",
+    "missing_cloud_run",
+    "experiment_absent",
+]
 METRIC_DEFINITIONS = {
     "evidence_supported_v1": {
         "description": "回答事实是否得到本次请求实际证据上下文的支持。",
@@ -164,6 +231,7 @@ class ExternalScenarioSource:
     root: Path | None = None
     dataset: EvaluationDataset | None = None
     document: dict[str, Any] = field(default_factory=dict)
+    platform: str = LANGFUSE_PLATFORM
     run_id: str | None = None
     purpose: str | None = None
     scoring_mode: str | None = None
@@ -178,6 +246,7 @@ class ExternalScenarioSource:
     context: FeedbackContext | None = None
     collection: LoadedCollection | None = None
     latest: FeedbackCollectionBatch | None = None
+    history: "HistoricalCollection | None" = None
     batch_id: str | None = None
     source_assurance: str = SOURCE_ASSURANCE
     expected_scenario_ids: list[str] = field(default_factory=list)
@@ -236,6 +305,25 @@ def _read_document(source: Path) -> tuple[Path, dict[str, Any]]:
     return root, document
 
 
+HISTORICAL_BLOCKING_CODES = BLOCKING_CODES | {"missing_cloud_run"}
+
+
+def source_platform(document: dict[str, Any]) -> str:
+    # 布局分发包判定：sdk-run.json 的 schema 字符串唯一决定平台，不猜模式。
+    platform = SCENARIO_PLATFORMS.get(document.get("schema"))
+    if platform is None:
+        raise ExternalSummaryError(
+            "场景运行 Schema 不受支持: " f"{document.get('schema')!r}"
+        )
+    return platform
+
+
+def _platform_protocols(platform: str) -> dict[str, str]:
+    if platform == LANGFUSE_PLATFORM:
+        return SCORING_PROTOCOLS
+    return LEGACY_SCORING_PROTOCOLS
+
+
 def protocol(document: dict[str, Any]) -> tuple[int, str]:
     try:
         version = feedback_version(document)
@@ -243,26 +331,29 @@ def protocol(document: dict[str, Any]) -> tuple[int, str]:
     except ScenarioSDKError as error:
         raise ExternalSummaryError(str(error)) from error
     recorded = document.get("protocol_version")
-    if recorded is not None and recorded != SCORING_PROTOCOLS[mode]:
+    if recorded is not None and recorded != _platform_protocols(
+        source_platform(document)
+    )[mode]:
         raise ExternalSummaryError(
             f"评分模式与协议版本不一致: {mode!r}/{recorded!r}"
         )
     return version, mode
 
 
-def _require_external(document: dict[str, Any]) -> None:
-    if document.get("schema") != SCENARIO_SCHEMA:
-        raise ExternalSummaryError("场景运行 Schema 不受支持")
+def _require_external(document: dict[str, Any]) -> str:
+    platform = source_platform(document)
     version, mode = protocol(document)
     if mode != "external" or version != EXTERNAL_FEEDBACK_VERSION:
         raise ExternalSummaryError(
             "外部汇总拒绝非 external 评分模式或非外部反馈版本"
         )
-    if document.get("protocol_version") != EXTERNAL_PROTOCOL_VERSION:
+    expected_protocol = EXTERNAL_PROTOCOLS[platform]
+    if document.get("protocol_version") != expected_protocol:
         raise ExternalSummaryError(
             "外部运行必须显式声明协议版本 "
-            f"{EXTERNAL_PROTOCOL_VERSION}"
+            f"{expected_protocol}"
         )
+    return platform
 
 
 def _scope_ids(document: dict[str, Any]) -> list[str] | None:
@@ -300,13 +391,41 @@ def _approved_by_metric(
     return {item.metric: item for item in approved.applicability}
 
 
-def _record_diagnostics(
-    record: CheckpointFeedbackRecord, metric: str
-) -> list[Any]:
+def _record_blocking_codes(record: Any) -> set[str]:
+    # 历史批次的阻断码集合保持 LangSmith 期口径（missing_cloud_run）。
+    if isinstance(record, CheckpointFeedbackRecord):
+        return set(BLOCKING_CODES)
+    return set(HISTORICAL_BLOCKING_CODES)
+
+
+def _attempt_cloud_identity(attempt: Any) -> str | None:
+    # 按 attempt 契约类型分发云端身份：Langfuse 为 Score id，历史批次为 feedback id。
+    if isinstance(attempt, ExternalJudgeLangfuseScoringAttempt):
+        return (
+            None if attempt.cloud_score is None else attempt.cloud_score.score_id
+        )
+    if isinstance(attempt, ExternalJudgeScoringAttempt):
+        return (
+            None
+            if attempt.cloud_feedback is None
+            else attempt.cloud_feedback.feedback_id
+        )
+    raise ExternalSummaryError(f"未知评分尝试契约: {type(attempt).__name__}")
+
+
+def _evidence_key(item: Any) -> str | None:
+    key = getattr(item, "score_name", None)
+    if key is None:
+        key = getattr(item, "key", None)
+    return key
+
+
+def _record_diagnostics(record: Any, metric: str) -> list[Any]:
+    codes = _record_blocking_codes(record)
     return [
         diagnostic
         for diagnostic in record.diagnostics
-        if diagnostic.code in BLOCKING_CODES
+        if diagnostic.code in codes
         and diagnostic.metric in (None, metric)
     ]
 
@@ -316,7 +435,8 @@ def _metric_view(
     metric: str,
     checkpoint: CheckpointView,
     approved: ExternalJudgeApplicability | None,
-    record: CheckpointFeedbackRecord | None,
+    # record 为 Langfuse CheckpointFeedbackRecord 或历史 _HistoryRecord。
+    record: Any,
     collection_present: bool,
     feedback_keys: dict[str, str],
 ) -> MetricView:
@@ -392,7 +512,7 @@ def _metric_view(
     evidence_ids = [
         item.evidence_id
         for item in record.evidence
-        if wanted_key is not None and item.key == wanted_key
+        if wanted_key is not None and _evidence_key(item) == wanted_key
     ]
     evidence_ids.extend(
         item.evidence_id
@@ -404,6 +524,7 @@ def _metric_view(
     status = feedback.status
     detail: str | None = None
     if feedback.status == "failed":
+        # Langfuse 网页裁判失败不产生 score，终态行允许无评分尝试。
         detail = feedback.failure_evidence
     elif feedback.status == "not_applicable":
         detail = feedback.applicability_reason
@@ -440,9 +561,11 @@ def _metric_view(
         evidence_ids=sorted(set(evidence_ids)),
         cloud_feedback_ids=sorted(
             {
-                attempt.cloud_feedback.feedback_id
-                for attempt in attempts
-                if attempt.cloud_feedback is not None
+                identity
+                for identity in (
+                    _attempt_cloud_identity(attempt) for attempt in attempts
+                )
+                if identity is not None
             }
         ),
         diagnostic_codes=sorted(
@@ -555,7 +678,8 @@ def _build_scenario_view(
     evidence_execution: dict[tuple[str, str, str], str],
     approved: dict[tuple[str, str, str], ExternalJudgeApplicability] | None,
     ledger_entries: dict[tuple[str, str, str], dict[str, Any]],
-    records: dict[tuple[str, str, str], CheckpointFeedbackRecord],
+    # records 的值为 Langfuse CheckpointFeedbackRecord 或历史 _HistoryRecord。
+    records: dict[tuple[str, str, str], Any],
     collection_present: bool,
     feedback_keys: dict[str, str],
     source_issues: list[str],
@@ -672,7 +796,7 @@ def _build_scenario_view(
             checkpoint_view.blocked.extend(
                 diagnostic.detail
                 for diagnostic in checkpoint_record.diagnostics
-                if diagnostic.code in BLOCKING_CODES
+                if diagnostic.code in _record_blocking_codes(checkpoint_record)
             )
         view.checkpoints[key] = checkpoint_view
     for checkpoint in view.checkpoints.values():
@@ -797,9 +921,13 @@ def _request_issues(
 
 
 def _metadata_issues(
-    document: dict[str, Any], dataset: EvaluationDataset, purpose: str
+    document: dict[str, Any],
+    dataset: EvaluationDataset,
+    purpose: str,
+    platform: str,
 ) -> list[str]:
     issues: list[str] = []
+    label = PLATFORM_LABELS[platform]
     recorded_dataset = document.get("dataset")
     if not isinstance(recorded_dataset, dict):
         _add(issues, "运行摘要缺少数据身份")
@@ -842,7 +970,7 @@ def _metadata_issues(
         _add(issues, "场景物理索引身份缺失或非法")
     experiment = document.get("experiment")
     if not isinstance(experiment, dict) or not experiment.get("id"):
-        _add(issues, "场景来源缺少 LangSmith 实验 ID")
+        _add(issues, f"场景来源缺少 {label} 实验 ID")
     if document.get("max_concurrency") != MAX_CONCURRENCY:
         _add(issues, "场景并发配置与冻结上限不一致")
     if document.get("num_repetitions") != NUM_REPETITIONS:
@@ -940,11 +1068,464 @@ def _run_status(evidence: ExternalRunEvidence | None) -> str:
     return "awaiting_external_scoring"
 
 
+# ---- 历史 LangSmith 回收批次直读 ----
+# T4a 起回收链路只产 Langfuse 批次；历史 fit-agent-external-judge-feedback-*-1 批次
+# 在此按原契约形状解析消费，身份字段（run_id/feedback_id/cloud_run_id）保持原值。
+
+
+class _HistoryStateMapping(EvaluationContract):
+    user_request: Literal["inputs.user_request"]
+    answer: Literal["outputs.answer"]
+    context: Literal["outputs.context.items"]
+    reference: Literal["reference_outputs.reference"]
+
+
+class _HistoryEvaluatorBinding(EvaluationContract):
+    provider: NonEmptyText
+    evaluator: NonEmptyText
+    evaluator_id: NonEmptyText
+    model_alias: NonEmptyText
+    config: dict[str, Any]
+    config_sha256: Sha256
+
+    @model_validator(mode="after")
+    def validate_config(self) -> Self:
+        expected = sha256_text(canonical_json(self.config))
+        if self.config_sha256 != expected:
+            raise ValueError(f"config_sha256 应为 {expected}")
+        return self
+
+
+class _HistoryMetricBinding(EvaluationContract):
+    metric: ExternalJudgeMetric
+    feedback_key: NonEmptyText
+    question_id: NonEmptyText
+    question: NonEmptyText
+    question_sha256: Sha256
+    rubric_id: NonEmptyText | None = None
+    rubric: NonEmptyText
+    rubric_sha256: Sha256
+
+    @model_validator(mode="after")
+    def validate_definition(self) -> Self:
+        if self.question_sha256 != question_digest(
+            self.question_id, self.question
+        ):
+            raise ValueError("question_sha256 与问题内容不一致")
+        if self.rubric_sha256 != rubric_digest(self.rubric_id, self.rubric):
+            raise ValueError("rubric_sha256 与评分标准不一致")
+        return self
+
+
+class _HistoryExperimentTarget(EvaluationContract):
+    experiment_id: NonEmptyText
+    experiment_name: NonEmptyText
+    dataset_id: NonEmptyText
+    dataset_name: NonEmptyText
+    payload_sha256: Sha256
+    rows_sha256: Sha256
+    projections_sha256: Sha256
+
+
+class _HistoryBinding(EvaluationContract):
+    schema_version: Literal["fit-agent-external-judge-feedback-binding-1"]
+    run_id: NonEmptyText
+    source_sha256: Sha256
+    applicability_sha256: Sha256
+    experiment: _HistoryExperimentTarget | None = None
+    evaluator: _HistoryEvaluatorBinding
+    state_mapping: _HistoryStateMapping
+    metrics: list[_HistoryMetricBinding] = Field(min_length=2, max_length=2)
+
+    @model_validator(mode="after")
+    def validate_metrics(self) -> Self:
+        metrics = [row.metric for row in self.metrics]
+        if sorted(metrics) != sorted(EXTERNAL_JUDGE_METRICS):
+            raise ValueError("反馈绑定必须逐项且仅包含两个外部裁判指标")
+        keys = [row.feedback_key for row in self.metrics]
+        if len(set(keys)) != len(keys):
+            raise ValueError("反馈绑定的 feedback key 不能重复")
+        if self.state_mapping.context != "outputs.context.items":
+            raise ValueError("context 必须映射 outputs.context.items")
+        return self
+
+
+class _HistoryRawEvidence(EvaluationContract):
+    evidence_id: NonEmptyText
+    feedback_id: NonEmptyText
+    run_id: NonEmptyText
+    key: NonEmptyText
+    raw: dict[str, Any]
+    raw_sha256: Sha256
+
+    @model_validator(mode="after")
+    def validate_evidence(self) -> Self:
+        expected = sha256_text(canonical_json(self.raw))
+        if self.raw_sha256 != expected:
+            raise ValueError("原始证据摘要与内容不一致")
+        if self.evidence_id != f"{self.feedback_id}@{self.raw_sha256[:12]}":
+            raise ValueError("原始证据 ID 必须由 feedback ID 与摘要导出")
+        return self
+
+
+class _HistoryExclusion(EvaluationContract):
+    evidence_id: NonEmptyText
+    feedback_id: NonEmptyText
+    metric: ExternalJudgeMetric | None = None
+    reason: HISTORICAL_EXCLUSION_REASONS
+    detail: NonEmptyText
+
+
+class _HistoryDiagnostic(EvaluationContract):
+    code: HISTORICAL_DIAGNOSTIC_CODES
+    metric: ExternalJudgeMetric | None = None
+    detail: NonEmptyText
+
+
+class _HistoryRecord(EvaluationContract):
+    checkpoint: EvidenceLink
+    execution_sha256: Sha256
+    row_id: NonEmptyText | None = None
+    example_id: NonEmptyText | None = None
+    cloud_run_id: NonEmptyText | None = None
+    projection_sha256: Sha256 | None = None
+    feedback_set: ExternalJudgeFeedbackSet
+    attempts: list[ExternalJudgeScoringAttempt] = Field(default_factory=list)
+    evidence: list[_HistoryRawEvidence] = Field(default_factory=list)
+    exclusions: list[_HistoryExclusion] = Field(default_factory=list)
+    diagnostics: list[_HistoryDiagnostic] = Field(default_factory=list)
+    evidence_sha256: Sha256
+    status: Literal["complete", "pending", "blocked", "not_applicable"]
+
+    @model_validator(mode="after")
+    def validate_record(self) -> Self:
+        if self.feedback_set.checkpoint != self.checkpoint:
+            raise ValueError("反馈集合的检查点身份不一致")
+        if self.feedback_set.execution_sha256 != self.execution_sha256:
+            raise ValueError("反馈集合的执行摘要不一致")
+        attempt_ids = [attempt.attempt_id for attempt in self.attempts]
+        if len(set(attempt_ids)) != len(attempt_ids):
+            raise ValueError("评分尝试 ID 不能重复")
+        evidence_ids = [item.evidence_id for item in self.evidence]
+        if len(set(evidence_ids)) != len(evidence_ids):
+            raise ValueError("原始证据 ID 不能重复")
+        exclusion_ids = [
+            (item.evidence_id, item.reason) for item in self.exclusions
+        ]
+        if len(set(exclusion_ids)) != len(exclusion_ids):
+            raise ValueError("排除记录不能重复")
+        for attempt in self.attempts:
+            if (
+                attempt.checkpoint != self.checkpoint
+                or attempt.execution_sha256 != self.execution_sha256
+            ):
+                raise ValueError("评分尝试身份与检查点不一致")
+            if self.row_id is not None:
+                if (
+                    attempt.outbound.row_id != self.row_id
+                    or attempt.source.example_id != self.example_id
+                ):
+                    raise ValueError("评分尝试的出站投影身份不一致")
+                if self.projection_sha256 is not None and (
+                    attempt.outbound.projection_sha256
+                    != self.projection_sha256
+                ):
+                    raise ValueError("评分尝试的投影摘要不一致")
+            if self.cloud_run_id is not None and (
+                attempt.source.run_id != self.cloud_run_id
+                or attempt.cloud_feedback is None
+                or attempt.cloud_feedback.run_id != self.cloud_run_id
+            ):
+                raise ValueError("评分尝试的云端运行身份不一致")
+        feedback_by_metric = {
+            row.metric: row for row in self.feedback_set.feedback
+        }
+        for metric, row in feedback_by_metric.items():
+            matching = [
+                attempt
+                for attempt in self.attempts
+                if attempt.feedback.metric == metric
+            ]
+            if row.status in ("succeeded", "failed"):
+                if len(matching) != 1:
+                    raise ValueError("终态反馈必须绑定唯一评分尝试")
+                attempt = matching[0]
+                if (
+                    attempt.feedback.status != row.status
+                    or attempt.feedback.score != row.score
+                    or attempt.feedback.failure_evidence
+                    != row.failure_evidence
+                ):
+                    raise ValueError("终态反馈与评分尝试内容不一致")
+            if row.status == "not_applicable" and matching:
+                raise ValueError("不适用指标不得绑定评分尝试")
+        blocking = [
+            diagnostic
+            for diagnostic in self.diagnostics
+            if diagnostic.code in HISTORICAL_BLOCKING_CODES
+        ]
+        pending = [
+            row for row in self.feedback_set.feedback if row.status == "pending"
+        ]
+        if self.status == "not_applicable":
+            if any(
+                row.status != "not_applicable"
+                for row in self.feedback_set.feedback
+            ):
+                raise ValueError("不适用检查点必须两项指标均不适用")
+            if self.attempts:
+                raise ValueError("不适用检查点不得携带评分尝试")
+        elif self.status == "blocked":
+            if not blocking:
+                raise ValueError("阻断状态必须记录阻断诊断")
+        elif self.status == "pending":
+            if blocking:
+                raise ValueError("待回收状态不得携带阻断诊断")
+            if not pending:
+                raise ValueError("待回收状态必须存在待评分指标")
+        else:
+            if blocking:
+                raise ValueError("完成状态不得携带阻断诊断")
+            if pending:
+                raise ValueError("完成状态不得存在待评分指标")
+        expected = sha256_text(
+            canonical_json(
+                {
+                    "evidence": [
+                        item.model_dump(mode="json")
+                        for item in sorted(
+                            self.evidence, key=lambda row: row.evidence_id
+                        )
+                    ],
+                    "feedback_set": self.feedback_set.model_dump(mode="json"),
+                    "attempts": [
+                        item.model_dump(mode="json")
+                        for item in sorted(
+                            self.attempts, key=lambda row: row.attempt_id
+                        )
+                    ],
+                }
+            )
+        )
+        if self.evidence_sha256 != expected:
+            raise ValueError("回收证据摘要与原始证据/归一化结果不一致")
+        return self
+
+
+class _HistorySourceSummary(EvaluationContract):
+    run_id: NonEmptyText
+    dataset: DatasetIdentity
+    source_sha256: Sha256
+    payload_sha256: Sha256 | None = None
+    rows_sha256: Sha256 | None = None
+    projections_sha256: Sha256 | None = None
+    coverage: FeedbackCoverage
+    row_count: int = Field(ge=0)
+    example_count: int = Field(ge=0)
+
+
+class _HistoryBatch(EvaluationContract):
+    schema_version: Literal["fit-agent-external-judge-feedback-collection-1"]
+    content_sha256: Sha256
+    run_id: NonEmptyText
+    read_at: NonEmptyText
+    source_assurance: Literal["declared_binding"]
+    source: _HistorySourceSummary
+    binding_sha256: Sha256
+    binding: _HistoryBinding
+    experiment: FeedbackExperimentSummary | None = None
+    checkpoints: list[_HistoryRecord] = Field(min_length=1)
+    status: Literal["complete", "pending", "blocked"]
+    blocking: list[NonEmptyText] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def validate_batch(self) -> Self:
+        if self.run_id != self.source.run_id or self.run_id != self.binding.run_id:
+            raise ValueError("回收批次的运行身份不一致")
+        expected_binding = sha256_text(
+            canonical_json(self.binding.model_dump(mode="json"))
+        )
+        if self.binding_sha256 != expected_binding:
+            raise ValueError("回收批次的绑定摘要不一致")
+        keys = [
+            (
+                item.checkpoint.scenario_id,
+                item.checkpoint.event_id,
+                item.checkpoint.checkpoint_id,
+            )
+            for item in self.checkpoints
+        ]
+        if len(set(keys)) != len(keys):
+            raise ValueError("回收批次的检查点身份不能重复")
+        if len(self.checkpoints) != self.source.coverage.expected:
+            raise ValueError("回收批次的检查点数与覆盖账本不一致")
+        if self.source.row_count != sum(
+            1 for item in self.checkpoints if item.row_id is not None
+        ):
+            raise ValueError("回收批次的上传行数与投影行数不一致")
+        if self.source.example_count != self.source.row_count:
+            raise ValueError("回收批次的 Example 数与上传行数不一致")
+        if self.experiment is None:
+            if self.source.payload_sha256 is not None and self.source.row_count:
+                raise ValueError("无实验回执的批次不得包含上传行")
+            if self.binding.experiment is not None:
+                raise ValueError("无实验回执的批次不得声明实验绑定")
+            if any(item.attempts for item in self.checkpoints):
+                raise ValueError("无实验回执的批次不得携带评分尝试")
+        else:
+            if self.binding.experiment is None:
+                raise ValueError("存在实验回执的批次必须绑定实验身份")
+            target = self.binding.experiment
+            if (
+                target.experiment_id != self.experiment.experiment_id
+                or target.experiment_name != self.experiment.experiment_name
+                or target.dataset_id != self.experiment.dataset_id
+                or target.dataset_name != self.experiment.dataset_name
+            ):
+                raise ValueError("批次实验身份与绑定不一致")
+            for field in (
+                "payload_sha256",
+                "rows_sha256",
+                "projections_sha256",
+            ):
+                if getattr(self.source, field) != getattr(target, field):
+                    raise ValueError(f"批次源摘要与绑定不一致: {field}")
+            for item in self.checkpoints:
+                for attempt in item.attempts:
+                    if (
+                        attempt.source.experiment.experiment_id
+                        != self.experiment.experiment_id
+                        or attempt.cloud_feedback is None
+                        or attempt.cloud_feedback.experiment_id
+                        != self.experiment.experiment_id
+                    ):
+                        raise ValueError("评分尝试的实验身份与批次不一致")
+        blocked = any(item.status == "blocked" for item in self.checkpoints)
+        pending = any(item.status == "pending" for item in self.checkpoints)
+        if self.status == "blocked":
+            if not blocked or not self.blocking:
+                raise ValueError("阻断批次必须包含阻断检查点与依据")
+        elif self.status == "pending":
+            if blocked or not pending or self.blocking:
+                raise ValueError("待回收批次不得包含阻断依据")
+        else:
+            if blocked or pending or self.blocking:
+                raise ValueError("完成批次不得包含阻断或待回收检查点")
+        expected_content = _batch_content_sha256(self.model_dump(mode="json"))
+        if self.content_sha256 != expected_content:
+            raise ValueError("回收批次内容摘要与正文不一致")
+        return self
+
+
+class _HistoryBatchReference(EvaluationContract):
+    batch_id: NonEmptyText
+    content_sha256: Sha256
+    path: NonEmptyText
+    read_at: NonEmptyText
+    status: Literal["complete", "pending", "blocked"]
+
+
+class _HistoryIndex(EvaluationContract):
+    schema_version: Literal["fit-agent-external-judge-feedback-index-1"]
+    run_id: NonEmptyText
+    source_sha256: Sha256
+    payload_sha256: Sha256 | None = None
+    applicability_sha256: Sha256
+    binding_sha256: Sha256
+    experiment_id: NonEmptyText | None = None
+    latest: NonEmptyText
+    batches: list[_HistoryBatchReference] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def validate_index(self) -> Self:
+        ids = [item.batch_id for item in self.batches]
+        if len(set(ids)) != len(ids):
+            raise ValueError("回收索引的批次 ID 不能重复")
+        paths = [item.path for item in self.batches]
+        if len(set(paths)) != len(paths):
+            raise ValueError("回收索引的批次路径不能重复")
+        if self.latest not in ids:
+            raise ValueError("回收索引的最新批次不在批次列表中")
+        return self
+
+
+@dataclass(frozen=True)
+class HistoricalCollection:
+    index: _HistoryIndex
+    batch: _HistoryBatch
+
+    @property
+    def latest_batch_id(self) -> str:
+        return self.index.latest
+
+    @property
+    def batch_count(self) -> int:
+        return len(self.index.batches)
+
+
+def _load_historical_collection(
+    run_dir: Path, run_id: str
+) -> HistoricalCollection | None:
+    index_path = feedback_index_path(run_dir)
+    if not index_path.is_file():
+        return None
+    try:
+        document = json.loads(index_path.read_text(encoding="utf-8"))
+    except ValueError as error:
+        raise UploadBlocked(f"回收索引无法解析: {error}") from error
+    schema = (
+        document.get("schema_version") if isinstance(document, dict) else None
+    )
+    if schema == FEEDBACK_INDEX_SCHEMA:
+        # Langfuse 索引归常规回收链路消费，直读路径不处理。
+        return None
+    if schema != HISTORICAL_INDEX_SCHEMA:
+        raise UploadBlocked(f"回收索引版本不受支持: {schema!r}")
+    try:
+        index = _HistoryIndex.model_validate(document)
+    except ValidationError as error:
+        raise UploadBlocked("历史回收索引损坏，拒绝继续") from error
+    if index.run_id != run_id:
+        raise UploadBlocked("历史回收索引 run_id 与源运行不一致")
+    reference = next(
+        item for item in index.batches if item.batch_id == index.latest
+    )
+    relative = Path(reference.path)
+    if (
+        relative.parent != Path(FEEDBACK_BATCH_DIR)
+        or relative.name != f"{reference.batch_id}.json"
+    ):
+        raise UploadBlocked("回收索引包含非法批次路径")
+    batch_path = feedback_dir(run_dir) / relative
+    expected_dir = (feedback_dir(run_dir) / FEEDBACK_BATCH_DIR).resolve()
+    if batch_path.resolve().parent != expected_dir:
+        raise UploadBlocked("回收批次路径越界")
+    if not batch_path.is_file():
+        raise UploadBlocked("回收索引指向的批次文件缺失")
+    try:
+        batch_document = json.loads(batch_path.read_text(encoding="utf-8"))
+    except ValueError as error:
+        raise UploadBlocked(f"回收批次无法解析: {error}") from error
+    try:
+        batch = _HistoryBatch.model_validate(batch_document)
+    except ValidationError as error:
+        raise UploadBlocked("历史回收批次损坏，拒绝继续") from error
+    if (
+        batch.content_sha256 != reference.content_sha256
+        or batch.status != reference.status
+        or _batch_id(batch.content_sha256) != reference.batch_id
+    ):
+        raise UploadBlocked("回收批次与索引记录不一致")
+    if batch.run_id != run_id:
+        raise UploadBlocked("历史回收批次 run_id 与源运行不一致")
+    return HistoricalCollection(index=index, batch=batch)
+
+
 def load_external_scenario_source(
     source: Path, dataset: EvaluationDataset
 ) -> ExternalScenarioSource:
     root, document = _read_document(source)
-    _require_external(document)
+    platform = _require_external(document)
     run_id = document.get("run_id")
     if not isinstance(run_id, str) or not run_id:
         raise ExternalSummaryError("运行摘要缺少 run_id")
@@ -960,6 +1541,7 @@ def load_external_scenario_source(
         root=root,
         dataset=dataset,
         document=document,
+        platform=platform,
         run_id=run_id,
         purpose=purpose,
         scoring_mode=document.get("scoring_mode"),
@@ -984,7 +1566,7 @@ def load_external_scenario_source(
     unknown = sorted(set(result.expected_scenario_ids) - set(all_ids))
     if unknown:
         _add(result.blocking, f"运行范围包含未知场景: {unknown[:3]}")
-    for issue in _metadata_issues(document, dataset, purpose):
+    for issue in _metadata_issues(document, dataset, purpose, platform):
         _add(result.blocking, issue)
     evidence: ExternalRunEvidence | None = None
     try:
@@ -1026,6 +1608,14 @@ def load_external_scenario_source(
         result.latest = verified.latest
         if verified.collection is not None:
             result.batch_id = verified.collection.index.latest
+    if verified is None:
+        # Langfuse 回收链路未消费时尝试历史 LangSmith 批次：仅认历史索引 schema，直接本地读取。
+        try:
+            result.history = _load_historical_collection(root, run_id)
+        except UploadBlocked as error:
+            _add(result.blocking, f"反馈回收证据校验失败: {error}")
+        if result.history is not None:
+            result.batch_id = result.history.latest_batch_id
     recomputed_status = _run_status(evidence)
     if result.recorded_status not in ("awaiting_external_scoring", "incomplete"):
         _add(result.blocking, f"运行状态非法: {result.recorded_status!r}")
@@ -1052,7 +1642,9 @@ def _build_views(source: ExternalScenarioSource) -> None:
             row.scenario["scenario_id"]: row for row in source.evidence.scenarios
         }
     )
-    records: dict[tuple[str, str, str], CheckpointFeedbackRecord] = {}
+    records: dict[tuple[str, str, str], Any] = {}
+    batch_status: str | None = None
+    batch_blocking: list[str] = []
     if source.latest is not None:
         for record in source.latest.checkpoints:
             records[
@@ -1062,6 +1654,19 @@ def _build_views(source: ExternalScenarioSource) -> None:
                     record.checkpoint.checkpoint_id,
                 )
             ] = record
+        batch_status = source.latest.status
+        batch_blocking = list(source.latest.blocking)
+    elif source.history is not None:
+        for record in source.history.batch.checkpoints:
+            records[
+                (
+                    record.checkpoint.scenario_id,
+                    record.checkpoint.event_id,
+                    record.checkpoint.checkpoint_id,
+                )
+            ] = record
+        batch_status = source.history.batch.status
+        batch_blocking = list(source.history.batch.blocking)
     ledger_entries = (
         {}
         if source.ledger is None
@@ -1074,14 +1679,17 @@ def _build_views(source: ExternalScenarioSource) -> None:
             for entry in source.ledger["entries"]
         }
     )
-    feedback_keys = (
-        {}
-        if source.context is None
-        else {
+    feedback_keys: dict[str, str] = {}
+    if source.context is not None:
+        feedback_keys = {
             item.metric: item.feedback_key
             for item in source.context.binding.metrics
         }
-    )
+    elif source.history is not None:
+        feedback_keys = {
+            item.metric: item.feedback_key
+            for item in source.history.batch.binding.metrics
+        }
     for scenario_id in source.expected_scenario_ids:
         scenario = scenario_by_id.get(scenario_id)
         if scenario is None:
@@ -1116,29 +1724,30 @@ def _build_views(source: ExternalScenarioSource) -> None:
             approved=source.applicability,
             ledger_entries=ledger_entries,
             records=records,
-            collection_present=source.latest is not None,
+            collection_present=(
+                source.latest is not None or source.history is not None
+            ),
             feedback_keys=feedback_keys,
             source_issues=[],
         )
         source.scenarios[scenario_id] = view
         for issue in view.blocking:
             _add(source.blocking, issue)
-    if source.latest is None:
-        if source.collection is None:
+    if batch_status is None:
+        if source.collection is None and source.history is None:
             _add(
                 source.blocking,
                 "外部反馈尚未回收: 缺少 "
                 "external-judge/decision-feedback/index.json",
             )
-        else:
+        elif source.collection is not None:
             _add(source.blocking, "外部反馈回收索引缺失最新批次")
-    elif source.latest.status == "pending":
+    elif batch_status == "pending":
         _add(source.blocking, "外部反馈最新批次仍待回收")
-    elif source.latest.status == "blocked":
+    elif batch_status == "blocked":
         _add(
             source.blocking,
-            "外部反馈最新批次校验阻断: "
-            + "; ".join(source.latest.blocking),
+            "外部反馈最新批次校验阻断: " + "; ".join(batch_blocking),
         )
     source.issues = sorted(set(source.blocking))
 
@@ -1434,9 +2043,20 @@ def _coverage_summary(
     }
 
 
+def _iter_batch_records(
+    source: ExternalScenarioSource,
+) -> list[Any]:
+    if source.latest is not None:
+        return list(source.latest.checkpoints)
+    if source.history is not None:
+        return list(source.history.batch.checkpoints)
+    return []
+
+
 def _judge_summary(source: ExternalScenarioSource) -> dict[str, Any]:
     context = source.context
-    if context is None:
+    history = source.history
+    if context is None and history is None:
         return {
             "source_assurance": SOURCE_ASSURANCE,
             "limitations": list(SOURCE_ASSURANCE_LIMITS),
@@ -1444,17 +2064,23 @@ def _judge_summary(source: ExternalScenarioSource) -> dict[str, Any]:
             "model_versions": {},
             "batch_read_at": None,
         }
-    evaluator = context.binding.evaluator
+    if context is not None:
+        evaluator = context.binding.evaluator
+        state_mapping = context.binding.state_mapping.model_dump(mode="json")
+        metrics = context.binding.metrics
+    else:
+        assert history is not None
+        evaluator = history.batch.binding.evaluator
+        state_mapping = history.batch.binding.state_mapping.model_dump(
+            mode="json"
+        )
+        metrics = history.batch.binding.metrics
     versions: dict[str, dict[str, Any]] = {}
     for metric in EXTERNAL_JUDGE_METRICS:
         reported: set[str] = set()
         unreported = 0
         attempts = 0
-        for record in (
-            ()
-            if source.latest is None
-            else source.latest.checkpoints
-        ):
+        for record in _iter_batch_records(source):
             for attempt in record.attempts:
                 if attempt.feedback.metric != metric:
                     continue
@@ -1468,6 +2094,11 @@ def _judge_summary(source: ExternalScenarioSource) -> dict[str, Any]:
             "reported": sorted(reported),
             "unreported": unreported,
         }
+    read_at = None
+    if source.latest is not None:
+        read_at = source.latest.read_at
+    elif history is not None:
+        read_at = history.batch.read_at
     return {
         "source_assurance": SOURCE_ASSURANCE,
         "limitations": list(SOURCE_ASSURANCE_LIMITS),
@@ -1477,9 +2108,7 @@ def _judge_summary(source: ExternalScenarioSource) -> dict[str, Any]:
             "evaluator_id": evaluator.evaluator_id,
             "model_alias": evaluator.model_alias,
             "config_sha256": evaluator.config_sha256,
-            "state_mapping": context.binding.state_mapping.model_dump(
-                mode="json"
-            ),
+            "state_mapping": state_mapping,
             "metrics": [
                 {
                     "metric": item.metric,
@@ -1489,19 +2118,16 @@ def _judge_summary(source: ExternalScenarioSource) -> dict[str, Any]:
                     "rubric_id": item.rubric_id,
                     "rubric_sha256": item.rubric_sha256,
                 }
-                for item in context.binding.metrics
+                for item in metrics
             ],
         },
         "model_versions": versions,
-        "batch_read_at": (
-            None if source.latest is None else source.latest.read_at
-        ),
+        "batch_read_at": read_at,
     }
 
 
 def _identity_summary(source: ExternalScenarioSource) -> dict[str, Any]:
     document = source.document
-    context = source.context
     paths = {
         "source": _display_path(source.root),
         "sdk_run": _display_path(
@@ -1541,6 +2167,54 @@ def _identity_summary(source: ExternalScenarioSource) -> dict[str, Any]:
             }
         )
     collection = source.collection
+    history = source.history
+    if source.context is not None:
+        payload_sha256 = source.context.source.payload_sha256
+        rows_sha256 = source.context.source.rows_sha256
+        projections_sha256 = source.context.source.projections_sha256
+        applicability_sha256 = source.context.binding.applicability_sha256
+        binding_sha256 = source.context.binding_sha256
+        projection_rows = source.context.source.row_count
+        projection_examples = source.context.source.example_count
+        experiment_summary = (
+            None
+            if source.context.experiment is None
+            else source.context.experiment.model_dump(mode="json")
+        )
+    else:
+        payload_sha256 = None if history is None else history.batch.source.payload_sha256
+        rows_sha256 = None if history is None else history.batch.source.rows_sha256
+        projections_sha256 = (
+            None if history is None else history.batch.source.projections_sha256
+        )
+        applicability_sha256 = (
+            None if history is None else history.batch.binding.applicability_sha256
+        )
+        binding_sha256 = None if history is None else history.batch.binding_sha256
+        projection_rows = 0 if history is None else history.batch.source.row_count
+        projection_examples = (
+            0 if history is None else history.batch.source.example_count
+        )
+        experiment_summary = (
+            None
+            if history is None or history.batch.experiment is None
+            else history.batch.experiment.model_dump(mode="json")
+        )
+    if source.latest is not None:
+        batch_status = source.latest.status
+        batch_content = source.latest.content_sha256
+        batch_read_at = source.latest.read_at
+    elif history is not None:
+        batch_status = history.batch.status
+        batch_content = history.batch.content_sha256
+        batch_read_at = history.batch.read_at
+    else:
+        batch_status = None
+        batch_content = None
+        batch_read_at = None
+    batches_count = 0 if collection is None else len(collection.batches)
+    if collection is None and history is not None:
+        batches_count = history.batch_count
     return {
         "dataset": document.get("dataset"),
         "code": document.get("code_identity"),
@@ -1549,51 +2223,31 @@ def _identity_summary(source: ExternalScenarioSource) -> dict[str, Any]:
         "source_sha256": (
             None if source.evidence is None else source.evidence.source_sha256
         ),
-        "payload_sha256": (
-            None if context is None else context.source.payload_sha256
-        ),
-        "rows_sha256": (
-            None if context is None else context.source.rows_sha256
-        ),
-        "projections_sha256": (
-            None if context is None else context.source.projections_sha256
-        ),
-        "applicability_sha256": (
-            None if context is None else context.binding.applicability_sha256
-        ),
-        "binding_sha256": (
-            None if context is None else context.binding_sha256
-        ),
+        "payload_sha256": payload_sha256,
+        "rows_sha256": rows_sha256,
+        "projections_sha256": projections_sha256,
+        "applicability_sha256": applicability_sha256,
+        "binding_sha256": binding_sha256,
         "projections": {
-            "rows": 0 if context is None else context.source.row_count,
-            "examples": 0 if context is None else context.source.example_count,
+            "rows": projection_rows,
+            "examples": projection_examples,
         },
         "experiments": {
             "scenario": document.get("experiment"),
-            "checkpoint_judge": (
-                None
-                if context is None or context.experiment is None
-                else context.experiment.model_dump(mode="json")
-            ),
+            "checkpoint_judge": experiment_summary,
         },
         "collection": {
-            "index_present": collection is not None,
-            "latest": None if collection is None else collection.index.latest,
-            "batch_id": source.batch_id,
-            "batch_status": (
-                None if source.latest is None else source.latest.status
-            ),
-            "content_sha256": (
+            "index_present": collection is not None or history is not None,
+            "latest": (
                 None
-                if source.latest is None
-                else source.latest.content_sha256
+                if collection is None
+                else collection.index.latest
             ),
-            "read_at": (
-                None if source.latest is None else source.latest.read_at
-            ),
-            "batches": (
-                0 if collection is None else len(collection.batches)
-            ),
+            "batch_id": source.batch_id,
+            "batch_status": batch_status,
+            "content_sha256": batch_content,
+            "read_at": batch_read_at,
+            "batches": batches_count,
         },
         "paths": paths,
     }
@@ -1629,7 +2283,12 @@ def _release(
         for value in scenario["entries"].values()
         if value["status"] == "not_applicable"
     )
-    latest_status = None if source.latest is None else source.latest.status
+    if source.latest is not None:
+        latest_status: str | None = source.latest.status
+    elif source.history is not None:
+        latest_status = source.history.batch.status
+    else:
+        latest_status = None
     feedback_complete = (
         latest_status == "complete"
         and failed + succeeded == len(applicable)
@@ -1793,8 +2452,9 @@ def build_summary(
         }
     return {
         "schema": EXTERNAL_SUMMARY_SCHEMA,
+        "platform": source.platform,
         "scoring_mode": "external",
-        "protocol_version": EXTERNAL_PROTOCOL_VERSION,
+        "protocol_version": EXTERNAL_PROTOCOLS[source.platform],
         "feedback_version": EXTERNAL_FEEDBACK_VERSION,
         "run_id": source.run_id,
         "scope": scope_name,
@@ -1816,6 +2476,7 @@ def build_summary(
                 "path": _display_path(source.path),
                 "root": _display_path(source.root),
                 "run_id": source.run_id,
+                "platform": source.platform,
                 "purpose": source.purpose,
                 "scoring_mode": source.scoring_mode,
                 "protocol_version": source.protocol_version,
@@ -1847,7 +2508,13 @@ def build_summary(
         "warnings": sorted(set(source.warnings)),
         "release": release,
         "feedback_status": (
-            "absent" if source.latest is None else source.latest.status
+            "absent"
+            if source.latest is None and source.history is None
+            else (
+                source.latest.status
+                if source.latest is not None
+                else source.history.batch.status
+            )
         ),
     }
 

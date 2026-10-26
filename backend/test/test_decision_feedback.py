@@ -4,20 +4,36 @@ from copy import deepcopy
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
-from uuid import UUID, uuid4
+from uuid import uuid4
 
 import pytest
-from langsmith import schemas
+from langfuse.api import (
+    Experiment,
+    ExperimentItem,
+    GetScoresV3Meta,
+    GetScoresV3Response,
+    ObservationLevel,
+    ObservationsV2Meta,
+    ObservationsV2Response,
+    ObservationV2,
+    ScoreSource,
+    ScoreSubjectV3_Observation,
+    ScoreSubjectV3_Trace,
+    ScoreV3_Categorical,
+    ScoreV3_Numeric,
+)
 from pydantic import ValidationError
 
 from evaluation.contracts import (
     ExternalJudgeApplicability,
-    ExternalJudgeScoringAttempt,
+    ExternalJudgeLangfuseScoringAttempt,
 )
 from evaluation.dataset import load_for_evaluation
 from evaluation.decision_feedback import (
     FEEDBACK_BINDING_SCHEMA,
+    WEB_JUDGE_ENVIRONMENT,
     FeedbackBinding,
     FeedbackDiagnostic,
     _bounded_collect,
@@ -29,23 +45,32 @@ from evaluation.decision_feedback import (
     collect_feedback,
     feedback_binding_path,
     feedback_index_path,
-    group_run_feedback,
+    group_score_feedback,
     load_feedback_context,
     main,
     normalize_feedback,
     question_digest,
+    read_remote_feedback,
     rubric_digest,
     verify_receipt_runs,
 )
 from evaluation.generation_upload import (
+    EXPECTED_VARIABLE_MAPPING,
     EXTERNAL_DATASET_RECEIPT_NAME,
     EXTERNAL_DATASET_RECEIPT_SCHEMA,
     EXTERNAL_EXPERIMENT_PENDING_NAME,
     EXTERNAL_EXPERIMENT_RECEIPT_NAME,
     EXTERNAL_EXPERIMENT_RECEIPT_SCHEMA,
+    EXTERNAL_PAYLOAD_SCHEMA,
     UploadBlocked,
+    _dataset_marker,
+    _example_document,
+    _experiment_metadata,
+    _frozen_run_output,
     _verify_external_examples,
+    _web_judge_configuration,
     check_external_projection,
+    external_rule_filters,
     load_external_run,
     payload_digest,
 )
@@ -55,6 +80,9 @@ from test.test_external_judge_checkpoints import (
     FAILED_SCENARIO,
     PROFILE_SCENARIO,
     RUN_ID,
+    VERIFY_STAMP,
+    MemoryClient,
+    MemoryExperiment,
     approval_entries,
     build_fixture_run,
     default_decisions,
@@ -64,6 +92,8 @@ from test.test_external_judge_checkpoints import (
 EXPERIMENT_ID = "11111111-1111-4111-8111-111111111111"
 DATASET_ID = "22222222-2222-4222-8222-222222222222"
 EVALUATOR_ID = "evaluator-task4-declared"
+EVIDENCE_EVALUATOR_NAME = "fit-agent-evidence-judge"
+REFERENCE_EVALUATOR_NAME = "fit-agent-reference-judge"
 EVIDENCE_METRIC = "evidence_supported_v1"
 REFERENCE_METRIC = "reference_requirements_met_v1"
 REAL_CONTEXT_LIMIT_COMMENT = (
@@ -143,27 +173,21 @@ def binding_document(
     payload: dict[str, Any] | None,
     applicability_sha256: str,
 ) -> dict[str, Any]:
-    config = {
-        "model": "jev-latest",
-        "state": {
-            "user_request": "inputs.user_request",
-            "answer": "outputs.answer",
-            "context": "outputs.context.items",
-            "reference": "reference_outputs.reference",
+    config = _web_judge_configuration(
+        payload
+        or {
+            "dataset_name": (
+                "fit-agent-external-judge-langfuse-v2-binding-fixture"
+            )
         },
-        "questions": [
-            {
-                "id": EVIDENCE_METRIC,
-                "type": "noul",
-                "instructions": "回答事实是否全部由证据支持？",
-            },
-            {
-                "id": REFERENCE_METRIC,
-                "type": "noul",
-                "instructions": "回答是否满足参考要求？",
-            },
-        ],
-    }
+        DATASET_ID,
+    )
+    for entry, name in zip(
+        config["evaluators"],
+        (EVIDENCE_EVALUATOR_NAME, REFERENCE_EVALUATOR_NAME),
+        strict=True,
+    ):
+        entry["evaluator_name"] = name
     experiment = None
     if payload is not None:
         experiment = {
@@ -184,19 +208,14 @@ def binding_document(
         "applicability_sha256": applicability_sha256,
         "experiment": experiment,
         "evaluator": {
-            "provider": "TypeSafe",
+            "provider": "Langfuse",
             "evaluator": "fit-agent-external-judge",
             "evaluator_id": EVALUATOR_ID,
             "model_alias": "jev-latest",
             "config": config,
             "config_sha256": sha256_text(canonical_json(config)),
         },
-        "state_mapping": {
-            "user_request": "inputs.user_request",
-            "answer": "outputs.answer",
-            "context": "outputs.context.items",
-            "reference": "reference_outputs.reference",
-        },
+        "state_mapping": EXPECTED_VARIABLE_MAPPING,
         "metrics": [
             {
                 "metric": EVIDENCE_METRIC,
@@ -231,6 +250,7 @@ def binding_document(
 def write_receipts(
     run_dir: Path, payload: dict[str, Any]
 ) -> dict[str, str]:
+    web_judge = _web_judge_configuration(payload, DATASET_ID)
     dataset_receipt = {
         "schema": EXTERNAL_DATASET_RECEIPT_SCHEMA,
         "run_id": payload["run_id"],
@@ -243,9 +263,10 @@ def write_receipts(
         "dataset_name": payload["dataset_name"],
         "dataset_id": DATASET_ID,
         "dataset_url": None,
-        "example_ids": [row["row_id"] for row in payload["rows"]],
+        "item_ids": [row["row_id"] for row in payload["rows"]],
         "example_count": len(payload["rows"]),
         "created": True,
+        "web_judge": web_judge,
         "synced_at": "2026-10-21T00:00:00+00:00",
     }
     write_json(
@@ -273,7 +294,7 @@ def write_receipts(
         "experiment_name": payload["experiment_name"],
         "experiment_id": EXPERIMENT_ID,
         "experiment_url": None,
-        "example_ids": [row["row_id"] for row in payload["rows"]],
+        "item_ids": [row["row_id"] for row in payload["rows"]],
         "runs": runs,
         "projections": {
             row["row_id"]: {
@@ -288,6 +309,7 @@ def write_receipts(
         "coverage": payload["coverage"],
         "coverage_complete": True,
         "external_scoring_status": "pending_collection",
+        "web_judge": web_judge,
         "submitted_at": "2026-10-21T00:00:00+00:00",
     }
     write_json(
@@ -345,85 +367,203 @@ def prepare_run(tmp_path: Path, dataset, mode: str = "complete") -> PreparedRun:
     )
 
 
-def make_feedback(
-    run_id: str,
-    key: str,
-    score: Any,
+def make_score(
+    trace_id: str,
+    name: str,
+    value: float,
     *,
-    feedback_id: UUID | None = None,
+    score_id: str | None = None,
     comment: str | None = "真实分数",
-    extra: dict[str, Any] | None = None,
-    source_type: str = "model",
-    typesafe: dict[str, Any] | None = None,
-    value: Any = None,
-    correction: Any = None,
-    session_id: str | None = EXPERIMENT_ID,
-) -> schemas.Feedback:
-    metadata: dict[str, Any] = {}
-    if typesafe is not None:
-        metadata["typesafe"] = typesafe
-    return schemas.Feedback(
-        id=feedback_id or uuid4(),
-        created_at=datetime.now(UTC),
-        modified_at=datetime.now(UTC),
-        run_id=UUID(run_id),
-        trace_id=UUID(run_id),
-        session_id=UUID(session_id) if session_id is not None else None,
-        key=key,
-        score=score,
+    config_id: str | None = None,
+    metadata: dict[str, Any] | None = None,
+    source: ScoreSource = ScoreSource.EVAL,
+    subject_kind: str = "observation",
+) -> ScoreV3_Numeric:
+    resolved = score_id or str(uuid4())
+    subject = (
+        ScoreSubjectV3_Trace(kind="trace", id=trace_id)
+        if subject_kind == "trace"
+        else ScoreSubjectV3_Observation(
+            kind="observation", id=f"obs-{resolved[:8]}", trace_id=trace_id
+        )
+    )
+    stamp = datetime(2026, 10, 21, tzinfo=UTC)
+    return ScoreV3_Numeric(
+        data_type="NUMERIC",
         value=value,
-        correction=correction,
+        id=resolved,
+        project_id="project-1",
+        name=name,
+        source=source,
+        timestamp=stamp,
+        environment="default",
+        created_at=stamp,
+        updated_at=stamp,
         comment=comment,
-        extra=extra,
-        feedback_source=schemas.FeedbackSourceBase(
-            type=source_type, metadata=metadata or None
+        config_id=config_id,
+        metadata=metadata,
+        author_user_id=None,
+        queue_id=None,
+        subject=subject,
+    )
+
+
+def make_categorical_score(
+    trace_id: str,
+    name: str,
+    value: str,
+) -> ScoreV3_Categorical:
+    stamp = datetime(2026, 10, 21, tzinfo=UTC)
+    return ScoreV3_Categorical(
+        data_type="CATEGORICAL",
+        value=value,
+        id=str(uuid4()),
+        project_id="project-1",
+        name=name,
+        source=ScoreSource.EVAL,
+        timestamp=stamp,
+        environment="default",
+        created_at=stamp,
+        updated_at=stamp,
+        comment="真实分数",
+        config_id=None,
+        metadata=None,
+        author_user_id=None,
+        queue_id=None,
+        subject=ScoreSubjectV3_Observation(
+            kind="observation", id=f"obs-{trace_id[:8]}", trace_id=trace_id
         ),
     )
 
 
-def raw_feedback(
-    run_id: str,
-    key: str,
-    score: Any,
+def raw_score(
+    trace_id: str,
+    name: str,
+    value: Any,
     *,
-    feedback_id: str | None = None,
+    score_id: str | None = None,
     comment: str | None = "真实分数",
-    extra: dict[str, Any] | None = None,
-    source_type: str = "model",
-    typesafe: dict[str, Any] | None = {"model": "jev-1.13.0"},
-    value: Any = None,
+    source: str = "EVAL",
+    data_type: str = "NUMERIC",
+    config_id: str | None = None,
+    metadata: dict[str, Any] | None = None,
+    subject_kind: str = "observation",
 ) -> dict[str, Any]:
-    document = {
-        "id": feedback_id or str(uuid4()),
-        "created_at": "2026-10-21T00:00:00+00:00",
-        "modified_at": "2026-10-21T00:00:00+00:00",
-        "run_id": run_id,
-        "trace_id": run_id,
-        "session_id": EXPERIMENT_ID,
-        "key": key,
-        "score": score,
-        "value": value,
-        "correction": None,
+    stamp = "2026-10-21T00:00:00+00:00"
+    subject = (
+        {"kind": "trace", "id": trace_id}
+        if subject_kind == "trace"
+        else {
+            "kind": "observation",
+            "id": "obs-1",
+            "traceId": trace_id,
+        }
+    )
+    return {
+        "id": score_id or str(uuid4()),
+        "projectId": "project-1",
+        "name": name,
+        "source": source,
+        "timestamp": stamp,
+        "environment": "default",
+        "createdAt": stamp,
+        "updatedAt": stamp,
         "comment": comment,
-        "extra": extra,
-        "feedback_source": {
-            "type": source_type,
-            "metadata": (
-                {} if typesafe is None else {"typesafe": typesafe}
-            ),
-        },
+        "configId": config_id,
+        "metadata": metadata,
+        "authorUserId": None,
+        "queueId": None,
+        "dataType": data_type,
+        "value": value,
+        "subject": subject,
     }
-    return document
 
 
-def normalize(prepared: PreparedRun, items: list[Any]):
+def judge_failure_observation(
+    evaluator_name: str,
+    trace_id: str,
+    *,
+    level: str = "ERROR",
+    status_message: str | None = REAL_CONTEXT_LIMIT_COMMENT,
+    name: str | None = None,
+) -> dict[str, Any]:
+    return {
+        "id": str(uuid4()),
+        "traceId": trace_id,
+        "startTime": "2026-10-21T00:00:00+00:00",
+        "level": level,
+        "statusMessage": status_message,
+        "environment": WEB_JUDGE_ENVIRONMENT,
+        "name": name or f"Execute evaluator: {evaluator_name}",
+    }
+
+
+class MemoryScoresApi:
+    def __init__(self, client: "MemoryFeedbackClient") -> None:
+        self._client = client
+
+    def get_many(
+        self,
+        *,
+        experiment_id=None,
+        fields=None,
+        limit=None,
+        cursor=None,
+        **kwargs,
+    ):
+        scores = self._client.scores_by_experiment.get(experiment_id, [])
+        return GetScoresV3Response(
+            data=list(scores),
+            meta=GetScoresV3Meta(cursor=None, limit=len(scores)),
+        )
+
+
+class MemoryObservationsApi:
+    def __init__(self, client: "MemoryFeedbackClient") -> None:
+        self._client = client
+
+    def get_many(
+        self,
+        *,
+        environment=None,
+        trace_id=None,
+        limit=None,
+        cursor=None,
+        **kwargs,
+    ):
+        data = [
+            observation
+            for observation in self._client.observations_by_trace.get(
+                trace_id, []
+            )
+            if observation.environment == environment
+        ]
+        return ObservationsV2Response(
+            data=list(data), meta=ObservationsV2Meta(cursor=None)
+        )
+
+
+class MemoryFeedbackClient(MemoryClient):
+    # 在 T3 内存 Client 上补 scores/observations 读 API 面。
+    def __init__(self) -> None:
+        super().__init__()
+        self.scores_by_experiment: dict[str, list[Any]] = {}
+        self.observations_by_trace: dict[str, list[Any]] = {}
+        self.api.scores = MemoryScoresApi(self)
+        self.api.observations = MemoryObservationsApi(self)
+
+
+def normalize(prepared: PreparedRun, items: list[Any], judge_failures=None):
     assert prepared.row is not None
     row_id = prepared.row["row_id"]
-    run_id = prepared.runs[row_id]
+    trace_id = prepared.runs[row_id]
     return normalize_feedback(
         prepared.context,
-        {row_id: run_id},
-        {run_id: items},
+        {row_id: trace_id},
+        {trace_id: items},
+        judge_failures=(
+            None if not judge_failures else {trace_id: judge_failures}
+        ),
     )
 
 
@@ -435,21 +575,11 @@ def uploaded_record(records):
     )
 
 
-def complete_items(prepared: PreparedRun) -> list[schemas.Feedback]:
-    run_id = prepared.runs[prepared.row["row_id"]]
+def complete_items(prepared: PreparedRun) -> list[ScoreV3_Numeric]:
+    trace_id = prepared.runs[prepared.row["row_id"]]
     return [
-        make_feedback(
-            run_id,
-            EVIDENCE_METRIC,
-            0.82,
-            typesafe={"model": "jev-1.13.0"},
-        ),
-        make_feedback(
-            run_id,
-            REFERENCE_METRIC,
-            0.38,
-            typesafe={"model": "jev-1.13.0"},
-        ),
+        make_score(trace_id, EVIDENCE_METRIC, 0.82),
+        make_score(trace_id, REFERENCE_METRIC, 0.38),
     ]
 
 
@@ -461,21 +591,14 @@ def persisted(prepared: PreparedRun, items: list[Any]):
     return records, batch, path, reused
 
 
-def test_two_feedback_zero_and_one_preserve_probability_and_versions(
+def test_two_feedback_zero_and_one_preserve_probability_and_unreported_versions(
     tmp_path, dataset
 ):
     prepared = prepare_run(tmp_path, dataset)
-    run_id = prepared.runs[prepared.row["row_id"]]
+    trace_id = prepared.runs[prepared.row["row_id"]]
     items = [
-        make_feedback(
-            run_id,
-            EVIDENCE_METRIC,
-            0.0,
-            typesafe={"model": "jev-1.13.0"},
-        ),
-        make_feedback(
-            run_id, REFERENCE_METRIC, 1.0, typesafe={}
-        ),
+        make_score(trace_id, EVIDENCE_METRIC, 0.0),
+        make_score(trace_id, REFERENCE_METRIC, 1.0),
     ]
     records = normalize(prepared, items)
     record = uploaded_record(records)
@@ -488,9 +611,13 @@ def test_two_feedback_zero_and_one_preserve_probability_and_versions(
         attempt.feedback.metric: attempt.model.model_version
         for attempt in record.attempts
     }
-    assert versions[EVIDENCE_METRIC].kind == "reported"
-    assert versions[EVIDENCE_METRIC].version == "jev-1.13.0"
+    # Langfuse Score 不返回裁判模型版本，别名之外一律按平台未返回记录。
+    assert versions[EVIDENCE_METRIC].kind == "unreported"
     assert versions[REFERENCE_METRIC].kind == "unreported"
+    assert all(
+        attempt.model.model_alias == "jev-latest"
+        for attempt in record.attempts
+    )
     batch = build_feedback_batch(prepared.context, records)
     assert batch.status == "complete"
     assert batch.source_assurance == "declared_binding"
@@ -502,12 +629,10 @@ def test_two_feedback_zero_and_one_preserve_probability_and_versions(
 )
 def test_invalid_scores_block_success(tmp_path, dataset, score):
     prepared = prepare_run(tmp_path, dataset)
-    run_id = prepared.runs[prepared.row["row_id"]]
+    trace_id = prepared.runs[prepared.row["row_id"]]
     items = [
-        raw_feedback(run_id, EVIDENCE_METRIC, score),
-        make_feedback(
-            run_id, REFERENCE_METRIC, 0.4, typesafe={"model": "jev-1.13.0"}
-        ),
+        raw_score(trace_id, EVIDENCE_METRIC, score),
+        make_score(trace_id, REFERENCE_METRIC, 0.4),
     ]
     records = normalize(prepared, items)
     record = uploaded_record(records)
@@ -529,19 +654,42 @@ def test_invalid_scores_block_success(tmp_path, dataset, score):
     assert batch.blocking
 
 
+def test_non_numeric_data_type_rejected_with_terminal_evidence(
+    tmp_path, dataset
+):
+    prepared = prepare_run(tmp_path, dataset)
+    trace_id = prepared.runs[prepared.row["row_id"]]
+    categorical = make_categorical_score(trace_id, EVIDENCE_METRIC, "pass")
+    items = [
+        categorical,
+        make_score(trace_id, REFERENCE_METRIC, 0.4),
+    ]
+    records = normalize(prepared, items)
+    record = uploaded_record(records)
+    assert record.status == "blocked"
+    exclusion = next(
+        exclusion
+        for exclusion in record.exclusions
+        if exclusion.reason == "invalid_score"
+    )
+    assert "CATEGORICAL" in exclusion.detail
+    assert "pass" in exclusion.detail
+    stored = next(
+        item for item in record.evidence if item.score_id == categorical.id
+    )
+    assert stored.raw["dataType"] == "CATEGORICAL"
+    assert stored.raw["value"] == "pass"
+
+
 def test_missing_metric_pending_then_later_collect_completes(
     tmp_path, dataset
 ):
     prepared = prepare_run(tmp_path, dataset)
-    run_id = prepared.runs[prepared.row["row_id"]]
-    evidence_feedback = make_feedback(
-        run_id, EVIDENCE_METRIC, 0.7, typesafe={"model": "jev-1.13.0"}
-    )
-    reference_feedback = make_feedback(
-        run_id, REFERENCE_METRIC, 0.6, typesafe={"model": "jev-1.13.0"}
-    )
+    trace_id = prepared.runs[prepared.row["row_id"]]
+    evidence_score = make_score(trace_id, EVIDENCE_METRIC, 0.7)
+    reference_score = make_score(trace_id, REFERENCE_METRIC, 0.6)
     records, first, first_path, first_reused = persisted(
-        prepared, [evidence_feedback]
+        prepared, [evidence_score]
     )
     assert not first_reused
     assert uploaded_record(records).status == "pending"
@@ -556,9 +704,9 @@ def test_missing_metric_pending_then_later_collect_completes(
     second_records = normalize_feedback(
         prepared.context,
         {
-            prepared.row["row_id"]: run_id,
+            prepared.row["row_id"]: trace_id,
         },
-        {run_id: [evidence_feedback, reference_feedback]},
+        {trace_id: [evidence_score, reference_score]},
         history,
     )
     second = build_feedback_batch(prepared.context, second_records)
@@ -584,17 +732,13 @@ def test_bounded_wait_stops_at_deadline_and_second_read_completes(
     tmp_path, dataset, monkeypatch
 ):
     prepared = prepare_run(tmp_path, dataset)
-    run_id = prepared.runs[prepared.row["row_id"]]
-    evidence_feedback = make_feedback(
-        run_id, EVIDENCE_METRIC, 0.7, typesafe={"model": "jev-1.13.0"}
-    )
-    reference_feedback = make_feedback(
-        run_id, REFERENCE_METRIC, 0.6, typesafe={"model": "jev-1.13.0"}
-    )
-    mapping = {prepared.row["row_id"]: run_id}
+    trace_id = prepared.runs[prepared.row["row_id"]]
+    evidence_score = make_score(trace_id, EVIDENCE_METRIC, 0.7)
+    reference_score = make_score(trace_id, REFERENCE_METRIC, 0.6)
+    mapping = {prepared.row["row_id"]: trace_id}
 
     def always_pending(context, timeout_ms):
-        return mapping, {run_id: [evidence_feedback]}
+        return mapping, {trace_id: [evidence_score]}, {}
 
     started = time.monotonic()
     batch, reads = _bounded_collect(
@@ -615,8 +759,8 @@ def test_bounded_wait_stops_at_deadline_and_second_read_completes(
         observed_timeouts.append(timeout_ms)
         calls["count"] += 1
         if calls["count"] == 1:
-            return mapping, {run_id: [evidence_feedback]}
-        return mapping, {run_id: [evidence_feedback, reference_feedback]}
+            return mapping, {trace_id: [evidence_score]}, {}
+        return mapping, {trace_id: [evidence_score, reference_score]}, {}
 
     batch, reads = _bounded_collect(
         prepared.context, 3.0, None, reader=eventually
@@ -626,34 +770,28 @@ def test_bounded_wait_stops_at_deadline_and_second_read_completes(
     assert all(timeout > 0 for timeout in observed_timeouts)
 
 
-def test_real_cloud_failure_is_failed_and_local_invalid_score_is_blocked(
+def test_real_cloud_failure_is_failed_and_unattributed_stays_pending(
     tmp_path, dataset
 ):
     prepared = prepare_run(tmp_path, dataset)
-    run_id = prepared.runs[prepared.row["row_id"]]
-    failure = make_feedback(
-        run_id,
-        EVIDENCE_METRIC,
-        None,
-        comment=REAL_CONTEXT_LIMIT_COMMENT,
-        extra={"error": True},
-        typesafe={"model": "jev-1.13.0"},
+    row_id = prepared.row["row_id"]
+    trace_id = prepared.runs[row_id]
+    failure = judge_failure_observation(EVIDENCE_EVALUATOR_NAME, trace_id)
+    success = make_score(trace_id, REFERENCE_METRIC, 0.5)
+    records = normalize(
+        prepared, [success], judge_failures=[failure]
     )
-    success = make_feedback(
-        run_id, REFERENCE_METRIC, 0.5, typesafe={"model": "jev-1.13.0"}
-    )
-    records = normalize(prepared, [failure, success])
     record = uploaded_record(records)
     assert record.status == "complete"
     feedback = {row.metric: row for row in record.feedback_set.feedback}
     assert feedback[EVIDENCE_METRIC].status == "failed"
     assert feedback[EVIDENCE_METRIC].score is None
     assert "context limit" in feedback[EVIDENCE_METRIC].failure_evidence
+    assert WEB_JUDGE_ENVIRONMENT in feedback[EVIDENCE_METRIC].failure_evidence
     assert feedback[REFERENCE_METRIC].status == "succeeded"
-    assert {attempt.feedback.status for attempt in record.attempts} == {
-        "failed",
-        "succeeded",
-    }
+    assert [attempt.feedback.metric for attempt in record.attempts] == [
+        REFERENCE_METRIC
+    ]
     assert any(
         diagnostic.code == "cloud_failure"
         for diagnostic in record.diagnostics
@@ -663,81 +801,96 @@ def test_real_cloud_failure_is_failed_and_local_invalid_score_is_blocked(
         for diagnostic in record.diagnostics
     )
 
+    # 无法归属到声明 evaluator 的调试 observation 不得作为失败依据。
+    foreign = judge_failure_observation(
+        "other-judge", trace_id, name="Execute evaluator: other-judge"
+    )
+    records = normalize(
+        prepared, [success], judge_failures=[foreign]
+    )
+    record = uploaded_record(records)
+    assert record.status == "pending"
+    feedback = {row.metric: row for row in record.feedback_set.feedback}
+    assert feedback[EVIDENCE_METRIC].status == "pending"
+    assert any(
+        diagnostic.code == "awaiting_feedback"
+        for diagnostic in record.diagnostics
+    )
+
 
 def test_remote_run_identity_must_match_receipt(tmp_path, dataset):
     prepared = prepare_run(tmp_path, dataset)
     row = prepared.row
-    run_id = prepared.runs[row["row_id"]]
+    trace_id = prepared.runs[row["row_id"]]
 
     def run_object(**overrides):
         document = {
-            "id": UUID(run_id),
-            "name": row["upload"]["metadata"]["checkpoint"]["checkpoint_id"],
+            "id": str(uuid4()),
+            "trace_id": trace_id,
             "start_time": datetime.now(UTC),
-            "run_type": "chain",
-            "session_id": UUID(EXPERIMENT_ID),
-            "reference_example_id": UUID(row["row_id"]),
-            "inputs": deepcopy(row["upload"]["inputs"]),
-            "outputs": deepcopy(row["upload"]["outputs"]),
-            "error": None,
+            "end_time": None,
+            "level": "DEFAULT",
+            "environment": "default",
+            "experiment_id": EXPERIMENT_ID,
+            "experiment_name": row["upload"]["metadata"]["checkpoint"][
+                "checkpoint_id"
+            ],
+            "experiment_item_id": row["row_id"],
+            "input": deepcopy(row["dataset_input"]),
+            "output": _frozen_run_output(row),
         }
         document.update(overrides)
-        return schemas.Run(**document)
+        return ExperimentItem(**document)
 
     mapping = verify_receipt_runs(prepared.context, [run_object()])
     assert mapping == prepared.runs
     with pytest.raises(UploadBlocked, match="运行身份"):
-        verify_receipt_runs(prepared.context, [run_object(id=uuid4())])
+        verify_receipt_runs(
+            prepared.context, [run_object(trace_id=str(uuid4()))]
+        )
+    with pytest.raises(UploadBlocked, match="不属于回执实验"):
+        verify_receipt_runs(
+            prepared.context, [run_object(experiment_id="other-experiment")]
+        )
     with pytest.raises(UploadBlocked, match="inputs"):
         verify_receipt_runs(
             prepared.context,
-            [run_object(inputs={"tampered": True})],
+            [run_object(input={"tampered": True})],
         )
     with pytest.raises(UploadBlocked, match="outputs"):
         verify_receipt_runs(
             prepared.context,
-            [run_object(outputs={"tampered": True})],
+            [run_object(output={"tampered": True})],
         )
     with pytest.raises(UploadBlocked, match="未知样例"):
         verify_receipt_runs(
-            prepared.context, [run_object(reference_example_id=uuid4())]
+            prepared.context, [run_object(experiment_item_id=str(uuid4()))]
         )
-    with pytest.raises(UploadBlocked, match="多个根运行"):
+    with pytest.raises(UploadBlocked, match="多个实验条目"):
         verify_receipt_runs(
-            prepared.context, [run_object(), run_object(id=uuid4())]
+            prepared.context, [run_object(), run_object(trace_id=str(uuid4()))]
         )
-    with pytest.raises(UploadBlocked, match="不属于回执实验"):
-        verify_receipt_runs(
-            prepared.context, [run_object(session_id=uuid4())]
-        )
+    with pytest.raises(UploadBlocked, match="远端运行失败"):
+        verify_receipt_runs(prepared.context, [run_object(level="ERROR")])
 
 
 def test_example_reference_and_applicability_are_verified(tmp_path, dataset):
     prepared = prepare_run(tmp_path, dataset)
     row = prepared.row
-    example = schemas.Example(
-        id=UUID(row["row_id"]),
-        dataset_id=UUID(DATASET_ID),
-        inputs=deepcopy(row["upload"]["inputs"]),
-        outputs=deepcopy(row["upload"]["reference_outputs"]),
-        metadata={
-            "schema": "fit-agent-external-judge-upload-payload-1",
-            "row_id": row["row_id"],
-            "dataset": prepared.payload["dataset"],
-            "checkpoint": row["upload"]["metadata"]["checkpoint"],
-            "execution_sha256": row["upload"]["metadata"]["execution_sha256"],
-            "projection_sha256": row["projection_sha256"],
-        },
+    example = SimpleNamespace(
+        id=row["row_id"],
+        input=deepcopy(row["dataset_input"]),
+        expected_output=deepcopy(row["upload"]["reference_outputs"]),
+        metadata=_example_document(prepared.payload, row)["metadata"],
     )
     _verify_external_examples(
         prepared.payload, {str(example.id): example}
     )
-    tampered = schemas.Example(
+    tampered = SimpleNamespace(
         id=example.id,
-        dataset_id=example.dataset_id,
-        inputs=example.inputs,
-        outputs={
-            **example.outputs,
+        input=example.input,
+        expected_output={
+            **example.expected_output,
             "applicability": [
                 {"metric": EVIDENCE_METRIC, "applicable": False, "reason": "x"},
                 {"metric": REFERENCE_METRIC, "applicable": False, "reason": "x"},
@@ -745,31 +898,29 @@ def test_example_reference_and_applicability_are_verified(tmp_path, dataset):
         },
         metadata=example.metadata,
     )
-    with pytest.raises(UploadBlocked, match="outputs"):
+    with pytest.raises(UploadBlocked, match="expected_output"):
         _verify_external_examples(
             prepared.payload, {str(tampered.id): tampered}
         )
+    assert example.metadata["schema"] == EXTERNAL_PAYLOAD_SCHEMA
+    assert (
+        example.metadata[f"judge_metric_{EVIDENCE_METRIC}"] == "applicable"
+    )
 
 
-def test_source_gap_and_annotation_feedback_do_not_satisfy_metrics(
+def test_api_and_annotation_sources_do_not_satisfy_metrics(
     tmp_path, dataset
 ):
     prepared = prepare_run(tmp_path, dataset)
-    run_id = prepared.runs[prepared.row["row_id"]]
-    valid = make_feedback(
-        run_id, REFERENCE_METRIC, 0.4, typesafe={"model": "jev-1.13.0"}
-    )
-    for source_type, typesafe in (
-        ("api", {"model": "jev-1.13.0"}),
-        ("model", None),
-    ):
+    trace_id = prepared.runs[prepared.row["row_id"]]
+    valid = make_score(trace_id, REFERENCE_METRIC, 0.4)
+    for source in ("API", "ANNOTATION"):
         items = [
-            raw_feedback(
-                run_id,
+            raw_score(
+                trace_id,
                 EVIDENCE_METRIC,
                 0.9,
-                source_type=source_type,
-                typesafe=typesafe,
+                source=source,
             ),
             valid,
         ]
@@ -779,8 +930,7 @@ def test_source_gap_and_annotation_feedback_do_not_satisfy_metrics(
         feedback = {row.metric: row for row in record.feedback_set.feedback}
         assert feedback[EVIDENCE_METRIC].status == "pending"
         assert any(
-            exclusion.reason
-            in ("source_not_decision_model", "source_gap")
+            exclusion.reason == "source_not_decision_model"
             for exclusion in record.exclusions
         )
         assert any(
@@ -797,16 +947,14 @@ def test_duplicate_same_id_dedup_and_content_drift_conflict(
     tmp_path, dataset
 ):
     prepared = prepare_run(tmp_path, dataset)
-    run_id = prepared.runs[prepared.row["row_id"]]
-    feedback_id = str(uuid4())
-    reference = make_feedback(
-        run_id, REFERENCE_METRIC, 0.4, typesafe={"model": "jev-1.13.0"}
-    )
-    same = raw_feedback(
-        run_id,
+    trace_id = prepared.runs[prepared.row["row_id"]]
+    score_id = str(uuid4())
+    reference = make_score(trace_id, REFERENCE_METRIC, 0.4)
+    same = raw_score(
+        trace_id,
         EVIDENCE_METRIC,
         0.8,
-        feedback_id=feedback_id,
+        score_id=score_id,
     )
     records = normalize(prepared, [same, deepcopy(same), reference])
     record = uploaded_record(records)
@@ -814,7 +962,7 @@ def test_duplicate_same_id_dedup_and_content_drift_conflict(
     evidence = [
         item
         for item in record.evidence
-        if item.feedback_id == feedback_id
+        if item.score_id == score_id
     ]
     assert len(evidence) == 1
     assert len(
@@ -826,7 +974,7 @@ def test_duplicate_same_id_dedup_and_content_drift_conflict(
     ) == 1
 
     drift = deepcopy(same)
-    drift["score"] = 0.2
+    drift["value"] = 0.2
     records = normalize(prepared, [same, drift, reference])
     record = uploaded_record(records)
     assert record.status == "blocked"
@@ -837,24 +985,22 @@ def test_duplicate_same_id_dedup_and_content_drift_conflict(
     versions = [
         item
         for item in record.evidence
-        if item.feedback_id == feedback_id
+        if item.score_id == score_id
     ]
     assert len(versions) == 2
-    assert {item.raw["score"] for item in versions} == {0.8, 0.2}
+    assert {item.raw["value"] for item in versions} == {0.8, 0.2}
     assert not any(
         attempt.feedback.metric == EVIDENCE_METRIC
         for attempt in record.attempts
     )
 
 
-def test_different_feedback_ids_for_same_metric_conflict(tmp_path, dataset):
+def test_different_score_ids_for_same_metric_conflict(tmp_path, dataset):
     prepared = prepare_run(tmp_path, dataset)
-    run_id = prepared.runs[prepared.row["row_id"]]
-    first = raw_feedback(run_id, EVIDENCE_METRIC, 0.8)
-    second = raw_feedback(run_id, EVIDENCE_METRIC, 0.2)
-    reference = make_feedback(
-        run_id, REFERENCE_METRIC, 0.4, typesafe={"model": "jev-1.13.0"}
-    )
+    trace_id = prepared.runs[prepared.row["row_id"]]
+    first = raw_score(trace_id, EVIDENCE_METRIC, 0.8)
+    second = raw_score(trace_id, EVIDENCE_METRIC, 0.2)
+    reference = make_score(trace_id, REFERENCE_METRIC, 0.4)
     records = normalize(prepared, [first, second, reference])
     record = uploaded_record(records)
     assert record.status == "blocked"
@@ -875,15 +1021,11 @@ def test_different_feedback_ids_for_same_metric_conflict(tmp_path, dataset):
 
 def test_history_conflict_and_drift_preserve_old_batches(tmp_path, dataset):
     prepared = prepare_run(tmp_path, dataset)
-    run_id = prepared.runs[prepared.row["row_id"]]
-    evidence_feedback = make_feedback(
-        run_id, EVIDENCE_METRIC, 0.8, typesafe={"model": "jev-1.13.0"}
-    )
-    reference_feedback = make_feedback(
-        run_id, REFERENCE_METRIC, 0.4, typesafe={"model": "jev-1.13.0"}
-    )
+    trace_id = prepared.runs[prepared.row["row_id"]]
+    evidence_score = make_score(trace_id, EVIDENCE_METRIC, 0.8)
+    reference_score = make_score(trace_id, REFERENCE_METRIC, 0.4)
     _, first, first_path, _ = persisted(
-        prepared, [evidence_feedback, reference_feedback]
+        prepared, [evidence_score, reference_score]
     )
     assert first.status == "complete"
     loaded = _load_collection(prepared.context)
@@ -894,8 +1036,8 @@ def test_history_conflict_and_drift_preserve_old_batches(tmp_path, dataset):
     )
     missing_reference = normalize_feedback(
         prepared.context,
-        {prepared.row["row_id"]: run_id},
-        {run_id: [evidence_feedback]},
+        {prepared.row["row_id"]: trace_id},
+        {trace_id: [evidence_score]},
         history,
     )
     second = build_feedback_batch(prepared.context, missing_reference)
@@ -911,16 +1053,16 @@ def test_history_conflict_and_drift_preserve_old_batches(tmp_path, dataset):
     history = _history_from_batches(
         prepared.context, list(loaded.batches.values())
     )
-    drifted = raw_feedback(
-        run_id,
+    drifted = raw_score(
+        trace_id,
         EVIDENCE_METRIC,
         0.1,
-        feedback_id=str(evidence_feedback.id),
+        score_id=str(evidence_score.id),
     )
     third_records = normalize_feedback(
         prepared.context,
-        {prepared.row["row_id"]: run_id},
-        {run_id: [drifted, reference_feedback]},
+        {prepared.row["row_id"]: trace_id},
+        {trace_id: [drifted, reference_score]},
         history,
     )
     third = build_feedback_batch(prepared.context, third_records)
@@ -1009,17 +1151,13 @@ def test_unexpected_feedback_for_not_applicable_metric_is_audited(
     write_json(feedback_binding_path(run_dir), binding)
     context = load_feedback_context(run_dir, dataset_dir=DEFAULT_VERSION_DIR)
     row = payload["rows"][0]
-    run_id = runs[row["row_id"]]
+    trace_id = runs[row["row_id"]]
     items = [
-        make_feedback(
-            run_id, EVIDENCE_METRIC, 0.9, typesafe={"model": "jev-1.13.0"}
-        ),
-        make_feedback(
-            run_id, REFERENCE_METRIC, 0.6, typesafe={"model": "jev-1.13.0"}
-        ),
+        make_score(trace_id, EVIDENCE_METRIC, 0.9),
+        make_score(trace_id, REFERENCE_METRIC, 0.6),
     ]
     records = normalize_feedback(
-        context, {row["row_id"]: run_id}, {run_id: items}
+        context, {row["row_id"]: trace_id}, {trace_id: items}
     )
     record = uploaded_record(records)
     assert record.status == "complete"
@@ -1059,10 +1197,10 @@ def test_all_not_applicable_collect_is_offline_and_complete(
     }
 
     def explode(*args, **kwargs):
-        raise AssertionError("离线回收不得创建 LangSmith Client")
+        raise AssertionError("离线回收不得创建 Langfuse Client")
 
     monkeypatch.setattr(
-        "evaluation.decision_feedback.Client", explode
+        "evaluation.decision_feedback.Langfuse", explode
     )
     result = collect_feedback(prepared.run_dir)
     assert result["status"] == "complete"
@@ -1093,51 +1231,146 @@ def test_all_not_applicable_collect_is_offline_and_complete(
     ).exists()
 
 
+def test_read_remote_feedback_groups_scores_and_failures(
+    tmp_path, dataset, monkeypatch
+):
+    prepared = prepare_run(tmp_path, dataset)
+    payload = prepared.payload
+    row = prepared.row
+    trace_id = prepared.runs[row["row_id"]]
+    client = MemoryFeedbackClient()
+    client.create_dataset(
+        name=payload["dataset_name"], metadata=_dataset_marker(payload)
+    )
+    client.datasets[payload["dataset_name"]].id = DATASET_ID
+    for row_document in payload["rows"]:
+        document = _example_document(payload, row_document)
+        client.create_dataset_item(
+            dataset_name=payload["dataset_name"],
+            id=document["id"],
+            input=document["input"],
+            expected_output=document["expected_output"],
+            metadata=document["metadata"],
+        )
+    items = [
+        ExperimentItem(
+            id=str(uuid4()),
+            trace_id=prepared.runs[row_document["row_id"]],
+            start_time=VERIFY_STAMP,
+            end_time=VERIFY_STAMP,
+            level="DEFAULT",
+            environment="default",
+            experiment_id=EXPERIMENT_ID,
+            experiment_name=payload["experiment_name"],
+            experiment_item_id=row_document["row_id"],
+            input=row_document["dataset_input"],
+            output=_frozen_run_output(row_document),
+        )
+        for row_document in payload["rows"]
+    ]
+    experiment = Experiment(
+        id=EXPERIMENT_ID,
+        name=payload["experiment_name"],
+        description=None,
+        start_time=VERIFY_STAMP,
+        end_time=VERIFY_STAMP,
+        item_count=len(items),
+        dataset_id=DATASET_ID,
+        metadata=_experiment_metadata(payload, DATASET_ID),
+    )
+    client.experiments[EXPERIMENT_ID] = MemoryExperiment(experiment, items)
+    client.scores_by_experiment[EXPERIMENT_ID] = [
+        make_score(trace_id, REFERENCE_METRIC, 0.55)
+    ]
+    client.observations_by_trace[trace_id] = [
+        ObservationV2(
+            id=str(uuid4()),
+            trace_id=trace_id,
+            start_time=VERIFY_STAMP,
+            end_time=None,
+            project_id="project-1",
+            parent_observation_id=None,
+            type="GENERATION",
+            is_root_observation=True,
+            level=ObservationLevel.ERROR,
+            status_message=REAL_CONTEXT_LIMIT_COMMENT,
+            environment=WEB_JUDGE_ENVIRONMENT,
+            name=f"Execute evaluator: {EVIDENCE_EVALUATOR_NAME}",
+        )
+    ]
+    monkeypatch.setattr(
+        "evaluation.decision_feedback._feedback_client",
+        lambda timeout_ms: client,
+    )
+    mapping, grouped, failures = read_remote_feedback(
+        prepared.context, timeout_ms=30_000
+    )
+    assert mapping == prepared.runs
+    assert list(grouped[trace_id])
+    assert len(failures[trace_id]) == 1
+    records = normalize_feedback(
+        prepared.context,
+        mapping,
+        grouped,
+        judge_failures=failures,
+    )
+    batch = build_feedback_batch(prepared.context, records)
+    assert batch.status == "complete"
+    record = uploaded_record(records)
+    feedback = {row.metric: row for row in record.feedback_set.feedback}
+    assert feedback[EVIDENCE_METRIC].status == "failed"
+    assert feedback[REFERENCE_METRIC].status == "succeeded"
+    # 越界 score：subject trace 不属于回执运行，归组阻断。
+    client.scores_by_experiment[EXPERIMENT_ID] = [
+        make_score(str(uuid4()), REFERENCE_METRIC, 0.55)
+    ]
+    with pytest.raises(UploadBlocked, match="回执运行之外"):
+        read_remote_feedback(prepared.context, timeout_ms=30_000)
+
+
 def test_check_is_offline_and_collect_requires_explicit_key(
     tmp_path, dataset, monkeypatch
 ):
     prepared = prepare_run(tmp_path, dataset)
 
     def explode(*args, **kwargs):
-        raise AssertionError("check 不得创建 LangSmith Client")
+        raise AssertionError("check 不得创建 Langfuse Client")
 
     monkeypatch.setattr(
-        "evaluation.decision_feedback.Client", explode
+        "evaluation.decision_feedback.Langfuse", explode
     )
     result = check_feedback(prepared.run_dir)
     assert result["status"] == "pending"
     assert result["network"] == "not_called"
     assert result["reason"] == "collection_absent"
-    monkeypatch.delenv("LANGSMITH_API_KEY", raising=False)
+    monkeypatch.delenv("LANGFUSE_PUBLIC_KEY", raising=False)
+    monkeypatch.delenv("LANGFUSE_SECRET_KEY", raising=False)
     monkeypatch.setattr(
         "evaluation.decision_feedback.load_dotenv",
         lambda *args, **kwargs: None,
     )
-    with pytest.raises(UploadBlocked, match="LANGSMITH_API_KEY"):
+    with pytest.raises(UploadBlocked, match="LANGFUSE_PUBLIC_KEY"):
         collect_feedback(prepared.run_dir)
 
 
 def test_raw_evidence_sanitized_and_bound(tmp_path, dataset):
     prepared = prepare_run(tmp_path, dataset)
-    run_id = prepared.runs[prepared.row["row_id"]]
+    trace_id = prepared.runs[prepared.row["row_id"]]
     local_path = "D:\\private\\secret.txt"
     session_path = "sessions/abc/attachments/plan.md"
     items = [
-        make_feedback(
-            run_id,
+        make_score(
+            trace_id,
             EVIDENCE_METRIC,
             0.7,
             comment=f"路径 {local_path} 与 {session_path}",
-            typesafe={"model": "jev-1.13.0"},
         ),
-        make_feedback(
-            run_id, REFERENCE_METRIC, 0.5, typesafe={"model": "jev-1.13.0"}
-        ),
+        make_score(trace_id, REFERENCE_METRIC, 0.5),
     ]
     records = normalize(prepared, items)
     record = uploaded_record(records)
     stored = next(
-        item for item in record.evidence if item.key == EVIDENCE_METRIC
+        item for item in record.evidence if item.score_name == EVIDENCE_METRIC
     )
     assert local_path not in stored.raw["comment"]
     assert session_path not in stored.raw["comment"]
@@ -1159,12 +1392,11 @@ def test_raw_evidence_sanitized_and_bound(tmp_path, dataset):
         normalize(
             prepared,
             [
-                make_feedback(
-                    run_id,
+                make_score(
+                    trace_id,
                     EVIDENCE_METRIC,
                     0.7,
                     comment="Authorization: Bearer hidden",
-                    typesafe={"model": "jev-1.13.0"},
                 )
             ],
         )
@@ -1216,10 +1448,8 @@ def test_persistence_idempotent_and_history_preserved(tmp_path, dataset):
     assert same_path == path
     assert path.read_bytes() == batch_bytes
     assert feedback_index_path(prepared.run_dir).read_bytes() == index_bytes
-    run_id = prepared.runs[prepared.row["row_id"]]
-    extra = make_feedback(
-        run_id, "unrelated_metric", 0.3, typesafe={"model": "jev-1.13.0"}
-    )
+    trace_id = prepared.runs[prepared.row["row_id"]]
+    extra = make_score(trace_id, "unrelated_metric", 0.3)
     changed_records = normalize(
         prepared, complete_items(prepared) + [extra]
     )
@@ -1269,9 +1499,19 @@ def test_binding_rejects_old_metrics_state_and_secret(tmp_path, dataset):
     with pytest.raises(ValidationError):
         FeedbackBinding.model_validate(old_metric)
     wrong_state = deepcopy(base)
-    wrong_state["state_mapping"]["context"] = "outputs.context"
+    wrong_state["state_mapping"]["context"] = {
+        "source": "output",
+        "path": "context",
+    }
     with pytest.raises(ValidationError):
         FeedbackBinding.model_validate(wrong_state)
+    wrong_reference = deepcopy(base)
+    wrong_reference["state_mapping"]["reference"] = {
+        "source": "expected_output",
+        "path": "reference_outputs.reference",
+    }
+    with pytest.raises(ValidationError):
+        FeedbackBinding.model_validate(wrong_reference)
     secret = deepcopy(base)
     secret["evaluator"]["config"]["api_key"] = "hidden"
     secret["evaluator"]["config_sha256"] = sha256_text(
@@ -1287,35 +1527,58 @@ def test_binding_rejects_old_metrics_state_and_secret(tmp_path, dataset):
     duplicate_key["metrics"][1]["feedback_key"] = EVIDENCE_METRIC
     with pytest.raises(ValidationError):
         FeedbackBinding.model_validate(duplicate_key)
+    wrong_filter = deepcopy(base)
+    wrong_filter["evaluator"]["config"]["evaluators"][0]["rule_filters"] = (
+        external_rule_filters(REFERENCE_METRIC, DATASET_ID)
+    )
+    wrong_filter["evaluator"]["config_sha256"] = sha256_text(
+        canonical_json(wrong_filter["evaluator"]["config"])
+    )
+    with pytest.raises(ValidationError, match="规则过滤"):
+        FeedbackBinding.model_validate(wrong_filter)
+    wrong_mapping = deepcopy(base)
+    wrong_mapping["evaluator"]["config"]["variable_mapping"]["reference"] = {
+        "source": "output",
+        "path": "reference",
+    }
+    wrong_mapping["evaluator"]["config_sha256"] = sha256_text(
+        canonical_json(wrong_mapping["evaluator"]["config"])
+    )
+    with pytest.raises(ValidationError, match="变量映射"):
+        FeedbackBinding.model_validate(wrong_mapping)
+    missing_name = deepcopy(base)
+    missing_name["evaluator"]["config"]["evaluators"][0].pop(
+        "evaluator_name"
+    )
+    missing_name["evaluator"]["config_sha256"] = sha256_text(
+        canonical_json(missing_name["evaluator"]["config"])
+    )
+    with pytest.raises(ValidationError, match="evaluator 名称"):
+        FeedbackBinding.model_validate(missing_name)
 
 
-def test_terminal_attempt_requires_cloud_identity(tmp_path, dataset):
+def test_terminal_attempt_requires_cloud_score_identity(tmp_path, dataset):
     prepared = prepare_run(tmp_path, dataset)
     records = normalize(prepared, complete_items(prepared))
     attempt = uploaded_record(records).attempts[0]
     document = attempt.model_dump(mode="json")
-    document["cloud_feedback"] = None
+    document["cloud_score"] = None
     with pytest.raises(ValidationError, match="云端实际返回身份"):
-        ExternalJudgeScoringAttempt.model_validate(document)
+        ExternalJudgeLangfuseScoringAttempt.model_validate(document)
 
 
 def test_malformed_feedback_without_identity_creates_no_attempt(
     tmp_path, dataset
 ):
     prepared = prepare_run(tmp_path, dataset)
-    run_id = prepared.runs[prepared.row["row_id"]]
-    malformed = raw_feedback(run_id, EVIDENCE_METRIC, 0.8)
+    trace_id = prepared.runs[prepared.row["row_id"]]
+    malformed = raw_score(trace_id, EVIDENCE_METRIC, 0.8)
     malformed.pop("id")
     records = normalize(
         prepared,
         [
             malformed,
-            make_feedback(
-                run_id,
-                REFERENCE_METRIC,
-                0.4,
-                typesafe={"model": "jev-1.13.0"},
-            ),
+            make_score(trace_id, REFERENCE_METRIC, 0.4),
         ],
     )
     record = uploaded_record(records)
@@ -1346,6 +1609,10 @@ def test_malformed_feedback_without_identity_creates_no_attempt(
         (
             lambda receipt: receipt.__setitem__("dataset_id", "other"),
             "数据集 ID",
+        ),
+        (
+            lambda receipt: receipt.__setitem__("item_ids", []),
+            "样例身份",
         ),
         (
             lambda receipt: receipt.__setitem__("payload_sha256", "0" * 64),
@@ -1458,22 +1725,18 @@ def test_payload_projection_drift_is_blocked(tmp_path, dataset):
         )
 
 
-def test_feedback_scope_rejects_foreign_run_and_session():
-    experiment_id = EXPERIMENT_ID
-    run_id = str(uuid4())
-    foreign = make_feedback(
-        str(uuid4()), EVIDENCE_METRIC, 0.5
-    )
+def test_feedback_scope_rejects_foreign_subject():
+    trace_id = str(uuid4())
+    foreign = make_score(str(uuid4()), EVIDENCE_METRIC, 0.5)
     with pytest.raises(UploadBlocked, match="回执运行之外"):
-        group_run_feedback(experiment_id, [run_id], [foreign])
-    wrong_session = make_feedback(
-        run_id, EVIDENCE_METRIC, 0.5, session_id=str(uuid4())
-    )
-    with pytest.raises(UploadBlocked, match="会话身份"):
-        group_run_feedback(experiment_id, [run_id], [wrong_session])
-    allowed = make_feedback(run_id, EVIDENCE_METRIC, 0.5)
-    grouped = group_run_feedback(experiment_id, [run_id], [allowed])
-    assert grouped[run_id] == [allowed]
+        group_score_feedback([trace_id], [foreign])
+    session_subject = raw_score(trace_id, EVIDENCE_METRIC, 0.5)
+    session_subject["subject"] = {"kind": "session", "id": "session-1"}
+    with pytest.raises(UploadBlocked, match="subject"):
+        group_score_feedback([trace_id], [session_subject])
+    allowed = make_score(trace_id, EVIDENCE_METRIC, 0.5)
+    grouped = group_score_feedback([trace_id], [allowed])
+    assert grouped[trace_id] == [allowed]
 
 
 def test_wait_seconds_rejects_non_finite_and_negative():
@@ -1500,17 +1763,12 @@ def test_cli_exit_codes(tmp_path, dataset, capsys):
     assert code == 0
     assert output["status"] == "complete"
     blocked = prepare_run(tmp_path / "blocked", dataset)
-    run_id = blocked.runs[blocked.row["row_id"]]
+    trace_id = blocked.runs[blocked.row["row_id"]]
     records = normalize(
         blocked,
         [
-            raw_feedback(run_id, EVIDENCE_METRIC, True),
-            make_feedback(
-                run_id,
-                REFERENCE_METRIC,
-                0.5,
-                typesafe={"model": "jev-1.13.0"},
-            ),
+            raw_score(trace_id, EVIDENCE_METRIC, True),
+            make_score(trace_id, REFERENCE_METRIC, 0.5),
         ],
     )
     batch = build_feedback_batch(blocked.context, records)

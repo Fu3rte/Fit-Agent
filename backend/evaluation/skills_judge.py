@@ -2,19 +2,24 @@ import argparse
 import json
 import os
 import re
+from datetime import datetime
 from pathlib import Path
 
-from langsmith import Client
-from langsmith.schemas import FeedbackSourceType
 from openai import OpenAI
 
+from evaluation.langfuse_scenarios import make_client, require_credentials
+from evaluation.skills_generation import identity_digest
 from evaluation.skills_scoring import (
     EVALUATORS,
+    JUDGE_METHOD,
     KEYS,
     MODEL,
+    PROGRAMMATIC_CHANNEL,
     PROVIDER,
     QUESTIONS,
     build_payload,
+    judge_score_id,
+    require,
     scoring_dir,
 )
 
@@ -22,6 +27,7 @@ from evaluation.skills_scoring import (
 BASE_URL = "https://open.bigmodel.cn/api/coding/paas/v4"
 CATEGORIES = {key: tuple(EVALUATORS[key]["categories"]) for key in KEYS}
 KEY_RE = re.compile(r"\{\{(\w+)\}\}")
+SCORE_PAGE_LIMIT = 100
 
 
 def render(template: str, row: dict) -> str:
@@ -57,68 +63,84 @@ def ask(openai_client, key: str, row: dict):
     }
 
 
-def scored_keys(client: Client, run_ids: list[str]) -> dict[str, set]:
-    present: dict[str, set] = {run_id: set() for run_id in run_ids}
-    for item in client.list_feedback(run_ids=run_ids, limit=1000):
-        if item.key in KEYS:
-            present.setdefault(str(item.run_id), set()).add(item.key)
-    return present
+def trace_score_keys(client, trace_id: str) -> set[str]:
+    # 幂等前置：分页读取该 trace 已有 score，跳过已齐键，避免重复触发真实裁判。
+    present: set[str] = set()
+    cursor = None
+    while True:
+        response = client.api.scores.get_many(trace_id=trace_id, fields="details",
+                                              limit=SCORE_PAGE_LIMIT, cursor=cursor)
+        present.update(score.name for score in response.data if score.name in KEYS)
+        cursor = response.meta.cursor
+        if not cursor:
+            return present
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser(description="程序化运行已配置GLM Evaluator对真实回答打分并写回反馈")
-    parser.add_argument("--source", type=Path, required=True)
-    parser.add_argument("--group")
-    parser.add_argument("--limit", type=int, default=30)
-    parser.add_argument("--enable-judge", action="store_true")
-    args = parser.parse_args()
-    if not args.enable_judge:
-        raise ValueError("必须显式--enable-judge；此操作调用真实GLM")
-    key_value = os.environ.get("GLM_API_KEY")
-    if not key_value:
-        raise ValueError("缺少环境变量 GLM_API_KEY（bigmodel.cn 智谱密钥）；禁止以其它模型替代")
+def judge_score_metadata(key: str, usage: dict) -> dict:
+    # 程序化通道写入 score metadata 的声明字段；collect 按 PROGRAMMATIC_CHANNEL 逐项核验。
+    return {"ls_provider": PROVIDER, "model_name": MODEL,
+            "evaluator_repo_handle": EVALUATORS[key]["repo_handle"],
+            "evaluator_repo_id": EVALUATORS[key]["repo_id"],
+            "evaluator_commit_hash": EVALUATORS[key]["commit_hash"],
+            "method": JUDGE_METHOD, "judge_usage": usage}
 
-    payload = build_payload(args.source)
+
+def run_judge(*, source: Path, group: str | None, limit: int,
+              langfuse_client, openai_client) -> dict:
+    payload = build_payload(source)
     rows = [row for row in payload["rows"]
-            if args.group is None or row["upload"]["metadata"]["group"] == args.group]
-    receipt = json.loads((scoring_dir(args.source) / "experiment.json").read_text(encoding="utf-8"))
-    client = Client()
-    openai_client = OpenAI(api_key=key_value, base_url=BASE_URL)
-
-    run_of = {row["row_id"]: receipt["runs"][row["row_id"]] for row in rows}
-    present = scored_keys(client, list(run_of.values()))
+            if group is None or row["upload"]["metadata"]["group"] == group]
+    receipt = json.loads((scoring_dir(source) / "experiment.json").read_text(encoding="utf-8"))
+    require(receipt.get("run_id") == payload["run_id"]
+            and receipt.get("payload_sha256") == identity_digest(payload),
+            "实验回执与当前源证据不一致")
+    missing_rows = [row["row_id"] for row in rows if row["row_id"] not in receipt["runs"]]
+    require(not missing_rows, "实验回执缺少样本运行映射")
+    # 本地直写幂等约定：score_id 由业务身份稳定派生，name 与 timestamp 固定为实验提交时刻。
+    scored_at = datetime.fromisoformat(receipt["submitted_at"])
     processed = skipped = 0
     for row in rows:
-        if processed >= args.limit:
+        if processed >= limit:
             break
-        run_id = run_of[row["row_id"]]
-        meta = row["upload"]["metadata"]
-        have = present.get(run_id, set())
+        trace_id = receipt["runs"][row["row_id"]]
+        have = trace_score_keys(langfuse_client, trace_id)
         missing = [key for key in KEYS if key not in have]
         if not missing:
             skipped += 1
             continue
         for key in missing:
             category, comment, usage = ask(openai_client, key, row)
-            client.create_feedback(
-                run_id=run_id,
-                key=key,
+            langfuse_client.create_score(
+                trace_id=trace_id,
+                name=key,
                 value=category,
+                data_type=PROGRAMMATIC_CHANNEL["data_type"],
                 comment=comment,
-                feedback_source_type=FeedbackSourceType.MODEL,
-                source_info={"ls_provider": PROVIDER, "model_name": MODEL,
-                             "evaluator_repo_handle": EVALUATORS[key]["repo_handle"],
-                             "evaluator_commit_hash": EVALUATORS[key]["commit_hash"],
-                             "method": "sdk_programmatic_judge"},
-                feedback_config={"type": "categorical",
-                                 "categories": [{"value": float(index), "label": label}
-                                                for index, label in enumerate(CATEGORIES[key])]},
-                extra={"group": meta["group"], "case_id": meta["case_id"],
-                       "judge_usage": usage},
-            )
+                score_id=judge_score_id(payload["run_id"], row["row_id"], key),
+                metadata=judge_score_metadata(key, usage),
+                timestamp=scored_at)
         processed += 1
-    print(json.dumps({"rows_in_scope": len(rows), "scored_this_run": processed,
-                      "already_complete": skipped}, ensure_ascii=False))
+    return {"rows_in_scope": len(rows), "scored_this_run": processed,
+            "already_complete": skipped}
+
+
+def main(argv=None) -> int:
+    parser = argparse.ArgumentParser(description="程序化运行已配置GLM Evaluator对真实回答打分并写回 Langfuse score")
+    parser.add_argument("--source", type=Path, required=True)
+    parser.add_argument("--group")
+    parser.add_argument("--limit", type=int, default=30)
+    parser.add_argument("--enable-judge", action="store_true")
+    args = parser.parse_args(argv)
+    if not args.enable_judge:
+        raise ValueError("必须显式--enable-judge；此操作调用真实GLM")
+    key_value = os.environ.get("GLM_API_KEY")
+    if not key_value:
+        raise ValueError("缺少环境变量 GLM_API_KEY（bigmodel.cn 智谱密钥）；禁止以其它模型替代")
+    require_credentials()
+    result = run_judge(source=args.source, group=args.group, limit=args.limit,
+                       langfuse_client=make_client(),
+                       openai_client=OpenAI(api_key=key_value, base_url=BASE_URL))
+    print(json.dumps(result, ensure_ascii=False))
     return 0
 
 

@@ -1,4 +1,4 @@
-import asyncio
+import hashlib
 import json
 import shutil
 from copy import deepcopy
@@ -8,7 +8,14 @@ from types import SimpleNamespace
 from uuid import NAMESPACE_URL, uuid4, uuid5
 
 import pytest
-from langsmith import schemas
+from langfuse.api import (
+    Experiment,
+    ExperimentItem,
+    ExperimentItemsResponse,
+    ExperimentsResponse,
+    ExperimentsResponseMeta,
+    NotFoundError,
+)
 
 from evaluation.contracts import (
     AnswerEvidence,
@@ -36,17 +43,25 @@ from evaluation.dataset import BACKEND, load_for_evaluation
 from evaluation.generation_upload import (
     EXTERNAL_APPLICABILITY_REVIEW_SCHEMA,
     EXTERNAL_APPLICABILITY_SCHEMA,
+    EXTERNAL_DATASET_RECEIPT_NAME,
     EXTERNAL_DATASET_RECEIPT_SCHEMA,
+    EXTERNAL_EXPERIMENT_PENDING_NAME,
+    EXTERNAL_EXPERIMENT_PENDING_SCHEMA,
+    EXTERNAL_EXPERIMENT_RECEIPT_NAME,
+    EXTERNAL_EXPERIMENT_RECEIPT_SCHEMA,
     EXTERNAL_PAYLOAD_NAME,
     EXTERNAL_PAYLOAD_SCHEMA,
+    EXTERNAL_PRESENTATION_VERSION,
     ExternalApplicabilityEntry,
     ExternalApplicabilityInput,
     ExternalCheckpointEvidence,
     UploadBlocked,
     _assert_external_upload_whitelist,
     _collect_external_runs,
+    _example_document,
     _external_receipt_identity,
     _external_retrieval_evidence,
+    _frozen_run_output,
     _FrozenCheckpointTarget,
     _parse_args,
     _verify_external_examples,
@@ -56,12 +71,17 @@ from evaluation.generation_upload import (
     build_external_projection,
     build_upload_payload,
     check_external_projection,
+    external_dir,
+    external_rule_filters,
     load_external_applicability,
     load_external_run,
     outbound_text,
     payload_digest,
     review_external_source,
+    submit_external_experiment,
+    sync_external_dataset,
 )
+from evaluation.langfuse_scenarios import EXTERNAL_PROTOCOL_VERSION
 from evaluation.scenario_evidence import (
     EvaluationCallRecorder,
     canonical_json,
@@ -70,7 +90,6 @@ from evaluation.scenario_evidence import (
 )
 from evaluation.scenarios import (
     DEFAULT_VERSION_DIR,
-    EXTERNAL_PROTOCOL_VERSION,
     EventCapture,
     ExecutionIdentityError,
     GenerationCheckpointEvidence,
@@ -575,7 +594,7 @@ def build_fixture_run(dataset, root: Path) -> tuple[Path, dict[str, ScenarioExec
     write_json(
         run_dir / "sdk-run.json",
         {
-            "schema": "fit-agent-scenario-langsmith-1",
+            "schema": "fit-agent-scenario-langfuse-1",
             "run_id": RUN_ID,
             "purpose": "validation",
             "feedback_version": 3,
@@ -821,8 +840,13 @@ def test_projection_maps_contract_and_keeps_audit_separate(run_dir, dataset):
         payload["applicability_sha256"]
         == approval_document["approval"]["content_sha256"]
     )
-    assert payload["dataset_name"].endswith(
-        payload["applicability_sha256"][:12]
+    assert payload["dataset_name"] == (
+        f"fit-agent-external-judge-langfuse-v2-{RUN_ID}-"
+        f"{payload['applicability_sha256'][:12]}"
+    )
+    assert payload["experiment_name"] == (
+        f"fit-agent-external-judge-langfuse-v2-{RUN_ID}-"
+        f"{payload['projections_sha256'][:12]}"
     )
     assert payload_digest(payload) == result["payload_sha256"]
     row = payload["rows"][0]
@@ -847,7 +871,7 @@ def test_projection_maps_contract_and_keeps_audit_separate(run_dir, dataset):
     assert row["row_id"] == str(
         uuid5(
             NAMESPACE_URL,
-            "fit-agent-external-judge:"
+            "fit-agent-external-judge-langfuse-v2:"
             f"{RUN_ID}:{PROFILE_SCENARIO}:e01:cp1:"
             f"{upload['metadata']['execution_sha256']}",
         )
@@ -859,6 +883,20 @@ def test_projection_maps_contract_and_keeps_audit_separate(run_dir, dataset):
     assert [
         item["role"] for item in upload["inputs"]["user_request"]["prior_messages"]
     ] == ["user", "assistant"]
+    dataset_input = row["dataset_input"]
+    assert set(dataset_input) == {"display", "user_request"}
+    assert dataset_input["user_request"]["message"] == (
+        upload["inputs"]["user_request"]["message"]
+    )
+    assert "checkpoint" not in dataset_input["user_request"]
+    assert dataset_input["display"]["scenario_id"] == PROFILE_SCENARIO
+    assert dataset_input["display"]["event_id"] == "e01"
+    assert dataset_input["display"]["checkpoint_id"] == "cp1"
+    assert dataset_input["display"]["question"] == (
+        upload["inputs"]["user_request"]["message"]
+    )
+    assert dataset_input["display"]["scenario_label"]
+    assert dataset_input["display"]["title"].startswith(PROFILE_SCENARIO)
     answer_text = upload["outputs"]["answer"]["visible_text"]
     assert LOCAL_PATH not in answer_text
     assert SESSION_PATH not in answer_text
@@ -943,16 +981,25 @@ def test_target_returns_only_frozen_outputs(run_dir, dataset):
     )
     target = _FrozenCheckpointTarget(payload)
     row = payload["rows"][0]
-    assert asyncio.iscoroutinefunction(target.arun)
-    assert asyncio.run(
-        target.arun(deepcopy(row["upload"]["inputs"]))
-    ) == row["upload"]["outputs"]
-    outputs = target(deepcopy(row["upload"]["inputs"]))
-    assert outputs == row["upload"]["outputs"]
+    expected = _frozen_run_output(row)
+    assert set(expected) == {"answer", "context", "reference"}
+    assert (
+        expected["reference"]
+        == row["upload"]["reference_outputs"]["reference"]
+    )
+    outputs = target(item=SimpleNamespace(input=deepcopy(row["dataset_input"])))
+    assert outputs == expected
+    dict_item = {"input": deepcopy(row["dataset_input"])}
+    assert target(item=dict_item) == expected
     outputs["answer"]["visible_text"] = "被篡改"
-    assert target(row["upload"]["inputs"])["answer"]["visible_text"] != "被篡改"
+    assert (
+        target(item=SimpleNamespace(input=row["dataset_input"]))[
+            "answer"
+        ]["visible_text"]
+        != "被篡改"
+    )
     with pytest.raises(UploadBlocked, match="未知输入"):
-        target({"user_request": {"message": "其他请求"}})
+        target(item=SimpleNamespace(input={"user_request": {"message": "x"}}))
 
 
 def test_applicability_rejections(run_dir, dataset):
@@ -1065,7 +1112,7 @@ def test_retrieval_must_bind_visible_tool_results(tmp_path, dataset):
     write_json(
         run_dir / "sdk-run.json",
         {
-            "schema": "fit-agent-scenario-langsmith-1",
+            "schema": "fit-agent-scenario-langfuse-1",
             "run_id": RUN_ID,
             "purpose": "validation",
             "feedback_version": 3,
@@ -1315,7 +1362,7 @@ def write_single_scenario_run(tmp_path, dataset, execution) -> Path:
     write_json(
         run_dir / "sdk-run.json",
         {
-            "schema": "fit-agent-scenario-langsmith-1",
+            "schema": "fit-agent-scenario-langfuse-1",
             "run_id": RUN_ID,
             "purpose": "validation",
             "feedback_version": 3,
@@ -1399,9 +1446,10 @@ def test_judge_state_uses_visible_context_items_only(run_dir, dataset):
             encoding="utf-8"
         )
     )
-    upload = payload["rows"][0]["upload"]
+    row = payload["rows"][0]
+    upload = row["upload"]
     judge_state = {
-        "user_request": upload["inputs"]["user_request"],
+        "user_request": row["dataset_input"]["user_request"],
         "answer": upload["outputs"]["answer"],
         "context": upload["outputs"]["context"]["items"],
         "reference": upload["reference_outputs"]["reference"],
@@ -1491,24 +1539,51 @@ def test_example_and_receipt_identity_are_verified_once(run_dir, dataset):
         evidence, load_external_applicability(evidence)
     )
     row = payload["rows"][0]
-    example = schemas.Example(
-        id=row["row_id"],
-        dataset_id=uuid4(),
-        inputs=row["upload"]["inputs"],
-        outputs=row["upload"]["reference_outputs"],
-        metadata={
+    document = _example_document(payload, row)
+    checkpoint = row["upload"]["metadata"]["checkpoint"]
+    assert document["metadata"] == {
+        **{
             "schema": EXTERNAL_PAYLOAD_SCHEMA,
+            "presentation_version": EXTERNAL_PRESENTATION_VERSION,
             "row_id": row["row_id"],
             "dataset": payload["dataset"],
-            "checkpoint": row["upload"]["metadata"]["checkpoint"],
+            "checkpoint": checkpoint,
+            "run_id": checkpoint["run_id"],
+            "scenario_id": checkpoint["scenario_id"],
+            "event_id": checkpoint["event_id"],
+            "checkpoint_id": checkpoint["checkpoint_id"],
+            "display": row["dataset_input"]["display"],
             "execution_sha256": row["upload"]["metadata"]["execution_sha256"],
             "projection_sha256": row["projection_sha256"],
         },
+        "judge_metric_evidence_supported_v1": "applicable",
+        "judge_metric_reference_requirements_met_v1": "applicable",
+    }
+    example = SimpleNamespace(
+        id=document["id"],
+        input=document["input"],
+        expected_output=document["expected_output"],
+        metadata=document["metadata"],
     )
     _verify_external_examples(payload, {str(example.id): example})
-    tampered = example.model_copy(update={"outputs": {"reference": {}}})
-    with pytest.raises(UploadBlocked, match="outputs"):
+    tampered = example.__class__(
+        **{**example.__dict__, "expected_output": {"reference": {}}}
+    )
+    with pytest.raises(UploadBlocked, match="expected_output"):
         _verify_external_examples(payload, {str(tampered.id): tampered})
+    flag_tampered = example.__class__(
+        **{
+            **example.__dict__,
+            "metadata": {
+                **document["metadata"],
+                "judge_metric_evidence_supported_v1": "not_applicable",
+            },
+        }
+    )
+    with pytest.raises(UploadBlocked, match="evidence_supported_v1"):
+        _verify_external_examples(
+            payload, {str(flag_tampered.id): flag_tampered}
+        )
     receipt = {
         "schema": EXTERNAL_DATASET_RECEIPT_SCHEMA,
         "run_id": payload["run_id"],
@@ -1539,28 +1614,433 @@ def test_remote_runs_must_match_frozen_outputs(run_dir, dataset):
     )
     row = payload["rows"][0]
 
-    def run(outputs=None, error=None):
-        return schemas.Run(
-            id=uuid4(),
-            name="target",
+    def run(outputs=None, level="DEFAULT"):
+        return ExperimentItem(
+            id=str(uuid4()),
+            trace_id=str(uuid4()),
             start_time=datetime.now(UTC),
-            run_type="llm",
-            trace_id=uuid4(),
-            inputs=row["upload"]["inputs"],
-            outputs=row["upload"]["outputs"] if outputs is None else outputs,
-            reference_example_id=row["row_id"],
-            error=error,
+            end_time=None,
+            level=level,
+            environment="default",
+            experiment_id="exp-1",
+            experiment_name="experiment",
+            experiment_item_id=row["row_id"],
+            input=row["dataset_input"],
+            output=_frozen_run_output(row) if outputs is None else outputs,
         )
 
     missing, mapping = _collect_external_runs(payload, [run()])
     assert not missing
     assert mapping[row["row_id"]]
-    with pytest.raises(UploadBlocked, match="多个根运行"):
+    with pytest.raises(UploadBlocked, match="多个实验条目"):
         _collect_external_runs(payload, [run(), run()])
     with pytest.raises(UploadBlocked, match="远端运行失败"):
-        _collect_external_runs(payload, [run(error="boom")])
+        _collect_external_runs(payload, [run(level="ERROR")])
     with pytest.raises(UploadBlocked, match="outputs"):
         _collect_external_runs(payload, [run(outputs={"answer": {}})])
+    with pytest.raises(UploadBlocked, match="inputs"):
+        tampered_input = run().model_copy(update={"input": {}})
+        _collect_external_runs(payload, [tampered_input])
+
+
+VERIFY_STAMP = datetime(2026, 1, 1, tzinfo=UTC)
+
+
+class MemoryDataset:
+    def __init__(self, name: str, metadata: dict, project_id: str) -> None:
+        self.id = str(uuid4())
+        self.name = name
+        self.metadata = deepcopy(metadata)
+        self.project_id = project_id
+        self.items_by_id: dict[str, MemoryDatasetItem] = {}
+
+    @property
+    def items(self) -> list["MemoryDatasetItem"]:
+        return list(self.items_by_id.values())
+
+
+class MemoryDatasetItem:
+    def __init__(
+        self, dataset: MemoryDataset, row: dict, *, item_id: str | None = None
+    ) -> None:
+        self.id = item_id if item_id is not None else row["id"]
+        self.dataset_id = dataset.id
+        self.dataset_name = dataset.name
+        self.input = deepcopy(row["input"])
+        self.expected_output = deepcopy(row["expected_output"])
+        self.metadata = deepcopy(row["metadata"])
+
+
+class MemoryExperiment:
+    def __init__(self, experiment: Experiment, items: list[ExperimentItem]) -> None:
+        self.experiment = experiment
+        self.items = items
+
+
+class MemoryExperimentsApi:
+    def __init__(self, client: "MemoryClient") -> None:
+        self._client = client
+
+    def list(
+        self,
+        *,
+        from_start_time,
+        id=None,
+        name=None,
+        dataset_id=None,
+        fields=None,
+        cursor=None,
+        **kwargs,
+    ):
+        matches = [
+            entry.experiment
+            for entry in self._client.experiments.values()
+            if id is None or entry.experiment.id == id
+        ]
+        matches = [
+            experiment for experiment in matches if name is None or experiment.name == name
+        ]
+        return ExperimentsResponse(
+            data=matches, meta=ExperimentsResponseMeta(cursor=None)
+        )
+
+    def list_items(
+        self,
+        *,
+        from_start_time,
+        experiment_id=None,
+        fields=None,
+        cursor=None,
+        **kwargs,
+    ):
+        entry = self._client.experiments[experiment_id]
+        return ExperimentItemsResponse(
+            data=list(entry.items), meta=ExperimentsResponseMeta(cursor=None)
+        )
+
+
+class MemoryClient:
+    # 覆盖 generation_upload 外部链路使用的 Langfuse client 方法面。
+    _base_url = "https://cloud.langfuse.test"
+    project_id = "project-1"
+
+    def __init__(self) -> None:
+        self.datasets: dict[str, MemoryDataset] = {}
+        self.experiments: dict[str, MemoryExperiment] = {}
+        self.task_calls = 0
+        self.api = SimpleNamespace(experiments=MemoryExperimentsApi(self))
+
+    def get_dataset(self, name: str) -> MemoryDataset:
+        remote = self.datasets.get(name)
+        if remote is None:
+            raise NotFoundError({})
+        return remote
+
+    def create_dataset(self, *, name, description=None, metadata=None, **kwargs):
+        assert name not in self.datasets, "重复创建同名远端数据集"
+        remote = MemoryDataset(name, metadata or {}, self.project_id)
+        self.datasets[name] = remote
+        return remote
+
+    def create_dataset_item(
+        self,
+        *,
+        dataset_name,
+        id=None,
+        input=None,
+        expected_output=None,
+        metadata=None,
+        **kwargs,
+    ):
+        remote = self.datasets[dataset_name]
+        existing = remote.items_by_id.get(id)
+        if existing is not None:
+            assert (
+                existing.input == input
+                and existing.expected_output == expected_output
+                and existing.metadata == metadata
+            ), "同 id 重复提交且内容不一致"
+            return existing
+        item = MemoryDatasetItem(
+            remote,
+            {
+                "id": id,
+                "input": input,
+                "expected_output": expected_output,
+                "metadata": metadata,
+            },
+        )
+        remote.items_by_id[id] = item
+        return item
+
+    def run_experiment(
+        self,
+        *,
+        name,
+        run_name=None,
+        description=None,
+        data,
+        task,
+        evaluators=None,
+        run_evaluators=None,
+        max_concurrency=50,
+        metadata=None,
+        experiment_id=None,
+    ):
+        # 模拟 SDK：hosted item 携带 dataset_id，同 dataset 同 run_name 派生同一实验 id。
+        dataset_id = data[0].dataset_id
+        resolved = experiment_id
+        if resolved is None:
+            material = json.dumps(
+                ["langfuse-experiment-v1", self.project_id, dataset_id, run_name],
+                separators=(",", ":"),
+                ensure_ascii=False,
+            )
+            resolved = hashlib.sha256(material.encode("utf-8")).hexdigest()[:16]
+        items = []
+        for item in data:
+            self.task_calls += 1
+            output = task(item=item)
+            items.append(
+                ExperimentItem(
+                    id=str(uuid4()),
+                    trace_id=str(uuid4()),
+                    start_time=VERIFY_STAMP,
+                    end_time=VERIFY_STAMP,
+                    level="DEFAULT",
+                    environment="default",
+                    experiment_id=resolved,
+                    experiment_name=run_name,
+                    experiment_item_id=item.id,
+                    input=item.input,
+                    output=output,
+                )
+            )
+        experiment = Experiment(
+            id=resolved,
+            name=run_name,
+            description=description,
+            start_time=VERIFY_STAMP,
+            end_time=VERIFY_STAMP,
+            item_count=len(items),
+            dataset_id=dataset_id,
+            metadata=deepcopy(metadata),
+        )
+        existing = self.experiments.get(resolved)
+        if existing is not None:
+            existing.items.extend(items)
+        else:
+            self.experiments[resolved] = MemoryExperiment(experiment, items)
+        return SimpleNamespace(
+            experiment_id=resolved,
+            run_name=run_name,
+            experiment_url=(
+                f"{self._base_url}/project/{self.project_id}"
+                f"/experiments/results?baseline={resolved}"
+            ),
+            item_results=[],
+        )
+
+
+def approve_default(run_dir: Path, dataset) -> None:
+    evidence = load_external_run(run_dir, dataset)
+    write_approval(
+        run_dir, approval_entries(evidence, default_decisions(evidence)), dataset
+    )
+
+
+def test_external_dataset_sync_langfuse_lifecycle(run_dir, dataset, monkeypatch):
+    monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "pk-lf-test")
+    monkeypatch.setenv("LANGFUSE_SECRET_KEY", "sk-lf-test")
+    approve_default(run_dir, dataset)
+    client = MemoryClient()
+    first = sync_external_dataset(
+        run_dir, dataset_dir=DEFAULT_VERSION_DIR, client=client
+    )
+    assert first["status"] == "created"
+    assert first["example_count"] == 1
+    remote = client.datasets[first["dataset_name"]]
+    assert first["dataset_url"] == (
+        f"https://cloud.langfuse.test/project/{client.project_id}"
+        f"/datasets/{remote.id}"
+    )
+    item = remote.items[0]
+    assert item.metadata["judge_metric_evidence_supported_v1"] == "applicable"
+    assert (
+        item.metadata["judge_metric_reference_requirements_met_v1"]
+        == "applicable"
+    )
+    assert item.metadata["row_id"] == item.id
+    assert item.metadata["display"]["question"] == item.input["display"]["question"]
+    assert set(item.input) == {"display", "user_request"}
+    assert "checkpoint" not in item.input["user_request"]
+    original_input = deepcopy(item.input)
+    original_metadata = deepcopy(item.metadata)
+    receipt = json.loads(
+        (external_dir(run_dir) / EXTERNAL_DATASET_RECEIPT_NAME).read_text(
+            encoding="utf-8"
+        )
+    )
+    assert receipt["schema"] == EXTERNAL_DATASET_RECEIPT_SCHEMA
+    assert receipt["dataset_id"] == str(remote.id)
+    assert receipt["item_ids"] == [item.id]
+    web_judge = receipt["web_judge"]
+    assert web_judge["scope"]["dataset_id"] == receipt["dataset_id"]
+    assert web_judge["scope"]["observation_scope"] == "isExperimentItemRootSpan"
+    assert web_judge["scope"]["sampling"] == 1.0
+    assert {
+        row["metric"] for row in web_judge["evaluators"]
+    } == {
+        "evidence_supported_v1",
+        "reference_requirements_met_v1",
+    }
+    for evaluator in web_judge["evaluators"]:
+        assert evaluator["rule_filters"] == external_rule_filters(
+            evaluator["metric"], receipt["dataset_id"]
+        )
+    assert web_judge["variable_mapping"] == {
+        "user_request": {"source": "input", "path": "user_request"},
+        "answer": {"source": "output", "path": "answer"},
+        "context": {"source": "output", "path": "context.items"},
+        "reference": {
+            "source": "expected_output",
+            "path": "reference",
+        },
+    }
+    second = sync_external_dataset(
+        run_dir, dataset_dir=DEFAULT_VERSION_DIR, client=client
+    )
+    assert second["status"] == "verified_existing"
+    assert second["dataset_id"] == first["dataset_id"]
+    item.input = {"user_request": {"message": "被篡改"}}
+    with pytest.raises(UploadBlocked, match="样例 input 不符"):
+        sync_external_dataset(run_dir, dataset_dir=DEFAULT_VERSION_DIR, client=client)
+    item.input = deepcopy(original_input)
+    item.metadata = {
+        **item.metadata,
+        "judge_metric_evidence_supported_v1": "not_applicable",
+    }
+    with pytest.raises(UploadBlocked, match="样例 metadata"):
+        sync_external_dataset(run_dir, dataset_dir=DEFAULT_VERSION_DIR, client=client)
+    item.metadata = {
+        key: value
+        for key, value in item.metadata.items()
+        if key != "judge_metric_evidence_supported_v1"
+    }
+    with pytest.raises(
+        UploadBlocked, match="字段不符: judge_metric_evidence_supported_v1"
+    ):
+        sync_external_dataset(run_dir, dataset_dir=DEFAULT_VERSION_DIR, client=client)
+    # 未知远端样例阻断
+    item.metadata = deepcopy(original_metadata)
+    unknown = MemoryDatasetItem(
+        remote, {"id": str(uuid4()), "input": {}, "expected_output": {}, "metadata": {}}
+    )
+    remote.items_by_id[unknown.id] = unknown
+    with pytest.raises(UploadBlocked, match="未知样例"):
+        sync_external_dataset(run_dir, dataset_dir=DEFAULT_VERSION_DIR, client=client)
+    remote.items_by_id.pop(unknown.id)
+    # 删除回执与远端样例后重同步：远端数据集已存在，仅补齐缺失样例
+    (external_dir(run_dir) / EXTERNAL_DATASET_RECEIPT_NAME).unlink()
+    remote.items_by_id.pop(item.id)
+    third = sync_external_dataset(
+        run_dir, dataset_dir=DEFAULT_VERSION_DIR, client=client
+    )
+    assert third["status"] == "reused"
+    assert str(remote.items_by_id[item.id].id) == item.id
+    assert (
+        remote.items_by_id[item.id].metadata[
+            "judge_metric_evidence_supported_v1"
+        ]
+        == "applicable"
+    )
+
+
+def test_external_submit_langfuse_lifecycle(run_dir, dataset, monkeypatch):
+    monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "pk-lf-test")
+    monkeypatch.setenv("LANGFUSE_SECRET_KEY", "sk-lf-test")
+    approve_default(run_dir, dataset)
+    client = MemoryClient()
+    with pytest.raises(UploadBlocked, match="--confirm-external-judge-cost"):
+        submit_external_experiment(
+            run_dir, dataset_dir=DEFAULT_VERSION_DIR, confirm_cost=False, client=client
+        )
+    with pytest.raises(UploadBlocked, match="先同步"):
+        submit_external_experiment(
+            run_dir, dataset_dir=DEFAULT_VERSION_DIR, confirm_cost=True, client=client
+        )
+    sync_external_dataset(run_dir, dataset_dir=DEFAULT_VERSION_DIR, client=client)
+    result = submit_external_experiment(
+        run_dir, dataset_dir=DEFAULT_VERSION_DIR, confirm_cost=True, client=client
+    )
+    assert result["status"] == "submitted"
+    assert result["external_scoring_status"] == "pending_collection"
+    assert result["experiment_name"].startswith(
+        "fit-agent-external-judge-langfuse-v2-"
+    )
+    assert result["experiment_url"].endswith(result["experiment_id"])
+    row_id = next(iter(result["runs"]))
+    assert client.task_calls == 1
+    receipt_path = external_dir(run_dir) / EXTERNAL_EXPERIMENT_RECEIPT_NAME
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    assert receipt["schema"] == EXTERNAL_EXPERIMENT_RECEIPT_SCHEMA
+    assert receipt["runs"] == result["runs"]
+    assert receipt["projections"][row_id]["projection_sha256"]
+    assert receipt["web_judge"]["variable_mapping"]["reference"] == {
+        "source": "expected_output",
+        "path": "reference",
+    }
+    assert receipt["web_judge"]["scope"]["dataset_id"] == result["dataset_id"]
+    assert not (external_dir(run_dir) / EXTERNAL_EXPERIMENT_PENDING_NAME).exists()
+    again = submit_external_experiment(
+        run_dir, dataset_dir=DEFAULT_VERSION_DIR, confirm_cost=True, client=client
+    )
+    assert again["status"] == "verified_existing"
+    assert again["runs"] == result["runs"]
+    assert client.task_calls == 1
+    # 中断恢复：删除回执、重建 pending，远端实验完整时同名复用且不重跑
+    pending_document = {
+        "schema": EXTERNAL_EXPERIMENT_PENDING_SCHEMA,
+        "run_id": receipt["run_id"],
+        "source_sha256": receipt["source_sha256"],
+        "payload_sha256": receipt["payload_sha256"],
+        "applicability_sha256": receipt["applicability_sha256"],
+        "rows_sha256": receipt["rows_sha256"],
+        "projections_sha256": receipt["projections_sha256"],
+        "dataset_name": receipt["dataset_name"],
+        "dataset_id": receipt["dataset_id"],
+        "experiment_name": receipt["experiment_name"],
+        "started_at": receipt["submitted_at"],
+    }
+    receipt_path.unlink()
+    write_json(external_dir(run_dir) / EXTERNAL_EXPERIMENT_PENDING_NAME, pending_document)
+    recovered = submit_external_experiment(
+        run_dir, dataset_dir=DEFAULT_VERSION_DIR, confirm_cost=True, client=client
+    )
+    assert recovered["status"] == "submitted"
+    assert recovered["experiment_id"] == result["experiment_id"]
+    assert recovered["runs"] == result["runs"]
+    assert client.task_calls == 1
+    assert not (external_dir(run_dir) / EXTERNAL_EXPERIMENT_PENDING_NAME).exists()
+    # 部分恢复：远端实验缺一条运行，只补齐缺失行
+    experiment = client.experiments[result["experiment_id"]]
+    experiment.items.clear()
+    receipt_path.unlink()
+    write_json(external_dir(run_dir) / EXTERNAL_EXPERIMENT_PENDING_NAME, pending_document)
+    partial = submit_external_experiment(
+        run_dir, dataset_dir=DEFAULT_VERSION_DIR, confirm_cost=True, client=client
+    )
+    assert partial["status"] == "submitted"
+    assert client.task_calls == 2
+    assert set(partial["runs"]) == {row_id}
+    # 远端实验 metadata 冲突阻断
+    experiment.experiment = experiment.experiment.model_copy(update={"metadata": {}})
+    receipt_path.unlink()
+    write_json(external_dir(run_dir) / EXTERNAL_EXPERIMENT_PENDING_NAME, pending_document)
+    with pytest.raises(UploadBlocked, match="远端实验 metadata 不符"):
+        submit_external_experiment(
+            run_dir, dataset_dir=DEFAULT_VERSION_DIR, confirm_cost=True, client=client
+        )
 
 
 def test_cli_exposes_external_commands_and_cost_gate(tmp_path):

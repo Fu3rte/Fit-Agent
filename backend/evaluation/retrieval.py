@@ -11,8 +11,6 @@ from pathlib import Path
 from statistics import mean
 from uuid import NAMESPACE_URL, uuid4, uuid5
 
-from langsmith import Client
-
 from app.application.business import retrieval_text as rt
 from app.application.business.catalog import Catalog
 from app.application.business.retrieval_embedding import EmbeddingClient
@@ -59,6 +57,7 @@ LEGACY_METRICS = ("hit@5", "recall@5", "precision@5", "mrr@5", "ndcg@5")
 LEGACY_RETRIEVAL_LIMIT = 10
 RERANK_GROUP = "hybrid-rerank"
 RERANK_THRESHOLD_GROUPS = ("hybrid", RERANK_GROUP)
+UPLOAD_DATASET_MARKER = "fit-agent-retrieval-upload-langfuse-1"
 DISPLAY = {
     "recall@20": "Recall@20",
     "hit@5": "Hit@5",
@@ -87,7 +86,7 @@ def identity() -> dict:
     ]
     head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=support.REPO, check=True, capture_output=True, text=True).stdout.strip()
     return {"head": head, "files": {path.relative_to(support.BACKEND).as_posix(): sha256(path) for path in paths},
-            "versions": {name: version(name) for name in ("mteb", "langsmith", "pymilvus", "openai")}}
+            "versions": {name: version(name) for name in ("mteb", "langfuse", "pymilvus", "openai")}}
 
 
 def _retrieval_inputs(
@@ -934,6 +933,30 @@ def rescore(args) -> None:
     save_result(document)
 
 
+def _upload_dataset_marker(prepared: list[dict]) -> dict:
+    # 上传数据集 marker：绑定冻结行内容摘要，远端 metadata 与本地回执共同核验。
+    return {
+        "marker": UPLOAD_DATASET_MARKER,
+        "example_count": len(prepared),
+        "rows_sha256": support.sha256_text(support.json_text(prepared)),
+    }
+
+
+def _upload_payload(document: dict, group: str, name: str, rows: list[dict], metadata: dict, summary: list[dict]) -> dict:
+    prepared = [
+        {"id": row["row_id"], "inputs": row["inputs"], "outputs": row["expected_outputs"], "metadata": row["run_metadata"]}
+        for row in rows
+    ]
+    return {
+        "dataset_name": name,
+        "run_name": f"{document['run_id']}-{group}",
+        "dataset_marker": _upload_dataset_marker(prepared),
+        "experiment_metadata": metadata,
+        "summary_experiment_scores": summary,
+        "results": rows,
+    }
+
+
 def _parameter_metadata(document: dict) -> dict:
     if "parameters" not in document:
         return {}
@@ -972,7 +995,7 @@ def _upload_dataset_payload(document: dict, group: str) -> dict:
     )
     require(recomputed == result["metrics"], "上传评分与实际候选、金标或引擎身份不一致")
     expected_keys = set(STAGED_METRICS)
-    dataset_name = f"fit-agent-retrieval-{dataset.version}-{dataset.content_sha256[:12]}"
+    dataset_name = f"fit-agent-retrieval-langfuse-{dataset.version}-{dataset.content_sha256[:12]}"
     baseline_projections = (
         document["groups"]["hybrid"]["projections"]
         if group == RERANK_GROUP
@@ -1023,18 +1046,20 @@ def _upload_dataset_payload(document: dict, group: str) -> dict:
             "expected_outputs": {"qrels": [{"corpus_id": qrel["corpus_id"], "grade": qrel["grade"]} for qrel in qrels.get(qid, ())],
                                  "expect_empty": item["expect_empty"]},
             "actual_outputs": actual_outputs,
-            "evaluation_scores": [{"key": key, "score": round(value, 4)} for key, value in row["scores"].items()]
+            "evaluation_scores": [{"key": key, "score": float(value)} for key, value in row["scores"].items()]
                                  + [{"key": "hard_constraint_violation", "score": 0}, {"key": "budget_compliant", "score": 1}],
             **result["timings"][qid], "run_name": group,
+            # 数据集行 metadata 仅保留跨组稳定字段；实验身份由 actual_outputs 与 experiment_metadata 承载，
+            # 同池各组才能共享同一数据集与 rows_sha256。
             "run_metadata": {"query_id": qid, "tags": item["tags"], "family": item["family"],
-                             "dataset_version": dataset.version, "timing_scope": document["timing_scope"],
-                             "experiment": projection.get("experiment")},
+                             "dataset_version": dataset.version, "timing_scope": document["timing_scope"]},
         })
     overall = result["metrics"]["overall"]
     experiment_metadata = {"mode": document["mode"], "dataset": document["dataset"], "identity": document["identity"],
                            "index_identity": document["index_identity"], "timing_scope": document["timing_scope"],
                            "observation_scope": document["observation_scope"], "group": group,
                            "experiment": document.get("experiments", {}).get(group),
+                           "evidence_replay": True, "dataset_name": dataset_name,
                            "scoring": result["metrics"]["engine"]}
     if group == RERANK_GROUP:
         require(isinstance(document.get("rerank_identity"), dict), "重排实验缺少配置身份")
@@ -1048,18 +1073,18 @@ def _upload_dataset_payload(document: dict, group: str) -> dict:
             "text_version": identity["text_version"],
             "endpoint_sha256": support.sha256_text(identity["endpoint"]),
         }
-    return {
-        "dataset_name": dataset_name, "experiment_name": f"{document['run_id']}-{group}",
-        "experiment_start_time": min(row["start_time"] for row in rows),
-        "experiment_end_time": max(row["end_time"] for row in rows),
-        "experiment_metadata": experiment_metadata | _parameter_metadata(document),
-        "summary_experiment_scores": [
-            {"key": key, "score": round(value, 4)}
+    return _upload_payload(
+        document,
+        group,
+        dataset_name,
+        rows,
+        experiment_metadata | _parameter_metadata(document),
+        [
+            {"key": key, "score": float(value)}
             for key, value in overall.items()
             if value is not None and (key in expected_keys or key == "false_return_rate")
         ],
-        "results": rows,
-    }
+    )
 
 
 def _upload_legacy_payload(document: dict, group: str) -> dict:
@@ -1071,7 +1096,7 @@ def _upload_legacy_payload(document: dict, group: str) -> dict:
     result = document["groups"][group]
     require(set(queries) == set(result["metrics"]["per_query"]) == set(result["projections"]) == set(result["timings"]), "上传样例覆盖不完整")
     require(validate_legacy_projections(list(queries.values()), result["projections"], Catalog.load()) == result["metrics"], "上传评分与实际候选或金标不一致")
-    dataset_name = f"fit-agent-retrieval-{document['split']}-{document['dataset_sha256'][:12]}-{document['adaptation_sha256'][:12]}"
+    dataset_name = f"fit-agent-retrieval-langfuse-{document['split']}-{document['dataset_sha256'][:12]}-{document['adaptation_sha256'][:12]}"
     rows = []
     for qid, item in queries.items():
         row = result["metrics"]["per_query"][qid]
@@ -1084,21 +1109,21 @@ def _upload_legacy_payload(document: dict, group: str) -> dict:
                       | {"purpose": purposes[qid], "temporary_mapping": adapted[qid]["temporary_mapping"]},
             "expected_outputs": {"labels": item["labels"], "expect_empty": item["expect_empty"]},
             "actual_outputs": {"returned_ids": row["returned_ids"], "candidate_scores": projection["scores"]},
-            "evaluation_scores": [{"key": key, "score": round(value, 4)} for key, value in row["scores"].items()]
+            "evaluation_scores": [{"key": key, "score": float(value)} for key, value in row["scores"].items()]
                                  + [{"key": "hard_constraint_violation", "score": 0}, {"key": "budget_compliant", "score": 1}],
             **result["timings"][qid], "run_name": group,
             "run_metadata": {"query_id": qid, "intent": item["intent"], "family": item["family"], "split": item["split"], "timing_scope": document["timing_scope"]},
         })
-    return {
-        "dataset_name": dataset_name, "experiment_name": f"{document['run_id']}-{group}",
-        "experiment_start_time": min(row["start_time"] for row in rows),
-        "experiment_end_time": max(row["end_time"] for row in rows),
-        "experiment_metadata": {key: document[key] for key in ("mode", "split", "dataset_sha256", "adaptation_sha256", "identity", "index_identity", "timing_scope", "observation_scope")}
-                               | {"group": group, "scoring": result["metrics"]["engine"]}
-                               | _parameter_metadata(document),
-        "summary_experiment_scores": [{"key": key, "score": round(value, 4)} for key, value in result["metrics"]["overall"].items() if value is not None],
-        "results": rows,
-    }
+    return _upload_payload(
+        document,
+        group,
+        dataset_name,
+        rows,
+        {key: document[key] for key in ("mode", "split", "dataset_sha256", "adaptation_sha256", "identity", "index_identity", "timing_scope", "observation_scope")}
+        | {"group": group, "evidence_replay": True, "dataset_name": dataset_name, "scoring": result["metrics"]["engine"]}
+        | _parameter_metadata(document),
+        [{"key": key, "score": float(value)} for key, value in result["metrics"]["overall"].items() if value is not None],
+    )
 
 
 def upload_payload(document: dict, group: str) -> dict:
@@ -1119,34 +1144,79 @@ def query_documents_for_upload(document: dict) -> list[dict]:
 
 
 def upload(args) -> None:
-    require(bool(os.environ.get("LANGSMITH_API_KEY")), "请在 backend/.env 配置 LANGSMITH_API_KEY")
+    require(
+        bool(os.environ.get("LANGFUSE_PUBLIC_KEY")) and bool(os.environ.get("LANGFUSE_SECRET_KEY")),
+        "请在 backend/.env 配置 LANGFUSE_PUBLIC_KEY 与 LANGFUSE_SECRET_KEY",
+    )
     document = support.load_document(args.source)
     require(document.get("schema") in (SCHEMA_STAGED, SCHEMA_LEGACY), "评测证据格式非法")
     require(document.get("status") == "complete", "证据未通过发布门禁")
     if "dataset" not in document:
         support.require_inputs(Catalog.load())
-    client = Client(auto_batch_tracing=False)
+    from evaluation import langfuse_retrieval
+
+    client = langfuse_retrieval.make_client()
+    source_sha256 = sha256(args.source)
     for group in document["groups"]:
-        receipt_path = args.source.parent / f"langsmith-{group}.json"
+        receipt_path = args.source.parent / f"langfuse-{group}.json"
+        pending_path = args.source.parent / f"langfuse-{group}.pending.json"
         if receipt_path.exists():
             receipt = support.load_document(receipt_path)
-            require(receipt["source_sha256"] == sha256(args.source), "上传回执与源文件不一致")
-            project = client.read_project(project_id=receipt["experiment_id"])
-            require(str(project.reference_dataset_id) == receipt["dataset_id"] and project.name == f"{document['run_id']}-{group}", "远端实验与上传回执不一致")
+            require(receipt["source_sha256"] == source_sha256, "上传回执与源文件不一致")
+            langfuse_retrieval.verify_uploaded_experiment(
+                client,
+                experiment_id=receipt["experiment_id"],
+                dataset_id=receipt["dataset_id"],
+                run_name=receipt["run_name"],
+                from_start_time=datetime.fromisoformat(receipt["verify_from"]),
+            )
+            if pending_path.exists():
+                # 终态回执已在：清理与回执同身份的残留 pending（上次成功上传后中断于删除前）；
+                # 身份不符的残留不动，维持冲突阻断语义由人工处理。
+                leftover = support.load_document(pending_path)
+                if (
+                    leftover.get("run_name") == receipt["run_name"]
+                    and leftover.get("source_sha256") == source_sha256
+                ):
+                    pending_path.unlink()
             print(json.dumps({"group": group, "experiment_id": receipt["experiment_id"], "dataset_id": receipt["dataset_id"], "status": "verified_existing"}))
             continue
-        response = client.request_with_retries("POST", "/datasets/upload-experiment", request_kwargs={"json": upload_payload(document, group)}, stop_after_attempt=1)
-        response.raise_for_status()
-        receipt = response.json()
-        require(receipt["experiment"]["id"] and receipt["dataset"]["id"], "LangSmith 未返回实验和数据集 ID")
-        support.save_document(receipt_path, {"source_sha256": sha256(args.source), "experiment_id": receipt["experiment"]["id"], "dataset_id": receipt["dataset"]["id"]})
+        upload_started = now()
+        pending = None
+        if pending_path.exists():
+            # 上传中断恢复入口：pending 身份必须仍绑定当前源证据，证据已变更即按冲突阻断。
+            pending = support.load_document(pending_path)
+            require(
+                pending.get("source_sha256") == source_sha256,
+                f"{group} 存在未完成上传的 pending 记录且源证据已变更，旧上传身份作废；"
+                f"请人工核对远端实验 {pending.get('run_name')} 后处理 {pending_path}",
+            )
+        receipt = langfuse_retrieval.submit_frozen_experiment(
+            client,
+            payload=upload_payload(document, group),
+            verify_from=datetime.now(UTC),
+            pending_path=pending_path,
+            source_sha256=source_sha256,
+            pending=pending,
+        )
+        receipt.update(
+            source_sha256=source_sha256,
+            uploaded_at=now(),
+            upload_timing={"scope": "evidence_replay_upload", "started_at": upload_started, "finished_at": now()},
+        )
+        support.save_document(receipt_path, receipt)
+        # 终态回执持久化之后才删除 pending：两步之间中断仍可凭 pending 恢复且不产生重复条目。
+        pending_path.unlink(missing_ok=True)
         with (args.source.parent / "report.md").open("a", encoding="utf-8") as stream:
-            stream.write(f"\n- LangSmith：`{document['run_id']}/{group}`；experiment ID `{receipt['experiment']['id']}`；dataset ID `{receipt['dataset']['id']}`。\n")
-        print(json.dumps({"group": group, "experiment_id": receipt["experiment"]["id"], "dataset_id": receipt["dataset"]["id"]}))
+            stream.write(
+                f"\n- Langfuse：`{document['run_id']}/{group}`；experiment ID `{receipt['experiment_id']}`；"
+                f"dataset ID `{receipt['dataset_id']}`；上传耗时 `{receipt['upload_timing']['started_at']} → {receipt['upload_timing']['finished_at']}`（证据回放，非真实检索延迟）。\n"
+            )
+        print(json.dumps({"group": group, "experiment_id": receipt["experiment_id"], "dataset_id": receipt["dataset_id"], "dataset_name": receipt["dataset_name"], "run_name": receipt["run_name"], "resumed": pending is not None}))
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="MTEB 检索评测与 LangSmith 实验上传")
+    parser = argparse.ArgumentParser(description="MTEB 检索评测与 Langfuse 实验上传")
     commands = parser.add_subparsers(dest="command", required=True)
     live = commands.add_parser("run", help="真实检索；新数据绑定版本目录并全量执行，旧拆分显式标记为历史入口")
     source = live.add_mutually_exclusive_group(required=True)
@@ -1156,7 +1226,7 @@ def main() -> None:
     live.add_argument("--rerank", action="store_true", help="在同一 hybrid 候选池上执行显式 RRF baseline 与真实重排对照")
     sample = live.add_mutually_exclusive_group()
     sample.add_argument("--limit", type=int, help="仅执行批准查询的前 N 条，用于本地验证，不作为正式成绩上传")
-    sample.add_argument("--sample", choices=("validation",), help="使用与 LangSmith 验证一致的 6 条已批准查询，不作为正式成绩上传")
+    sample.add_argument("--sample", choices=("validation",), help="使用与 Langfuse 验证一致的 6 条已批准查询，不作为正式成绩上传")
     live.add_argument("--rrf-k", type=int, help="RRF 平滑参数，默认读取正式运行配置")
     live.add_argument("--depth", type=int)
     live.add_argument("--frozen", type=Path)
@@ -1176,7 +1246,7 @@ def main() -> None:
     offline = commands.add_parser("replay", help="仅使用已保存证据离线重建响应与评分，不调用模型或数据库检索")
     offline.add_argument("--source", type=Path, required=True)
     offline.add_argument("--output", type=Path)
-    publish = commands.add_parser("upload", help="上传已批准评测数据与本地评分")
+    publish = commands.add_parser("upload", help="上传已批准评测数据与冻结证据评分到 Langfuse")
     publish.add_argument("--source", type=Path, required=True)
     args = parser.parse_args()
     if args.command == "run":

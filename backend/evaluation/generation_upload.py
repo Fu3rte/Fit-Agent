@@ -1,10 +1,10 @@
 import argparse
-import asyncio
 import hashlib
 import json
 import os
 import re
 import time
+from collections.abc import Mapping
 from copy import deepcopy
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -13,8 +13,9 @@ from typing import Any, Literal, Sequence
 from uuid import NAMESPACE_URL, uuid5
 
 from dotenv import load_dotenv
+from langfuse.api import NotFoundError
 from langsmith import Client
-from langsmith.utils import LangSmithConflictError, LangSmithNotFoundError
+from langsmith.utils import LangSmithNotFoundError
 from pydantic import Field, ValidationError, model_validator
 
 from evaluation.contracts import (
@@ -39,14 +40,17 @@ from evaluation.contracts import (
     Sha256,
 )
 from evaluation.dataset import EvaluationDataset, load_for_evaluation
-from evaluation.langsmith_scenarios import (
+from evaluation.langfuse_scenarios import (
     EXTERNAL_FEEDBACK_VERSION,
+    EXTERNAL_PROTOCOL_VERSION,
     SDK_RUN_NAME,
     ScenarioSDKError,
     feedback_version,
+    make_client,
+    require_credentials,
     run_scoring_mode,
 )
-from evaluation.langsmith_scenarios import (
+from evaluation.langfuse_scenarios import (
     SCHEMA as SCENARIO_SDK_SCHEMA,
 )
 from evaluation.scenario_evidence import (
@@ -56,7 +60,6 @@ from evaluation.scenario_evidence import (
 from evaluation.scenarios import (
     DEFAULT_VERSION_DIR,
     EXECUTION_FILENAME,
-    EXTERNAL_PROTOCOL_VERSION,
     EXTERNAL_SCORING_FILENAME,
     ExecutionIdentityError,
     ExternalScenarioScoring,
@@ -91,17 +94,22 @@ EXTERNAL_APPLICABILITY_SCHEMA = "fit-agent-external-judge-applicability-1"
 EXTERNAL_APPLICABILITY_REVIEW_SCHEMA = (
     "fit-agent-external-judge-applicability-review-1"
 )
-EXTERNAL_PAYLOAD_SCHEMA = "fit-agent-external-judge-upload-payload-1"
-EXTERNAL_LEDGER_SCHEMA = "fit-agent-external-judge-coverage-ledger-1"
+EXTERNAL_PAYLOAD_SCHEMA = "fit-agent-external-judge-upload-payload-langfuse-2"
+EXTERNAL_LEDGER_SCHEMA = "fit-agent-external-judge-coverage-ledger-langfuse-2"
 EXTERNAL_DATASET_RECEIPT_SCHEMA = (
-    "fit-agent-external-judge-dataset-receipt-1"
+    "fit-agent-external-judge-dataset-receipt-langfuse-2"
 )
 EXTERNAL_EXPERIMENT_RECEIPT_SCHEMA = (
-    "fit-agent-external-judge-experiment-receipt-1"
+    "fit-agent-external-judge-experiment-receipt-langfuse-2"
 )
 EXTERNAL_EXPERIMENT_PENDING_SCHEMA = (
-    "fit-agent-external-judge-experiment-pending-1"
+    "fit-agent-external-judge-experiment-pending-langfuse-2"
 )
+EXTERNAL_PRESENTATION_VERSION = "fit-agent-external-judge-presentation-2"
+EXTERNAL_REMOTE_PREFIX = "fit-agent-external-judge-langfuse-v2"
+EXTERNAL_METRIC_METADATA_PREFIX = "judge_metric_"
+EXTERNAL_OBSERVATION_SCOPE = "isExperimentItemRootSpan"
+EXTERNAL_RULE_SAMPLING = 1.0
 EXTERNAL_DIR = "external-judge"
 APPLICABILITY_NAME = "applicability.json"
 APPLICABILITY_REVIEW_NAME = "applicability.review.json"
@@ -1006,8 +1014,9 @@ def upload_payload(
     }
 
 
-# ---- LangSmith 外部裁判：检查点投影与上传 ----
+# ---- Langfuse 外部裁判：检查点投影、数据集同步与实验提交 ----
 # 外部分支只读取已封存的执行证据；不调用旧 load_run/build_summary，也不要求 Ragas 评分。
+# 旧 ragas check/upload 链路（LangSmith REST 上传与 langsmith-generation.json 回执）原样保留。
 
 
 class ExternalApplicabilityEntry(EvaluationContract):
@@ -1695,10 +1704,18 @@ def build_external_review(evidence: ExternalRunEvidence) -> dict[str, Any]:
         planned_reference = _planned_reference(
             checkpoint.scenario, checkpoint.link.checkpoint_id
         )
+        question = (
+            entry.checkpoint.user_input.message
+            if entry is not None and entry.checkpoint is not None
+            else checkpoint.scenario["input"]["message"]
+        )
         entries.append(
             {
                 "checkpoint": checkpoint.link.model_dump(mode="json"),
                 "execution_sha256": checkpoint.execution_sha256,
+                "display": _checkpoint_display(
+                    checkpoint.scenario, checkpoint.link, question
+                ),
                 "scenario": {
                     "family": checkpoint.scenario["family"],
                     "tags": list(checkpoint.scenario["tags"]),
@@ -2073,21 +2090,29 @@ def _assert_external_upload_whitelist(payload: dict[str, Any]) -> None:
     forbidden = sorted(set(_walk_keys(probe)) & FORBIDDEN_KEYS)
     _require(not forbidden, f"上传 payload 包含禁止字段: {','.join(forbidden)}")
     # 逐字符串扫描：canonical JSON 会把正文换行转义成 \n，序列化后扫描会把 "字:\n\n1." 误判成盘符路径。
-    secret = os.environ.get("LANGSMITH_API_KEY")
+    for variable in ("LANGFUSE_PUBLIC_KEY", "LANGFUSE_SECRET_KEY"):
+        secret = os.environ.get(variable)
+        for text in _walk_strings(probe):
+            if secret:
+                _require(secret not in text, "上传 payload 包含 Langfuse 凭据")
     for text in _walk_strings(probe):
         residue = _local_path_residue(text)
         _require(residue is None, f"上传 payload 包含本地路径: {residue}")
-        if secret:
-            _require(secret not in text, "上传 payload 包含 LangSmith 凭据")
-        for marker in ("Bearer ", "Authorization:", "LANGSMITH_API_KEY"):
+        for marker in (
+            "Bearer ",
+            "Authorization:",
+            "LANGFUSE_PUBLIC_KEY",
+            "LANGFUSE_SECRET_KEY",
+        ):
             _require(marker not in text, f"上传 payload 包含凭据标记: {marker}")
 
 
 def _row_id(link: EvidenceLink, execution_sha256: str) -> str:
+    # 新展示投影使用独立 item id 种子，避免复用旧投影的远端身份。
     return str(
         uuid5(
             NAMESPACE_URL,
-            "fit-agent-external-judge:"
+            f"{EXTERNAL_REMOTE_PREFIX}:"
             f"{link.run_id}:{link.scenario_id}:{link.event_id}:"
             f"{link.checkpoint_id}:{execution_sha256}",
         )
@@ -2112,6 +2137,9 @@ def build_external_payload(
             {
                 "row_id": _row_id(checkpoint.link, checkpoint.execution_sha256),
                 "projection_sha256": projection_sha256,
+                "dataset_input": _dataset_input(
+                    upload, checkpoint.scenario, checkpoint.link
+                ),
                 "upload": upload,
                 "audit": audit,
             }
@@ -2120,10 +2148,11 @@ def build_external_payload(
     rows.sort(key=lambda row: row["row_id"])
     payload = {
         "schema": EXTERNAL_PAYLOAD_SCHEMA,
+        "presentation_version": EXTERNAL_PRESENTATION_VERSION,
         "run_id": evidence.run_id,
         "dataset": evidence.dataset_identity.model_dump(mode="json"),
         "dataset_name": (
-            f"fit-agent-external-judge-{evidence.run_id}-"
+            f"{EXTERNAL_REMOTE_PREFIX}-{evidence.run_id}-"
             f"{_external_applicability_sha256(evidence, applicability)[:12]}"
         ),
         "experiment_name": "",
@@ -2148,7 +2177,7 @@ def build_external_payload(
         )
     )
     payload["experiment_name"] = (
-        f"fit-agent-external-judge-{evidence.run_id}-"
+        f"{EXTERNAL_REMOTE_PREFIX}-{evidence.run_id}-"
         f"{payload['projections_sha256'][:12]}"
     )
     _assert_external_upload_whitelist(payload)
@@ -2269,6 +2298,7 @@ def review_external_source(
 def _dataset_marker(payload: dict[str, Any]) -> dict[str, Any]:
     return {
         "schema": EXTERNAL_PAYLOAD_SCHEMA,
+        "presentation_version": EXTERNAL_PRESENTATION_VERSION,
         "run_id": payload["run_id"],
         "dataset": payload["dataset"],
         "source_sha256": payload["source_sha256"],
@@ -2279,16 +2309,34 @@ def _dataset_marker(payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _metric_flags(applicability: list[dict[str, Any]]) -> dict[str, str]:
+    # 网页 rule 的 metadata 过滤只支持字符串值；适用性标志使用明确字符串。
+    return {
+        _metric_metadata_key(row["metric"]): (
+            "applicable" if row["applicable"] else "not_applicable"
+        )
+        for row in applicability
+    }
+
+
 def _example_metadata(
     payload: dict[str, Any], row: dict[str, Any]
 ) -> dict[str, Any]:
+    checkpoint = row["upload"]["metadata"]["checkpoint"]
     return {
         "schema": EXTERNAL_PAYLOAD_SCHEMA,
+        "presentation_version": EXTERNAL_PRESENTATION_VERSION,
         "row_id": row["row_id"],
         "dataset": payload["dataset"],
-        "checkpoint": row["upload"]["metadata"]["checkpoint"],
+        "checkpoint": checkpoint,
+        "run_id": checkpoint["run_id"],
+        "scenario_id": checkpoint["scenario_id"],
+        "event_id": checkpoint["event_id"],
+        "checkpoint_id": checkpoint["checkpoint_id"],
+        "display": row["dataset_input"]["display"],
         "execution_sha256": row["upload"]["metadata"]["execution_sha256"],
         "projection_sha256": row["projection_sha256"],
+        **_metric_flags(row["upload"]["reference_outputs"]["applicability"]),
     }
 
 
@@ -2297,8 +2345,8 @@ def _example_document(
 ) -> dict[str, Any]:
     return {
         "id": row["row_id"],
-        "inputs": row["upload"]["inputs"],
-        "outputs": row["upload"]["reference_outputs"],
+        "input": row["dataset_input"],
+        "expected_output": row["upload"]["reference_outputs"],
         "metadata": _example_metadata(payload, row),
     }
 
@@ -2327,12 +2375,12 @@ def _verify_example_document(
         f"远端样例 ID 不符: {expected['id']}",
     )
     _require(
-        actual.inputs == expected["inputs"],
-        f"远端样例 inputs 不符: {expected['id']}",
+        actual.input == expected["input"],
+        f"远端样例 input 不符: {expected['id']}",
     )
     _require(
-        actual.outputs == expected["outputs"],
-        f"远端样例 outputs 不符: {expected['id']}",
+        actual.expected_output == expected["expected_output"],
+        f"远端样例 expected_output 不符: {expected['id']}",
     )
     _verify_metadata_subset(
         actual.metadata,
@@ -2342,10 +2390,10 @@ def _verify_example_document(
     )
 
 
-def _fetch_examples(client: Any, dataset_id: str) -> dict[str, Any]:
+def _fetch_examples(client: Any, dataset_name: str) -> dict[str, Any]:
     return {
         str(example.id): example
-        for example in client.list_examples(dataset_id=dataset_id)
+        for example in client.get_dataset(dataset_name).items
     }
 
 
@@ -2370,12 +2418,12 @@ def _verify_external_examples(
         _verify_example_document(document, examples[example_id])
 
 
-def _dataset_page_url(client: Any, dataset_id: str) -> str | None:
-    host = client._host_url
-    tenant = client._get_optional_tenant_id()
-    if not host or tenant is None:
+def _dataset_page_url(client: Any, dataset: Any) -> str | None:
+    project_id = getattr(dataset, "project_id", None)
+    base_url = getattr(client, "_base_url", None)
+    if not project_id or not base_url:
         return None
-    return f"{host.rstrip('/')}/o/{tenant}/datasets/{dataset_id}"
+    return f"{str(base_url).rstrip('/')}/project/{project_id}/datasets/{dataset.id}"
 
 
 def _external_receipt_identity(
@@ -2399,18 +2447,21 @@ def _external_receipt_identity(
 def _resolve_remote_dataset(
     client: Any, payload: dict[str, Any]
 ) -> tuple[Any, bool]:
+    # Langfuse 数据集按项目内唯一名称解析；缺失时 SDK 抛 NotFoundError。
     name = payload["dataset_name"]
-    matches = list(client.list_datasets(dataset_name=name))
-    _require(len(matches) <= 1, "远端存在多个同名检查点数据集，拒绝继续")
-    if matches:
-        return matches[0], False
+    try:
+        remote = client.get_dataset(name)
+    except NotFoundError:
+        remote = None
+    if remote is not None:
+        return remote, False
     marker = _dataset_marker(payload)
     client.create_dataset(
-        name,
+        name=name,
         description="Fit-Agent 外部裁判检查点；输入为用户请求，输出为参考要求与显式适用性。",
         metadata=marker,
     )
-    remote = client.read_dataset(dataset_name=name)
+    remote = client.get_dataset(name)
     _require(remote.name == name, "创建后未解析到唯一检查点数据集")
     return remote, True
 
@@ -2421,11 +2472,15 @@ def _verify_remote_dataset(
     dataset_id: str,
 ) -> Any:
     try:
-        dataset = client.read_dataset(dataset_id=dataset_id)
-    except LangSmithNotFoundError as error:
+        dataset = client.get_dataset(payload["dataset_name"])
+    except NotFoundError as error:
         raise UploadBlocked(
             "回执记录的检查点数据集在远端不存在，拒绝自动重建"
         ) from error
+    _require(
+        str(dataset.id) == dataset_id,
+        "远端检查点数据集与回执身份不一致",
+    )
     _require(
         dataset.name == payload["dataset_name"],
         "远端检查点数据集名称与 payload 不一致",
@@ -2436,36 +2491,202 @@ def _verify_remote_dataset(
         EXTERNAL_DATASET_METADATA_EXTRA,
         "检查点数据集 metadata",
     )
-    examples = _fetch_examples(client, dataset_id)
+    examples = _fetch_examples(client, payload["dataset_name"])
     _verify_external_examples(payload, examples)
     _require(
-        dataset.example_count == len(payload["rows"]),
+        len(examples) == len(payload["rows"]),
         "远端检查点数据集样例数与 payload 不一致",
     )
     return dataset
+
+
+JUDGE_COMMON_INSTRUCTIONS = (
+    "只依据本检查点提供的 user_request、answer、context、reference 判断，"
+    "不补充外部知识。"
+    "answer 是对象：以 answer.visible_text 为用户可见回答正文；"
+    "answer.structured_snapshot 只在包含实际展示的计划或业务内容时作为回答的一部分，"
+    "忽略 thinking、签名与用量等内部字段。"
+    "context 是模型实际可见的上下文条目数组，只按 content 判断，"
+    "source、tool_call_id、tool_name 与 fact_origin 仅用于定位来源。"
+    "reference 是已审阅参考要求对象。"
+)
+JUDGE_SYSTEM_PROMPTS = {
+    "evidence_supported_v1": (
+        "判断回答中的事实陈述是否全部由提供的证据上下文支持。"
+        "只评估动作名称、器械、目标肌群、重量口径、步骤与用户已有事实；"
+        "忽略寒暄、训练建议、计划安排和没有事实内容的表述。"
+        "回答中的任一具体事实若在证据上下文中没有依据，或与证据上下文矛盾，"
+        "则整条回答为否。"
+        "真：全部事实陈述都能在证据上下文中找到依据，且没有与证据矛盾的事实。"
+        "假：至少包含一条没有依据或与证据矛盾的具体事实。"
+        "输出 NUMERIC 分数，范围 0 到 1；1 表示真，0 表示假；保留判断理由。"
+    ),
+    "reference_requirements_met_v1": (
+        "判断回答是否满足参考答案中的任务要求。"
+        "必须同时检查：reference.must_include 列出的内容全部出现；"
+        "reference.forbidden_claims 列出的任一表述都没有出现；"
+        "reference.allowed_variation 只用于允许的替代表述，不能替代必须内容。"
+        "参考事实只用于核对事实，不要求逐字复述。"
+        "缺少任一必须内容或出现任一禁止声明，则整条回答为否。"
+        "真：全部必须内容出现且没有禁止声明。"
+        "假：缺少至少一项必须内容或出现至少一项禁止声明。"
+        "输出 NUMERIC 分数，范围 0 到 1；1 表示真，0 表示假；保留判断理由。"
+    ),
+}
+JUDGE_USER_PROMPT = (
+    "user_request:\n{{user_request}}\n\n"
+    "answer:\n{{answer}}\n\n"
+    "context:\n{{context}}\n\n"
+    "reference:\n{{reference}}"
+)
+EXPECTED_VARIABLE_MAPPING = {
+    "user_request": {"source": "input", "path": "user_request"},
+    "answer": {"source": "output", "path": "answer"},
+    "context": {"source": "output", "path": "context.items"},
+    "reference": {"source": "expected_output", "path": "reference"},
+}
+
+
+def _metric_metadata_key(metric: str) -> str:
+    return f"{EXTERNAL_METRIC_METADATA_PREFIX}{metric}"
+
+
+def _short_question(question: str, limit: int = 120) -> str:
+    text = " ".join(question.split())
+    return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
+def _checkpoint_display(
+    scenario: dict[str, Any], link: EvidenceLink, question: str
+) -> dict[str, Any]:
+    tags = [tag for tag in scenario["tags"] if tag]
+    family = scenario["family"]
+    parts = [link.scenario_id]
+    if family:
+        parts.append(family)
+    if tags:
+        parts.append("/".join(tags))
+    scenario_label = " · ".join(parts)
+    return {
+        "title": (
+            f"{scenario_label} · {link.event_id}/{link.checkpoint_id} · "
+            f"{_short_question(question)}"
+        ),
+        "scenario_id": link.scenario_id,
+        "scenario_label": scenario_label,
+        "family": family,
+        "tags": tags,
+        "event_id": link.event_id,
+        "checkpoint_id": link.checkpoint_id,
+        "question": question,
+    }
+
+
+def _dataset_input(
+    upload: dict[str, Any],
+    scenario: dict[str, Any],
+    link: EvidenceLink,
+) -> dict[str, Any]:
+    request = upload["inputs"]["user_request"]
+    return {
+        "display": _checkpoint_display(
+            scenario, link, request["message"]
+        ),
+        "user_request": {
+            "message": request["message"],
+            "prior_messages": list(request["prior_messages"]),
+        },
+    }
+
+
+def external_rule_filters(
+    metric: str, dataset_id: str
+) -> list[dict[str, Any]]:
+    # Langfuse evaluation rule 的 API 结构性约束：datasetId 与 root observation
+    # 限定作用域，metadata 过滤只支持字符串值。
+    return [
+        {
+            "type": "boolean",
+            "column": EXTERNAL_OBSERVATION_SCOPE,
+            "operator": "=",
+            "value": True,
+        },
+        {
+            "type": "stringOptions",
+            "column": "datasetId",
+            "operator": "any of",
+            "value": [dataset_id],
+        },
+        {
+            "type": "stringObject",
+            "column": "metadata",
+            "key": _metric_metadata_key(metric),
+            "operator": "=",
+            "value": "applicable",
+        },
+    ]
+
+
+def _web_judge_configuration(
+    payload: dict[str, Any], dataset_id: str
+) -> dict[str, Any]:
+    # 网页端配置要求：两指标各一个 evaluator；rule 以数据集 id 与 root observation
+    # 限定作用域，再按字符串 metadata 适用性标志过滤；本地无法验证网页规则。
+    return {
+        "ownership": "langfuse",
+        "scope": {
+            "dataset_id": dataset_id,
+            "dataset_name": payload["dataset_name"],
+            "observation_scope": EXTERNAL_OBSERVATION_SCOPE,
+            "sampling": EXTERNAL_RULE_SAMPLING,
+        },
+        "evaluators": [
+            {
+                "metric": metric,
+                "evaluator_name": metric,
+                "score_name": metric,
+                "score_type": "NUMERIC",
+                "value_range": [0.0, 1.0],
+                "sampling": EXTERNAL_RULE_SAMPLING,
+                "rule_filters": external_rule_filters(metric, dataset_id),
+                "system_prompt": (
+                    JUDGE_COMMON_INSTRUCTIONS + JUDGE_SYSTEM_PROMPTS[metric]
+                ),
+                "user_prompt": JUDGE_USER_PROMPT,
+            }
+            for metric in EXTERNAL_JUDGE_METRICS
+        ],
+        "variable_mapping": EXPECTED_VARIABLE_MAPPING,
+        "collection_guard": (
+            "每个适用检查点每指标恰好一条终态 score；"
+            "不适用指标出现对应 score 按意外反馈阻断"
+        ),
+    }
 
 
 def sync_external_dataset(
     source: Path,
     *,
     dataset_dir: Path = DEFAULT_VERSION_DIR,
-    client: Client | None = None,
+    client: Any | None = None,
 ) -> dict[str, Any]:
     load_dotenv(BACKEND / ".env", override=False)
-    _require(
-        bool(os.environ.get("LANGSMITH_API_KEY")),
-        "请在 backend/.env 配置 LANGSMITH_API_KEY",
-    )
+    require_credentials()
     evidence, _, payload, ledger = _external_documents(source, dataset_dir)
     payload_path, ledger_path = _write_payload_documents(
         evidence.run_dir, payload, ledger
     )
     receipt_path = external_dir(evidence.run_dir) / EXTERNAL_DATASET_RECEIPT_NAME
-    client = client or Client(auto_batch_tracing=False)
+    client = client or make_client()
     if receipt_path.is_file():
         receipt = _read_json(receipt_path)
         _external_receipt_identity(
             receipt, payload, schema=EXTERNAL_DATASET_RECEIPT_SCHEMA
+        )
+        _require(
+            receipt.get("web_judge")
+            == _web_judge_configuration(payload, receipt["dataset_id"]),
+            "已有数据集回执的网页裁判配置与当前投影不一致",
         )
         _verify_remote_dataset(client, payload, receipt["dataset_id"])
         return {
@@ -2491,7 +2712,7 @@ def sync_external_dataset(
         row["row_id"]: _example_document(payload, row)
         for row in payload["rows"]
     }
-    existing = _fetch_examples(client, dataset_id)
+    existing = _fetch_examples(client, payload["dataset_name"])
     unexpected = sorted(set(existing) - set(expected))
     _require(
         not unexpected,
@@ -2504,15 +2725,21 @@ def sync_external_dataset(
         for example_id in expected
         if example_id not in existing
     ]
-    if missing:
-        client.create_examples(
-            dataset_id=dataset_id, examples=missing, max_concurrency=3
+    for document in missing:
+        # 显式传 id 依赖 Langfuse 的按 id upsert 幂等语义。
+        client.create_dataset_item(
+            dataset_name=payload["dataset_name"],
+            id=document["id"],
+            input=document["input"],
+            expected_output=document["expected_output"],
+            metadata=document["metadata"],
         )
-    remote_examples = _fetch_examples(client, dataset_id)
+    remote_examples = _fetch_examples(client, payload["dataset_name"])
     _verify_external_examples(payload, remote_examples)
-    dataset_url = _dataset_page_url(client, dataset_id)
+    dataset_url = _dataset_page_url(client, remote)
     receipt = {
         "schema": EXTERNAL_DATASET_RECEIPT_SCHEMA,
+        "presentation_version": EXTERNAL_PRESENTATION_VERSION,
         "run_id": payload["run_id"],
         "dataset": payload["dataset"],
         "source_sha256": payload["source_sha256"],
@@ -2523,9 +2750,10 @@ def sync_external_dataset(
         "dataset_name": payload["dataset_name"],
         "dataset_id": dataset_id,
         "dataset_url": dataset_url,
-        "example_ids": [row["row_id"] for row in payload["rows"]],
+        "item_ids": [row["row_id"] for row in payload["rows"]],
         "example_count": len(payload["rows"]),
         "created": created,
+        "web_judge": _web_judge_configuration(payload, dataset_id),
         "synced_at": datetime.now(UTC).isoformat(),
     }
     _write_json(receipt_path, receipt)
@@ -2547,6 +2775,7 @@ def _experiment_metadata(
 ) -> dict[str, Any]:
     return {
         "schema": EXTERNAL_PAYLOAD_SCHEMA,
+        "presentation_version": EXTERNAL_PRESENTATION_VERSION,
         "local_run_id": payload["run_id"],
         "dataset": payload["dataset"],
         "dataset_id": dataset_id,
@@ -2559,7 +2788,35 @@ def _experiment_metadata(
         "external_scoring_status": "pending_collection",
         "coverage": payload["coverage"],
         "row_count": len(payload["rows"]),
+        "generation_quality_scope": {
+            "dataset_id": dataset_id,
+            "observation_scope": EXTERNAL_OBSERVATION_SCOPE,
+            "sampling": EXTERNAL_RULE_SAMPLING,
+        },
     }
+
+
+def _list_remote_experiments(
+    client: Any,
+    *,
+    from_start_time: datetime,
+    experiment_id: str | None = None,
+    name: str | None = None,
+) -> list[Any]:
+    experiments = []
+    cursor = None
+    while True:
+        response = client.api.experiments.list(
+            from_start_time=from_start_time,
+            id=experiment_id,
+            name=name,
+            fields="core,metadata",
+            cursor=cursor,
+        )
+        experiments.extend(response.data)
+        cursor = response.meta.cursor
+        if not cursor:
+            return experiments
 
 
 def _verify_experiment_project(
@@ -2568,30 +2825,69 @@ def _verify_experiment_project(
     experiment_name: str,
     dataset_id: str,
     metadata: dict[str, Any],
+    *,
+    from_start_time: datetime,
 ) -> Any:
-    try:
-        project = client.read_project(
-            project_id=project_id, include_stats=True
+    matches = [
+        experiment
+        for experiment in _list_remote_experiments(
+            client, from_start_time=from_start_time, experiment_id=project_id
         )
-    except LangSmithNotFoundError as error:
-        raise UploadBlocked(
-            "回执记录的检查点实验在远端不存在，拒绝自动重提"
-        ) from error
+        if experiment.id == project_id
+    ]
+    if not matches:
+        raise UploadBlocked("回执记录的检查点实验在远端不存在，拒绝自动重提")
+    _require(len(matches) == 1, "远端检查点实验身份不唯一，拒绝继续")
+    experiment = matches[0]
     _require(
-        project.name == experiment_name,
+        experiment.name == experiment_name,
         "远端实验名称与提交身份不一致",
     )
     _require(
-        str(project.reference_dataset_id) == dataset_id,
+        str(experiment.dataset_id) == dataset_id,
         "远端实验绑定的数据集与提交身份不一致",
     )
-    remote_metadata = (project.extra or {}).get("metadata") or {}
+    remote_metadata = experiment.metadata or {}
     for key, value in metadata.items():
         _require(
             remote_metadata.get(key) == value,
             f"远端实验 metadata 不符: {key}",
         )
-    return project
+    return experiment
+
+
+def _find_remote_experiment(
+    client: Any,
+    experiment_name: str,
+    *,
+    from_start_time: datetime,
+) -> Any | None:
+    matches = [
+        experiment
+        for experiment in _list_remote_experiments(
+            client, from_start_time=from_start_time, name=experiment_name
+        )
+        if experiment.name == experiment_name
+    ]
+    _require(
+        len(matches) <= 1,
+        "远端存在多个同名检查点实验，拒绝继续",
+    )
+    return matches[0] if matches else None
+
+
+def _frozen_run_output(row: dict[str, Any]) -> dict[str, Any]:
+    # 实验 Run outputs：冻结回答与上下文，reference 一并放入供网页裁判变量映射。
+    outputs = row["upload"]["outputs"]
+    document = {
+        "answer": outputs["answer"],
+        "context": outputs["context"],
+        "reference": row["upload"]["reference_outputs"]["reference"],
+    }
+    _assert_external_upload_whitelist(
+        {"rows": [{"upload": {"outputs": document}}]}
+    )
+    return document
 
 
 class _FrozenCheckpointTarget:
@@ -2600,41 +2896,55 @@ class _FrozenCheckpointTarget:
     def __init__(self, payload: dict[str, Any]) -> None:
         self.rows = {}
         for row in payload["rows"]:
-            key = sha256_text(_canonical(row["upload"]["inputs"]))
+            key = sha256_text(_canonical(row["dataset_input"]))
             _require(key not in self.rows, "检查点样例输入重复")
             self.rows[key] = row
 
-    def __call__(self, inputs: dict[str, Any]) -> dict[str, Any]:
+    def __call__(self, *, item: Any) -> dict[str, Any]:
+        # Langfuse runner 以 item 关键字调用 task；hosted item 取 .input 字段。
+        inputs = item["input"] if isinstance(item, Mapping) else item.input
         key = sha256_text(_canonical(inputs))
         row = self.rows.get(key)
         _require(
             row is not None,
             "外部裁判 target 只返回冻结检查点输出，未知输入被拒绝",
         )
-        return deepcopy(row["upload"]["outputs"])
-
-    async def arun(self, inputs: dict[str, Any]) -> dict[str, Any]:
-        # SDK 只把协程函数识别为异步 target；实例本身会被当作 runs 迭代。
-        return self(inputs)
+        return deepcopy(_frozen_run_output(row))
 
 
-def _root_runs(client: Any, experiment_id: str) -> list[Any]:
-    return list(client.list_runs(project_id=experiment_id, is_root=True))
+def _root_runs(
+    client: Any,
+    experiment_id: str,
+    *,
+    from_start_time: datetime,
+) -> list[Any]:
+    items = []
+    cursor = None
+    while True:
+        response = client.api.experiments.list_items(
+            from_start_time=from_start_time,
+            experiment_id=experiment_id,
+            fields="core,dataset,io",
+            cursor=cursor,
+        )
+        items.extend(response.data)
+        cursor = response.meta.cursor
+        if not cursor:
+            return items
 
 
-def _verify_run_row(row: dict[str, Any], run: Any) -> None:
+def _verify_run_row(row: dict[str, Any], item: Any) -> None:
     row_id = row["row_id"]
     _require(
-        str(run.reference_example_id) == row_id,
-        f"远端运行样例身份不符: {row_id}",
+        item.level != "ERROR",
+        f"远端运行失败: {row_id}",
     )
-    _require(run.error is None, f"远端运行失败: {row_id}")
     _require(
-        run.inputs == row["upload"]["inputs"],
+        item.input == row["dataset_input"],
         f"远端运行 inputs 与冻结样例不一致: {row_id}",
     )
     _require(
-        run.outputs == row["upload"]["outputs"],
+        item.output == _frozen_run_output(row),
         f"远端运行 outputs 与冻结回答/上下文不一致: {row_id}",
     )
 
@@ -2644,12 +2954,12 @@ def _collect_external_runs(
 ) -> tuple[list[str], dict[str, str]]:
     expected = {row["row_id"]: row for row in payload["rows"]}
     by_example: dict[str, list[Any]] = {}
-    for run in runs:
+    for item in runs:
         _require(
-            run.reference_example_id is not None,
-            f"远端运行缺少样例绑定: {run.id}",
+            item.experiment_item_id is not None,
+            f"实验条目缺少样例身份: {item.id}",
         )
-        by_example.setdefault(str(run.reference_example_id), []).append(run)
+        by_example.setdefault(str(item.experiment_item_id), []).append(item)
     unexpected = sorted(set(by_example) - set(expected))
     _require(
         not unexpected, f"远端实验包含未知样例: {unexpected[:3]}"
@@ -2660,23 +2970,31 @@ def _collect_external_runs(
         matched = by_example.get(row_id, [])
         _require(
             len(matched) <= 1,
-            f"远端同一样例存在多个根运行: {row_id}",
+            f"远端同一样例存在多个实验条目: {row_id}",
         )
         if not matched:
             missing.append(row_id)
             continue
         _verify_run_row(row, matched[0])
-        mapping[row_id] = str(matched[0].id)
+        mapping[row_id] = str(matched[0].trace_id)
     return missing, mapping
 
 
-async def _await_external_runs(
-    client: Any, experiment_id: str, payload: dict[str, Any]
+def _await_external_runs(
+    client: Any,
+    experiment_id: str,
+    payload: dict[str, Any],
+    *,
+    from_start_time: datetime,
 ) -> dict[str, str]:
+    # Langfuse 落库异步：有界轮询远端实验条目，直至每行恰好绑定一个 trace。
     deadline = time.monotonic() + EXTERNAL_REMOTE_VERIFY_TIMEOUT_SECONDS
     while True:
         missing, mapping = _collect_external_runs(
-            payload, _root_runs(client, experiment_id)
+            payload,
+            _root_runs(
+                client, experiment_id, from_start_time=from_start_time
+            ),
         )
         if not missing:
             return mapping
@@ -2684,7 +3002,7 @@ async def _await_external_runs(
             raise UploadBlocked(
                 f"远端检查点运行未在时限内齐备: {missing[:3]}"
             )
-        await asyncio.sleep(1.5)
+        time.sleep(1.5)
 
 
 def _read_dataset_receipt(
@@ -2721,32 +3039,77 @@ def _experiment_pending_document(
 
 
 def _experiment_page_url(
-    client: Any, experiment_id: str
+    client: Any, project_id: str | None, experiment_id: str
 ) -> str | None:
-    host = client._host_url
-    tenant = client._get_optional_tenant_id()
-    if not host or tenant is None:
+    base_url = getattr(client, "_base_url", None)
+    if not project_id or not base_url:
         return None
-    return f"{host.rstrip('/')}/o/{tenant}/projects/p/{experiment_id}"
+    return (
+        f"{str(base_url).rstrip('/')}/project/{project_id}"
+        f"/experiments/results?baseline={experiment_id}"
+    )
 
 
-async def submit_external_experiment(
+def _run_external_experiment(
+    client: Any,
+    *,
+    payload: dict[str, Any],
+    experiment_name: str,
+    metadata: dict[str, Any],
+    dataset_id: str,
+    missing: Sequence[str] | None,
+    experiment_id: str | None = None,
+) -> Any:
+    # 经 SDK 实验 runner 提交：hosted item 携带 dataset_id，同 dataset 同 run_name
+    # 归并同一实验；本地不挂任何 evaluator，评分只来自网页 Evaluator。
+    examples = _fetch_examples(client, payload["dataset_name"])
+    expected = {
+        row["row_id"]: _example_document(payload, row)
+        for row in payload["rows"]
+    }
+    selected_ids = (
+        [row["row_id"] for row in payload["rows"]]
+        if missing is None
+        else list(missing)
+    )
+    selected = []
+    for row_id in selected_ids:
+        _require(
+            row_id in examples,
+            f"远端数据集缺少待提交样例: {row_id}",
+        )
+        _verify_example_document(expected[row_id], examples[row_id])
+        selected.append(examples[row_id])
+    target = _FrozenCheckpointTarget(payload)
+    return client.run_experiment(
+        name=experiment_name,
+        run_name=experiment_name,
+        description=(
+            "Fit-Agent 外部裁判检查点实验；target 只回放冻结回答与上下文。"
+        ),
+        data=selected,
+        task=target,
+        evaluators=[],
+        max_concurrency=3,
+        metadata=metadata,
+        experiment_id=experiment_id,
+    )
+
+
+def submit_external_experiment(
     source: Path,
     *,
     dataset_dir: Path = DEFAULT_VERSION_DIR,
     confirm_cost: bool,
-    client: Client | None = None,
+    client: Any | None = None,
 ) -> dict[str, Any]:
     load_dotenv(BACKEND / ".env", override=False)
     _require(
-        bool(os.environ.get("LANGSMITH_API_KEY")),
-        "请在 backend/.env 配置 LANGSMITH_API_KEY",
-    )
-    _require(
         confirm_cost,
-        "提交外部裁判实验会触发 LangSmith 数据集 Evaluator 的真实模型调用与费用，"
+        "提交外部裁判实验会触发 Langfuse 网页 Evaluator 的真实模型调用与费用，"
         "需传入 --confirm-external-judge-cost",
     )
+    require_credentials()
     evidence, _, payload, ledger = _external_documents(source, dataset_dir)
     payload_path, ledger_path = _write_payload_documents(
         evidence.run_dir, payload, ledger
@@ -2754,9 +3117,17 @@ async def submit_external_experiment(
     run_dir = evidence.run_dir
     dataset_receipt = _read_dataset_receipt(run_dir, payload)
     payload_sha256 = payload_digest(payload)
-    client = client or Client(auto_batch_tracing=False)
+    client = client or make_client()
     dataset_id = dataset_receipt["dataset_id"]
-    _verify_remote_dataset(client, payload, dataset_id)
+    _require(
+        dataset_receipt.get("web_judge")
+        == _web_judge_configuration(payload, dataset_id),
+        "数据集回执的网页裁判配置与当前投影不一致",
+    )
+    dataset = _verify_remote_dataset(client, payload, dataset_id)
+    started_at = datetime.fromisoformat(evidence.document["started_at"])
+    experiment_name = payload["experiment_name"]
+    metadata = _experiment_metadata(payload, dataset_id)
     receipt_path = (
         external_dir(run_dir) / EXTERNAL_EXPERIMENT_RECEIPT_NAME
     )
@@ -2765,15 +3136,26 @@ async def submit_external_experiment(
         _external_receipt_identity(
             receipt, payload, schema=EXTERNAL_EXPERIMENT_RECEIPT_SCHEMA
         )
+        _require(
+            receipt.get("web_judge")
+            == _web_judge_configuration(payload, dataset_id),
+            "已有实验回执的网页裁判配置与当前投影不一致",
+        )
         _verify_experiment_project(
             client,
             receipt["experiment_id"],
-            payload["experiment_name"],
+            experiment_name,
             dataset_id,
-            _experiment_metadata(payload, dataset_id),
+            metadata,
+            from_start_time=started_at,
         )
         missing, mapping = _collect_external_runs(
-            payload, _root_runs(client, receipt["experiment_id"])
+            payload,
+            _root_runs(
+                client,
+                receipt["experiment_id"],
+                from_start_time=started_at,
+            ),
         )
         _require(
             not missing,
@@ -2796,7 +3178,6 @@ async def submit_external_experiment(
             "payload_path": str(payload_path),
             "ledger_path": str(ledger_path),
         }
-    metadata = _experiment_metadata(payload, dataset_id)
     pending_path = (
         external_dir(run_dir) / EXTERNAL_EXPERIMENT_PENDING_NAME
     )
@@ -2805,80 +3186,79 @@ async def submit_external_experiment(
         _external_receipt_identity(
             pending, payload, schema=EXTERNAL_EXPERIMENT_PENDING_SCHEMA
         )
-    experiment_name = payload["experiment_name"]
-    try:
-        project = client.read_project(project_name=experiment_name)
-    except LangSmithNotFoundError:
-        project = None
-    if project is None:
+    remote_experiment = _find_remote_experiment(
+        client, experiment_name, from_start_time=started_at
+    )
+    if remote_experiment is not None:
+        experiment_id = str(remote_experiment.id)
+        _verify_experiment_project(
+            client,
+            experiment_id,
+            experiment_name,
+            dataset_id,
+            metadata,
+            from_start_time=started_at,
+        )
+    else:
+        experiment_id = None
+    if not pending_path.is_file():
         _write_json(
             pending_path,
             _experiment_pending_document(
                 payload, dataset_id, experiment_name, payload_sha256
             ),
         )
-        try:
-            created = client.create_project(
-                experiment_name,
-                description="Fit-Agent 外部裁判检查点实验；target 只回放冻结回答与上下文。",
-                metadata=metadata,
-                reference_dataset_id=dataset_id,
-            )
-        except LangSmithConflictError:
-            project = client.read_project(project_name=experiment_name)
-            created = None
-        else:
-            project = client.read_project(project_id=created.id)
-    else:
-        if not pending_path.is_file():
-            _write_json(
-                pending_path,
-                _experiment_pending_document(
-                    payload, dataset_id, experiment_name, payload_sha256
-                ),
-            )
-    experiment_id = str(project.id)
-    _verify_experiment_project(
-        client, experiment_id, experiment_name, dataset_id, metadata
-    )
-    missing, mapping = _collect_external_runs(
-        payload, _root_runs(client, experiment_id)
-    )
-    experiment_url = _experiment_page_url(client, experiment_id)
-    if missing:
-        examples = _fetch_examples(client, dataset_id)
-        expected = {
-            row["row_id"]: _example_document(payload, row)
-            for row in payload["rows"]
-        }
-        selected = []
-        for row_id in missing:
-            _require(
-                row_id in examples,
-                f"远端数据集缺少待提交样例: {row_id}",
-            )
-            _verify_example_document(expected[row_id], examples[row_id])
-            selected.append(examples[row_id])
-        target = _FrozenCheckpointTarget(payload)
-        results = await client.aevaluate(
-            target.arun,
-            data=selected,
+    if experiment_id is None:
+        results = _run_external_experiment(
+            client,
+            payload=payload,
+            experiment_name=experiment_name,
             metadata=metadata,
-            experiment=project,
-            description=payload["experiment_name"],
-            max_concurrency=3,
-            num_repetitions=1,
-            blocking=True,
-            disable_evaluator_tracing=True,
+            dataset_id=dataset_id,
+            missing=None,
         )
-        await results.wait()
-        experiment_url = results.url
-        mapping = await _await_external_runs(
-            client, experiment_id, payload
+        experiment_id = str(results.experiment_id)
+        experiment_url = results.experiment_url
+        mapping = _await_external_runs(
+            client,
+            experiment_id,
+            payload,
+            from_start_time=started_at,
+        )
+    else:
+        missing, mapping = _collect_external_runs(
+            payload,
+            _root_runs(
+                client, experiment_id, from_start_time=started_at
+            ),
+        )
+        if missing:
+            results = _run_external_experiment(
+                client,
+                payload=payload,
+                experiment_name=experiment_name,
+                metadata=metadata,
+                dataset_id=dataset_id,
+                missing=missing,
+                experiment_id=experiment_id,
+            )
+            _require(
+                str(results.experiment_id) == experiment_id,
+                "补齐提交后的实验身份与既有实验不一致",
+            )
+            mapping = _await_external_runs(
+                client,
+                experiment_id,
+                payload,
+                from_start_time=started_at,
+            )
+        experiment_url = _experiment_page_url(
+            client, getattr(dataset, "project_id", None), experiment_id
         )
     coverage_complete = ledger["counts"]["missing"] == 0
     receipt = {
         "schema": EXTERNAL_EXPERIMENT_RECEIPT_SCHEMA,
+        "presentation_version": EXTERNAL_PRESENTATION_VERSION,
         "run_id": payload["run_id"],
         "dataset": payload["dataset"],
         "source_sha256": payload["source_sha256"],
@@ -2892,7 +3272,7 @@ async def submit_external_experiment(
         "experiment_name": experiment_name,
         "experiment_id": experiment_id,
         "experiment_url": experiment_url,
-        "example_ids": [row["row_id"] for row in payload["rows"]],
+        "item_ids": [row["row_id"] for row in payload["rows"]],
         "runs": mapping,
         "projections": {
             row["row_id"]: {
@@ -2907,6 +3287,7 @@ async def submit_external_experiment(
         "coverage": payload["coverage"],
         "coverage_complete": coverage_complete,
         "external_scoring_status": "pending_collection",
+        "web_judge": _web_judge_configuration(payload, dataset_id),
         "submitted_at": datetime.now(UTC).isoformat(),
     }
     _write_json(receipt_path, receipt)
@@ -2944,18 +3325,18 @@ def _external_command(args: argparse.Namespace) -> dict[str, Any]:
         return sync_external_dataset(
             args.source, dataset_dir=args.dataset
         )
-    return asyncio.run(
-        submit_external_experiment(
-            args.source,
-            dataset_dir=args.dataset,
-            confirm_cost=args.confirm_external_judge_cost,
-        )
+    return submit_external_experiment(
+        args.source,
+        dataset_dir=args.dataset,
+        confirm_cost=args.confirm_external_judge_cost,
     )
 
 
 def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="生成评测显式上传入口；默认命令不发起网络请求"
+        description=(
+            "生成评测显式上传入口；外部裁判链路使用 Langfuse，默认命令不发起网络请求"
+        )
     )
     commands = parser.add_subparsers(dest="command", required=True)
     for name in ("check", "upload"):
@@ -2969,9 +3350,9 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
         )
     for name, help_text in (
         ("external-review", "校验外部执行证据并导出适用性审阅清单"),
-        ("external-project", "构造并离线校验外部检查点投影"),
-        ("external-sync", "同步外部检查点数据集，不触发评分"),
-        ("external-submit", "提交外部检查点实验并触发数据集 Evaluator"),
+        ("external-project", "构造并离线校验外部检查点 Langfuse 投影"),
+        ("external-sync", "同步外部检查点数据集到 Langfuse，不触发评分"),
+        ("external-submit", "提交外部检查点 Langfuse 实验并触发网页 Evaluator"),
     ):
         command = commands.add_parser(name, help=help_text)
         command.add_argument("--source", type=Path, required=True)
@@ -2983,8 +3364,8 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
                 "--confirm-external-judge-cost",
                 action="store_true",
                 help=(
-                    "确认提交后会由 LangSmith 绑定的 Evaluator 发起真实 Jev "
-                    "模型调用并产生费用"
+                    "确认提交后会由 Langfuse 网页 Evaluator 发起真实模型"
+                    "调用并产生费用"
                 ),
             )
     return parser.parse_args(argv)

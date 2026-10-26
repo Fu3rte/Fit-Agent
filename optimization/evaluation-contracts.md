@@ -10,6 +10,8 @@ LangSmith 外部裁判迁移的任务 1 已新增独立契约：新指标身份�
 
 任务 4 已在 `evaluation.decision_feedback` 增加离线核验、显式绑定、云端读取、严格归一化与版本化落盘；`check` 默认不联网，真实云端回收需要有效实验回执与用户独立授权，详见第 14 节。
 
+任务 1～5 的评测平台已迁移 Langfuse，活动链路契约见第 16 节；第 11～15 节为 LangSmith 历史实现记录，历史证据按原身份读取。
+
 共享契约唯一导入路径：
 
 ```python
@@ -1301,3 +1303,178 @@ uv run --locked --directory backend python -m evaluation.sdk_summary write-v3 --
 - reranker/Cross-Encoder 专项与真实服务测试全部暂停：`test_retrieval_rerank_evaluation.py`、`test_retrieval_rerank_stages.py`、`test_retrieval_rrf.py`、`test_retrieval_stages.py`、`test_retrieval_mteb.py`、`test_retrieval_runtime_integration.py`、`check_retrieval_rerank_production.py` 等。
 - 未执行真实生成模型、Embedding、reranker、裁判模型或 LangSmith 云端调用；未执行真实 `collect`、未提交新实验、未改写任何正式成绩。
 - 未建立真实 40 条默认场景外部全量运行、正式检索来源与人工裁判质量审阅，因此不存在真实外部正式发布。
+
+## 16. Langfuse 平台迁移契约
+
+本节记录任务 1～5 的 Langfuse 平台迁移契约；设计基线为 `backend/temp/langfuse-migration/design-brief.md`（SDK 5.0.4 事实、统一约定与任务边界）。第 11～15 节为 LangSmith 历史实现记录，正文与历史产物保持原值。
+
+### 16.1 模块与命名清单
+
+| 模块 | CLI | 远端命名 | 本地产物 | Schema |
+|---|---|---|---|---|
+| `evaluation/langfuse_retrieval.py` | `sync`（`--dataset`）、`run`（`--dataset`、`--groups bm25 dense hybrid hybrid-rerank`、`--purpose validation\|formal`） | 数据集 `fit-agent-retrieval-sdk-langfuse-<version>-<content_sha256[:12]>`；实验 run_name `<run_id>-<group>-<purpose>` | `backend/temp/retrieval-langfuse/`：`datasets/` 同步回执、`<run_id>/run.json`、`<run_id>/<group>/result.json`、`<group>/samples/<query_id>.json` | `fit-agent-retrieval-langfuse-1`（运行文档与数据集 marker `fit-agent-retrieval-sdk-langfuse-1`） |
+| `evaluation/retrieval.py` `upload` | `upload --source <evaluation.json>` | 新数据 `fit-agent-retrieval-langfuse-<version>-<content_sha256[:12]>`；历史入口 `fit-agent-retrieval-langfuse-<split>-<dataset_sha256[:12]>-<adaptation_sha256[:12]>` | 回执 `langfuse-<group>.json`（含 `source_sha256`、`verify_from`、`upload_timing`）；提交前 pending 记录 `langfuse-<group>.pending.json`（`fit-agent-retrieval-langfuse-pending-1`，回执持久化后删除） | 上传 marker `fit-agent-retrieval-upload-langfuse-1` |
+| `evaluation/langfuse_scenarios.py` | `sync`、`run`（`--purpose`、`--scenario-id`、`--judge-timeout`、`--scoring-mode ragas\|external`，默认 `external`）、`finalize --run` | 场景数据集 `fit-agent-scenario-langfuse-<version>-<content_sha256[:12]>`；实验 run_name `<run_id>-<purpose>` | `backend/temp/scenario-langfuse/runs/<run_id>/` | `fit-agent-scenario-langfuse-1`；外部协议 `fit-agent-external-scenario-langfuse-protocol-1` |
+| `evaluation/generation_upload.py` external-* | `external-review`、`external-project`（离线）、`external-sync`、`external-submit --confirm-external-judge-cost` | 检查点数据集 `fit-agent-external-judge-langfuse-v2-<run_id>-<applicability_sha256[:12]>`；实验 `fit-agent-external-judge-langfuse-v2-<run_id>-<projections_sha256[:12]>` | 回执 `checkpoint-dataset.json`、`checkpoint-experiment.json`（`runs` 为 row_id→trace_id）、pending 标记 | 五件套：`fit-agent-external-judge-upload-payload-langfuse-2`、`fit-agent-external-judge-coverage-ledger-langfuse-2`、`fit-agent-external-judge-dataset-receipt-langfuse-2`、`fit-agent-external-judge-experiment-receipt-langfuse-2`、`fit-agent-external-judge-experiment-pending-langfuse-2`；展示版本 `fit-agent-external-judge-presentation-2` |
+| `evaluation/decision_feedback.py` | `check`（离线）、`collect --wait-seconds` | 按实验读 `api.scores.get_many`，subject trace 归组 | `external-judge/decision-feedback/`：`feedback-binding.json`、`index.json`、`batches/batch-<content_sha256[:16]>.json` | `fit-agent-external-judge-feedback-binding-langfuse-2`、`fit-agent-external-judge-feedback-collection-langfuse-2`、`fit-agent-external-judge-feedback-index-langfuse-2` |
+| `evaluation/skills_scoring.py`、`evaluation/skills_judge.py` | 见技能评测入口 | 数据集与实验同名 `fit-agent-skills-diagnostic-langfuse-<run_id>-<source_sha256[:12]>`（source 摘要聚合 `identity_sha256` 与逐样本执行摘要） | 技能运行目录内评分与绑定产物 | `fit-agent-skills-scoring-langfuse-1`、`fit-agent-skills-binding-langfuse-1` |
+| `evaluation/sdk_summary.py`、`evaluation/external_summary.py` | `check`、`report`、`write-v3`（CLI 不变） | — | 汇总输出目录 | 外部汇总 `fit-agent-external-judge-summary-langfuse-1`；接受 langfuse 与历史布局分发 |
+
+身份派生公式：
+
+- 检索 SDK 样例：`uuid5(NAMESPACE_URL, "<dataset_name>:<query_id>")`，dataset_name 自带 `langfuse` marker。
+- 检索上传行：`uuid5(NAMESPACE_URL, "<dataset_name>:<query_id>")`。
+- 外部裁判行：`uuid5(NAMESPACE_URL, "fit-agent-external-judge-langfuse:<run_id>:<scenario_id>:<event_id>:<checkpoint_id>:<execution_sha256>")`。
+- 技能样例行：`uuid5(NAMESPACE_URL, "<SCORING_SCHEMA>:<run_id>:<group>:<case_id>:<row_digest>")`。
+- 全部数据集 item 显式传 `id=`，依赖 Langfuse 按 id upsert 幂等；本地直写 score 传由业务身份派生的稳定 `score_id`，`name` 与 `timestamp` 固定。
+
+`evaluation.retrieval.identity()` 记录 `langfuse` 包实际版本；运行身份核验随平台迁移覆盖。
+
+### 16.2 Langfuse SDK 事实（5.0.4，实现前经源码/自省核实）
+
+- 实验 runner：`run_experiment(name, run_name=None, description=None, data=[...], task=..., evaluators=[], run_evaluators=[], max_concurrency=50, metadata=None, experiment_id=None)`；hosted dataset 用 `dataset.run_experiment(...)`。同一 dataset + 同一 run_name 归并为同一 experiment id；跨进程续跑显式传相同 `experiment_id` + 相同 `run_name`。
+- task 签名：runner 以 `item` 关键字调用；hosted item 携带 `.input`。task 返回值即该次执行 trace 的输出。
+- evaluator 签名：`evaluator(*, input, output, expected_output, metadata, ...)` 返回 `Evaluation(name=..., value=...)` 列表；runner 本地执行，分数以 `source=EVAL` 挂到该次执行 trace。
+- 数据集 item：`create_dataset_item(dataset_name, input=None, expected_output=None, metadata=None, id=None)` 按 id upsert；id 项目内唯一、≤255 字符；不传 id 的重复提交产生重复项。item `metadata` 会随实验 trace 合并到 observation metadata（SDK 源码 `final_observation_metadata`），实验 item input/output 成为根 observation 的 input/output，`expected_output` 以 `langfuse.experiment.item.expected_output` 属性保留。Evaluation rule 的 `metadata` filter 是 `stringObject`（需要 `key`，值为字符串），布尔 metadata 不能作为过滤条件；适用性标志因此写为字符串 `"applicable"`/`"not_applicable"`。
+- 读回 API：`api.experiments.list(dataset_id=..., from_start_time=...)`（`fromStartTime` 必填）、`api.experiments.list_items(experiment_id=..., fields=...)`（ExperimentItem 含 `traceId`，`fields=scores` 取分数）、`api.scores.get_many(...)`（`GET /api/public/v3/scores`；过滤 `id/name/source/dataType/environment/configId/traceId/sessionId/experimentId`，`fields=details,subject,annotation`，cursor 分页默认 50 最大 100；source 枚举 `ANNOTATION/API/EVAL`）。
+- Score 幂等三元组：`create_score(*, name, value, ..., score_id=None, ..., timestamp=None, environment=None)` 仅在 `score_id`+`name`+`toDate(timestamp)` 三者一致时覆盖，否则新纪录；observation 级 score 必须同时给 `observation_id` 与 `trace_id`。
+- `flush()` 保证已投递、不保证立即可读（服务端异步，通常 15–30 秒）；读回判定用有界轮询（30 秒上限 / 1.5 秒间隔）。
+- 网页 LLM-as-a-Judge：evaluator 挂 rule（filters + sampling rate），rule 匹配新进入 observation 时由 Langfuse worker 执行；每次执行产生完整调试 trace（environment=`langfuse-llm-as-a-judge`，状态 Completed/Error/Delayed/Pending）；变量映射来源为 observation 的 `input`/`output`/`metadata`/`tool_calls`，实验 evaluator 另有 `expected_output` 与 experiment item metadata；模型接入需先建 LLM Connection（项目/组织级，自带 provider key，支持任意 OpenAI 兼容网关）。score 对象不携带裁判模型名与 evaluator 版本字段。
+- Evaluation rule 的实验作用域由 filters 表达：`isExperimentItemRootSpan=true` 限定实验 item 根 observation；`datasetId`（`stringOptions`，`any of`）使用 `GET /api/public/v2/datasets` 的 dataset ID；`sampling` 是 0..1 比例，`1.0` 为全量。`metadata` filter 为 `stringObject`，需要 `key`，只支持字符串比较。
+- 凭据：`LANGFUSE_PUBLIC_KEY`、`LANGFUSE_SECRET_KEY`、可选 `LANGFUSE_BASE_URL`（Cloud 默认 `https://cloud.langfuse.com`）；云端入口先查密钥再 `auth_check()`；新代码不读取 `LANGSMITH_*`；密钥不进入产物、日志、报告与回执。
+
+### 16.3 外部裁判链路契约
+
+- 运行模式：`scoring_mode=external` 的 Langfuse 场景运行使用协议 `fit-agent-external-scenario-langfuse-protocol-1`；实验 metadata `judge={"ownership":"langfuse","configuration":"external"}`；finalize 语义与 LangSmith 版一致（完成且无问题的运行状态为 `awaiting_external_scoring`）。
+- 数据集同步：`external-sync` 只创建/核验检查点数据集；每个 Dataset Item 对应一个检查点。`input` 为 `{display, user_request}`，`display` 由场景标识、family、tags、事件/检查点与真实问题确定性生成，`user_request` 只含 `message` 与 `prior_messages`；`expected_output` 为 `{reference, applicability}`；`metadata` 携带 `schema`、`presentation_version`、稳定身份、`display`、执行/投影摘要与字符串适用性标志 `judge_metric_<metric>="applicable"|"not_applicable"`。实验 output 为 `{answer, context, reference}`，`context.request_boundary` 与 `context.retrieval` 仅审计。
+- 实验提交：`external-submit` 必须已有 `checkpoint-dataset.json` 回执并显式 `--confirm-external-judge-cost`；经 `client.run_experiment` 提交冻结回放，task 按 Dataset Item input 摘要查找冻结检查点并只返回 `{answer, context, reference}`；本地 evaluators 为空，评分由网页 evaluator 的 rule 触发；提交后有界轮询实验条目，回执 `runs` 为 row_id→trace_id。实验 metadata 记录 `presentation_version` 与 `generation_quality_scope`（检查点 dataset ID、root observation、sampling 1.0）。
+- 回执 `web_judge` 字段记录网页端配置要求：两指标各一个 evaluator；`scope` 固定检查点 `dataset_id`/`dataset_name`、`observation_scope=isExperimentItemRootSpan`、`sampling=1.0`；每项 evaluator 的 `rule_filters` 为 `isExperimentItemRootSpan=true`、`datasetId any of [检查点 dataset_id]`、`metadata` 字符串键 `judge_metric_<metric>="applicable"`；变量映射为 `user_request←Input.user_request`、`answer←Output.answer`、`context←Output.context.items`、`reference←Expected Output.reference`；score 类型 `NUMERIC` 0..1，System message 放完整判定标准，User message 放四变量。回收侧核验不适用指标没有对应 score，出现即按“意外反馈”阻断；每个适用检查点每指标恰好一条终态 score。
+- 场景级实验 `<run_id>-validation/formal` 使用 `fit-agent-scenario-langfuse-<version>-<content_sha256[:12]>`，继续只承担执行与确定性断言；生成质量 evaluator 的 rule 以检查点 dataset ID 限定，不作用于场景级实验数据集。
+- 反馈回收：`collect` 按实验经 `api.scores.get_many` 分页拉取 score，subject trace 归组到检查点；成功口径为 `declared_binding`：score `source=EVAL` + `name` 匹配声明指标 + subject trace 属回执实验；模型版本恒 `unreported`（score 对象无模型字段，不补造）。
+- 裁判失败判定：仅按回执 trace 作用域查 `observations.get_many(environment="langfuse-llm-as-a-judge")`，取 `level=ERROR` 且名称可归属到本指标 evaluator 的 observation 作失败依据；无证据保持 `pending`，不推断失败。
+- 退出码：`0=complete`、`2=pending`（argparse 参数错误同 2）、`3=blocked`、`1=未捕获异常`。
+- 覆盖分母、`missing`/`not_applicable` 不缩分母、批次幂等与历史保留语义沿用第 14 节口径。
+
+### 16.4 评分尝试契约与历史并存
+
+`evaluation.contracts` 新增 `ExternalJudgeScoreSource`、`ExternalJudgeCloudScoreIdentity`、`ExternalJudgeLangfuseSource`、`ExternalJudgeLangfuseScoringAttempt`，反馈契约版本 `fit-agent-external-judge-feedback-langfuse-1`。attempt 绑定：本地记录身份（run/checkpoint/execution_sha256）、Langfuse 来源（experiment/trace/score 身份）、模型声明（provider/evaluator/model_alias/config_sha256，版本恒 unreported）、定义摘要（question/rubric SHA-256）、出站投影（row_id/projection_sha256）与反馈状态。
+
+旧 LangSmith 契约类（第 11.5 节的 `ExternalJudgeScoringAttempt` 等）与历史批次 schema 保留，历史批次按原身份读取；新批次不写入旧 schema。历史 LangSmith 绑定/批次/索引目录与 `backend/temp/scenario-langsmith/` 产物按原身份存档。
+
+### 16.5 历史 LangSmith/Ragas 证据读取边界
+
+仍被消费的历史布局：
+
+- `evaluation.sdk_summary` 接受历史 LangSmith SDK 布局（检索 `backend/temp/retrieval-langsmith/<run_id>/run.json`、场景 `backend/temp/scenario-langsmith/runs/<run_id>/sdk-run.json`，反馈版本 1/2 走 Ragas 分支、版本 3 走 LangSmith 外部汇总分支）与本地 Ragas `run.json` 布局；`write-v3` 读取的 `quantitive-index/v3.md` 历史成绩段保持原值。
+- `evaluation.summary` 继续读取本地 Ragas 场景运行目录并拒绝 `scoring_mode=external`。
+- `evaluation.decision_feedback` 的历史 LangSmith 批次经旧契约类按原 schema 读取。
+
+仅存档（活动链路不再写入）：`backend/temp/retrieval-langsmith/`、`backend/temp/scenario-langsmith/` 全部历史产物；LangSmith 云端数据集、实验与回执（2026-10-21 记录见 13.8）；`langsmith_retrieval.py`、`langsmith_scenarios.py` 历史入口（langsmith 0.14.11 经 langchain 链随锁文件保留，历史链路可读，依赖收尾归迁移任务 6）。
+
+### 16.6 验证状态
+
+2026-10-25 由 subagent 在 `backend/` 目录离线实测（`--basetemp=temp/t7-docs/pytest-*`，单命令 300 秒上限内），全部退出码 0：
+
+| 命令 | 结果 | 耗时 |
+| --- | --- | --- |
+| `uv run --locked python -m pytest test/test_langfuse_retrieval.py -q --basetemp=temp/t7-docs/pytest-t1` | 24 passed | 15.33s |
+| `uv run --locked python -m pytest test/test_langfuse_scenarios.py test/test_external_scenario_mode.py -q --basetemp=temp/t7-docs/pytest-t2` | 44 passed | 53.01s |
+| `uv run --locked python -m pytest test/test_external_judge_checkpoints.py -q --basetemp=temp/t7-docs/pytest-t3` | 18 passed | 57.30s |
+| `uv run --locked python -m pytest test/test_decision_feedback.py -q -k "two_feedback_zero_and_one or invalid_scores or non_numeric_data_type or missing_metric_pending or bounded_wait or real_cloud_failure or remote_run_identity or example_reference or api_and_annotation or duplicate_same_id or different_score_ids or history_conflict or missing_upload or unexpected_feedback or all_not_applicable or read_remote_feedback" --basetemp=temp/t7-docs/pytest-t4a-a` | 22 passed，26 deselected | 113.86s |
+| `uv run --locked python -m pytest test/test_decision_feedback.py -q -k "check_is_offline or raw_evidence or batch_diagnostics or persistence_idempotent or corrupt_index or binding_rejects or terminal_attempt or malformed_feedback or experiment_receipt_drift or binding_digest_drift or binding_identity_drift or missing_or_pending or payload_projection_drift or feedback_scope or wait_seconds or cli_exit_codes" --basetemp=temp/t7-docs/pytest-t4a-b` | 26 passed，22 deselected | 173.46s |
+| `uv run --locked python -m pytest test/test_skills_scoring.py test/test_skills_generation.py -q --basetemp=temp/t7-docs/pytest-t5` | 37 passed | 18.81s |
+| `uv run --locked python -m pytest test/test_external_judge_contracts.py -q --basetemp=temp/t7-docs/pytest-contracts` | 24 passed | 8.47s |
+| `uv run --locked python -m pytest test/test_retrieval_mteb.py -q --basetemp=temp/t7-docs/pytest-mteb` | 72 passed | 96.29s |
+| `uv run --locked python -m pytest test/test_retrieval_rerank_evaluation.py test/test_retrieval_review_gate.py -q --basetemp=temp/t7-docs/pytest-rerank` | 34 passed | 42.97s |
+
+`test_decision_feedback.py` 全文件拆两批执行，批一覆盖归一化、来源、冲突、等待与 CLI 语义，批二覆盖离线核验、原始证据、批次持久化、绑定拒绝与回执漂移；两批节点无遗漏、无重叠。
+
+T4b（`sdk_summary.py`/`external_summary.py` 的 langfuse 布局分发与 `fit-agent-external-judge-summary-langfuse-1` 接线）已完成并实测：`test_external_summary.py` 全文件 35 passed（含历史 LangSmith 批次最小回归），`test_sdk_summary.py` 26 passed（含 langfuse/历史双布局参数化），相邻回归 `test_evaluation_summary.py`（22 passed、6 deselected）与 `test_decision_feedback.py` 抽批 12 passed；`ruff`、`compileall` 与 `git diff --check` 通过。T6 依赖收尾后另实测 `test_external_scenario_mode.py` 与 `test_evaluation_rebuild_v3.py` 合计 24 passed、历史模块回归 36 passed。
+
+T8 终态批跑（2026-10-25，依赖收尾后的最终代码状态）：22 条命令全部退出码 0，合计 703 passed、0 failed、0 skipped；`test_decision_feedback.py` 48 例按补集拆两批（各 24 passed）；`test_evaluation_summary.py` 6 个 rerank/cross_encoder 用例按历史暂停口径 deselected；`ruff check`（evaluation 与 13 个迁移测试文件）、`compileall evaluation`、`uv lock --check`、`git diff --check` 全部通过。
+
+P1 缺陷修复批跑（2026-10-25，同池两组数据集身份冲突、场景入口默认评分模式、冻结上传落库与断点恢复三处修复，契约见 16.7）：`test_langfuse_retrieval.py` 34 passed（含同池两组连续提交、延迟落库、超时保留 pending、部分/完整恢复、崩溃窗口零补投、pending 先于提交落盘与 `experiment_id` 并入）、`test_langfuse_scenarios.py` 32 passed（含省略 `--scoring-mode` 默认 external 与 CLI 默认值用例）、`test_external_scenario_mode.py` 14 passed、`test_retrieval_mteb.py` + `test_retrieval_review_gate.py` + `test_retrieval_rerank_evaluation.py` 106 passed；`ruff check` 与 `compileall` 退出码 0。
+
+云端真实调用全部未执行（待验证/受阻）：`backend/.env` 已有 `LANGFUSE_PUBLIC_KEY`/`LANGFUSE_SECRET_KEY`/`LANGFUSE_BASE_URL` 条目（值未读取、未打印），当前进程环境未设置同名变量；无 Langfuse 项目与 LLM Connection；无网页访问与 Evaluator 身份；未获得数据集写入、实验提交与裁判费用授权。未运行项不得视为通过。
+
+### 16.7 检索上传与场景入口稳定性契约（2026-10-25 P1 修复）
+
+- 数据集行跨实验稳定：冻结上传的数据集行 metadata 白名单恰为 `query_id`、`tags`、`family`、`dataset_version`、`timing_scope`，不含组内 `experiment` 取值；数据集名与行 ID 跨组共享，marker `rows_sha256` 跨组一致，同池各组（含 `hybrid` 与 `hybrid-rerank`）连续同步复用同一数据集；`experiment` 身份仅存在于实验 metadata、run_name 与 `actual_outputs`。
+- 场景入口默认评分模式：`langfuse_scenarios` 的 CLI 与 `run_experiment` 入口省略 `--scoring-mode` 时取 `external`，只执行确定性断言并等待 Langfuse 外部评分，不读取本地裁判配置；本地 Ragas 裁判需显式 `--scoring-mode ragas`；历史 `langsmith_scenarios` 默认值保持原状。
+- 冻结上传 pending 与断点恢复：pending 记录 schema `fit-agent-retrieval-langfuse-pending-1`，字段含 `dataset_name`、`run_name`、`verify_from`、`source_sha256`、`query_ids`、`status`。时序：pending 先于 `run_experiment` 落盘；`run_experiment` 返回后立即把 `experiment_id`/`experiment_url` 并入 pending 重新落盘；随后有界回读（30 秒上限 / 1.5 秒间隔，复用实时路径常量）核验条目覆盖、分数（容差 5e-5）与实验 metadata；终态回执持久化之后才删除 pending；回执已存在时清理与回执同身份的残留 pending，身份不符的残留保持人工处理。
+- 恢复优先级：pending 含 `experiment_id` 时以 id 为主有界等待实验记录与条目可读，并核验 dataset/run_name 身份；超时就地失败并保留 pending，禁止降级为全量提交（条目已投递，重放即重复）。pending 不含 `experiment_id`（`run_experiment` 未返回即中断）时按 name/dataset 解析既有实验，解析不到才全量提交。恢复逐项核验已落库样例，仅对确认缺失样例以同 name/run_name/metadata 补投并核验合并进同一实验 id；重复条目、未知条目与 `source_sha256` 漂移均就地阻断。
+
+### 16.8 生成质量检查点展示与网页规则投影（2026-10-25）
+
+本轮只调整 Langfuse 检查点上传结构、可读展示与接线；原问题、金标、评分标准与审批记录保持原值。
+
+#### 16.8.1 隔离身份
+
+- 检查点数据集：`fit-agent-external-judge-langfuse-v2-<run_id>-<applicability_sha256[:12]>`。
+- 检查点实验：`fit-agent-external-judge-langfuse-v2-<run_id>-<projections_sha256[:12]>`。
+- 行 ID：`uuid5(NAMESPACE_URL, "fit-agent-external-judge-langfuse-v2:<run_id>:<scenario_id>:<event_id>:<checkpoint_id>:<execution_sha256>")`。
+- Schema：payload/ledger/dataset receipt/experiment receipt/pending 均为 `...-langfuse-2`；展示版本 `fit-agent-external-judge-presentation-2`；绑定/索引/批次为 `fit-agent-external-judge-feedback-*-langfuse-2`。
+- `projection_sha256` 仍绑定检查点上传契约；Dataset Item 展示文档与 metadata 另计入 `rows_sha256`。旧 LangSmith 与旧 Langfuse v1 回执、数据集、实验与分数按原身份保留，不覆盖、不迁移。
+
+#### 16.8.2 Dataset Item 与 Observation
+
+- `input.display`：`title`、`scenario_id`、`scenario_label`、`family`、`tags`、`event_id`、`checkpoint_id`、`question`；`title` 由场景标识、family、tags、事件/检查点与真实问题确定性生成，不调用模型。
+- `input.user_request`：只含真实 `message` 与 `prior_messages`；不含 checkpoint 身份对象。
+- `expected_output`：`reference`（已审阅答案、事实、`must_include`、`allowed_variation`、`forbidden_claims`）与 `applicability`（两项逐指标适用性及原因）。
+- `output`：`answer`（`visible_text` 与 `structured_snapshot`）、`context`（`items`、整体裁剪字段、`request_boundary`、`retrieval`）、`reference` 副本。`request_boundary` 与 `retrieval` 只审计，不映射为裁判变量。
+- `metadata`：`schema`、`presentation_version`、`row_id`、`dataset`、`checkpoint`、`run_id`、`scenario_id`、`event_id`、`checkpoint_id`、`display`、`execution_sha256`、`projection_sha256`、`judge_metric_evidence_supported_v1`、`judge_metric_reference_requirements_met_v1`。适用性值固定为 `"applicable"` 或 `"not_applicable"`。
+
+#### 16.8.3 四变量与网页 rule
+
+| 变量 | 来源 | 路径 | 内容 |
+|---|---|---|---|
+| `user_request` | Input | `user_request` | 真实问题与会话信息对象 |
+| `answer` | Output | `answer` | 真实回答正文与结构化快照 |
+| `context` | Output | `context.items` | 本次模型实际可见的上下文条目 |
+| `reference` | Expected Output | `reference` | 已审阅参考要求对象 |
+
+每项 evaluator 的 rule filters：
+
+```json
+[
+  {"type": "boolean", "column": "isExperimentItemRootSpan", "operator": "=", "value": true},
+  {"type": "stringOptions", "column": "datasetId", "operator": "any of", "value": ["<checkpoint-dataset.json 的 dataset_id>"]},
+  {"type": "stringObject", "column": "metadata", "key": "judge_metric_<metric>", "operator": "=", "value": "applicable"}
+]
+```
+
+- 采样率 `1.0`（100%）；evaluator `score_name` 等于指标名，类型 `NUMERIC`，范围 0..1，保留 reasoning。
+- System message 放完整判定标准；User message 放 `{{user_request}}`、`{{answer}}`、`{{context}}`、`{{reference}}` 四变量。System message 的共同约束：只依据四变量判断；`answer` 以 `visible_text` 为可见正文，`structured_snapshot` 只在实际展示计划或业务内容时纳入，忽略 thinking/签名/用量；`context` 只按 `content` 判断，来源字段仅用于定位。
+- `datasetId` 把生成质量 rule 限定到检查点数据集；场景级实验数据集不进入作用域。`isExperimentItemRootSpan` 保证每个检查点实验条目只有一个根 observation 产生分数。
+- 旧 v1 绑定/批次不自动转换；新代码只写 v2。若需读取旧 Langfuse v1 批次，按原 schema 单独审计。
+
+#### 16.8.4 当前真实证据与阻塞
+
+- 诊断运行 `20261025T064301Z-9f370396` 的场景级实验有 6 个 Cloud 条目：3 completed（`s-clarification-authorization-medical-risk-02`、`s-confirmation-cancellation-state-07`、`s-confirmation-cancellation-state-08`）与 3 blocked（`s-action-verification-01`、`s-confirmation-cancellation-state-03`、`s-confirmation-cancellation-state-05`）。
+- `external-review` 实际读取该运行：预期 15 个检查点，`pending_review=5`、`missing=10`、`not_applicable=0`、`uploadable=0`。5 个 ready 检查点为 `s-clarification-authorization-medical-risk-02/e01/cp1`、`s-confirmation-cancellation-state-07/e01/cp1`、`s-confirmation-cancellation-state-07/e04/cp4`、`s-confirmation-cancellation-state-08/e01/cp1`、`s-confirmation-cancellation-state-08/e05/cp4`。10 个 missing 为 6 个 `generation_checkpoint` 缺失与 4 个 `no_generation_evidence`。
+- 该运行已记录用户批准的 `external-judge/applicability.json`，`approval.content_sha256=ca67a6e42e805cde5d60b7033bc1ac6e0b1f4830498731465a714ed2613e6a15`；`external-project` 退出码 0，`external-sync` 创建检查点数据集 `fit-agent-external-judge-langfuse-v2-20261025T064301Z-9f370396-ca67a6e42e80`（ID `cmvnklfix00c7ad0f5dj6bqkz`，5 个样例，页面 `https://us.cloud.langfuse.com/project/cmvn966q7002fad0ea2ivxc7o/datasets/cmvnklfix00c7ad0f5dj6bqkz`）。覆盖为 `uploadable=5`、`missing=4`、`not_applicable=6`、`pending_review=0`。
+- 4 个 `missing` 为 `s-action-verification-01/e01/cp1`、`s-confirmation-cancellation-state-03/e03/cp1`、`s-confirmation-cancellation-state-05/e01/cp1`、`s-confirmation-cancellation-state-05/e02/cp2`；6 个 `not_applicable` 为 `s-confirmation-cancellation-state-03/e04/cp2`、`s-confirmation-cancellation-state-05/e03/cp3`、`s-confirmation-cancellation-state-07/e02/cp2`、`.../e03/cp3`、`s-confirmation-cancellation-state-08/e02/cp2`、`.../e03/cp3`。
+- 场景级实验保留真实故障：远端 metadata `feedback_version` 不符；确定性 score 未回读（`feedback={}`）；历史 HTTP 429；3 个 blocked 场景缺少生成检查点或断言绑定错误。
+- 检查点实验尚未提交；LLM Connection、网页 Evaluator 身份与裁判费用授权均未获得；真实 `external-submit`、`collect` 与网页预览未执行。数据集写入已按用户“直接生成”指令执行。
+
+#### 16.8.5 本轮验证
+
+以下命令由 subagent 在 `backend/` 实际运行，单命令不超过 300 秒，退出码均为 0，除非另注。
+
+| 命令 | 结果 |
+|---|---|
+| `uv run --locked python -m pytest test/test_external_judge_checkpoints.py -q --basetemp=temp/t9-projection/pytest-checkpoints` | 18 passed，92.08s |
+| `uv run --locked python -m pytest test/test_external_judge_contracts.py -q --basetemp=temp/t9-projection/pytest-contracts` | 24 passed，11.87s |
+| `uv run --locked python -m pytest test/test_decision_feedback.py -q -k "two_feedback_zero_and_one or invalid_scores or non_numeric_data_type or missing_metric_pending or bounded_wait or real_cloud_failure or remote_run_identity or example_reference or api_and_annotation or duplicate_same_id or different_score_ids or history_conflict or missing_upload or unexpected_feedback or all_not_applicable or read_remote_feedback" --basetemp=temp/t9-feedback/full-a` | 22 passed，167.72s |
+| `uv run --locked python -m pytest test/test_decision_feedback.py -q -k "check_is_offline or raw_evidence or batch_diagnostics or persistence_idempotent or corrupt_index or binding_rejects or terminal_attempt or malformed_feedback" --basetemp=temp/t9-final/fb-b1` | 8 passed，70.47s |
+| `uv run --locked python -m pytest test/test_decision_feedback.py -q -k "experiment_receipt_drift or binding_digest_drift or binding_identity_drift or missing_or_pending or payload_projection_drift or feedback_scope or wait_seconds or cli_exit_codes" --basetemp=temp/t9-final/fb-b2` | 18 passed，184.97s |
+| `uv run --locked python -m pytest test/test_external_summary.py -q -k "zero_one_probability or all_not_applicable or scenario_macro_mean or approved_applicability or missing_sample or missing_upload or batch_complete or latest_pending or latest_blocked or conflict_attempt or two_attempts or corrupt_or_tampered or normalized_feedback or missing_request or request_digest or request_context or checkpoint_answer" --basetemp=temp/t9-summary/ext-a` | 24 passed，292.24s |
+| `uv run --locked python -m pytest test/test_external_summary.py -q -k "unreported_versions or cloud_success or formal_scope or sdk_summary_missing_retrieval or protocol_dispatch or local_summary_rejects or ragas_protocol or cli_external_paths or archived_external_run or historical_langsmith_batch or historical_reader_ignores" --basetemp=temp/t9-summary/ext-b` | 10 passed、1 failed（测试夹具只改写了 `state_mapping.reference`，未改写其余三项）；修正夹具后 `test_historical_langsmith_batch_remains_readable` 单独重跑 1 passed，38.90s |
+| `uv run --locked python -m pytest test/test_sdk_summary.py -q --basetemp=temp/t9-summary/sdk` | 26 passed，158.42s |
+| `uv run --locked python -m pytest test/test_evaluation_summary.py -q --basetemp=temp/t9-summary/evaluation` | 28 passed，217.14s |
+| `uv run --locked ruff check evaluation/generation_upload.py evaluation/decision_feedback.py evaluation/external_summary.py test/test_external_judge_checkpoints.py test/test_decision_feedback.py` | 通过 |
+| `uv run --locked python -m compileall -q evaluation` | 通过 |
+| `uv lock --check --directory backend` | 通过 |
+| `git diff --check` | 通过 |
+
+`test_decision_feedback.py` 全文件单次运行超过 300 秒，按互不重叠的 `-k` 选择拆为三批（22+8+18=48），覆盖全部节点。`test_external_summary.py` 全文件单次运行超过 300 秒，按互不重叠的 `-k` 选择拆为两批；夹具修正只修改测试文件，生产加载器行为未变。上述离线测试不代表真实云端裁判准确性或正式发布。

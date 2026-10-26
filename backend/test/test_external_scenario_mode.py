@@ -5,7 +5,7 @@ from uuid import NAMESPACE_URL, uuid4, uuid5
 
 import pytest
 
-from evaluation import langsmith_scenarios as ls
+from evaluation import langfuse_scenarios as ls
 from evaluation.contracts import (
     AnswerEvidence,
     BusinessProjection,
@@ -564,6 +564,15 @@ async def _external_evaluator_run(dataset, run_dir, scenario, monkeypatch):
     return example_id, execution, row, summary, evaluator
 
 
+async def _invoke_external_evaluator(evaluator, row, summary):
+    return await evaluator(
+        input=row["inputs"],
+        output=summary,
+        expected_output=row["outputs"],
+        metadata=row["metadata"],
+    )
+
+
 async def test_external_evaluator_writes_and_reuses_local_result(
     dataset, tmp_path, monkeypatch
 ):
@@ -592,8 +601,8 @@ async def test_external_evaluator_writes_and_reuses_local_result(
     )
     scenario_root = run_dir / "scenarios" / example_id / scenario["scenario_id"]
     execution_before = (scenario_root / ls.EXECUTION_NAME).read_bytes()
-    first = await evaluator(row["inputs"], summary, row["outputs"])
-    feedback = {item["key"]: item["score"] for item in first["results"]}
+    first = await _invoke_external_evaluator(evaluator, row, summary)
+    feedback = {item.name: item.value for item in first}
     assert set(feedback) == set(ls.EXTERNAL_FEEDBACK_FIELDS)
     assert feedback["execution_completed"] == 1.0
     assert feedback["assertion_passed"] == 1.0
@@ -614,8 +623,10 @@ async def test_external_evaluator_writes_and_reuses_local_result(
     )
     assert state["scoring_mode"] == "external"
     scoring_bytes = (scenario_root / ls.EXTERNAL_SCORING_NAME).read_bytes()
-    second = await evaluator(row["inputs"], summary, row["outputs"])
-    assert second == first
+    second = await _invoke_external_evaluator(evaluator, row, summary)
+    assert [(item.name, item.value) for item in second] == [
+        (item.name, item.value) for item in first
+    ]
     assert (scenario_root / ls.EXTERNAL_SCORING_NAME).read_bytes() == scoring_bytes
     evaluation = json.loads(
         (scenario_root / ls.EXTERNAL_EVALUATION_NAME).read_text(encoding="utf-8")
@@ -624,9 +635,10 @@ async def test_external_evaluator_writes_and_reuses_local_result(
     assert (scenario_root / ls.EXECUTION_NAME).read_bytes() == execution_before
     with pytest.raises(ls.ScenarioSDKError, match="execution_sha256"):
         await evaluator(
-            row["inputs"],
-            {**summary, "execution_sha256": "0" * 64},
-            row["outputs"],
+            input=row["inputs"],
+            output={**summary, "execution_sha256": "0" * 64},
+            expected_output=row["outputs"],
+            metadata=row["metadata"],
         )
 
 
@@ -672,7 +684,7 @@ async def test_external_mode_does_not_reuse_or_overwrite_ragas_files(
             scoring_mode="external",
         )
     state_path.unlink()
-    await evaluator(row["inputs"], summary, row["outputs"])
+    await _invoke_external_evaluator(evaluator, row, summary)
     assert ragas_path.read_bytes() == ragas_bytes
     artifact = ScenarioArtifact(
         run_id=execution.run_id,
@@ -714,7 +726,7 @@ def _external_run_document(evaluation, example_id, scenario_id):
         "run_id": "run-sdk-offline",
         "feedback_version": ls.EXTERNAL_FEEDBACK_VERSION,
         "scoring_mode": "external",
-        "protocol_version": EXTERNAL_PROTOCOL_VERSION,
+        "protocol_version": ls.EXTERNAL_PROTOCOL_VERSION,
         "status": "running",
         "coverage": {
             "status": "complete",
@@ -754,7 +766,7 @@ async def test_finalize_external_keeps_generation_scoring_pending(
     example_id, _, row, summary, evaluator = await _external_evaluator_run(
         dataset, run_dir, scenario, monkeypatch
     )
-    await evaluator(row["inputs"], summary, row["outputs"])
+    await _invoke_external_evaluator(evaluator, row, summary)
     scenario_root = run_dir / "scenarios" / example_id / scenario["scenario_id"]
     evaluation = json.loads(
         (scenario_root / ls.EXTERNAL_EVALUATION_NAME).read_text(encoding="utf-8")
@@ -768,7 +780,7 @@ async def test_finalize_external_keeps_generation_scoring_pending(
     finalized = ls.finalize_run(run_dir)
     assert finalized["status"] == ls.EXTERNAL_RUN_STATUS
     assert finalized["scoring_mode"] == "external"
-    assert finalized["protocol_version"] == EXTERNAL_PROTOCOL_VERSION
+    assert finalized["protocol_version"] == ls.EXTERNAL_PROTOCOL_VERSION
     sample = finalized["samples"][0]
     assert sample["generation_scoring_status"] == "pending_external"
     assert sample["feedback"]["generation_scoring_completed"] == 0.0
@@ -797,7 +809,7 @@ async def test_finalize_external_failed_assertion_is_incomplete(
     example_id, _, row, summary, evaluator = await _external_evaluator_run(
         dataset, run_dir, scenario, monkeypatch
     )
-    await evaluator(row["inputs"], summary, row["outputs"])
+    await _invoke_external_evaluator(evaluator, row, summary)
     scenario_root = run_dir / "scenarios" / example_id / scenario["scenario_id"]
     evaluation = json.loads(
         (scenario_root / ls.EXTERNAL_EVALUATION_NAME).read_text(encoding="utf-8")
@@ -843,23 +855,49 @@ def test_old_scenario_summary_rejects_external_run(tmp_path):
         load_run(run_dir)
 
 
-def test_old_langsmith_summary_rejects_external_protocol(dataset, tmp_path):
+def test_old_sdk_summary_scenario_source_dispatches_by_schema(dataset, tmp_path):
+    from evaluation import sdk_summary as ss
+    from evaluation.external_summary import LANGFUSE_PLATFORM
     from evaluation.sdk_summary import load_scenario_source
 
     path = tmp_path / ls.SDK_RUN_NAME
+    payload = {
+        "run_id": "run-ext",
+        "purpose": "validation",
+    }
+    # Langfuse 场景 schema 被接受并进入 Langfuse 分支继续解析。
     path.write_text(
         json.dumps(
-            {
-                "schema": ls.SCHEMA,
-                "run_id": "run-ext",
-                "purpose": "validation",
-                "feedback_version": ls.EXTERNAL_FEEDBACK_VERSION,
-                "scoring_mode": "external",
-            }
+            {**payload, "schema": ls.SCHEMA, "feedback_version": ls.FEEDBACK_VERSION}
         ),
         encoding="utf-8",
     )
     source = load_scenario_source(path, dataset)
+    assert source.available is True
+    assert source.platform == LANGFUSE_PLATFORM
+    assert source.feedback_version == ls.FEEDBACK_VERSION
+    assert not any("Schema 不符" in item for item in source.issues)
+
+    # 未知 schema 仍按旧口径拒绝。
+    path.write_text(
+        json.dumps({**payload, "schema": "fit-agent-scenario-unknown-1"}),
+        encoding="utf-8",
+    )
+    source = load_scenario_source(path, dataset)
     assert source.available is False
-    assert source.feedback_version == ls.EXTERNAL_FEEDBACK_VERSION
-    assert any("协议分发" in item for item in source.issues)
+    assert any("Schema 不符" in item for item in source.issues)
+
+    # external 反馈协议运行交由协议分发读取，两种平台 schema 同口径拒绝。
+    external = {
+        **payload,
+        "feedback_version": ls.EXTERNAL_FEEDBACK_VERSION,
+        "scoring_mode": "external",
+    }
+    for schema in (ls.SCHEMA, ss.SCENARIO_SCHEMA):
+        path.write_text(
+            json.dumps({**external, "schema": schema}), encoding="utf-8"
+        )
+        source = load_scenario_source(path, dataset)
+        assert source.available is False
+        assert source.feedback_version == ls.EXTERNAL_FEEDBACK_VERSION
+        assert any("协议分发" in item for item in source.issues)

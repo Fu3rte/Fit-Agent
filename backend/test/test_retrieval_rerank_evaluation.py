@@ -510,8 +510,8 @@ def test_rerank_identity_aggregation_blocks_conflicted_and_mixed_runs():
     assert mixed["experiment"] == "rrf_baseline"
 
 
-def test_langsmith_rerank_target_evidence_replays(dataset):
-    from evaluation import langsmith_retrieval as lr
+def test_langfuse_rerank_target_evidence_replays(dataset):
+    from evaluation import langfuse_retrieval as lr
 
     query = reviewed_query(dataset)
     _, _, _, baseline, reranked = projections(dataset, query)

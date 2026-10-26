@@ -109,7 +109,8 @@ uv run --env-file .env python -m test.check_retrieval_index build
 ### 评测配置
 
 - 裁判模型：`FIT_AGENT_EVAL_JUDGE_MODEL`、`FIT_AGENT_EVAL_JUDGE_BASE_URL`、`FIT_AGENT_EVAL_JUDGE_API_KEY`。
-- LangSmith：`LANGSMITH_API_KEY`、`LANGSMITH_ENDPOINT`。
+- Langfuse：`LANGFUSE_PUBLIC_KEY`、`LANGFUSE_SECRET_KEY`，可选 `LANGFUSE_BASE_URL`（Cloud 默认 `https://cloud.langfuse.com`）；当前评测平台配置。
+- LangSmith：`LANGSMITH_API_KEY`、`LANGSMITH_ENDPOINT`；历史平台配置，langsmith 包经传递依赖保留，历史链路可读。
 
 ### 前端端口
 
@@ -145,7 +146,7 @@ uv run --env-file .env python -m uvicorn app.interfaces.http:app --reload --host
 - **数据校验：Pydantic**。定义并校验接口输入、工具参数及业务数据结构。
 - **持久化：SQLite**。通过 aiosqlite 保存画像、会话消息、运行与操作记录、画像快照、计划、训练记录及保存幂等结果；观测数据独立写入 `backend/data/trace.db`。迁移按版本执行，外键与结构校验保持开启；启动恢复中断操作，业务保存使用事务。
 - **前端**。React、TypeScript、Vite、Tailwind CSS 及 Shadcn/Radix 组件。
-- **评测（开发依赖）**。MTEB 计算检索指标，LangSmith 管理实验与上传，Ragas 完成本地生成评分，外部裁判处理生成评分。
+- **评测（开发依赖）**。MTEB 计算检索指标，Langfuse 管理实验与上传，Ragas 完成本地生成评分，外部裁判处理生成评分。
 
 ## 项目结构
 
@@ -178,7 +179,7 @@ uv run ruff check .
 
 ```bash
 uv run --locked --env-file .env python -m evaluation.retrieval run --dataset dataset/evaluation/rebuild-v1 --groups hybrid --rerank
-uv run --locked --env-file .env python -m evaluation.langsmith_scenarios run --purpose validation --scoring-mode external
+uv run --locked --env-file .env python -m evaluation.langfuse_scenarios run --purpose validation --scoring-mode external
 uv run --locked python -m evaluation.summary report --source backend/temp/evaluation-scenarios/<run_id>
 ```
 

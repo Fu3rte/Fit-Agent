@@ -42,11 +42,13 @@ from evaluation.scenarios import (
     code_identity as scenario_code_identity,
 )
 from test.test_decision_feedback import (
+    EVIDENCE_EVALUATOR_NAME,
     EVIDENCE_METRIC,
     REFERENCE_METRIC,
     binding_document,
     decisions_for,
-    make_feedback,
+    judge_failure_observation,
+    make_score,
     write_receipts,
 )
 from test.test_external_judge_checkpoints import (
@@ -79,7 +81,7 @@ class Prepared:
         return None if self.payload is None else self.payload["rows"][0]
 
     @property
-    def run_id(self) -> str:
+    def trace_id(self) -> str:
         assert self.row is not None
         return self.runs[self.row["row_id"]]
 
@@ -251,40 +253,32 @@ def _prepare_multi_turn(tmp_path: Path) -> Prepared:
 
 def _complete_items(
     prepared: Prepared,
-    evidence_score: float | None = 0.82,
-    reference_score: float | None = 0.38,
-    **overrides: Any,
+    evidence_score: float = 0.82,
+    reference_score: float = 0.38,
 ) -> list[Any]:
-    run_id = prepared.run_id
-    evidence = make_feedback(
-        run_id,
-        EVIDENCE_METRIC,
-        evidence_score,
-        typesafe={"model": "jev-1.13.0"},
-        **overrides,
-    )
-    reference = make_feedback(
-        run_id,
-        REFERENCE_METRIC,
-        reference_score,
-        typesafe={"model": "jev-1.13.0"},
-        **overrides,
-    )
-    return [evidence, reference]
+    trace_id = prepared.trace_id
+    return [
+        make_score(trace_id, EVIDENCE_METRIC, evidence_score),
+        make_score(trace_id, REFERENCE_METRIC, reference_score),
+    ]
 
 
 def _persist(
     prepared: Prepared,
     items: list[Any],
     history: Any = None,
+    judge_failures: list[Any] | None = None,
 ) -> tuple[Any, Path]:
     assert prepared.row is not None
-    run_id = prepared.run_id
+    trace_id = prepared.trace_id
     records = normalize_feedback(
         prepared.context,
-        {prepared.row["row_id"]: run_id},
-        {run_id: items},
+        {prepared.row["row_id"]: trace_id},
+        {trace_id: items},
         history,
+        judge_failures=(
+            None if not judge_failures else {trace_id: judge_failures}
+        ),
     )
     batch = build_feedback_batch(prepared.context, records)
     loaded = _load_collection(prepared.context)
@@ -373,8 +367,9 @@ def test_zero_one_probability_counts_and_scenario_values(tmp_path):
     assert summary["release"]["checks"]["generation_scoring_succeeded"] is True
     assert summary["release"]["effective"] is False
     versions = summary["judge"]["model_versions"][EVIDENCE_METRIC]
-    assert versions["reported"] == ["jev-1.13.0"]
-    assert versions["unreported"] == 0
+    # Langfuse Score 不返回裁判模型版本，恒按平台未返回口径记录。
+    assert versions["reported"] == []
+    assert versions["unreported"] == 1
 
 
 def test_all_not_applicable_is_complete_without_values_or_release(tmp_path):
@@ -526,21 +521,12 @@ def test_missing_upload_and_assertions_keep_denominator(tmp_path):
 def test_batch_complete_with_failed_score_blocks_release(tmp_path):
     prepared = _prepare(tmp_path)
     items = [
-        make_feedback(
-            prepared.run_id,
-            EVIDENCE_METRIC,
-            None,
-            extra={"error": True},
-            comment="云端评分失败",
-        ),
-        make_feedback(
-            prepared.run_id,
-            REFERENCE_METRIC,
-            0.38,
-            typesafe={"model": "jev-1.13.0"},
-        ),
+        make_score(prepared.trace_id, REFERENCE_METRIC, 0.38),
     ]
-    batch, _ = _persist(prepared, items)
+    failures = [
+        judge_failure_observation(EVIDENCE_EVALUATOR_NAME, prepared.trace_id)
+    ]
+    batch, _ = _persist(prepared, items, judge_failures=failures)
     assert batch.status == "complete"
     summary = _summary(prepared.run_dir)
     evidence = summary["generation"]["metrics"][EVIDENCE_METRIC]
@@ -563,7 +549,7 @@ def test_latest_pending_is_reported_without_fallback(tmp_path):
     prepared = _prepare(tmp_path)
     batch, _ = _persist(
         prepared,
-        _complete_items(prepared, reference_score=None)[:1],
+        [make_score(prepared.trace_id, EVIDENCE_METRIC, 0.82)],
     )
     assert batch.status == "pending"
     summary = _summary(prepared.run_dir)
@@ -641,12 +627,7 @@ def _tamper_conflict_attempt(document: dict) -> None:
 
 def test_conflict_attempt_cannot_be_dropped_from_collection(tmp_path):
     prepared = _prepare(tmp_path)
-    conflict = make_feedback(
-        prepared.run_id,
-        EVIDENCE_METRIC,
-        0.2,
-        typesafe={"model": "jev-1.13.0"},
-    )
+    conflict = make_score(prepared.trace_id, EVIDENCE_METRIC, 0.2)
     batch, batch_path = _persist(
         prepared, [*_complete_items(prepared), conflict]
     )
@@ -672,12 +653,7 @@ def test_two_attempts_for_one_metric_do_not_produce_a_score(tmp_path):
         prepared.context, list(loaded.batches.values())
     )
     items = _complete_items(prepared)
-    conflict = make_feedback(
-        prepared.run_id,
-        EVIDENCE_METRIC,
-        0.2,
-        typesafe={"model": "jev-1.13.0"},
-    )
+    conflict = make_score(prepared.trace_id, EVIDENCE_METRIC, 0.2)
     batch, _ = _persist(prepared, [*items, conflict], history)
     assert batch.status == "blocked"
     summary = _summary(prepared.run_dir)
@@ -843,13 +819,13 @@ def _tamper_normalized(document: dict, kind: str) -> None:
     evidence = next(
         item
         for item in record["evidence"]
-        if item["feedback_id"] == attempt["cloud_feedback"]["feedback_id"]
+        if item["score_id"] == attempt["cloud_score"]["score_id"]
     )
     raw = evidence["raw"]
-    raw["extra"] = {**(raw.get("extra") or {}), "error": True}
+    raw["value"] = 0.11
     digest = sha256_text(canonical_json(raw))
     evidence["raw_sha256"] = digest
-    evidence["evidence_id"] = f"{evidence['feedback_id']}@{digest[:12]}"
+    evidence["evidence_id"] = f"{evidence['score_id']}@{digest[:12]}"
 
 
 @pytest.mark.parametrize("tamper", ["score", "error"])
@@ -1025,18 +1001,8 @@ def test_checkpoint_answer_must_match_event_capture(tmp_path, field):
 def test_unreported_versions_and_declared_binding_are_not_blockers(tmp_path):
     prepared = _prepare(tmp_path)
     items = [
-        make_feedback(
-            prepared.run_id,
-            EVIDENCE_METRIC,
-            0.8,
-            typesafe={"model": "jev-latest"},
-        ),
-        make_feedback(
-            prepared.run_id,
-            REFERENCE_METRIC,
-            0.4,
-            typesafe={"model": "jev-latest"},
-        ),
+        make_score(prepared.trace_id, EVIDENCE_METRIC, 0.8),
+        make_score(prepared.trace_id, REFERENCE_METRIC, 0.4),
     ]
     _persist(prepared, items)
     summary = _summary(prepared.run_dir)
@@ -1237,15 +1203,16 @@ def test_cli_external_paths_are_offline_and_read_only(
         ),
     ]
     before = _file_hashes(source_files)
-    monkeypatch.setenv("LANGSMITH_API_KEY", "offline-test-key")
+    monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "pk-offline-test")
+    monkeypatch.setenv("LANGFUSE_SECRET_KEY", "sk-offline-test")
 
     def _no_client(*args, **kwargs):
-        raise AssertionError("汇总路径不得创建 LangSmith Client")
+        raise AssertionError("汇总路径不得创建 Langfuse Client")
 
     def _no_collect(*args, **kwargs):
         raise AssertionError("汇总路径不得执行云端回收")
 
-    monkeypatch.setattr(df, "Client", _no_client)
+    monkeypatch.setattr(df, "Langfuse", _no_client)
     monkeypatch.setattr(df, "read_remote_feedback", _no_client)
     monkeypatch.setattr(df, "collect_feedback", _no_collect)
     arguments = [
@@ -1306,14 +1273,152 @@ def test_archived_external_run_is_read_only(tmp_path):
     ]
     before = _file_hashes(files)
     summary = _summary(run_dir)
+    # 历史 LangSmith 布局按 schema/protocol 字段分发读取，不按未知布局拒绝。
+    assert summary["platform"] == es.LANGSMITH_PLATFORM
+    assert summary["protocol_version"] == EXTERNAL_PROTOCOL_VERSION
     assert summary["coverage"]["expected_checkpoints"] == 15
-    assert summary["coverage"]["checkpoint_classification"] == {
-        "expected": 15,
-        "uploadable": 8,
-        "missing": 0,
-        "not_applicable": 7,
-        "pending_review": 0,
-    }
     assert summary["feedback_status"] == "absent"
     assert summary["release"]["effective"] is False
+    # 源证据装载器已迁移 Langfuse 契约，历史布局的封存证据核验按阻断呈现。
+    assert any(
+        "源证据校验失败" in issue
+        for issue in summary["release"]["blocking_issues"]
+    )
     assert _file_hashes(files) == before
+
+
+def _rewrite_historical(prepared: Prepared, batch_path: Path) -> str:
+    # 将 Langfuse 批次改写为历史 LangSmith 批次：attempt/evidence 身份字段按旧契约回填，
+    # 摘要全部重算后落盘并改写回收索引为历史 schema。
+    document = json.loads(batch_path.read_text(encoding="utf-8"))
+    document["schema_version"] = es.HISTORICAL_COLLECTION_SCHEMA
+    document["binding"]["schema_version"] = es.HISTORICAL_BINDING_SCHEMA
+    document["binding"]["state_mapping"] = {
+        "user_request": "inputs.user_request",
+        "answer": "outputs.answer",
+        "context": "outputs.context.items",
+        "reference": "reference_outputs.reference",
+    }
+    document["binding_sha256"] = sha256_text(
+        canonical_json(document["binding"])
+    )
+    for record in document["checkpoints"]:
+        if "cloud_trace_id" in record:
+            record["cloud_run_id"] = record.pop("cloud_trace_id")
+        for attempt in record["attempts"]:
+            attempt["schema_version"] = "fit-agent-external-judge-feedback-1"
+            source = attempt["source"]
+            source["run_id"] = source.pop("trace_id")
+            source["feedback_source"] = {"kind": "evaluator", "identity": None}
+            cloud = attempt.pop("cloud_score")
+            if cloud is not None:
+                attempt["cloud_feedback"] = {
+                    "experiment_id": source["experiment"]["experiment_id"],
+                    "run_id": source["run_id"],
+                    "feedback_id": cloud["score_id"],
+                }
+        for evidence in record["evidence"]:
+            evidence["feedback_id"] = evidence.pop("score_id")
+            evidence["run_id"] = evidence.pop("trace_id")
+            evidence["key"] = evidence.pop("score_name")
+        for exclusion in record["exclusions"]:
+            exclusion["feedback_id"] = exclusion.pop("score_id")
+        for diagnostic in record["diagnostics"]:
+            if diagnostic["code"] == "missing_cloud_trace":
+                diagnostic["code"] = "missing_cloud_run"
+        record["evidence_sha256"] = sha256_text(
+            canonical_json(
+                {
+                    "evidence": sorted(
+                        record["evidence"],
+                        key=lambda item: item["evidence_id"],
+                    ),
+                    "feedback_set": record["feedback_set"],
+                    "attempts": sorted(
+                        record["attempts"],
+                        key=lambda item: item["attempt_id"],
+                    ),
+                }
+            )
+        )
+    document["content_sha256"] = df._batch_content_sha256(document)
+    batch_id = df._batch_id(document["content_sha256"])
+    target = (
+        prepared.run_dir
+        / "external-judge"
+        / "decision-feedback"
+        / "batches"
+        / f"{batch_id}.json"
+    )
+    write_json(target, document)
+    index_path = feedback_index_path(prepared.run_dir)
+    index = json.loads(index_path.read_text(encoding="utf-8"))
+    index["schema_version"] = es.HISTORICAL_INDEX_SCHEMA
+    index["batches"] = [
+        {
+            "batch_id": batch_id,
+            "content_sha256": document["content_sha256"],
+            "path": f"batches/{batch_id}.json",
+            "read_at": document["read_at"],
+            "status": document["status"],
+        }
+    ]
+    index["latest"] = batch_id
+    write_json(index_path, index)
+    return batch_id
+
+
+def test_historical_langsmith_batch_remains_readable(tmp_path):
+    prepared = _prepare(tmp_path)
+    _, batch_path = _persist(prepared, _complete_items(prepared))
+    batch_id = _rewrite_historical(prepared, batch_path)
+    collection = es._load_historical_collection(
+        prepared.run_dir, prepared.run_dir.name
+    )
+    assert collection is not None
+    assert collection.latest_batch_id == batch_id
+    assert collection.batch.status == "complete"
+    scored = next(
+        record for record in collection.batch.checkpoints if record.attempts
+    )
+    assert all(
+        isinstance(attempt, es.ExternalJudgeScoringAttempt)
+        for attempt in scored.attempts
+    )
+    feedback_ids = {
+        metric: sorted(
+            attempt.cloud_feedback.feedback_id
+            for attempt in scored.attempts
+            if attempt.feedback.metric == metric
+        )
+        for metric in (EVIDENCE_METRIC, REFERENCE_METRIC)
+    }
+    summary = _summary(prepared.run_dir)
+    assert summary["feedback_status"] == "complete"
+    assert summary["identity"]["collection"]["batch_id"] == batch_id
+    assert summary["identity"]["experiments"]["checkpoint_judge"] is not None
+    assert summary["judge"]["declared"]["evaluator"] is not None
+    for metric, identities in feedback_ids.items():
+        entries = [
+            entry
+            for row in summary["scenarios"].values()
+            for entry in row["metrics"][metric]["entries"].values()
+        ]
+        assert any(
+            entry["status"] == "succeeded"
+            and entry["cloud_feedback_ids"] == identities
+            for entry in entries
+        )
+    assert summary["release"]["effective"] is False
+
+
+def test_historical_reader_ignores_langfuse_index(tmp_path):
+    prepared = _prepare(tmp_path)
+    _, batch_path = _persist(prepared, _complete_items(prepared))
+    assert (
+        es._load_historical_collection(
+            prepared.run_dir, prepared.run_dir.name
+        )
+        is None
+    )
+    assert batch_path.is_file()

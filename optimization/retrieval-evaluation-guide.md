@@ -1,4 +1,4 @@
-# LangSmith + MTEB + Ragas 评测方案
+# Langfuse + MTEB + Ragas 评测方案
 
 ## 已确定的基线目标
 
@@ -8,9 +8,9 @@
 
 ## 当前实现与迁移范围
 
-检索评分已迁移到 MTEB 2.26.7。`backend/uv.lock` 固定 `mteb==2.26.7` 与 `jsonlines==4.0.0`，dev 依赖已移除 ranx。评分适配、数据加载、证据、报告和 LangSmith 上传适配已完成开发验证；正式 150 条检索、80 个业务场景执行、云端上传、Ragas 与裁判调用尚未执行。
+检索评分已迁移到 MTEB 2.26.7。`backend/uv.lock` 固定 `mteb==2.26.7` 与 `jsonlines==4.0.0`，dev 依赖已移除 ranx。评分适配、数据加载、证据、报告和上传适配已完成开发验证；评测平台已迁移 Langfuse（依赖锁定 `langfuse>=5.0.4,<6`），正式 150 条检索、80 个业务场景全量执行、云端上传、Ragas 与裁判调用尚未执行，Langfuse 云端链路待凭据验证。
 
-- LangSmith 负责统一看板、实验管理、对照和逐例分析，MTEB 负责检索指标，Ragas 负责生成指标。
+- Langfuse 负责统一看板、实验管理、对照和逐例分析，MTEB 负责检索指标，Ragas 负责生成指标。
 - 候选阶段只计算 Recall@20：门槛与预算裁剪前的前 20 条候选。最终输入阶段计算 Hit@5、MRR@5、nDCG@5、Precision@5，按实际公开顺序最多 5 条评分。两阶段分别调用 MTEB。
 - 无答案误返回率、硬约束、候选数、字符预算和 JSON 结构检查继续保留；搜索公开响应最多 5 条且不暴露内部剩余候选身份。
 - 二元相关性沿用 grade≥1；Precision@5 固定分母为 5；nDCG@5 使用 `2^grade−1` 增益。
@@ -25,7 +25,7 @@ MTEB 接入真实 BM25、dense、hybrid 检索结果及业务金标。候选池�
 
 ## 文件与职责
 
-- `backend/evaluation/retrieval.py`：新数据全量检索、历史重评分与 LangSmith 上传入口。
+- `backend/evaluation/retrieval.py`：新数据全量检索、历史重评分与 Langfuse 冻结证据上传入口。
 - `backend/evaluation/retrieval_metrics.py`：`RetrievalInput` 到 `RetrievalResult` 的适配；候选池 Recall@20 与最终输入四项 @5 分别计算，历史入口保留单阶段 @5 身份。
 - `backend/evaluation/retrieval_support.py`：复用目录、用途适配、条件求值、索引验证与查询向量缓存。
 - `backend/evaluation/dataset.py`：新数据加载、Schema 与来源校验、审批门禁、评分输入适配与未审阅候选检测。
@@ -35,9 +35,11 @@ MTEB 接入真实 BM25、dense、hybrid 检索结果及业务金标。候选池�
 - `backend/test/test_evaluation_dataset.py`：数据加载、审批、配额、引用、路径边界与发布门禁测试。
 - `backend/test/evaluation_fixtures.py`：使用真实动作目录、已批准补充数据与真实 Schema 构造的开发测试数据。
 - `quantitive-index/evaluation.md`：保留历史实际评测指标与实验身份；新数据版本的结果独立记录。
-- `backend/evaluation/langsmith_retrieval.py`：LangSmith SDK 检索实验入口，包含 `hybrid-rerank` 同池重排实验。
+- `backend/evaluation/langfuse_retrieval.py`：Langfuse SDK 检索实验入口（`sync`/`run`），包含 `hybrid-rerank` 同池重排实验。
+- `backend/test/test_langfuse_retrieval.py`：数据集同步幂等、实验提交、远端核验、审阅门禁与回执回归测试。
 - `backend/test/test_retrieval_rerank_evaluation.py`：重排证据、同池对照、离线回放、上传白名单与场景记录回归测试。
-- `backend/temp/retrieval-mteb/<run_id>/`：每轮 `evaluation.json`、`report.md` 与逐组 LangSmith 回执；历史 `backend/temp/retrieval-evaluation/`、`backend/temp/retrieval-ranx/` 原件保持原值。
+- `backend/temp/retrieval-mteb/<run_id>/`：每轮 `evaluation.json`、`report.md` 与逐组 Langfuse 回执（`langfuse-<group>.json`）；`backend/temp/retrieval-langfuse/` 保存 SDK 数据集回执与运行产物。
+- `backend/evaluation/langsmith_retrieval.py`：LangSmith 历史入口，历史产物按原身份存档；历史 `backend/temp/retrieval-evaluation/`、`backend/temp/retrieval-ranx/`、`backend/temp/retrieval-langsmith/` 原件保持原值。
 - `backend/pyproject.toml`、`backend/uv.lock`：固定 MTEB、jsonlines 及实际指标计算依赖；Ragas 依赖在生成评测实现时锁定。
 
 MTEB 负责检索评分，Ragas 负责生成评分。数据适配和业务规则由项目代码执行，并保留必要测试。
@@ -84,7 +86,7 @@ query 批准覆盖自身正文与关联 qrels，qrel 批准覆盖自身正文，
 
 `backend/dataset/evaluation/rebuild-v2/` 继承 `rebuild-v1`，追加用户审阅批准的 25 条相关性标注：qrels 共 1104 条，新增分布为 0 分 8 条、1 分 11 条、2 分 6 条。三个关联查询更新审阅范围与审批摘要；原有 qrels、其余查询、corpus、场景和附件保持继承内容。批准记录见 [rebuild-v2 补标批准记录](evaluation-rebuild-v2-qrels-approval.md)。使用新版本时显式指定 `--dataset dataset/evaluation/rebuild-v2`；旧版本及其 blocked 运行身份保持原值。正式全量评测与云端上传仍需对应授权，后续出现的新未审阅候选继续阻断发布。
 
-批准状态及内容哈希只能证明文件与批准记录一致。标注是否符合业务，需要人工复核。可以在 LangSmith 查看失分样例，并回到动作目录核实。
+批准状态及内容哈希只能证明文件与批准记录一致。标注是否符合业务，需要人工复核。可以在 Langfuse 查看失分样例，并回到动作目录核实。
 
 历史 `action-retrieval-queries.json` 与 `action-retrieval-purpose-adaptation.json` 保留为旧数据，绑定原始批准与暂缓记录。新数据入口不会自行解释尚未批准的条件。
 
@@ -126,7 +128,7 @@ uv run --locked --directory backend python -m evaluation.retrieval run --dataset
 
 - `evaluation.json`：新数据 Schema 为 `fit-agent-retrieval-mteb-2`，包含数据身份、参数、身份哈希、逐组指标、逐查询候选池、最终模型输入、原分数、公开响应与证据、耗时和未审阅候选。历史入口继续使用 `fit-agent-retrieval-mteb-1` 单阶段身份。
 - `report.md`：逐组 Recall@20、Hit@5、MRR@5、nDCG@5、Precision@5、有标注/无答案数量与无答案误返回率。
-- `langsmith-<group>.json`：上传成功后写入的回执。
+- `langfuse-<group>.json`：上传成功后写入的 Langfuse 回执（含 `upload_timing` 证据回放口径）。
 
 结果包括：
 
@@ -136,27 +138,27 @@ uv run --locked --directory backend python -m evaluation.retrieval run --dataset
 - 每条查询的有序候选池、最终模型输入、原始融合分数、完整公开响应、SearchResponseEvidence、逐项指标与真实搜索时间。
 - 条件、门槛、预算、RRF 参数及索引、模型、代码、数据身份。
 
-数据身份由 `dataset.version`、`version_dir`、`manifest_sha256`、`content_sha256`、`corpus_sha256`、Schema 哈希、来源与文件哈希组成。实验数据集名称为 `fit-agent-retrieval-<version>-<content_sha256[:12]>`，样例行 ID 使用 `uuid5(dataset_name + ":" + query_id)`，同一数据身份的 ID 稳定，不同版本相互隔离。
+数据身份由 `dataset.version`、`version_dir`、`manifest_sha256`、`content_sha256`、`corpus_sha256`、Schema 哈希、来源与文件哈希组成。实验数据集名称为 `fit-agent-retrieval-langfuse-<version>-<content_sha256[:12]>`，样例 item ID 使用 `uuid5(NAMESPACE_URL, dataset_name + ":" + query_id)` 显式传入（按 id upsert 幂等），同一数据身份的 ID 稳定，不同版本相互隔离。历史入口使用拆分、数据集哈希与用途适配哈希生成名称。
 
 出现未审阅候选时，组状态为 `blocked_unreviewed_candidates`，本轮证据与报告仍写入运行目录，`evaluation.json` 的文档状态为 `blocked`，退出码非零。补标并批准新版本后重算全部对照组。
 
 当前耗时范围是“缓存向量搜索及响应构造”。它不包含在线 Embedding，也不等于完整 Agent 响应时间。
 
-## 3.1 LangSmith SDK 检索实验
+### 3.1 Langfuse SDK 检索实验
 
-`backend/evaluation/langsmith_retrieval.py` 使用 LangSmith 公开 SDK 执行真实检索实验，复用 `search_vectors`、`project_response`、`RetrievalInput` 与 `retrieval_metrics.evaluate`。
+`backend/evaluation/langfuse_retrieval.py` 使用 Langfuse 公开 SDK（5.0.4）执行真实检索实验，复用 `search_vectors`、`project_response`、`RetrievalInput` 与 `retrieval_metrics.evaluate`。
 
 ```powershell
-uv run --locked --env-file .env --directory backend python -m evaluation.langsmith_retrieval sync --dataset dataset/evaluation/rebuild-v1
-uv run --locked --env-file .env --directory backend python -m evaluation.langsmith_retrieval run --dataset dataset/evaluation/rebuild-v1 --groups bm25 dense hybrid --purpose validation
-uv run --locked --env-file .env --directory backend python -m evaluation.langsmith_retrieval run --dataset dataset/evaluation/rebuild-v1 --groups bm25 dense hybrid --purpose formal
+uv run --locked --env-file .env --directory backend python -m evaluation.langfuse_retrieval sync --dataset dataset/evaluation/rebuild-v1
+uv run --locked --env-file .env --directory backend python -m evaluation.langfuse_retrieval run --dataset dataset/evaluation/rebuild-v1 --groups bm25 dense hybrid --purpose validation
+uv run --locked --env-file .env --directory backend python -m evaluation.langfuse_retrieval run --dataset dataset/evaluation/rebuild-v1 --groups bm25 dense hybrid --purpose formal
 ```
 
-数据集名称为 `fit-agent-retrieval-sdk-<version>-<content_sha256[:12]>`。每个 example 的 ID 由数据集名称与 `query_id` 稳定派生；`inputs` 只包含查询、用途与合成条件，`reference_outputs` 包含 `query_id`、`scenario_id`、`expect_empty` 与 `labels`，`metadata` 记录用途、标签、样本摘要与数据摘要。同步入口按名称与内容核验远端样例，缺失样例补齐，未知字段或内容冲突直接阻断。本地回执位于 `backend/temp/retrieval-langsmith/datasets/`。
+数据集名称为 `fit-agent-retrieval-sdk-langfuse-<version>-<content_sha256[:12]>`。每个样例的 ID 由数据集名称与 `query_id` 经 `uuid5(NAMESPACE_URL, dataset_name + ":" + query_id)` 稳定派生并显式传入，依赖 Langfuse 数据集 item 的按 id upsert 幂等（id 项目内唯一、≤255 字符）；`inputs` 只包含查询、用途与合成条件，`expected_output` 包含 `query_id`、`scenario_id`、`expect_empty` 与 `labels`，`metadata` 记录用途、标签、样本摘要与数据摘要。同步入口按名称与内容核验远端样例，缺失样例补齐，未知字段或内容冲突直接阻断。本地回执位于 `backend/temp/retrieval-langfuse/datasets/`。
 
-每个检索组独立创建实验，固定 `max_concurrency=6`、`num_repetitions=1`、`blocking=True`，三组依次执行。`purpose=validation` 按用途各取第一条有答案与第一条无答案查询，共 6 条；`purpose=formal` 覆盖 150 条。实验 metadata 记录本地 `run_id`、组名、用途、数据与 manifest 摘要、代码身份、冻结参数、物理索引身份、向量缓存身份、并发与样本范围。
+每个检索组独立创建实验（run_name `<run_id>-<group>-<purpose>`），固定 `max_concurrency=6`，三组依次执行。`purpose=validation` 按用途各取第一条有答案与第一条无答案查询，共 6 条；`purpose=formal` 覆盖 150 条。实验 metadata 记录本地 `run_id`、组名、用途、数据与 manifest 摘要、代码身份、冻结参数、物理索引身份、向量缓存身份、并发与样本范围。
 
-`run.json`、`<group>/result.json` 与 `<group>/samples/<query_id>.json` 位于 `backend/temp/retrieval-langsmith/<run_id>/`。覆盖核验读取远端 run 与 feedback，逐样本比对本地评分；远端落库延迟时有界重试。SDK feedback 保留 4 位小数，本地一致性容差为 `5e-5`。并发证据同时记录 target 在途数与底层 Milvus RPC 调用数；现有 `MilvusConnection` 仍按内部锁串行执行 RPC。
+`run.json`、`<group>/result.json` 与 `<group>/samples/<query_id>.json` 位于 `backend/temp/retrieval-langfuse/<run_id>/`，运行文档 schema 为 `fit-agent-retrieval-langfuse-1`。覆盖核验经官方读回 API（experiments / experiment-items，`fields=scores`）逐样本比对本地评分；远端落库延迟时按 30 秒上限、1.5 秒间隔有界轮询，分数一致性容差为 `5e-5`。并发证据同时记录 target 在途数与底层 Milvus RPC 调用数；现有 `MilvusConnection` 仍按内部锁串行执行 RPC。
 
 候选审阅门禁沿用 `EvaluationDataset.reviewed_corpus_ids()` 与 `unreviewed_candidates` 规则，覆盖门槛与预算裁剪前的完整候选池。target 返回候选证据时写入 `review` 状态；evaluator 与 `expected_feedback` 在构造 `RetrievalInput` 前阻断；`parity_report`、`verify_group` 与 `sdk_summary` 在评分前再次核验。缺标组的 `run.json` 保留候选、`unknown_candidates` 与错误信息，组状态记为 `blocked_unreviewed_candidates`，实验文档状态保持 `incomplete`。空候选池继续按既有 `false_return` 口径处理。
 
@@ -177,7 +179,7 @@ uv run --locked --env-file .env --directory backend python -m evaluation.retriev
 - `usage` 与 `request_id`；空池记录零请求与空 `request_id`。
 - 公开响应、`SearchResponseEvidence`、实际门槛、数量上限、预算与字符数。
 
-本地小规模核验使用与 LangSmith 验证一致的 6 条已批准查询：
+本地小规模核验使用 6 条已批准验证查询（`--purpose validation` 同款样本范围）：
 
 ```powershell
 uv run --locked --env-file .env --directory backend python -m evaluation.retrieval run --dataset dataset/evaluation/rebuild-v1 --groups hybrid --rerank --sample validation
@@ -187,10 +189,10 @@ uv run --locked --env-file .env --directory backend python -m evaluation.retriev
 
 Recall@20 两个组完全相同；Hit@5、MRR@5、nDCG@5、Precision@5 只按重排后的公开顺序评分。发布门禁会拒绝两组候选或 RRF 分数不一致的证据。
 
-LangSmith SDK 入口使用独立组名：
+Langfuse SDK 入口使用独立组名：
 
 ```powershell
-uv run --locked --env-file .env --directory backend python -m evaluation.langsmith_retrieval run --dataset dataset/evaluation/rebuild-v1 --groups hybrid hybrid-rerank --purpose validation
+uv run --locked --env-file .env --directory backend python -m evaluation.langfuse_retrieval run --dataset dataset/evaluation/rebuild-v1 --groups hybrid hybrid-rerank --purpose validation
 ```
 
 `hybrid-rerank` target 的每个样例同时返回重排证据与同池 baseline 的候选、最终输入与响应。实验 metadata 记录 `experiment`、`rerank_identity`（模型、文本版本、地址 SHA-256），`result.json` 的 `comparison` 保存逐查询换序统计。
@@ -203,15 +205,15 @@ uv run --locked --directory backend python -m evaluation.retrieval replay --sour
 
 回放读取已保存的候选 ID、RRF 分数、重排结果、身份、用量与请求身份，重建 `RerankResult`、`RerankIdentity` 与共享阶段，逐项核对候选池、最终输入、公开条目、`has_more`、预算与逐查询指标。回放不调用重排服务、Embedding 或 Milvus。缺少重排结果或身份、ID 集合或原排名不符、越界、重复、非降序、同分次序错误与最终输入不一致均明确失败。历史缺少 `experiment` 与 `rerank` 字段的证据按显式 RRF baseline 回放；REBUILD 之前的单阶段证据继续使用 `rescore`。
 
-## 4. 配置 LangSmith
+## 4. 配置 Langfuse
 
-登录 LangSmith，在设置中创建 API Key，将其保存到已被 gitignore 排除的 `backend/.env`，变量名为 `LANGSMITH_API_KEY`。
+在 Langfuse Cloud 创建项目（默认地址 `https://cloud.langfuse.com`），在项目设置中创建 API Key，将其保存到已被 gitignore 排除的 `backend/.env`，变量名为 `LANGFUSE_PUBLIC_KEY` 与 `LANGFUSE_SECRET_KEY`。
 
-使用对应区域或自建服务时，配置正确的 `LANGSMITH_ENDPOINT`。工作区要求时配置 `LANGSMITH_WORKSPACE_ID`。密钥保持本地，不粘贴到聊天、报告或版本库。
+使用自建或指定区域服务时，配置正确的 `LANGFUSE_BASE_URL`。密钥保持本地，不粘贴到聊天、报告或版本库。云端命令入口检查两个密钥变量，缺失即阻断；Client 构造后执行 `auth_check()` 快速失败。
 
 本次授权上传范围为现有评测查询、合成条件、金标和候选 ID。上传入口按字段白名单构造内容，不上传真实个人画像、缓存向量、服务凭据或查询端点配置。
 
-上传不会开启生产 Trace，也不会改变原有 Trace 隐私契约。已授权生成评测将请求、回答、实际上下文及参考答案发送至用户当前配置的裁判服务，并将样例内容、模型输出及评分结果上传 LangSmith。现有检索上传白名单保持不变；生成评测实现时按上述授权范围构造独立字段白名单，服务凭据保持本地。
+上传不会开启生产 Trace，也不会改变原有 Trace 隐私契约。已授权生成评测将请求、回答、实际上下文及参考答案发送至用户当前配置的裁判服务，并将样例内容、模型输出及评分结果上传 Langfuse。现有检索上传白名单保持不变；生成评测实现时按上述授权范围构造独立字段白名单，服务凭据保持本地。
 
 ## 5. 上传实验并在界面分析
 
@@ -221,21 +223,21 @@ uv run --locked --directory backend python -m evaluation.retrieval replay --sour
 uv run --locked --directory backend python -m evaluation.retrieval upload --source D:/repository/fit-agent/backend/temp/retrieval-mteb/<run_id>/evaluation.json
 ```
 
-上传采用 LangSmith 官方外部实验接口。每个检索组成为一个 experiment，共用同一版本的数据集。上传前重新执行真实两阶段评分与 `validate_projections()`，核验候选池、最终输入、公开响应与 SearchResponseEvidence 一致，并核对数据版本、manifest、内容摘要与语料摘要；按生产序列化重算完整公开响应字符数，从已批准查询条件重做整个候选池的硬约束，并用共享阶段构造核对门槛、裁剪与最终响应。投影自报的预算与硬约束标记不作为合规依据；存储评分与实际候选、金标或引擎身份不一致时拒绝上传。
+上传采用 Langfuse 官方实验 runner（`client.run_experiment`）提交冻结证据回放实验。每个检索组成为一个实验（run_name 绑定组名与数据身份），共用同一版本的数据集；数据集 item 以稳定 row_id 显式传入，按 id upsert 幂等；数据集行 metadata 仅含跨实验稳定字段（query_id、tags、family、dataset_version、timing_scope），marker 的 `rows_sha256` 跨组一致，同池各组（含 `hybrid` 与 `hybrid-rerank`）连续上传复用同一数据集，组内 `experiment` 身份只进入实验 metadata、run_name 与实际输出。上传前重新执行真实两阶段评分与 `validate_projections()`，核验候选池、最终输入、公开响应与 SearchResponseEvidence 一致，并核对数据版本、manifest、内容摘要与语料摘要；按生产序列化重算完整公开响应字符数，从已批准查询条件重做整个候选池的硬约束，并用共享阶段构造核对门槛、裁剪与最终响应。投影自报的预算与硬约束标记不作为合规依据；存储评分与实际候选、金标或引擎身份不一致时拒绝上传。
 
-上传反馈分数按接口要求保留 4 位小数；本地原始指标保持完整精度。上传字段白名单包含查询、条件、用途、标签、家族、有序候选池、最终模型输入、候选原分数、公开搜索响应与证据、契约指标、硬约束、预算结果与 RRF 参数；重排实验额外包含 `experiment`、重排模型、文本版本、地址 SHA-256、重排排序、用量、`request_id` 与同池基线候选/最终输入/响应。完整请求地址、API Key、完整客户端配置、原始 HTTP 响应、真实个人画像、缓存向量与服务凭据保持本地。
+上传评分由本地 evaluator 以完整精度写入 Langfuse score；本地原始指标保持完整精度，提交后按官方读回 API 核验实验条目与分数，一致性容差为 `5e-5`。上传字段白名单包含查询、条件、用途、标签、家族、有序候选池、最终模型输入、候选原分数、公开搜索响应与证据、契约指标、硬约束、预算结果与 RRF 参数；重排实验额外包含 `experiment`、重排模型、文本版本、地址 SHA-256、重排排序、用量、`request_id` 与同池基线候选/最终输入/响应。完整请求地址、API Key、完整客户端配置、原始 HTTP 响应、真实个人画像、缓存向量与服务凭据保持本地。
 
-新数据的数据集名称为 `fit-agent-retrieval-<version>-<content_sha256[:12]>`；历史入口使用拆分、数据集哈希与用途适配哈希生成名称。每条查询的行 ID 使用 `uuid5(dataset_name + ":" + query_id)`，同一数据身份稳定，不同版本相互隔离。
+新数据的数据集名称为 `fit-agent-retrieval-langfuse-<version>-<content_sha256[:12]>`；历史入口使用拆分、数据集哈希与用途适配哈希生成名称。每条查询的行 ID 使用 `uuid5(NAMESPACE_URL, dataset_name + ":" + query_id)`，同一数据身份稳定，不同版本相互隔离。
 
-上传回执记录在实验目录，实验与数据集 ID 写入对应运行目录。再次执行时，入口核对已有回执的源文件哈希及远端实验身份，仅提交尚未上传的组。无答案样例只附加 `false_return` 与确定性规则字段，汇总分母仅包含有金标样例。
+上传回执 `langfuse-<group>.json` 记录在运行目录，保存实验与数据集 ID、run_name、`verify_from`、`source_sha256` 与 `upload_timing`。提交前先写 `langfuse-<group>.pending.json`（schema `fit-agent-retrieval-langfuse-pending-1`）保存实验身份，`run_experiment` 返回后立即把 `experiment_id` 并入 pending；提交后按 30 秒上限、1.5 秒间隔有界回读实验条目与分数，Cloud 落库延迟不构成失败，超时就地报错并保留 pending。重跑上传命令按 pending 恢复：优先按 `experiment_id` 有界等待远端可读，逐项核验已落库样例后仅补齐确认缺失的样例，禁止重复提交已完成样例；终态回执持久化之后才删除 pending。再次执行时，入口核对已有回执的源文件哈希并按读回 API 核验远端实验身份，仅提交尚未上传的组。无答案样例只附加 `false_return` 与确定性规则字段，汇总分母仅包含有金标样例。
 
-各实验使用本组真实查询的最早开始时间和最晚结束时间，逐查询的原始耗时保持不变。
+上传为冻结证据回放，`upload_timing` 标记 `evidence_replay_upload` 口径；逐查询的原始检索延迟保留在本地证据，Langfuse 端展示的实验时间窗表示本次上传，不能用于评价检索速度。
 
-在 LangSmith 的 Datasets & Experiments 中：
+在 Langfuse 的 Datasets 页中：
 
 1. 打开本轮绑定的新版本全量检索数据集。
-2. 选择本轮 BM25、dense、hybrid 实验。
-3. 查看平均得分及每条样例的输入和候选。
+2. 在数据集的实验列表选择本轮 BM25、dense、hybrid 实验。
+3. 查看逐样例的输入、输出与分数。
 4. 筛选 `hit@5=0`，检查遗漏的目标动作。
 5. 查看低 nDCG 样例，检查弱相关动作的排名。
 6. 查看 `false_return=1`，检查无答案误返回。
@@ -253,7 +255,7 @@ uv run --locked --directory backend python -m evaluation.retrieval run --dataset
 
 新数据入口从 `retrieval_frozen` 读取未显式覆盖的参数，`--rrf-k` 与 `--depth` 只覆盖本轮运行值；运行结果绑定参数与数据身份，不自动改写 runtime 配置。
 
-两轮配置的结果均记录在对应新数据版本的指标文件。在 LangSmith 选择对应实验对照：
+两轮配置的结果均记录在对应新数据版本的指标文件。在 Langfuse 的 Experiments 页选择对应实验对照：
 
 - Recall 提升覆盖了哪些新动作？
 - MRR 提升是否来自核心查询？
@@ -287,7 +289,7 @@ uv run --locked --directory backend python -m evaluation.retrieval upload --sour
 
 `rescore` 是历史入口，继续使用旧查询集与已批准用途适配，要求历史 `compare.json` 的查询集与适配哈希一致。结果标记为 `historical_rescore`，使用历史返回 ID 及顺序，按单阶段 @5 口径重新交给 MTEB 评分；历史证据缺少 20 候选，不推算或宣称 Recall@20。历史原始分数仅保留为证据，历史证据身份与成绩保持原值，不追加开发测试结果。
 
-历史证据缺少逐查询检索耗时。上传时间范围表示本次批量重评分，LangSmith 展示的这类延迟不能用于评价检索速度。
+历史证据缺少逐查询检索耗时。上传时间窗表示本次批量重评分（`evidence_replay_upload` 口径），Langfuse 展示的这类延迟不能用于评价检索速度。历史 LangSmith 上传产物按原身份保持原值；重新上传历史重评分结果会以 Langfuse 身份新建数据集与实验。
 
 ## 9. Ragas 生成评测边界
 
@@ -312,9 +314,11 @@ uv run --locked --directory backend python -m evaluation.generation_upload uploa
 
 `summary` 与 `generation_upload check` 均只读本地产物，不加载密钥、不发起网络请求。生成指标逐检查点保留状态，场景内按成功检查点取均值，跨场景并列输出“含部分成功”与“仅完整成功”两套分母；有效发布只认完整成功口径。`upload` 仅消费通过正式全量门禁的运行，按独立字段白名单逐字段构造 payload，排除裁判地址、裁判调用原文、prompt 指纹原文、原始模型调用与本地路径，并保存源摘要和 payload 摘要回执。详细口径见 [共享契约](evaluation-contracts.md) 第 9 节。
 
+本节记录 Ragas 历史本地裁判链路的边界与依赖；生成评分主路径为第 11、12 节的 Langfuse 外部网页裁判链路。
+
 ## 10. 任务五验收
 
-运行方法（真实服务入口，逐条顺序执行，配置由 `uv run --env-file .env` 加载。执行前需本机 Milvus 栈可用，判据是 `127.0.0.1:19530` 处于 LISTENING 且容器 `fit-agent-milvus-standalone` 状态为 healthy；服务缺失时脚本在建立连接处即失败，早于任何断言。`replay` 入口只读本地产物，不需要环境文件）：
+运行方法（真实服务入口，逐条顺序执行，配置由 `uv run --env-file .env` 加载。执行前需本机 Milvus 栈可用，判据是 `127.0.0.1:19530` 处于 LISTENING 且容器 `fit-agent-milvus-standalone` 状态为 healthy；服务缺失时脚本在建立连接处即失败，早于任何断言。`replay` 入口只读本地产物，不需要环境文件）。本节为任务五验收的历史记录，云端记录产生于 LangSmith 平台时期；`backend/temp/retrieval-langsmith/` 历史产物与回执按原身份保持原值，当前活动云端入口见第 3.1 节：
 
 ```powershell
 uv run --locked --env-file .env --directory backend python -m test.check_rerank_client_live
@@ -338,18 +342,18 @@ uv run --locked --directory backend python -m evaluation.retrieval replay --sour
 - P1 独立复验：`q-lookup-001` 的 5 个真实未审阅候选 `0022, 0589, 0574, 0055, 0788` 在 SDK `expected_feedback`（重排组与同池基线组）、`retrieval_input`、`make_evaluator`、`parity_report` 与本地 `validate_group` 五处入口全部阻断，缺标集合与开发验证运行逐字一致；空池查询返回 `{"false_return": 0.0}`，含已审阅 `grade=0` 候选的完整审阅查询照常产出五项指标。
 - 已接受限制：离线入口的文档级 `rerank_identity` 与逐投影重排身份不做交叉比对；`run --rerank` 的 `hybrid` 组耗时窗口包含同池重排调用。两项按用户决定保持现状。
 - 测试与 lint：第一轮按批执行，清单内 12 个回归文件为批次 A `133 passed`、审阅门禁 `13 passed`、MTEB `72 passed`、LangSmith 检索 `17 passed`、SDK 汇总 `22 passed`、场景与汇总消费方 `76 passed`，合计 333 项、退出码全为 0；附加批次实测 `68 passed`、`28 passed` 与 `64 passed, 1 failed`。第二轮按放行补齐重排证据回归断言并修正陈旧断言后，`test_input_audit.py` 单文件 `8 passed`、`test_evaluation_summary.py` `28 passed`、`test_retrieval_rerank_evaluation.py` `20 passed`，`python -m test.check_retrieval_runtime_integration` 连续两次退出码 0；全量为 501 项通过、零失败（第一轮 493 项加失败节点修正 1 项与本轮新增 7 项）。`ruff` 对 16 个业务/评测文件与 14 个测试与脚本均 `All checks passed!`；`git diff --check` 零输出。逐条命令、退出码与证据位置见 `tmp/action-rerank-t5/acceptance.md` 的 D 节与 M 节。
-- 尚未执行：150 条正式检索、40 个业务场景（`rebuild-v3` 默认基线）、批量云端上传、LangSmith 提交与正式成绩。解除数据审阅阻塞需要用户扩充并批准 qrels；真实重排调用数与用量以当次运行入口输出为准，单价未经账单核验。
+- 尚未执行：150 条正式检索、40 个业务场景（`rebuild-v3` 默认基线）、批量云端上传、Langfuse 提交与正式成绩。解除数据审阅阻塞需要用户扩充并批准 qrels；真实重排调用数与用量以当次运行入口输出为准，单价未经账单核验。
 
-## 11. LangSmith 外部裁判检查点（任务 3）
+## 11. Langfuse 外部裁判检查点（任务 3）
 
-外部裁判只从 `scoring_mode=external` 的 LangSmith 场景运行读取证据。运行目录为 `backend/temp/scenario-langsmith/runs/<run_id>/`，每个场景必须有 `execution.json` 与 `external-scoring.json`；旧 Ragas 运行、`scoring.json`、`generation.jsonl` 不进入此流程。完整契约见 [评测契约第 13 节](evaluation-contracts.md#13-langsmith-外部裁判迁移任务-3检查点投影与上传)。
+外部裁判只从 `scoring_mode=external` 的 Langfuse 场景运行读取证据。运行目录为 `backend/temp/scenario-langfuse/runs/<run_id>/`，运行摘要 schema 为 `fit-agent-scenario-langfuse-1`，外部协议为 `fit-agent-external-scenario-langfuse-protocol-1`；每个场景必须有 `execution.json` 与 `external-scoring.json`，旧 Ragas 运行、`scoring.json`、`generation.jsonl` 不进入此流程。完整契约见 [评测契约第 16 节](evaluation-contracts.md#16-langfuse-平台迁移契约)。
 
 ### 11.1 准备运行
 
-外部运行仍会真实调用生成模型与检索，但不调用本地 Ragas 裁判：
+外部运行仍会真实调用生成模型与检索，不调用本地 Ragas 裁判（`--scoring-mode` 默认即 `external`，可省略；本地 Ragas 裁判需显式 `--scoring-mode ragas`）：
 
 ```powershell
-uv run --locked --directory backend python -m evaluation.langsmith_scenarios run --purpose validation --scoring-mode external
+uv run --locked --directory backend python -m evaluation.langfuse_scenarios run --purpose validation --scoring-mode external
 ```
 
 运行结束后 `sdk-run.json` 的状态应为 `awaiting_external_scoring` 或 `incomplete`；记录输出的 `run_id`。
@@ -357,7 +361,7 @@ uv run --locked --directory backend python -m evaluation.langsmith_scenarios run
 ### 11.2 审阅与批准适用性
 
 ```powershell
-uv run --locked --directory backend python -m evaluation.generation_upload external-review --source D:/Repository/Fit-Agent/backend/temp/scenario-langsmith/runs/<run_id>
+uv run --locked --directory backend python -m evaluation.generation_upload external-review --source D:/Repository/Fit-Agent/backend/temp/scenario-langfuse/runs/<run_id>
 ```
 
 该命令校验运行、数据身份、执行摘要、检查点与 `external-scoring.json` 一致性，写出：
@@ -410,59 +414,161 @@ uv run --locked --directory backend python -m evaluation.generation_upload exter
 ### 11.3 离线投影与数据集同步
 
 ```powershell
-uv run --locked --directory backend python -m evaluation.generation_upload external-project --source D:/Repository/Fit-Agent/backend/temp/scenario-langsmith/runs/<run_id>
-uv run --locked --directory backend python -m evaluation.generation_upload external-sync --source D:/Repository/Fit-Agent/backend/temp/scenario-langsmith/runs/<run_id>
+uv run --locked --directory backend python -m evaluation.generation_upload external-project --source D:/Repository/Fit-Agent/backend/temp/scenario-langfuse/runs/<run_id>
+uv run --locked --directory backend python -m evaluation.generation_upload external-sync --source D:/Repository/Fit-Agent/backend/temp/scenario-langfuse/runs/<run_id>
 ```
 
-`external-project` 不发起网络请求，写出 `checkpoints-payload.json` 与覆盖账本，并校验：回答/上下文/请求边界、检索工具绑定、重排地址摘要、脱敏、白名单、`projection_sha256`、`row_id`。`external-sync` 需要 `backend/.env` 中的 `LANGSMITH_API_KEY`，只创建/核验检查点数据集，不运行 Evaluator；输出真实数据集名称、ID、页面地址与 `checkpoint-dataset.json` 回执。数据集名称为 `fit-agent-external-judge-<run_id>-<applicability_sha256[:12]>`。
+`external-project` 不发起网络请求，写出 `checkpoints-payload.json` 与覆盖账本，并校验：回答/上下文/请求边界、检索工具绑定、重排地址摘要、脱敏、白名单、`projection_sha256`、`row_id`。`external-sync` 需要 `backend/.env` 中的 `LANGFUSE_PUBLIC_KEY` 与 `LANGFUSE_SECRET_KEY`，只创建/核验检查点数据集，不运行 Evaluator；输出真实数据集名称、ID、页面地址与 `checkpoint-dataset.json` 回执。数据集名称为 `fit-agent-external-judge-langfuse-v2-<run_id>-<applicability_sha256[:12]>`；每行以稳定 `row_id = uuid5(NAMESPACE_URL, "fit-agent-external-judge-langfuse-v2:<run_id>:<scenario_id>:<event_id>:<checkpoint_id>:<execution_sha256>")` 显式传入，按 id upsert 幂等。`v2` 是新展示投影的隔离身份，旧 LangSmith 与旧 Langfuse 回执、数据集与实验按原身份保留。
 
-### 11.4 配置网页 Evaluator
+Dataset Item 结构：
 
-1. LangSmith `Settings > Integrations > Provider secrets` 选择 `TypeSafe`，保存 `TYPESAFE_API_KEY`。
-2. 打开同步返回的数据集 → `Evaluators` → `+ Evaluator` → `LLM-as-a-Judge Evaluator`。
-3. 模型配置选择 `TypeSafe` + Jev（`jev-latest`）；决策模型 Evaluator 只能在网页创建。
-4. State 映射四个变量（网页来源分别为 Input、Output、Output、Reference output；路径为 SDK JSON 实际路径）：
-   - `user_request` ← `inputs.user_request`
-   - `answer` ← `outputs.answer`
-   - `context` ← `outputs.context.items`
-   - `reference` ← `reference_outputs.reference`
-   `outputs.context.request_boundary` 与 `outputs.context.retrieval` 只用于离线审计与复核，不映射到评分 State；裁判只能看到 `outputs.context.items` 中模型实际可见的正文。
-5. 两项 Noul Question 的名称使用 `evidence_supported_v1` 与 `reference_requirements_met_v1`，Instructions 使用 [评测契约 13.7](evaluation-contracts.md#137-网页-evaluator-配置) 的原文。
-6. 在 Preview 中确认 `inputs` 与 `reference_outputs` 是真实数据；若面板提供 Run 预览，再确认 `answer` 与 `context` 映射非空，且 `context` 只包含上下文条目本身。数据集尚未同步或适用性尚未批准时不要启用。
+```json
+{
+  "input": {
+    "display": {
+      "title": "<scenario_id> · <family> · <tags> · <event_id>/<checkpoint_id> · <问题摘要>",
+      "scenario_id": "<scenario_id>",
+      "scenario_label": "<scenario_id> · <family> · <tags>",
+      "family": "<family>",
+      "tags": ["<tag>"],
+      "event_id": "<event_id>",
+      "checkpoint_id": "<checkpoint_id>",
+      "question": "<完整真实用户问题>"
+    },
+    "user_request": {
+      "message": "<完整真实用户问题>",
+      "prior_messages": [
+        {"role": "user", "content": "<真实历史消息>"}
+      ]
+    }
+  },
+  "expected_output": {
+    "reference": {
+      "answer": "<已审阅参考答案>",
+      "facts": [{"fact_id": "<id>", "text": "<已审阅事实>"}],
+      "must_include": ["<必须内容>"],
+      "allowed_variation": ["<允许变化>"],
+      "forbidden_claims": ["<禁止声明>"]
+    },
+    "applicability": [
+      {"metric": "evidence_supported_v1", "applicable": true, "reason": null},
+      {"metric": "reference_requirements_met_v1", "applicable": true, "reason": null}
+    ]
+  },
+  "metadata": {
+    "schema": "fit-agent-external-judge-upload-payload-langfuse-2",
+    "presentation_version": "fit-agent-external-judge-presentation-2",
+    "row_id": "<row_id>",
+    "dataset": {"version": "rebuild-v3", "manifest_sha256": "...", "content_sha256": "...", "corpus_sha256": "..."},
+    "checkpoint": {"run_id": "<run_id>", "scenario_id": "<scenario_id>", "event_id": "<event_id>", "checkpoint_id": "<checkpoint_id>", "tool_call_id": null},
+    "run_id": "<run_id>",
+    "scenario_id": "<scenario_id>",
+    "event_id": "<event_id>",
+    "checkpoint_id": "<checkpoint_id>",
+    "display": {"title": "...", "scenario_id": "...", "scenario_label": "...", "family": "...", "tags": ["..."], "event_id": "...", "checkpoint_id": "...", "question": "..."},
+    "execution_sha256": "<execution_sha256>",
+    "projection_sha256": "<projection_sha256>",
+    "judge_metric_evidence_supported_v1": "applicable",
+    "judge_metric_reference_requirements_met_v1": "applicable"
+  }
+}
+```
 
-### 11.5 提交实验
+每个 Dataset Item 对应一个检查点；问题、回答、上下文与 reference 均来自该检查点的真实封存证据。`display.title` 由场景标识、标签与真实问题确定性生成，不调用模型编造场景说明。Dataset Item 的 `input` 不含 checkpoint 身份对象；身份在 `metadata.checkpoint` 与顶层稳定字段中保持可追溯。`expected_output` 只放已审阅 reference 与逐指标适用性；`user_request` 只放真实请求与会话信息。
+
+实验 Observation 的 output 固定为：
+
+```json
+{
+  "answer": {"visible_text": "<真实回答正文>", "structured_snapshot": {"stop_reason": "...", "content": []}},
+  "context": {
+    "items": [{"source": "...", "content": "<实际模型可见正文>", "fact_origin": "...", "tool_call_id": null, "tool_name": null, "truncated": false, "omitted_chars": null, "original_chars": null}],
+    "truncated": false,
+    "omitted_chars": null,
+    "request_boundary": {"api": "...", "session_id": "...", "run_id": "...", "nodes": [], "tool_nodes": []},
+    "retrieval": []
+  },
+  "reference": {"answer": "...", "facts": [], "must_include": [], "allowed_variation": [], "forbidden_claims": []}
+}
+```
+
+`context.request_boundary` 与 `context.retrieval` 只用于离线审计；网页变量只映射 `context.items`。完整上下文正文、结构化回答与 reference 原样保留，不做裁剪、摘要或模型改写。省略上下文的 SQLite 与模型请求证据仍在本地产物中，哈希与本地路径不进入裁判变量。
+
+### 11.4 配置网页 Evaluator（Langfuse）
+
+1. 在 Langfuse 项目设置建立 LLM Connection（项目/组织级，自带 provider key，支持任意 OpenAI 兼容网关：自定义 Base URL + 模型名）。
+2. 打开同步返回的检查点数据集，进入 `Evaluators`，为两项指标各创建一个 `LLM-as-a-Judge` evaluator。
+3. 每个 evaluator 挂一条 rule。rule 的 filter 必须同时限定：
+   - `isExperimentItemRootSpan = true`：只评分实验根 observation，每条检查点一条分数。
+   - `datasetId` 为检查点数据集 ID（`checkpoint-dataset.json` 的 `dataset_id`）：场景级实验数据集不在此范围。
+   - `metadata` 的字符串键 `judge_metric_evidence_supported_v1` 或 `judge_metric_reference_requirements_met_v1` 等于 `applicable`：按已批准适用性过滤。
+   - 采样率 100%（API `sampling=1.0`）。
+   当前 Langfuse evaluation rule 的 `metadata` 过滤只支持字符串值，因此适用性标志写为 `"applicable"` / `"not_applicable"`，不使用布尔值。
+4. 变量映射固定四项，来源与路径按 Langfuse observation 的 input/output/expected output 填写：
+   - `user_request` ← Input，路径 `user_request`（对象含 `message` 与 `prior_messages`）
+   - `answer` ← Output，路径 `answer`（对象含 `visible_text` 与 `structured_snapshot`）
+   - `context` ← Output，路径 `context.items`
+   - `reference` ← Expected Output，路径 `reference`
+   `context.request_boundary` 与 `context.retrieval` 只用于离线审计与复核，不映射到评分变量；裁判只能看到 `context.items` 中模型实际可见的正文。`user_request` 不含 checkpoint 身份、哈希或本地路径。
+5. 两项 evaluator 的 `Score name` 与名称使用 `evidence_supported_v1` 与 `reference_requirements_met_v1`；score 类型为 `NUMERIC`，范围 `0..1`，保留 reasoning。每项 System message 以以下共同约束开头：
+   ```text
+   只依据本检查点提供的 user_request、answer、context、reference 判断，不补充外部知识。answer 是对象：以 answer.visible_text 为用户可见回答正文；answer.structured_snapshot 只在包含实际展示的计划或业务内容时作为回答的一部分，忽略 thinking、签名与用量等内部字段。context 是模型实际可见的上下文条目数组，只按 content 判断，source、tool_call_id、tool_name 与 fact_origin 仅用于定位来源。reference 是已审阅参考要求对象。
+   ```
+   随后接对应指标的完整判定标准：
+   - `evidence_supported_v1`：判断回答中的事实陈述是否全部由提供的证据上下文支持。只评估动作名称、器械、目标肌群、重量口径、步骤与用户已有事实；忽略寒暄、训练建议、计划安排和没有事实内容的表述。回答中的任一具体事实若在证据上下文中没有依据，或与证据上下文矛盾，则整条回答为否。真：全部事实陈述都能在证据上下文中找到依据，且没有与证据矛盾的事实。假：至少包含一条没有依据或与证据矛盾的具体事实。输出 NUMERIC 分数，范围 0 到 1；1 表示真，0 表示假；保留判断理由。
+   - `reference_requirements_met_v1`：判断回答是否满足参考答案中的任务要求。必须同时检查：`reference.must_include` 列出的内容全部出现；`reference.forbidden_claims` 列出的任一表述都没有出现；`reference.allowed_variation` 只用于允许的替代表述，不能替代必须内容。参考事实只用于核对事实，不要求逐字复述。缺少任一必须内容或出现任一禁止声明，则整条回答为否。真：全部必须内容出现且没有禁止声明。假：缺少至少一项必须内容或出现至少一项禁止声明。输出 NUMERIC 分数，范围 0 到 1；1 表示真，0 表示假；保留判断理由。
+   User message 原文：
+   ```text
+   user_request:
+   {{user_request}}
+
+   answer:
+   {{answer}}
+
+   context:
+   {{context}}
+
+   reference:
+   {{reference}}
+   ```
+6. 数据集同步完成且适用性批准之后再启用 evaluator。每次 evaluator 执行产生完整调试 trace（environment=`langfuse-llm-as-a-judge`），状态为 Completed/Error/Delayed/Pending；长上下文检查点按调试 trace 的实际失败证据核验，禁止裁剪上下文、摘要正文或更换模型，映射与评分口径变更属于契约变更，须经用户批准。
+7. 场景级实验 `<run_id>-validation/formal` 继续只承担执行与确定性断言，其数据集是 `fit-agent-scenario-langfuse-<version>-<content_sha256[:12]>`。两项生成质量 evaluator 的 rule 以检查点数据集 ID 为作用域，不作用于场景级实验。
+
+### 11.5 提交实验与费用闸门
 
 ```powershell
-uv run --locked --directory backend python -m evaluation.generation_upload external-submit --source D:/Repository/Fit-Agent/backend/temp/scenario-langsmith/runs/<run_id> --confirm-external-judge-cost
+uv run --locked --directory backend python -m evaluation.generation_upload external-submit --source D:/Repository/Fit-Agent/backend/temp/scenario-langfuse/runs/<run_id> --confirm-external-judge-cost
 ```
 
-该命令必须已有 `checkpoint-dataset.json` 回执，并使用固定实验名提交 SDK 实验。target 只返回冻结的 answer/context，不执行业务、不调用生成模型或本地裁判。提交后校验 Example、Run inputs/outputs 与元数据，写出 `checkpoint-experiment.json`（实验 ID/名称/页面地址、逐 row 的 run_id、checkpoint、execution_sha256、projection_sha256），并保持 `external_scoring_status=pending_collection`。
+该命令必须已有 `checkpoint-dataset.json` 回执，实验名称固定为 `fit-agent-external-judge-langfuse-v2-<run_id>-<projections_sha256[:12]>`，经 `client.run_experiment` 提交冻结回放实验：task 按 Dataset Item input 摘要查找冻结检查点并只返回 `{answer, context, reference}`，不执行业务、不调用生成模型或本地裁判；本地 evaluators 为空，评分由网页 evaluator 的 rule 触发。提交后有界轮询实验条目，写出 `checkpoint-experiment.json`（实验 ID/名称/页面地址、dataset ID、`runs` 为 row_id→trace_id 映射、逐行 checkpoint、execution_sha256、projection_sha256），并保持 `external_scoring_status=pending_collection`。
 
-`--confirm-external-judge-cost` 是费用闸门：提交后数据集 Evaluator 会对每行运行两项 Question，触发真实 Jev 调用与费用。离线检查与数据集同步不会触发评分。
+`--confirm-external-judge-cost` 是费用闸门：提交产生的新 trace 会触发匹配 rule 的网页 evaluator 真实模型调用与费用。离线检查与数据集同步不会触发评分。
 
-同一身份重复执行只核验已有数据集/实验；回执或内容不一致直接拒绝。中断后使用 pending 标记核验并补齐缺失运行，不自动重试失败运行。反馈回收、分数聚合与发布门禁属于任务 4、5，本轮不做。
+同一身份重复执行只核验已有数据集/实验；回执或内容不一致直接拒绝。中断后按 pending 标记核验并补齐缺失运行，不自动重试失败运行。反馈回收、分数聚合与发布门禁见第 12 节与外部裁判操作手册。
 
 ### 11.6 当前状态
 
-2026-10-21 定向验证运行 `20261021T034031Z-b5fb95de` 已通过审阅与批准，并同步出检查点数据集：
+2026-10-25 诊断运行 `20261025T064301Z-9f370396` 是场景级 Langfuse 实验：6 个 Cloud 条目对应 6 个场景，本地 3 个 completed、3 个 blocked。completed 为 `s-clarification-authorization-medical-risk-02`、`s-confirmation-cancellation-state-07`、`s-confirmation-cancellation-state-08`；blocked 为 `s-action-verification-01`、`s-confirmation-cancellation-state-03`、`s-confirmation-cancellation-state-05`。该运行已记录用户批准的 `external-judge/applicability.json`（`approval.content_sha256=ca67a6e42e805cde5d60b7033bc1ac6e0b1f4830498731465a714ed2613e6a15`），并创建检查点数据集 `fit-agent-external-judge-langfuse-v2-20261025T064301Z-9f370396-ca67a6e42e80`（ID `cmvnklfix00c7ad0f5dj6bqkz`，5 个样例，`uploadable` 5、`missing` 4、`not_applicable` 6、`pending_review` 0）。检查点实验尚未提交。
 
-- 名称：`fit-agent-external-judge-20261021T034031Z-b5fb95de-6cfd1f851629`
-- ID：`b342ad9f-365a-4512-adab-758cf1ebd09e`
-- 页面：`https://smith.langchain.com/o/9b70e395-fb97-4ba4-922f-b6246212e102/datasets/b342ad9f-365a-4512-adab-758cf1ebd09e`
-- 行数：8；覆盖账本 expected 15、uploadable 8、not_applicable 7；运行 `incomplete`，覆盖不完整，只用于诊断。
-- 回执：`backend/temp/scenario-langsmith/runs/20261021T034031Z-b5fb95de/external-judge/checkpoint-dataset.json`
+该运行同时保留以下真实故障，投影调整不掩盖：
 
-实验已提交：`fit-agent-external-judge-20261021T034031Z-b5fb95de-1cdf82ccc3a4`，ID `c26774c1-7ba9-4afe-8bed-266590d5a53b`，页面 `https://smith.langchain.com/o/9b70e395-fb97-4ba4-922f-b6246212e102/projects/p/c26774c1-7ba9-4afe-8bed-266590d5a53b`，8 个 run 全部与 Example 绑定。首个实验已按授权删除，旧回执保留为 `checkpoint-experiment.context-limit.json`。
+- 远端场景实验 metadata 与本地 `feedback_version` 类型/取值不一致（`issues` 记录“远端实验 metadata 不符: feedback_version”）。
+- 场景级确定性 score 未回读，样本 `feedback={}`，`error=远端反馈指标集合与本地外部评分不一致`；运行记录过 HTTP 429，未自动重试收费业务。
+- 3 个 blocked 场景缺少生成检查点或断言绑定错误；completed 场景中也存在 `no_generation_evidence` 检查点，不能当作可上传检查点。
 
-网页 Evaluator 已将 `context` 改为 `outputs.context.items`：5 个 run 产生真实分数（`evidence_supported_v1` 0.58–0.82，`reference_requirements_met_v1` 0.38–0.59），3 个仍报 `The model's context limit was exceeded`，对应 `s-confirmation-cancellation-state-07/cp4`、`state-05/cp2`、`state-05/cp1`，上下文 69k–77k 字符。下一步尝试把 `context` 收窄为 `outputs.context.items[*].content`（61k–66k 字符）；网页路径不支持数组通配时，需要新增紧凑评分子段。
+Langfuse 云端检查点链路已执行数据集同步；实验提交、网页裁判与分数回收仍未执行。阻塞项：
 
-正式 80 场景运行 `20261021T031501Z-e91b6334` 因 6 个失败样本缺少 `external-scoring.json` 被 `external-review` 拒绝，需先处理 `s-profile-update-06`、`s-plan-import-file-02`、`s-performance-adjustment-04`、`s-clarification-authorization-medical-risk-01/03/07` 的证据缺陷后重跑。
+- `backend/.env` 已有 `LANGFUSE_PUBLIC_KEY`、`LANGFUSE_SECRET_KEY` 与 `LANGFUSE_BASE_URL` 条目（值未读取、未打印）；当前进程环境未设置同名变量。命令通过 `load_dotenv` 读取该文件。
+- 未建立 Langfuse LLM Connection（需自带 provider key，或授权由用户在网页创建）。
+- 无 Langfuse 网页访问与 Evaluator 身份：两项 LLM-as-a-Judge evaluator 及各自 rule 尚未创建，绑定声明无法落笔。
+- 数据集写入已按用户“直接生成”指令执行；实验提交与裁判模型费用尚未获得独立授权。
+- `20261025T064301Z-9f370396` 的检查点适用性已按用户指令记录批准，批准依据为 rebuild-v3 冻结 `metric_applicability`；4 个适用但证据缺失的检查点保持 `missing`，6 个纯状态检查点标记 `not_applicable`。
 
-任务 4 的反馈回收入口见第 12 节。上方已提交实验可直接用于离线 `check`；真实 `collect` 尚未执行，需要用户独立授权。
+历史验证记录产生于 LangSmith 平台时期，完整数据集/实验/网页裁判结果见 [评测契约 13.8](evaluation-contracts.md#138-验证状态)；历史数据集、实验、回执与分数按原身份存档，保持原值。任务 4 的反馈回收入口见第 12 节，离线 `check` 可先行，真实 `collect` 待上述阻塞项解除。
 
-## 12. LangSmith 外部裁判反馈回收（任务 4）
+## 12. Langfuse 外部裁判反馈回收（任务 4）
 
-完整契约、绑定字段与状态口径见 [评测契约第 14 节](evaluation-contracts.md#14-langsmith-外部裁判迁移任务-4反馈回收与评分证据落盘)。本节给出可直接执行的操作顺序。
+完整契约、绑定字段与状态口径见 [评测契约第 16 节](evaluation-contracts.md#16-langfuse-平台迁移契约)。本节给出可直接执行的操作顺序。
 
 ### 12.1 写入显式反馈绑定
 
@@ -470,7 +576,7 @@ uv run --locked --directory backend python -m evaluation.generation_upload exter
 
 ```json
 {
-  "schema_version": "fit-agent-external-judge-feedback-binding-1",
+  "schema_version": "fit-agent-external-judge-feedback-binding-langfuse-2",
   "run_id": "<run_id>",
   "source_sha256": "<源证据摘要>",
   "applicability_sha256": "<已批准适用性摘要>",
@@ -484,33 +590,71 @@ uv run --locked --directory backend python -m evaluation.generation_upload exter
     "projections_sha256": "<payload 的 projections_sha256>"
   },
   "evaluator": {
-    "provider": "TypeSafe",
-    "evaluator": "<网页 Evaluator 名称>",
+    "provider": "Langfuse",
+    "evaluator": "<网页 evaluator 集合名>",
     "evaluator_id": "<人工声明的 Evaluator 标识>",
-    "model_alias": "jev-latest",
+    "model_alias": "<LLM Connection 模型名>",
     "config": {
-      "model": "jev-latest",
-      "state": {
-        "user_request": "inputs.user_request",
-        "answer": "outputs.answer",
-        "context": "outputs.context.items",
-        "reference": "reference_outputs.reference"
+      "ownership": "langfuse",
+      "scope": {
+        "dataset_id": "<checkpoint-dataset.json 的 dataset_id>",
+        "dataset_name": "<checkpoint-dataset.json 的 dataset_name>",
+        "observation_scope": "isExperimentItemRootSpan",
+        "sampling": 1.0
+      },
+      "evaluators": [
+        {
+          "metric": "evidence_supported_v1",
+          "evaluator_name": "<网页 evaluator 名称>",
+          "score_name": "evidence_supported_v1",
+          "score_type": "NUMERIC",
+          "value_range": [0.0, 1.0],
+          "sampling": 1.0,
+          "rule_filters": [
+            {"type": "boolean", "column": "isExperimentItemRootSpan", "operator": "=", "value": true},
+            {"type": "stringOptions", "column": "datasetId", "operator": "any of", "value": ["<checkpoint-dataset.json 的 dataset_id>"]},
+            {"type": "stringObject", "column": "metadata", "key": "judge_metric_evidence_supported_v1", "operator": "=", "value": "applicable"}
+          ],
+          "system_prompt": "<evidence_supported_v1 System message 原文>",
+          "user_prompt": "user_request:\n{{user_request}}\n\nanswer:\n{{answer}}\n\ncontext:\n{{context}}\n\nreference:\n{{reference}}"
+        },
+        {
+          "metric": "reference_requirements_met_v1",
+          "evaluator_name": "<网页 evaluator 名称>",
+          "score_name": "reference_requirements_met_v1",
+          "score_type": "NUMERIC",
+          "value_range": [0.0, 1.0],
+          "sampling": 1.0,
+          "rule_filters": [
+            {"type": "boolean", "column": "isExperimentItemRootSpan", "operator": "=", "value": true},
+            {"type": "stringOptions", "column": "datasetId", "operator": "any of", "value": ["<checkpoint-dataset.json 的 dataset_id>"]},
+            {"type": "stringObject", "column": "metadata", "key": "judge_metric_reference_requirements_met_v1", "operator": "=", "value": "applicable"}
+          ],
+          "system_prompt": "<reference_requirements_met_v1 System message 原文>",
+          "user_prompt": "user_request:\n{{user_request}}\n\nanswer:\n{{answer}}\n\ncontext:\n{{context}}\n\nreference:\n{{reference}}"
+        }
+      ],
+      "variable_mapping": {
+        "user_request": {"source": "input", "path": "user_request"},
+        "answer": {"source": "output", "path": "answer"},
+        "context": {"source": "output", "path": "context.items"},
+        "reference": {"source": "expected_output", "path": "reference"}
       }
     },
     "config_sha256": "<sha256(canonical_json(config))>"
   },
   "state_mapping": {
-    "user_request": "inputs.user_request",
-    "answer": "outputs.answer",
-    "context": "outputs.context.items",
-    "reference": "reference_outputs.reference"
+    "user_request": {"source": "input", "path": "user_request"},
+    "answer": {"source": "output", "path": "answer"},
+    "context": {"source": "output", "path": "context.items"},
+    "reference": {"source": "expected_output", "path": "reference"}
   },
   "metrics": [
     {
       "metric": "evidence_supported_v1",
       "feedback_key": "evidence_supported_v1",
       "question_id": "evidence_supported_v1",
-      "question": "<网页 Question 原文>",
+      "question": "<网页 evaluator 判定标准原文>",
       "question_sha256": "<sha256(canonical_json({question_id, question}))>",
       "rubric_id": null,
       "rubric": "<判断口径原文>",
@@ -520,7 +664,7 @@ uv run --locked --directory backend python -m evaluation.generation_upload exter
       "metric": "reference_requirements_met_v1",
       "feedback_key": "reference_requirements_met_v1",
       "question_id": "reference_requirements_met_v1",
-      "question": "<网页 Question 原文>",
+      "question": "<网页 evaluator 判定标准原文>",
       "question_sha256": "<sha256(canonical_json({question_id, question}))>",
       "rubric_id": null,
       "rubric": "<判断口径原文>",
@@ -530,17 +674,17 @@ uv run --locked --directory backend python -m evaluation.generation_upload exter
 }
 ```
 
-全不适用且没有上传行的运行把 `experiment` 写成 `null`，不提供 payload/rows/projections；`applicability_sha256` 仍然必填。`config` 不写入认证头、API Key、Cookie、Token 或本地路径。
+全不适用且没有上传行的运行把 `experiment` 写成 `null`，不提供 payload/rows/projections；`applicability_sha256` 仍然必填。`config` 不写入认证头、API Key、Cookie、Token 或本地路径；`evaluators` 必须两指标各一个、`score_name` 等于指标名、`NUMERIC` 0..1、采样 1.0、rule filters 逐指标限定检查点 `datasetId`、`isExperimentItemRootSpan` 与字符串适用性键，变量映射与冻结声明一致，否则绑定被拒绝。`scope.dataset_id`/`dataset_name` 必须与 `checkpoint-dataset.json` 回执一致；数据集或实验回执的 `web_judge` 与当前投影不一致时，`sync`/`submit`/`collect` 均阻断。
 
-来源保证口径为“显式绑定 + `feedback_source.metadata.typesafe`”软链：成功分数要求来源类型为 `model`/`evaluator` 且 `typesafe` 对象存在；云端失败要求来源类型为 `model`/`evaluator` 且 `extra.error=true`。归档固定记录 `source_assurance=declared_binding`，不宣称服务已唯一证明 Evaluator 身份。
+来源保证口径为“显式绑定 + Langfuse score `source=EVAL`”软链：成功分数要求 score 的 `source` 为 `EVAL`、`name` 匹配声明指标、subject trace 属于回执实验。Langfuse score 对象不携带裁判模型名与 evaluator 版本字段，模型版本恒记录为 `unreported`，不补造版本字符串。归档固定记录 `source_assurance=declared_binding`，不宣称服务已唯一证明 Evaluator 身份。
 
 ### 12.2 离线检查
 
 ```powershell
-uv run --locked --directory backend python -m evaluation.decision_feedback check --source D:/Repository/Fit-Agent/backend/temp/scenario-langsmith/runs/<run_id>
+uv run --locked --directory backend python -m evaluation.decision_feedback check --source D:/Repository/Fit-Agent/backend/temp/scenario-langfuse/runs/<run_id>
 ```
 
-该命令不联网，校验源执行/评分证据、已批准适用性、磁盘 payload 与任务 3 回执、逐行投影、run/Example 映射，以及已有回收索引与批次。输出 JSON：
+该命令不联网，校验源执行/评分证据、已批准适用性、磁盘 payload 与任务 3 回执、逐行投影、row/trace 映射，以及已有回收索引与批次。输出 JSON：
 
 - `status=complete`：已有批次评分证据齐备。
 - `status=pending`：尚无回收批次，或仍有待回收/未上传检查点。
@@ -551,13 +695,15 @@ uv run --locked --directory backend python -m evaluation.decision_feedback check
 ### 12.3 执行回收
 
 ```powershell
-uv run --locked --directory backend python -m evaluation.decision_feedback collect --source D:/Repository/Fit-Agent/backend/temp/scenario-langsmith/runs/<run_id>
-uv run --locked --directory backend python -m evaluation.decision_feedback collect --source D:/Repository/Fit-Agent/backend/temp/scenario-langsmith/runs/<run_id> --wait-seconds 60
+uv run --locked --directory backend python -m evaluation.decision_feedback collect --source D:/Repository/Fit-Agent/backend/temp/scenario-langfuse/runs/<run_id>
+uv run --locked --directory backend python -m evaluation.decision_feedback collect --source D:/Repository/Fit-Agent/backend/temp/scenario-langfuse/runs/<run_id> --wait-seconds 60
 ```
 
-`collect` 从既有实验回执读取实际 `experiment_id` 与 run 映射，读取全部根 Run 的 run-level feedback；不按实验名称搜索，不读取实验汇总反馈，不补提交实验或 Run。默认单次读取；`--wait-seconds` 只接受有限非负数，到期仍缺反馈时保存 `pending` 并结束。SDK 单次请求超时受剩余时限约束，每次读取关闭重试。
+`collect` 从既有实验回执读取实际 `experiment_id` 与 `runs`（row_id→trace_id）映射，按实验经 `api.scores.get_many` 分页拉取 score，按 subject trace 归组到检查点；不按实验名称搜索，不读取实验外 score，不补提交实验或 trace。默认单次读取；`--wait-seconds` 只接受有限非负数，到期仍缺反馈时保存 `pending` 并结束。
 
-`LANGSMITH_API_KEY` 从进程环境或 `backend/.env` 读取。真实云端回收的前置条件：有效实验回执、匹配的绑定文件、用户对本次只读云端调用的独立授权。
+裁判失败判定：仅按回执 trace 作用域查 `observations.get_many(environment="langfuse-llm-as-a-judge")`，取 `level=ERROR` 且名称可归属到本指标 evaluator 的 observation 作失败依据；无证据保持 `pending`，不推断失败。
+
+`LANGFUSE_PUBLIC_KEY` 与 `LANGFUSE_SECRET_KEY` 从进程环境或 `backend/.env` 读取。真实云端回收的前置条件：有效实验回执、匹配的绑定文件、用户对本次只读云端调用的独立授权。
 
 ### 12.4 输出与状态
 
@@ -569,9 +715,9 @@ external-judge/decision-feedback/
 ```
 
 - `index.json`：`latest` 指向最新批次；保存源/绑定/实验摘要与历史批次列表。
-- 批次：`fit-agent-external-judge-feedback-collection-1`，包含覆盖账本、逐检查点 `FeedbackSet`、可成立的 `ScoringAttempt`、原始反馈证据、排除原因、诊断与 `evidence_sha256`。
-- 重复回收相同 feedback ID 与内容复用已有批次；新反馈或内容变化写入新批次，旧批次保留。
-- 同一 feedback ID 内容漂移、同一指标多个不同 feedback ID、来源缺口、非法分数、缺少云端运行、索引/批次损坏均标记 `blocked`，保留真实候选与原始证据。
+- 批次：`fit-agent-external-judge-feedback-collection-langfuse-1`，包含覆盖账本、逐检查点 `FeedbackSet`、可成立的评分尝试、原始 score 证据、排除原因、诊断与 `evidence_sha256`。
+- 重复回收相同 score ID 与内容复用已有批次；新反馈或内容变化写入新批次，旧批次保留。
+- 同一 score ID 内容漂移、同一指标多个不同 score ID、来源缺口、非法分数、缺少云端运行、索引/批次损坏均标记 `blocked`，保留真实候选与原始证据。
 
 退出码：
 
@@ -584,9 +730,8 @@ external-judge/decision-feedback/
 
 ### 12.5 当前验证状态
 
-- 新增 `backend/test/test_decision_feedback.py`：45 passed，退出码 0，283.08s。覆盖 0/1 分、bool/字符串/非有限数/越界分数、模型版本缺失与别名、真实云端错误结构、缺失反馈与有界等待、同 ID 去重/漂移、不同 ID 冲突、来源错误/缺口、N/A 意外反馈、全 N/A、缺失未上传检查点、身份/摘要漂移、脱敏、幂等、历史保留、索引/批次损坏与 CLI 退出码。
-- 相邻非 reranker 回归：任务 1～3 54 passed；契约与汇总 48 passed；LangSmith 场景与数据集 56 passed；场景执行与评分 63 passed；各批退出码 0。
-- 本轮未执行真实云端 `collect`、任何生成模型/Embedding/reranker/外部裁判模型调用、Ragas 重评分、任务 5 聚合与发布门禁。
+- 2026-10-25 离线实测（`backend/` 目录，`--basetemp=temp/t7-docs/pytest-*`，退出码均为 0）：`test_decision_feedback.py` 按测试名拆两批执行，批一 `22 passed, 26 deselected`（113.86s）、批二 `26 passed, 22 deselected`（173.46s），合计覆盖 0/1 分、bool/字符串/非有限数/越界分数、`source=EVAL` 与名称匹配、trace 归组、真实错误结构、缺失反馈与有界等待、同 ID 去重/漂移、不同 ID 冲突、N/A 意外反馈、全 N/A、缺失未上传检查点、身份/摘要漂移、脱敏、幂等、历史保留、索引/批次损坏与 CLI 退出码。
+- 本轮未执行真实云端 `collect`、任何生成模型/Embedding/reranker/外部裁判模型调用与 Ragas 重评分；Langfuse 云端阻塞项见 11.6。
 - 本轮未运行 reranker/Cross-Encoder 专项与真实服务测试，保留现有实现与测试：`test_retrieval_rerank_evaluation.py`、`test_retrieval_rerank_stages.py`、`test_retrieval_rrf.py`、`test_retrieval_stages.py`、`test_retrieval_mteb.py`、`test_retrieval_runtime_integration.py`、`check_retrieval_rerank_production.py` 等。
 
 ## 检索评分口径核对
@@ -608,4 +753,6 @@ external-judge/decision-feedback/
 - [MTEB 检索指标实现](https://github.com/embeddings-benchmark/mteb/blob/cd182883/mteb/_evaluators/retrieval_metrics.py)
 - [Ragas Faithfulness](https://docs.ragas.io/en/stable/concepts/metrics/available_metrics/faithfulness/)
 - [Ragas FactualCorrectness](https://docs.ragas.io/en/stable/concepts/metrics/available_metrics/factual_correctness/)
-- [LangSmith 外部实验上传与对照](https://docs.langchain.com/langsmith/upload-existing-experiments)
+- [Langfuse Datasets 与 Experiments](https://langfuse.com/docs/datasets)
+- [Langfuse LLM-as-a-Judge evaluator](https://langfuse.com/docs/scores/llm-as-a-judge)
+- [Langfuse Scores 读回 API](https://langfuse.com/docs/scores)

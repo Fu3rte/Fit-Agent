@@ -3,9 +3,12 @@ from pathlib import Path
 
 import pytest
 
-from evaluation import langsmith_retrieval as lr
-from evaluation import langsmith_scenarios as ls
+from evaluation import langfuse_retrieval as lfr
+from evaluation import langfuse_scenarios as lfs
+from evaluation import langsmith_retrieval as lsr
+from evaluation import langsmith_scenarios as lss
 from evaluation import sdk_summary as ss
+from evaluation import summary as sm
 from evaluation.contracts import (
     AssertionOutcome,
     BusinessProjection,
@@ -35,6 +38,9 @@ from evaluation.scenarios import (
 
 DATASET = load_for_evaluation(BACKEND / "dataset" / "evaluation" / "rebuild-v1")
 SCENARIOS = {scenario["scenario_id"]: scenario for scenario in DATASET.scenarios}
+# 历史布局用例沿用 langsmith 模块别名；langfuse 布局用例显式传入对应平台模块。
+ls = lss
+lr = lsr
 VALIDATION_SCENARIO_ROWS, _ = ls.select_validation_scenarios(DATASET)
 VALIDATION_SCENARIOS = [
     scenario["scenario_id"] for scenario in VALIDATION_SCENARIO_ROWS
@@ -226,6 +232,7 @@ def _write_scenario_run(
     sample_status: str = "complete",
     missing_scoring: bool = False,
     assertions_by_scenario: dict[str, list[AssertionCheckpointArtifact]] | None = None,
+    scenario_sdk=lss,
 ) -> Path:
     root = tmp_path / "scenario-run"
     root.mkdir(parents=True)
@@ -240,7 +247,9 @@ def _write_scenario_run(
             outcomes,
             (assertions_by_scenario or {}).get(scenario_id),
         )
-        example_id = ls.stable_example_id(ls.dataset_name(DATASET), scenario_id)
+        example_id = scenario_sdk.stable_example_id(
+            scenario_sdk.dataset_name(DATASET), scenario_id
+        )
         scenario_root = root / "scenarios" / example_id / scenario_id
         scenario_root.mkdir(parents=True)
         execution_path = scenario_root / "execution.json"
@@ -255,11 +264,11 @@ def _write_scenario_run(
         if not missing_scoring:
             scoring_path.write_text(scoring_text, encoding="utf-8")
         scoring_sha = sha256_text(scoring_text)
-        feedback = ls.scenario_feedback(execution, artifact)
-        incomplete = ls.incomplete_items(artifact)
+        feedback = scenario_sdk.scenario_feedback(execution, artifact)
+        incomplete = scenario_sdk.incomplete_items(artifact)
         evaluation = {
-            "schema": ls.SCHEMA,
-            "feedback_version": ls.FEEDBACK_VERSION,
+            "schema": scenario_sdk.SCHEMA,
+            "feedback_version": scenario_sdk.FEEDBACK_VERSION,
             "run_id": RUN_ID,
             "example_id": example_id,
             "scenario_id": scenario_id,
@@ -271,7 +280,7 @@ def _write_scenario_run(
             "scoring_binding": "initial",
             "execution_status": execution.status,
             "feedback": feedback,
-            "checkpoints": ls.checkpoint_records(artifact),
+            "checkpoints": scenario_sdk.checkpoint_records(artifact),
             "incomplete": incomplete,
             "written_at": FINISHED_AT,
         }
@@ -302,7 +311,7 @@ def _write_scenario_run(
             "execution_status": execution.status,
             "scoring_relative": f"scenarios/{example_id}/{scenario_id}/scoring.json",
             "scoring_sha256": scoring_sha,
-            "feedback_version": ls.FEEDBACK_VERSION,
+            "feedback_version": scenario_sdk.FEEDBACK_VERSION,
             "feedback": feedback,
             "expected_feedback": feedback,
             "incomplete": incomplete,
@@ -311,12 +320,12 @@ def _write_scenario_run(
             "run_end_time": FINISHED_AT,
         }
         samples.append(sample)
-        records.append(ls.scenario_record(root, sample))
+        records.append(scenario_sdk.scenario_record(root, sample))
     document = {
-        "schema": ls.SCHEMA,
+        "schema": scenario_sdk.SCHEMA,
         "run_id": RUN_ID,
         "purpose": purpose,
-        "feedback_version": ls.FEEDBACK_VERSION,
+        "feedback_version": scenario_sdk.FEEDBACK_VERSION,
         "status": (
             "incomplete"
             if any(sample["incomplete"] for sample in samples)
@@ -325,11 +334,11 @@ def _write_scenario_run(
         "started_at": STARTED_AT,
         "finished_at": FINISHED_AT,
         "dataset": DATASET.identity(),
-        "dataset_name": ls.dataset_name(DATASET),
+        "dataset_name": scenario_sdk.dataset_name(DATASET),
         "dataset_id": "fixture-dataset",
         "example_ids": {
-            scenario["scenario_id"]: ls.stable_example_id(
-                ls.dataset_name(DATASET), scenario["scenario_id"]
+            scenario["scenario_id"]: scenario_sdk.stable_example_id(
+                scenario_sdk.dataset_name(DATASET), scenario["scenario_id"]
             )
             for scenario in DATASET.scenarios
         },
@@ -400,11 +409,12 @@ def _retrieval_run(
     dataset_identity: dict | None = None,
     code_identity: dict | None = None,
     sample_scope_ids: list[str] | None = None,
+    retrieval_sdk=lsr,
 ) -> Path:
     expected_rows = (
-        lr.select_validation_queries(DATASET)
+        retrieval_sdk.select_validation_queries(DATASET)
         if purpose == "validation"
-        else lr.select_formal_queries(DATASET)
+        else retrieval_sdk.select_formal_queries(DATASET)
     )
     expected_ids = [row["query_id"] for row in expected_rows]
     groups_document = {}
@@ -413,7 +423,7 @@ def _retrieval_run(
             "status": "incomplete",
             "purpose": purpose,
             "group": group,
-            "parameters": lr.validated_parameters(),
+            "parameters": retrieval_sdk.validated_parameters(),
             "index_collection": "fixture-collection",
             "index_manifest_sha256": "c" * 64,
             "index_build_id": "fixture-build",
@@ -438,23 +448,23 @@ def _retrieval_run(
             "experiment_url": "https://example.invalid",
         }
     document = {
-        "schema": lr.SCHEMA,
+        "schema": retrieval_sdk.SCHEMA,
         "run_id": "retrieval-sdk-test",
         "purpose": purpose,
         "status": "incomplete",
         "started_at": STARTED_AT,
         "finished_at": FINISHED_AT,
         "dataset": dataset_identity or DATASET.identity(),
-        "dataset_name": lr.dataset_name(DATASET),
+        "dataset_name": retrieval_sdk.dataset_name(DATASET),
         "dataset_id": "fixture-dataset",
         "example_ids": {
-            query["query_id"]: lr.stable_example_id(
-                lr.dataset_name(DATASET), query["query_id"]
+            query["query_id"]: retrieval_sdk.stable_example_id(
+                retrieval_sdk.dataset_name(DATASET), query["query_id"]
             )
             for query in DATASET.queries
         },
-        "parameters": lr.validated_parameters(),
-        "code_identity": code_identity or lr.sdk_code_identity(),
+        "parameters": retrieval_sdk.validated_parameters(),
+        "code_identity": code_identity or retrieval_sdk.sdk_code_identity(),
         "max_concurrency": 6,
         "num_repetitions": 1,
         "sample_scope": {"query_ids": sample_scope_ids or expected_ids},
@@ -1030,4 +1040,79 @@ def test_scenario_record_version_must_match_run(tmp_path):
     assert any(
         "场景记录反馈协议版本与运行不一致" in issue
         for issue in source.issues
+    )
+
+
+def test_langfuse_layouts_are_accepted_with_platform_wording(tmp_path):
+    # Langfuse 检索/场景布局进入 Ragas 汇总分支：数据集名、样例 ID 按平台模块派生。
+    scenario_root = _write_scenario_run(
+        tmp_path / "langfuse",
+        {"s-action-verification-01": {}},
+        scenario_sdk=lfs,
+    )
+    retrieval_root = _retrieval_run(
+        tmp_path / "langfuse", retrieval_sdk=lfr
+    )
+    summary = _build(tmp_path / "langfuse", scenario_root, retrieval_root)
+    assert summary["schema"] == sm.SUMMARY_SCHEMA
+    assert summary["sources"]["retrieval"]["platform"] == "langfuse"
+    assert summary["sources"]["scenario"]["platform"] == "langfuse"
+    issues = summary["release"]["blocking_issues"]
+    assert not any(
+        "样例 ID 映射" in issue or "数据集名称" in issue for issue in issues
+    )
+    report = "\n".join(ss.report_lines(summary))
+    assert "- Langfuse retrieval：" in report
+    assert "- Langfuse scenario：" in report
+    assert report.count("本次未重连 Langfuse") == 2
+    assert "LangSmith" not in report
+
+
+def test_historical_layout_report_keeps_langsmith_wording(tmp_path):
+    scenario_root = _write_scenario_run(
+        tmp_path / "history", {"s-action-verification-01": {}}
+    )
+    retrieval_root = _retrieval_run(tmp_path / "history")
+    summary = _build(tmp_path / "history", scenario_root, retrieval_root)
+    assert summary["sources"]["retrieval"]["platform"] == "langsmith"
+    assert summary["sources"]["scenario"]["platform"] == "langsmith"
+    report = "\n".join(ss.report_lines(summary))
+    assert "- LangSmith retrieval：" in report
+    assert "- LangSmith scenario：" in report
+    assert report.count("本次未重连 LangSmith") == 2
+
+
+def test_unknown_layout_schema_is_rejected(tmp_path):
+    scenario_root = _write_scenario_run(
+        tmp_path / "unknown", {"s-action-verification-01": {}}
+    )
+    document = json.loads(
+        (scenario_root / "sdk-run.json").read_text(encoding="utf-8")
+    )
+    document["schema"] = "fit-agent-scenario-unknown-1"
+    _write_document(scenario_root, document)
+    source = ss.load_scenario_source(scenario_root, DATASET)
+    assert source.available is False
+    assert any("场景来源 Schema 不符" in issue for issue in source.issues)
+
+
+def test_langfuse_retrieval_formal_gate_uses_platform_wording(tmp_path):
+    retrieval_root = _retrieval_run(
+        tmp_path,
+        purpose="formal",
+        groups=("bm25",),
+        retrieval_sdk=lfr,
+    )
+    document = json.loads(
+        (retrieval_root / "run.json").read_text(encoding="utf-8")
+    )
+    document["groups"]["bm25"].pop("experiment_id")
+    (retrieval_root / "run.json").write_text(
+        json.dumps(document, ensure_ascii=False), encoding="utf-8"
+    )
+    source = ss.load_retrieval_source(retrieval_root, DATASET)
+    assert source.platform == "langfuse"
+    assert any(
+        "缺少 Langfuse 实验" in issue
+        for issue in ss._retrieval_formal_issues(source, DATASET)
     )

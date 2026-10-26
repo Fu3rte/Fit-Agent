@@ -1046,3 +1046,62 @@ class ExternalJudgeScoringAttempt(EvaluationContract):
         ):
             raise ValueError("云端反馈身份必须与评分来源一致")
         return self
+
+
+# Langfuse 外部裁判回收契约：云端身份改用 Langfuse Score 身份；上方 LangSmith 契约原样保留。
+EXTERNAL_JUDGE_FEEDBACK_LANGFUSE_SCHEMA_VERSION = (
+    "fit-agent-external-judge-feedback-langfuse-1"
+)
+ExternalJudgeFeedbackLangfuseSchemaVersion = Literal[
+    "fit-agent-external-judge-feedback-langfuse-1"
+]
+ExternalJudgeScoreSourceKind = Literal["api", "eval", "annotation"]
+
+
+class ExternalJudgeScoreSource(EvaluationContract):
+    # Langfuse Score 读回的 source 枚举小写化；author_user_id 是平台返回的人工作者身份。
+    kind: ExternalJudgeScoreSourceKind
+    author_user_id: NonEmptyText | None = None
+
+
+class ExternalJudgeCloudScoreIdentity(EvaluationContract):
+    # Langfuse Score 身份：score id + subject trace + name + timestamp + source + configId。
+    score_id: NonEmptyText
+    trace_id: NonEmptyText
+    name: NonEmptyText
+    timestamp: NonEmptyText
+    source: ExternalJudgeScoreSourceKind
+    config_id: NonEmptyText | None = None
+
+
+class ExternalJudgeLangfuseSource(EvaluationContract):
+    experiment: ExternalJudgeExperimentIdentity
+    trace_id: NonEmptyText
+    example_id: NonEmptyText
+    feedback_source: ExternalJudgeScoreSource
+
+
+class ExternalJudgeLangfuseScoringAttempt(EvaluationContract):
+    schema_version: ExternalJudgeFeedbackLangfuseSchemaVersion
+    attempt_id: NonEmptyText
+    checkpoint: EvidenceLink
+    execution_sha256: Sha256
+    source: ExternalJudgeLangfuseSource
+    model: ExternalJudgeModelIdentity
+    definition: ExternalJudgeDefinitionIdentity
+    outbound: ExternalJudgeOutboundProjection
+    feedback: ExternalJudgeFeedback
+    cloud_score: ExternalJudgeCloudScoreIdentity | None = None
+
+    @model_validator(mode="after")
+    def validate_attempt(self) -> Self:
+        cloud = self.cloud_score
+        if cloud is None:
+            if self.feedback.status != "pending":
+                raise ValueError("已完成的反馈必须绑定云端实际返回身份")
+            return self
+        if self.feedback.status == "pending":
+            raise ValueError("待评分反馈不得绑定云端实际返回身份")
+        if cloud.trace_id != self.source.trace_id:
+            raise ValueError("云端 Score 身份必须与评分来源一致")
+        return self

@@ -8,46 +8,48 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Callable, Literal, Sequence
-from uuid import NAMESPACE_URL, UUID, uuid5
+from uuid import NAMESPACE_URL, uuid5
 
 from dotenv import load_dotenv
-from langsmith import Client
+from langfuse import Langfuse
 from pydantic import Field, TypeAdapter, ValidationError, model_validator
-from urllib3.util import Retry
 
 from evaluation.contracts import (
+    EXTERNAL_JUDGE_FEEDBACK_LANGFUSE_SCHEMA_VERSION,
     EXTERNAL_JUDGE_FEEDBACK_SCHEMA_VERSION,
     EXTERNAL_JUDGE_METRICS,
     DatasetIdentity,
     EvaluationContract,
     EvidenceLink,
-    ExternalJudgeCloudFeedbackIdentity,
+    ExternalJudgeCloudScoreIdentity,
     ExternalJudgeDefinitionIdentity,
     ExternalJudgeExperimentIdentity,
     ExternalJudgeFeedback,
     ExternalJudgeFeedbackSet,
-    ExternalJudgeFeedbackSource,
+    ExternalJudgeLangfuseScoringAttempt,
+    ExternalJudgeLangfuseSource,
     ExternalJudgeMetric,
     ExternalJudgeModelIdentity,
     ExternalJudgeOutboundProjection,
-    ExternalJudgeScoringAttempt,
-    ExternalJudgeSource,
+    ExternalJudgeScoreSource,
     NonEmptyText,
     ProbabilityScore,
-    ReportedModelVersion,
     Sha256,
     UnreportedModelVersion,
 )
 from evaluation.dataset import EvaluationDataset, load_for_evaluation
 from evaluation.generation_upload import (
     BACKEND,
+    EXPECTED_VARIABLE_MAPPING,
     EXTERNAL_DATASET_RECEIPT_NAME,
     EXTERNAL_DATASET_RECEIPT_SCHEMA,
     EXTERNAL_EXPERIMENT_PENDING_NAME,
     EXTERNAL_EXPERIMENT_RECEIPT_NAME,
     EXTERNAL_EXPERIMENT_RECEIPT_SCHEMA,
+    EXTERNAL_OBSERVATION_SCOPE,
     EXTERNAL_PAYLOAD_NAME,
     EXTERNAL_PAYLOAD_SCHEMA,
+    EXTERNAL_RULE_SAMPLING,
     FORBIDDEN_KEYS,
     ExternalApplicabilityEntry,
     ExternalRunEvidence,
@@ -66,9 +68,11 @@ from evaluation.generation_upload import (
     _verify_remote_dataset,
     _walk_keys,
     _walk_strings,
+    _web_judge_configuration,
     _write_json,
     build_external_payload,
     external_dir,
+    external_rule_filters,
     load_external_applicability,
     load_external_run,
     payload_digest,
@@ -76,9 +80,11 @@ from evaluation.generation_upload import (
 from evaluation.scenario_evidence import canonical_json, sha256_text
 from evaluation.scenarios import DEFAULT_VERSION_DIR
 
-FEEDBACK_BINDING_SCHEMA = "fit-agent-external-judge-feedback-binding-1"
-FEEDBACK_COLLECTION_SCHEMA = "fit-agent-external-judge-feedback-collection-1"
-FEEDBACK_INDEX_SCHEMA = "fit-agent-external-judge-feedback-index-1"
+FEEDBACK_BINDING_SCHEMA = "fit-agent-external-judge-feedback-binding-langfuse-2"
+FEEDBACK_COLLECTION_SCHEMA = (
+    "fit-agent-external-judge-feedback-collection-langfuse-2"
+)
+FEEDBACK_INDEX_SCHEMA = "fit-agent-external-judge-feedback-index-langfuse-2"
 FEEDBACK_DIR = "decision-feedback"
 FEEDBACK_BINDING_NAME = "feedback-binding.json"
 FEEDBACK_INDEX_NAME = "index.json"
@@ -87,7 +93,14 @@ FEEDBACK_BATCH_SIZE = 100
 FEEDBACK_READ_TIMEOUT_SECONDS = 30.0
 FEEDBACK_POLL_INTERVAL_SECONDS = 1.5
 SOURCE_ASSURANCE = "declared_binding"
-CONTEXT_STATE_PATH = "outputs.context.items"
+CONTEXT_STATE_PATH = "output.context.items"
+WEB_JUDGE_ENVIRONMENT = "langfuse-llm-as-a-judge"
+CREDENTIAL_MARKERS = (
+    "Bearer ",
+    "Authorization:",
+    "LANGFUSE_PUBLIC_KEY",
+    "LANGFUSE_SECRET_KEY",
+)
 SECRET_KEYS = {
     "api_key",
     "apikey",
@@ -105,7 +118,7 @@ BLOCKING_CODES = {
     "feedback_content_drift",
     "feedback_history_conflict",
     "malformed_cloud_feedback",
-    "missing_cloud_run",
+    "missing_cloud_trace",
     "experiment_absent",
 }
 
@@ -139,7 +152,10 @@ def rubric_digest(rubric_id: str | None, rubric: str) -> str:
 
 
 def _assert_no_secret(value: Any, label: str) -> None:
-    secret = os.environ.get("LANGSMITH_API_KEY")
+    secrets = [
+        os.environ.get(name)
+        for name in ("LANGFUSE_PUBLIC_KEY", "LANGFUSE_SECRET_KEY")
+    ]
     for key in _walk_keys(value):
         if isinstance(key, str) and key.lower() in SECRET_KEYS:
             raise UploadBlocked(f"{label} 包含认证字段: {key}")
@@ -147,9 +163,10 @@ def _assert_no_secret(value: Any, label: str) -> None:
         residue = _local_path_residue(text)
         if residue is not None:
             raise UploadBlocked(f"{label} 包含本地路径: {residue}")
-        if secret and secret in text:
-            raise UploadBlocked(f"{label} 包含 LangSmith 凭据")
-        for marker in ("Bearer ", "Authorization:", "LANGSMITH_API_KEY"):
+        for secret in secrets:
+            if secret and secret in text:
+                raise UploadBlocked(f"{label} 包含 Langfuse 凭据")
+        for marker in CREDENTIAL_MARKERS:
             if marker in text:
                 raise UploadBlocked(f"{label} 包含凭据标记: {marker}")
 
@@ -161,9 +178,7 @@ def _json_safe(value: Any) -> Any:
         return {str(key): _json_safe(child) for key, child in value.items()}
     if isinstance(value, (list, tuple)):
         return [_json_safe(child) for child in value]
-    if isinstance(value, UUID):
-        return str(value)
-    if isinstance(value, datetime):
+    if hasattr(value, "isoformat"):
         return value.isoformat()
     return value
 
@@ -182,40 +197,52 @@ def _raw_feedback(value: Any) -> dict[str, Any]:
     return sanitized
 
 
-def _feedback_identity(raw: dict[str, Any]) -> tuple[str, str, str]:
-    feedback_id = raw.get("id")
-    run_id = raw.get("run_id")
-    key = raw.get("key")
+def _score_identity(raw: dict[str, Any]) -> tuple[str, str, str]:
+    # Langfuse Score 身份：score id + subject trace + score name。
+    score_id = raw.get("id")
+    name = raw.get("name")
+    subject = raw.get("subject")
     _require(
-        isinstance(feedback_id, str) and bool(feedback_id.strip()),
-        "云端反馈缺少 feedback id",
+        isinstance(score_id, str) and bool(score_id.strip()),
+        "云端反馈缺少 score id",
     )
     _require(
-        isinstance(run_id, str) and bool(run_id.strip()),
-        "云端反馈缺少 run_id",
+        isinstance(name, str) and bool(name.strip()),
+        "云端反馈缺少 score name",
     )
+    _require(isinstance(subject, dict), "云端反馈缺少 subject")
+    kind = subject.get("kind")
+    if kind == "trace":
+        trace_id = subject.get("id")
+    elif kind == "observation":
+        trace_id = subject.get("traceId")
+    else:
+        raise UploadBlocked(
+            f"云端反馈的 subject 不属于 trace/observation: {kind}"
+        )
     _require(
-        isinstance(key, str) and bool(key.strip()),
-        "云端反馈缺少 feedback key",
+        isinstance(trace_id, str) and bool(trace_id.strip()),
+        "云端反馈的 subject 缺少所属 trace",
     )
-    return feedback_id, run_id, key
+    return score_id, trace_id, name
 
 
 def _semantic_feedback(raw: dict[str, Any]) -> dict[str, Any]:
-    # 时间戳变化不代表评分内容变化；评分、来源与关联字段逐项比较。
+    # timestamp 与创建/更新时间变化不代表评分内容变化；数值、来源与归属字段逐项比较。
     return {
         field: raw.get(field)
         for field in (
-            "key",
-            "score",
+            "name",
+            "dataType",
             "value",
             "comment",
-            "correction",
-            "feedback_source",
-            "extra",
-            "run_id",
-            "session_id",
-            "trace_id",
+            "source",
+            "configId",
+            "metadata",
+            "authorUserId",
+            "queueId",
+            "environment",
+            "subject",
         )
     }
 
@@ -224,11 +251,32 @@ def _semantic_sha256(raw: dict[str, Any]) -> str:
     return sha256_text(canonical_json(_semantic_feedback(raw)))
 
 
+class FeedbackStatePath(EvaluationContract):
+    source: Literal["input", "output", "expected_output"]
+    path: NonEmptyText
+
+
 class FeedbackStateMapping(EvaluationContract):
-    user_request: Literal["inputs.user_request"]
-    answer: Literal["outputs.answer"]
-    context: Literal["outputs.context.items"]
-    reference: Literal["reference_outputs.reference"]
+    user_request: FeedbackStatePath
+    answer: FeedbackStatePath
+    context: FeedbackStatePath
+    reference: FeedbackStatePath
+
+    @model_validator(mode="after")
+    def validate_mapping(self) -> "FeedbackStateMapping":
+        if self.model_dump(mode="json") != EXPECTED_VARIABLE_MAPPING:
+            raise ValueError(
+                "四变量映射必须为 input.user_request、output.answer、"
+                "output.context.items、expected_output.reference"
+            )
+        return self
+
+
+def _binding_evaluator_names(config: dict[str, Any]) -> dict[str, str]:
+    return {
+        entry["metric"]: entry["evaluator_name"]
+        for entry in config["evaluators"]
+    }
 
 
 class FeedbackEvaluatorBinding(EvaluationContract):
@@ -248,9 +296,76 @@ class FeedbackEvaluatorBinding(EvaluationContract):
         if forbidden:
             raise ValueError("Evaluator 配置快照包含禁止字段: " + ", ".join(forbidden))
         for text in _walk_strings(self.config):
-            for marker in ("Bearer ", "Authorization:", "LANGSMITH_API_KEY"):
+            residue = _local_path_residue(text)
+            if residue is not None:
+                raise ValueError("Evaluator 配置快照包含本地路径")
+            for marker in CREDENTIAL_MARKERS:
                 if marker in text:
                     raise ValueError("Evaluator 配置快照包含凭据标记")
+        scope = self.config.get("scope")
+        if not isinstance(scope, dict):
+            raise ValueError("Evaluator 配置缺少 rule 作用域")
+        dataset_id = scope.get("dataset_id")
+        dataset_name = scope.get("dataset_name")
+        if (
+            not isinstance(dataset_id, str)
+            or not dataset_id.strip()
+            or not isinstance(dataset_name, str)
+            or not dataset_name.strip()
+        ):
+            raise ValueError("Evaluator 配置的 rule 作用域缺少数据集身份")
+        if scope.get("observation_scope") != EXTERNAL_OBSERVATION_SCOPE:
+            raise ValueError(
+                f"Evaluator 配置的 rule 必须限定 {EXTERNAL_OBSERVATION_SCOPE}"
+            )
+        if scope.get("sampling") != EXTERNAL_RULE_SAMPLING:
+            raise ValueError("Evaluator 配置的 rule 采样率必须为全量 1.0")
+        if self.config.get("variable_mapping") != EXPECTED_VARIABLE_MAPPING:
+            raise ValueError("Evaluator 配置的变量映射与冻结声明不一致")
+        evaluators = self.config.get("evaluators")
+        if not isinstance(evaluators, list) or len(evaluators) != 2:
+            raise ValueError("Evaluator 配置必须为两个指标各声明一个 evaluator")
+        names: list[str] = []
+        metrics: list[str] = []
+        for entry in evaluators:
+            if not isinstance(entry, dict):
+                raise ValueError("Evaluator 配置的 evaluator 声明必须为对象")
+            metric = entry.get("metric")
+            if metric not in EXTERNAL_JUDGE_METRICS:
+                raise ValueError("Evaluator 配置包含未知外部裁判指标")
+            metrics.append(metric)
+            evaluator_name = entry.get("evaluator_name")
+            if (
+                not isinstance(evaluator_name, str)
+                or not evaluator_name.strip()
+            ):
+                raise ValueError("Evaluator 配置缺少 evaluator 名称")
+            if entry.get("score_name") != metric:
+                raise ValueError(
+                    f"Evaluator 配置的 score 名称必须等于指标名: {metric}"
+                )
+            if entry.get("score_type") != "NUMERIC":
+                raise ValueError("Evaluator 配置的 score 类型必须为 NUMERIC")
+            if entry.get("value_range") != [0.0, 1.0]:
+                raise ValueError("Evaluator 配置的 score 范围必须为 0..1")
+            if entry.get("sampling") != EXTERNAL_RULE_SAMPLING:
+                raise ValueError("Evaluator 配置的采样率必须为全量 1.0")
+            for field in ("system_prompt", "user_prompt"):
+                prompt = entry.get(field)
+                if not isinstance(prompt, str) or not prompt.strip():
+                    raise ValueError(f"Evaluator 配置缺少 {field}")
+            if entry.get("rule_filters") != external_rule_filters(
+                metric, dataset_id
+            ):
+                raise ValueError(
+                    "Evaluator 配置的规则过滤必须限定检查点数据集、"
+                    "root observation 与字符串适用性标志"
+                )
+            names.append(evaluator_name)
+        if len(set(names)) != len(names):
+            raise ValueError("Evaluator 配置的 evaluator 名称不能重复")
+        if sorted(metrics) != sorted(EXTERNAL_JUDGE_METRICS):
+            raise ValueError("Evaluator 配置必须逐项且仅包含两个指标")
         return self
 
 
@@ -286,7 +401,7 @@ class FeedbackExperimentTarget(EvaluationContract):
 
 
 class FeedbackBinding(EvaluationContract):
-    schema_version: Literal["fit-agent-external-judge-feedback-binding-1"]
+    schema_version: Literal["fit-agent-external-judge-feedback-binding-langfuse-2"]
     run_id: NonEmptyText
     source_sha256: Sha256
     applicability_sha256: Sha256
@@ -303,44 +418,47 @@ class FeedbackBinding(EvaluationContract):
         keys = [row.feedback_key for row in self.metrics]
         if len(set(keys)) != len(keys):
             raise ValueError("反馈绑定的 feedback key 不能重复")
-        if self.state_mapping.context != CONTEXT_STATE_PATH:
-            raise ValueError("context 必须映射 outputs.context.items")
+        if (
+            self.state_mapping.context.source != "output"
+            or self.state_mapping.context.path != "context.items"
+        ):
+            raise ValueError("context 必须映射 output.context.items")
         return self
 
 
 class FeedbackRawEvidence(EvaluationContract):
     evidence_id: NonEmptyText
-    feedback_id: NonEmptyText
-    run_id: NonEmptyText
-    key: NonEmptyText
+    score_id: NonEmptyText
+    trace_id: NonEmptyText
+    score_name: NonEmptyText
     raw: dict[str, Any]
     raw_sha256: Sha256
 
     @model_validator(mode="after")
     def validate_evidence(self) -> "FeedbackRawEvidence":
-        feedback_id, run_id, key = _feedback_identity(self.raw)
-        if (feedback_id, run_id, key) != (
-            self.feedback_id,
-            self.run_id,
-            self.key,
+        score_id, trace_id, name = _score_identity(self.raw)
+        if (score_id, trace_id, name) != (
+            self.score_id,
+            self.trace_id,
+            self.score_name,
         ):
             raise ValueError("原始证据身份与封装字段不一致")
         expected = sha256_text(canonical_json(self.raw))
         if self.raw_sha256 != expected:
             raise ValueError("原始证据摘要与内容不一致")
-        if self.evidence_id != f"{self.feedback_id}@{self.raw_sha256[:12]}":
-            raise ValueError("原始证据 ID 必须由 feedback ID 与摘要导出")
+        # evidence_id 派生公式："<score_id>@<raw_sha256[:12]>"。
+        if self.evidence_id != f"{self.score_id}@{self.raw_sha256[:12]}":
+            raise ValueError("原始证据 ID 必须由 score ID 与摘要导出")
         return self
 
 
 class FeedbackExclusion(EvaluationContract):
     evidence_id: NonEmptyText
-    feedback_id: NonEmptyText
+    score_id: NonEmptyText
     metric: ExternalJudgeMetric | None = None
     reason: Literal[
         "unmapped_key",
         "source_not_decision_model",
-        "source_gap",
         "invalid_score",
         "not_applicable_metric",
         "malformed_cloud_feedback",
@@ -351,7 +469,6 @@ class FeedbackExclusion(EvaluationContract):
 class FeedbackDiagnostic(EvaluationContract):
     code: Literal[
         "awaiting_feedback",
-        "feedback_without_terminal_score",
         "cloud_failure",
         "checkpoint_missing_upload",
         "invalid_score",
@@ -361,7 +478,7 @@ class FeedbackDiagnostic(EvaluationContract):
         "feedback_history_conflict",
         "malformed_cloud_feedback",
         "unexpected_not_applicable_feedback",
-        "missing_cloud_run",
+        "missing_cloud_trace",
         "experiment_absent",
     ]
     metric: ExternalJudgeMetric | None = None
@@ -393,10 +510,12 @@ class CheckpointFeedbackRecord(EvaluationContract):
     execution_sha256: Sha256
     row_id: NonEmptyText | None = None
     example_id: NonEmptyText | None = None
-    cloud_run_id: NonEmptyText | None = None
+    cloud_trace_id: NonEmptyText | None = None
     projection_sha256: Sha256 | None = None
     feedback_set: ExternalJudgeFeedbackSet
-    attempts: list[ExternalJudgeScoringAttempt] = Field(default_factory=list)
+    attempts: list[ExternalJudgeLangfuseScoringAttempt] = Field(
+        default_factory=list
+    )
     evidence: list[FeedbackRawEvidence] = Field(default_factory=list)
     exclusions: list[FeedbackExclusion] = Field(default_factory=list)
     diagnostics: list[FeedbackDiagnostic] = Field(default_factory=list)
@@ -437,10 +556,10 @@ class CheckpointFeedbackRecord(EvaluationContract):
                     != self.projection_sha256
                 ):
                     raise ValueError("评分尝试的投影摘要不一致")
-            if self.cloud_run_id is not None and (
-                attempt.source.run_id != self.cloud_run_id
-                or attempt.cloud_feedback is None
-                or attempt.cloud_feedback.run_id != self.cloud_run_id
+            if self.cloud_trace_id is not None and (
+                attempt.source.trace_id != self.cloud_trace_id
+                or attempt.cloud_score is None
+                or attempt.cloud_score.trace_id != self.cloud_trace_id
             ):
                 raise ValueError("评分尝试的云端运行身份不一致")
         feedback_by_metric = {
@@ -452,7 +571,7 @@ class CheckpointFeedbackRecord(EvaluationContract):
                 for attempt in self.attempts
                 if attempt.feedback.metric == metric
             ]
-            if row.status in ("succeeded", "failed"):
+            if row.status == "succeeded":
                 if len(matching) != 1:
                     raise ValueError("终态反馈必须绑定唯一评分尝试")
                 attempt = matching[0]
@@ -463,6 +582,9 @@ class CheckpointFeedbackRecord(EvaluationContract):
                     != row.failure_evidence
                 ):
                     raise ValueError("终态反馈与评分尝试内容不一致")
+            if row.status == "failed" and matching:
+                # 网页裁判失败不产生 score，失败依据保存在 feedback.failure_evidence。
+                raise ValueError("失败反馈不得绑定评分尝试")
             if row.status == "not_applicable" and matching:
                 raise ValueError("不适用指标不得绑定评分尝试")
         blocking = [
@@ -494,6 +616,8 @@ class CheckpointFeedbackRecord(EvaluationContract):
                 raise ValueError("完成状态不得携带阻断诊断")
             if pending:
                 raise ValueError("完成状态不得存在待评分指标")
+        # evidence_sha256 派生公式：按 evidence_id/attempt_id 排序后的原始证据（score 形态）、
+        # 反馈集合与评分尝试三部分的 canonical JSON 摘要。
         expected = sha256_text(
             canonical_json(
                 {
@@ -539,7 +663,9 @@ class FeedbackExperimentSummary(EvaluationContract):
 
 
 class FeedbackCollectionBatch(EvaluationContract):
-    schema_version: Literal["fit-agent-external-judge-feedback-collection-1"]
+    schema_version: Literal[
+        "fit-agent-external-judge-feedback-collection-langfuse-2"
+    ]
     content_sha256: Sha256
     run_id: NonEmptyText
     read_at: NonEmptyText
@@ -609,9 +735,7 @@ class FeedbackCollectionBatch(EvaluationContract):
                     if (
                         attempt.source.experiment.experiment_id
                         != self.experiment.experiment_id
-                        or attempt.cloud_feedback is None
-                        or attempt.cloud_feedback.experiment_id
-                        != self.experiment.experiment_id
+                        or attempt.cloud_score is None
                     ):
                         raise ValueError("评分尝试的实验身份与批次不一致")
         blocked = any(item.status == "blocked" for item in self.checkpoints)
@@ -642,7 +766,9 @@ class FeedbackBatchReference(EvaluationContract):
 
 
 class FeedbackCollectionIndex(EvaluationContract):
-    schema_version: Literal["fit-agent-external-judge-feedback-index-1"]
+    schema_version: Literal[
+        "fit-agent-external-judge-feedback-index-langfuse-2"
+    ]
     run_id: NonEmptyText
     source_sha256: Sha256
     payload_sha256: Sha256 | None = None
@@ -752,8 +878,8 @@ def _read_dataset_receipt(
         "数据集回执的数据身份与 payload 不一致",
     )
     _require(
-        receipt.get("example_ids") == [row["row_id"] for row in payload["rows"]],
-        "数据集回执的 Example 身份与 payload 不一致",
+        receipt.get("item_ids") == [row["row_id"] for row in payload["rows"]],
+        "数据集回执的样例身份与 payload 不一致",
     )
     _require(
         receipt.get("example_count") == len(payload["rows"]),
@@ -763,6 +889,11 @@ def _read_dataset_receipt(
         isinstance(receipt.get("dataset_id"), str)
         and bool(receipt["dataset_id"]),
         "数据集回执缺少 dataset_id",
+    )
+    _require(
+        receipt.get("web_judge")
+        == _web_judge_configuration(payload, receipt["dataset_id"]),
+        "数据集回执的网页裁判配置与当前投影不一致",
     )
     return receipt
 
@@ -820,8 +951,8 @@ def _read_experiment_receipt(
         "实验回执的数据身份与 payload 不一致",
     )
     _require(
-        receipt.get("example_ids") == [row["row_id"] for row in payload["rows"]],
-        "实验回执的 Example 身份与 payload 不一致",
+        receipt.get("item_ids") == [row["row_id"] for row in payload["rows"]],
+        "实验回执的样例身份与 payload 不一致",
     )
     _require(
         receipt.get("coverage") == payload["coverage"],
@@ -838,6 +969,13 @@ def _read_experiment_receipt(
     _require(
         receipt.get("dataset_id") == dataset_receipt["dataset_id"],
         "实验回执的数据集 ID 与数据集回执不一致",
+    )
+    _require(
+        receipt.get("web_judge")
+        == _web_judge_configuration(
+            payload, dataset_receipt["dataset_id"]
+        ),
+        "实验回执的网页裁判配置与当前投影不一致",
     )
     _require(
         receipt.get("external_scoring_status") == "pending_collection",
@@ -858,7 +996,7 @@ def _read_experiment_receipt(
     for row_id in row_ids:
         _require(
             isinstance(runs[row_id], str) and bool(runs[row_id]),
-            f"实验回执缺少云端运行 ID: {row_id}",
+            f"实验回执缺少云端 trace: {row_id}",
         )
     return receipt
 
@@ -916,6 +1054,14 @@ def _binding_identity(
         target.dataset_id == dataset_receipt["dataset_id"]
         and target.dataset_name == payload["dataset_name"],
         "反馈绑定的数据集身份与回执不一致",
+    )
+    scope = binding.evaluator.config["scope"]
+    _require(
+        scope.get("dataset_id") == dataset_receipt["dataset_id"]
+        and scope.get("dataset_name") == payload["dataset_name"]
+        and scope.get("observation_scope") == EXTERNAL_OBSERVATION_SCOPE
+        and scope.get("sampling") == EXTERNAL_RULE_SAMPLING,
+        "反馈绑定的 rule 作用域与检查点数据集回执不一致",
     )
     _require(
         target.payload_sha256 == payload_digest(payload)
@@ -1080,48 +1226,6 @@ def _metric_binding(context: FeedbackContext) -> dict[str, FeedbackMetricBinding
     return {row.metric: row for row in context.binding.metrics}
 
 
-def _type_safe_metadata(raw: dict[str, Any]) -> dict[str, Any] | None:
-    source = raw.get("feedback_source")
-    if not isinstance(source, dict):
-        return None
-    metadata = source.get("metadata")
-    if not isinstance(metadata, dict):
-        return None
-    typesafe = metadata.get("typesafe")
-    return typesafe if isinstance(typesafe, dict) else None
-
-
-def _source_kind(raw: dict[str, Any]) -> str | None:
-    source = raw.get("feedback_source")
-    if not isinstance(source, dict):
-        return None
-    kind = source.get("type")
-    return kind if isinstance(kind, str) else None
-
-
-def _source_identity(raw: dict[str, Any]) -> str | None:
-    source = raw.get("feedback_source")
-    if not isinstance(source, dict):
-        return None
-    for key in ("user_name", "user_id"):
-        value = source.get(key)
-        if isinstance(value, str) and value.strip():
-            return value
-    return None
-
-
-def _model_version(raw: dict[str, Any], alias: str):
-    typesafe = _type_safe_metadata(raw)
-    if typesafe is None:
-        return UnreportedModelVersion(kind="unreported")
-    version = typesafe.get("model")
-    if not isinstance(version, str) or not version.strip():
-        return UnreportedModelVersion(kind="unreported")
-    if version == alias or version.endswith(("-latest", "-preview")):
-        return UnreportedModelVersion(kind="unreported")
-    return ReportedModelVersion(kind="reported", version=version)
-
-
 def _probability(value: Any) -> float:
     try:
         return TypeAdapter(ProbabilityScore).validate_python(value)
@@ -1130,16 +1234,21 @@ def _probability(value: Any) -> float:
 
 
 def _evidence_row(raw: dict[str, Any]) -> FeedbackRawEvidence:
-    feedback_id, run_id, key = _feedback_identity(raw)
+    score_id, trace_id, name = _score_identity(raw)
     raw_sha256 = sha256_text(canonical_json(raw))
     return FeedbackRawEvidence(
-        evidence_id=f"{feedback_id}@{raw_sha256[:12]}",
-        feedback_id=feedback_id,
-        run_id=run_id,
-        key=key,
+        evidence_id=f"{score_id}@{raw_sha256[:12]}",
+        score_id=score_id,
+        trace_id=trace_id,
+        score_name=name,
         raw=raw,
         raw_sha256=raw_sha256,
     )
+
+
+def _author_identity(raw: dict[str, Any]) -> str | None:
+    author = raw.get("authorUserId")
+    return author if isinstance(author, str) and author.strip() else None
 
 
 def _attempt(
@@ -1149,52 +1258,57 @@ def _attempt(
     row: dict[str, Any],
     raw: dict[str, Any],
     feedback: ExternalJudgeFeedback,
-) -> ExternalJudgeScoringAttempt:
-    feedback_id, run_id, _ = _feedback_identity(raw)
-    cloud_run_id = context.experiment_receipt["runs"][row["row_id"]]
+) -> ExternalJudgeLangfuseScoringAttempt:
+    score_id, trace_id, name = _score_identity(raw)
+    cloud_trace_id = context.experiment_receipt["runs"][row["row_id"]]
     _require(
-        run_id == cloud_run_id,
-        f"云端反馈的运行身份与回执不一致: {feedback_id}",
+        trace_id == cloud_trace_id,
+        f"云端反馈的运行身份与回执不一致: {score_id}",
+    )
+    timestamp = raw.get("timestamp")
+    _require(
+        isinstance(timestamp, str) and bool(timestamp.strip()),
+        f"云端反馈缺少 timestamp: {score_id}",
     )
     _require(context.experiment is not None, "缺少实验身份，无法构造评分尝试")
-    kind = _source_kind(raw)
     _require(
-        kind in ("model", "evaluator"),
-        f"反馈来源不是自动裁判: {feedback_id}",
+        raw.get("source") == "EVAL",
+        f"反馈来源不是自动裁判: {score_id}",
     )
+    # attempt_id 派生公式：本地运行/检查点/执行摘要/指标 + score 身份材料
+    # （score_id、name、timestamp、trace_id）经 uuid5(NAMESPACE_URL, ...) 派生。
     attempt_id = str(
         uuid5(
             NAMESPACE_URL,
-            "fit-agent-external-judge-attempt:"
+            "fit-agent-external-judge-attempt-langfuse:"
             f"{checkpoint.link.run_id}:{checkpoint.link.scenario_id}:"
             f"{checkpoint.link.event_id}:{checkpoint.link.checkpoint_id}:"
             f"{checkpoint.execution_sha256}:{metric_binding.metric}:"
-            f"{feedback_id}",
+            f"{score_id}:{name}:{timestamp}:{trace_id}",
         )
     )
-    return ExternalJudgeScoringAttempt(
-        schema_version=EXTERNAL_JUDGE_FEEDBACK_SCHEMA_VERSION,
+    return ExternalJudgeLangfuseScoringAttempt(
+        schema_version=EXTERNAL_JUDGE_FEEDBACK_LANGFUSE_SCHEMA_VERSION,
         attempt_id=attempt_id,
         checkpoint=checkpoint.link,
         execution_sha256=checkpoint.execution_sha256,
-        source=ExternalJudgeSource(
+        source=ExternalJudgeLangfuseSource(
             experiment=ExternalJudgeExperimentIdentity(
                 experiment_id=context.experiment.experiment_id,
                 experiment_name=context.experiment.experiment_name,
             ),
-            run_id=cloud_run_id,
+            trace_id=cloud_trace_id,
             example_id=row["row_id"],
-            feedback_source=ExternalJudgeFeedbackSource(
-                kind=kind, identity=_source_identity(raw)
+            feedback_source=ExternalJudgeScoreSource(
+                kind="eval", author_user_id=_author_identity(raw)
             ),
         ),
         model=ExternalJudgeModelIdentity(
             provider=context.binding.evaluator.provider,
             evaluator=context.binding.evaluator.evaluator,
             model_alias=context.binding.evaluator.model_alias,
-            model_version=_model_version(
-                raw, context.binding.evaluator.model_alias
-            ),
+            # Langfuse Score 读回不含裁判模型版本字段，一律按平台未返回记录。
+            model_version=UnreportedModelVersion(kind="unreported"),
             config_sha256=context.binding.evaluator.config_sha256,
         ),
         definition=ExternalJudgeDefinitionIdentity(
@@ -1208,10 +1322,13 @@ def _attempt(
             projection_sha256=row["projection_sha256"],
         ),
         feedback=feedback,
-        cloud_feedback=ExternalJudgeCloudFeedbackIdentity(
-            experiment_id=context.experiment.experiment_id,
-            run_id=cloud_run_id,
-            feedback_id=feedback_id,
+        cloud_score=ExternalJudgeCloudScoreIdentity(
+            score_id=score_id,
+            trace_id=trace_id,
+            name=name,
+            timestamp=timestamp,
+            source="eval",
+            config_id=raw.get("configId"),
         ),
     )
 
@@ -1220,49 +1337,34 @@ def _normalize_candidate(
     raw: dict[str, Any],
     metric_binding: FeedbackMetricBinding,
 ) -> tuple[ExternalJudgeFeedback | None, str | None, dict[str, Any] | None]:
-    kind = _source_kind(raw)
-    if kind not in ("model", "evaluator"):
+    score_id = raw.get("id")
+    if raw.get("source") != "EVAL":
         return (
             None,
             "source_not_decision_model",
-            {"kind": kind, "feedback_id": raw.get("id")},
+            {"source": raw.get("source"), "score_id": score_id},
         )
-    extra = raw.get("extra")
-    comment = raw.get("comment")
-    if isinstance(extra, dict) and extra.get("error") is True:
-        if isinstance(comment, str) and comment.strip():
-            failure = comment
-        else:
-            failure = canonical_json({"error": True, "extra": extra})
-        return (
-            ExternalJudgeFeedback(
-                metric=metric_binding.metric,
-                status="failed",
-                failure_evidence=failure,
-            ),
-            None,
-            None,
-        )
-    score = raw.get("score")
-    if score is None:
+    if raw.get("dataType") != "NUMERIC":
         return (
             None,
-            "feedback_without_terminal_score",
-            {"kind": kind, "feedback_id": raw.get("id")},
+            "invalid_score",
+            {
+                "dataType": raw.get("dataType"),
+                "value": _json_safe(raw.get("value")),
+                "score_id": score_id,
+            },
         )
     try:
-        value = _probability(score)
+        value = _probability(raw.get("value"))
     except ValueError as error:
         return (
             None,
             "invalid_score",
-            {"score": _json_safe(score), "error": str(error)},
-        )
-    if _type_safe_metadata(raw) is None:
-        return (
-            None,
-            "source_gap",
-            {"kind": kind, "feedback_id": raw.get("id")},
+            {
+                "value": _json_safe(raw.get("value")),
+                "score_id": score_id,
+                "error": str(error),
+            },
         )
     return (
         ExternalJudgeFeedback(
@@ -1272,6 +1374,38 @@ def _normalize_candidate(
         ),
         None,
         None,
+    )
+
+
+def _judge_failure(
+    observations: Sequence[dict[str, Any]], evaluator_name: str
+) -> dict[str, Any] | None:
+    # 网页裁判调试 trace 根 observation 命名为 "Execute evaluator: <名称>"；
+    # 只有名称可归属到本指标 evaluator 的 Error observation 才能作为失败依据。
+    matches = sorted(
+        (
+            observation
+            for observation in observations
+            if observation.get("level") == "ERROR"
+            and observation.get("name")
+            in (evaluator_name, f"Execute evaluator: {evaluator_name}")
+        ),
+        key=lambda observation: str(observation.get("id") or ""),
+    )
+    return matches[0] if matches else None
+
+
+def _failure_evidence(observation: dict[str, Any]) -> str:
+    return canonical_json(
+        {
+            "environment": observation.get("environment"),
+            "id": observation.get("id"),
+            "level": observation.get("level"),
+            "name": observation.get("name"),
+            "start_time": observation.get("startTime"),
+            "status_message": observation.get("statusMessage"),
+            "trace_id": observation.get("traceId"),
+        }
     )
 
 
@@ -1298,8 +1432,9 @@ def _checkpoint_record(
     context: FeedbackContext,
     checkpoint,
     row: dict[str, Any] | None,
-    cloud_run_id: str | None,
+    cloud_trace_id: str | None,
     raw_items: Sequence[dict[str, Any]],
+    judge_failures: Sequence[dict[str, Any]],
     history: FeedbackHistory | None,
 ) -> CheckpointFeedbackRecord:
     approved = context.applicability[checkpoint.key]
@@ -1307,9 +1442,12 @@ def _checkpoint_record(
         item.metric: item for item in approved.applicability
     }
     metric_bindings = _metric_binding(context)
+    evaluator_names = _binding_evaluator_names(
+        context.binding.evaluator.config
+    )
     exclusions: list[FeedbackExclusion] = []
     diagnostics: list[FeedbackDiagnostic] = []
-    attempts: list[ExternalJudgeScoringAttempt] = []
+    attempts: list[ExternalJudgeLangfuseScoringAttempt] = []
     feedback_rows: list[ExternalJudgeFeedback] = []
     primary_evidence: dict[str, list[FeedbackRawEvidence]] = {}
     semantic_by_id: dict[str, set[str]] = {}
@@ -1326,21 +1464,21 @@ def _checkpoint_record(
                 )
             )
             continue
-        primary_evidence.setdefault(item.feedback_id, []).append(item)
+        primary_evidence.setdefault(item.score_id, []).append(item)
         semantic = sha256_text(canonical_json(_semantic_feedback(item.raw)))
-        semantic_by_id.setdefault(item.feedback_id, set()).add(semantic)
-        key = item.key
-        if key not in mapped_keys:
+        semantic_by_id.setdefault(item.score_id, set()).add(semantic)
+        name = item.score_name
+        if name not in mapped_keys:
             exclusions.append(
                 FeedbackExclusion(
                     evidence_id=item.evidence_id,
-                    feedback_id=item.feedback_id,
+                    score_id=item.score_id,
                     reason="unmapped_key",
-                    detail=f"反馈 key 未映射到外部裁判指标: {key}",
+                    detail=f"反馈 score name 未映射到外部裁判指标: {name}",
                 )
             )
     unique_evidence: list[FeedbackRawEvidence] = []
-    for feedback_id, versions in sorted(primary_evidence.items()):
+    for score_id, versions in sorted(primary_evidence.items()):
         seen_semantic: set[str] = set()
         for item in sorted(versions, key=lambda row: row.raw_sha256):
             semantic = sha256_text(
@@ -1350,13 +1488,13 @@ def _checkpoint_record(
                 continue
             seen_semantic.add(semantic)
             unique_evidence.append(item)
-        if len(semantic_by_id[feedback_id]) > 1:
+        if len(semantic_by_id[score_id]) > 1:
             diagnostics.append(
                 FeedbackDiagnostic(
                     code="feedback_content_drift",
                     detail=(
-                        "同一远端反馈 ID 在本次读取中出现不同内容: "
-                        f"{feedback_id}"
+                        "同一远端 score ID 在本次读取中出现不同内容: "
+                        f"{score_id}"
                     ),
                 )
             )
@@ -1366,7 +1504,7 @@ def _checkpoint_record(
         candidates = [
             item
             for item in unique_evidence
-            if item.key == metric_binding.feedback_key
+            if item.score_name == metric_binding.feedback_key
         ]
         if not approval.applicable:
             feedback_rows.append(
@@ -1380,7 +1518,7 @@ def _checkpoint_record(
                 exclusions.append(
                     FeedbackExclusion(
                         evidence_id=item.evidence_id,
-                        feedback_id=item.feedback_id,
+                        score_id=item.score_id,
                         metric=metric,
                         reason="not_applicable_metric",
                         detail="指标已批准为不适用，云端分数仅作审计",
@@ -1393,7 +1531,7 @@ def _checkpoint_record(
                         metric=metric,
                         detail=(
                             "不适用指标收到云端反馈，已排除出成功统计: "
-                            f"{', '.join(item.feedback_id for item in candidates)}"
+                            f"{', '.join(item.score_id for item in candidates)}"
                         ),
                     )
                 )
@@ -1414,15 +1552,15 @@ def _checkpoint_record(
                     )
                 )
             continue
-        if cloud_run_id is None:
+        if cloud_trace_id is None:
             feedback_rows.append(
                 ExternalJudgeFeedback(metric=metric, status="pending")
             )
             diagnostics.append(
                 FeedbackDiagnostic(
-                    code="missing_cloud_run",
+                    code="missing_cloud_trace",
                     metric=metric,
-                    detail=f"检查点缺少云端根运行: {row['row_id']}",
+                    detail=f"检查点缺少云端 trace: {row['row_id']}",
                 )
             )
             continue
@@ -1431,21 +1569,21 @@ def _checkpoint_record(
             if history is None
             else history.terminal.get((checkpoint.key, metric), {})
         )
-        current_ids = {item.feedback_id for item in candidates}
-        for feedback_id, entries in sorted(historical.items()):
-            if feedback_id not in current_ids:
+        current_ids = {item.score_id for item in candidates}
+        for score_id, entries in sorted(historical.items()):
+            if score_id not in current_ids:
                 diagnostics.append(
                     FeedbackDiagnostic(
                         code="feedback_history_conflict",
                         metric=metric,
                         detail=(
                             "历史评分反馈未出现在本次读取中: "
-                            f"{feedback_id}"
+                            f"{score_id}"
                         ),
                     )
                 )
                 continue
-            current_semantics = semantic_by_id.get(feedback_id, set())
+            current_semantics = semantic_by_id.get(score_id, set())
             if not current_semantics or any(
                 entry.semantic_sha256 not in current_semantics
                 for entry in entries
@@ -1456,11 +1594,33 @@ def _checkpoint_record(
                         metric=metric,
                         detail=(
                             "远端反馈内容相对历史回收证据发生变化: "
-                            f"{feedback_id}"
+                            f"{score_id}"
                         ),
                     )
                 )
         if not candidates:
+            failure = _judge_failure(
+                judge_failures, evaluator_names[metric]
+            )
+            if failure is not None:
+                feedback_rows.append(
+                    ExternalJudgeFeedback(
+                        metric=metric,
+                        status="failed",
+                        failure_evidence=_failure_evidence(failure),
+                    )
+                )
+                diagnostics.append(
+                    FeedbackDiagnostic(
+                        code="cloud_failure",
+                        metric=metric,
+                        detail=(
+                            "网页裁判执行失败: "
+                            f"{failure.get('id')}"
+                        ),
+                    )
+                )
+                continue
             feedback_rows.append(
                 ExternalJudgeFeedback(metric=metric, status="pending")
             )
@@ -1469,30 +1629,29 @@ def _checkpoint_record(
                     code="awaiting_feedback",
                     metric=metric,
                     detail=(
-                        "尚未读取到映射反馈: "
-                        f"{metric_binding.feedback_key}"
+                        "尚未读取到映射 score: "
+                        f"{metric_binding.feedback_key}; "
+                        f"网页裁判调试 observation（environment="
+                        f"{WEB_JUDGE_ENVIRONMENT}）无可归属 Error 证据，"
+                        "不推断云端失败"
                     ),
                 )
             )
             continue
         terminal: list[tuple[FeedbackRawEvidence, ExternalJudgeFeedback]] = []
         for item in candidates:
-            if len(semantic_by_id[item.feedback_id]) > 1:
+            if len(semantic_by_id[item.score_id]) > 1:
                 continue
             feedback, reason, audit = _normalize_candidate(
                 item.raw, metric_binding
             )
             if reason is not None:
-                if reason in ("source_not_decision_model", "source_gap"):
-                    detail = (
-                        "反馈来源不是 Decision Model Evaluator"
-                        if reason == "source_not_decision_model"
-                        else "反馈缺少 feedback_source.metadata.typesafe"
-                    )
+                if reason == "source_not_decision_model":
+                    detail = "反馈来源不是 EVAL 网页裁判"
                     exclusions.append(
                         FeedbackExclusion(
                             evidence_id=item.evidence_id,
-                            feedback_id=item.feedback_id,
+                            score_id=item.score_id,
                             metric=metric,
                             reason=reason,
                             detail=detail,
@@ -1502,7 +1661,7 @@ def _checkpoint_record(
                         FeedbackDiagnostic(
                             code="source_gap",
                             metric=metric,
-                            detail=f"{detail}: {item.feedback_id}",
+                            detail=f"{detail}: {item.score_id}",
                         )
                     )
                 elif reason == "invalid_score":
@@ -1510,7 +1669,7 @@ def _checkpoint_record(
                     exclusions.append(
                         FeedbackExclusion(
                             evidence_id=item.evidence_id,
-                            feedback_id=item.feedback_id,
+                            score_id=item.score_id,
                             metric=metric,
                             reason="invalid_score",
                             detail=detail,
@@ -1521,19 +1680,8 @@ def _checkpoint_record(
                             code="invalid_score",
                             metric=metric,
                             detail=(
-                                "反馈分数不是有限的 0..1 数值: "
-                                f"{item.feedback_id}; {detail}"
-                            ),
-                        )
-                    )
-                elif reason == "feedback_without_terminal_score":
-                    diagnostics.append(
-                        FeedbackDiagnostic(
-                            code="feedback_without_terminal_score",
-                            metric=metric,
-                            detail=(
-                                "反馈对象缺少分数与错误标记: "
-                                f"{item.feedback_id}"
+                                "反馈分数不是 NUMERIC 的有限 0..1 数值: "
+                                f"{item.score_id}; {detail}"
                             ),
                         )
                     )
@@ -1547,7 +1695,7 @@ def _checkpoint_record(
                     metric=metric,
                     detail=(
                         "同一指标存在多个终态反馈，拒绝自动选择: "
-                        f"{', '.join(item.feedback_id for item, _ in terminal)}"
+                        f"{', '.join(item.score_id for item, _ in terminal)}"
                     ),
                 )
             )
@@ -1558,17 +1706,6 @@ def _checkpoint_record(
             )
             attempts.append(attempt)
             feedback_rows.append(feedback)
-            if feedback.status == "failed":
-                diagnostics.append(
-                    FeedbackDiagnostic(
-                        code="cloud_failure",
-                        metric=metric,
-                        detail=(
-                            "云端评分失败: "
-                            f"{attempt.cloud_feedback.feedback_id}"
-                        ),
-                    )
-                )
         else:
             feedback_rows.append(
                 ExternalJudgeFeedback(metric=metric, status="pending")
@@ -1638,7 +1775,7 @@ def _checkpoint_record(
         execution_sha256=checkpoint.execution_sha256,
         row_id=None if row is None else row["row_id"],
         example_id=None if row is None else row["row_id"],
-        cloud_run_id=cloud_run_id,
+        cloud_trace_id=cloud_trace_id,
         projection_sha256=None if row is None else row["projection_sha256"],
         feedback_set=feedback_set,
         attempts=attempts_sorted,
@@ -1655,24 +1792,32 @@ def normalize_feedback(
     cloud_runs: dict[str, str],
     feedback_by_run: dict[str, Sequence[Any]],
     history: FeedbackHistory | None = None,
+    *,
+    judge_failures: dict[str, Sequence[dict[str, Any]]] | None = None,
 ) -> list[CheckpointFeedbackRecord]:
+    failures_by_trace = judge_failures or {}
     records: list[CheckpointFeedbackRecord] = []
     for checkpoint in context.evidence.checkpoints:
         row = context.rows_by_key.get(checkpoint.key)
-        cloud_run_id = (
+        cloud_trace_id = (
             None if row is None else cloud_runs.get(row["row_id"])
         )
         raw_items: list[dict[str, Any]] = []
-        if cloud_run_id is not None:
-            for value in feedback_by_run.get(cloud_run_id, ()):
+        if cloud_trace_id is not None:
+            for value in feedback_by_run.get(cloud_trace_id, ()):
                 raw_items.append(_raw_feedback(value))
         records.append(
             _checkpoint_record(
                 context,
                 checkpoint,
                 row,
-                cloud_run_id,
+                cloud_trace_id,
                 raw_items,
+                (
+                    list(failures_by_trace.get(cloud_trace_id) or ())
+                    if cloud_trace_id is not None
+                    else []
+                ),
                 history,
             )
         )
@@ -1742,12 +1887,12 @@ def _history_from_batches(
     for batch in batches:
         for record in batch.checkpoints:
             evidence_by_id = {
-                item.feedback_id: item for item in record.evidence
+                item.score_id: item for item in record.evidence
             }
             for attempt in record.attempts:
-                if attempt.cloud_feedback is None:
+                if attempt.cloud_score is None:
                     continue
-                item = evidence_by_id.get(attempt.cloud_feedback.feedback_id)
+                item = evidence_by_id.get(attempt.cloud_score.score_id)
                 _require(
                     item is not None,
                     "历史评分尝试缺少原始证据，拒绝读取",
@@ -1765,7 +1910,7 @@ def _history_from_batches(
                 )
                 bucket = terminal.setdefault((key, metric), {})
                 bucket.setdefault(
-                    attempt.cloud_feedback.feedback_id, []
+                    attempt.cloud_score.score_id, []
                 ).append(entry)
     return FeedbackHistory(terminal=terminal)
 
@@ -1869,7 +2014,7 @@ def verify_batch(context: FeedbackContext, batch: FeedbackCollectionBatch) -> No
             _require(
                 record.row_id is None
                 and record.example_id is None
-                and record.cloud_run_id is None
+                and record.cloud_trace_id is None
                 and record.projection_sha256 is None
                 and not record.attempts,
                 "未上传检查点不得携带上传、运行或评分尝试身份",
@@ -1884,7 +2029,7 @@ def verify_batch(context: FeedbackContext, batch: FeedbackCollectionBatch) -> No
                 "回收批次的投影摘要与 payload 不一致",
             )
             _require(
-                record.cloud_run_id == runs.get(row["row_id"]),
+                record.cloud_trace_id == runs.get(row["row_id"]),
                 "回收批次的云端运行身份与实验回执不一致",
             )
         approved = context.applicability[key]
@@ -1895,8 +2040,8 @@ def verify_batch(context: FeedbackContext, batch: FeedbackCollectionBatch) -> No
         evidence_by_id: dict[str, list[FeedbackRawEvidence]] = {}
         semantic_by_id: dict[str, set[str]] = {}
         for item in record.evidence:
-            evidence_by_id.setdefault(item.feedback_id, []).append(item)
-            semantic_by_id.setdefault(item.feedback_id, set()).add(
+            evidence_by_id.setdefault(item.score_id, []).append(item)
+            semantic_by_id.setdefault(item.score_id, set()).add(
                 sha256_text(canonical_json(_semantic_feedback(item.raw)))
             )
         for metric in EXTERNAL_JUDGE_METRICS:
@@ -1924,18 +2069,18 @@ def verify_batch(context: FeedbackContext, batch: FeedbackCollectionBatch) -> No
             if (
                 approval.applicable
                 and row is not None
-                and record.cloud_run_id is not None
+                and record.cloud_trace_id is not None
             ):
                 for item in record.evidence:
-                    if item.key != binding.feedback_key:
+                    if item.score_name != binding.feedback_key:
                         continue
-                    if len(semantic_by_id[item.feedback_id]) > 1:
+                    if len(semantic_by_id[item.score_id]) > 1:
                         continue
                     candidate, reason, _ = _normalize_candidate(
                         item.raw, binding
                     )
                     if reason is None and candidate is not None:
-                        expected_terminal[item.feedback_id] = candidate
+                        expected_terminal[item.score_id] = candidate
             conflicts = [
                 diagnostic
                 for diagnostic in record.diagnostics
@@ -1955,6 +2100,10 @@ def verify_batch(context: FeedbackContext, batch: FeedbackCollectionBatch) -> No
                     f"评分尝试的模型身份与绑定不一致: {key}/{metric}",
                 )
                 _require(
+                    attempt.model.model_version.kind == "unreported",
+                    f"评分尝试的模型版本必须为平台未返回口径: {key}/{metric}",
+                )
+                _require(
                     attempt.definition.model_dump(mode="json")
                     == {
                         "question_id": binding.question_id,
@@ -1964,36 +2113,36 @@ def verify_batch(context: FeedbackContext, batch: FeedbackCollectionBatch) -> No
                     },
                     f"评分尝试的问题或评分标准与绑定不一致: {key}/{metric}",
                 )
-                cloud = attempt.cloud_feedback
+                cloud = attempt.cloud_score
                 _require(
                     cloud is not None,
                     f"评分尝试缺少云端反馈身份: {key}/{metric}",
                 )
-                matches = evidence_by_id.get(cloud.feedback_id, [])
+                matches = evidence_by_id.get(cloud.score_id, [])
                 _require(
                     len(matches) == 1,
-                    f"评分尝试缺少唯一原始反馈证据: {cloud.feedback_id}",
+                    f"评分尝试缺少唯一原始反馈证据: {cloud.score_id}",
                 )
                 evidence = matches[0]
                 _require(
-                    evidence.run_id == cloud.run_id == attempt.source.run_id,
-                    f"评分尝试与原始反馈的运行身份不一致: {cloud.feedback_id}",
+                    evidence.trace_id == cloud.trace_id == attempt.source.trace_id,
+                    f"评分尝试与原始反馈的运行身份不一致: {cloud.score_id}",
                 )
                 _require(
-                    record.cloud_run_id == attempt.source.run_id,
-                    f"评分尝试的运行不属于回收检查点: {cloud.feedback_id}",
+                    record.cloud_trace_id == attempt.source.trace_id,
+                    f"评分尝试的运行不属于回收检查点: {cloud.score_id}",
                 )
                 _require(
                     attempt.source.example_id == record.example_id,
-                    f"评分尝试的 Example 身份与回收检查点不一致: {cloud.feedback_id}",
+                    f"评分尝试的 Example 身份与回收检查点不一致: {cloud.score_id}",
                 )
                 _require(
-                    evidence.key == binding.feedback_key,
-                    f"评分尝试关联了错误 feedback key: {cloud.feedback_id}",
+                    evidence.score_name == binding.feedback_key,
+                    f"评分尝试关联了错误 feedback key: {cloud.score_id}",
                 )
                 _require(
-                    _source_kind(evidence.raw) in ("model", "evaluator"),
-                    f"评分尝试关联的反馈不是自动裁判来源: {cloud.feedback_id}",
+                    evidence.raw.get("source") == "EVAL",
+                    f"评分尝试关联的反馈不是自动裁判来源: {cloud.score_id}",
                 )
                 normalized, reason, _ = _normalize_candidate(
                     evidence.raw, binding
@@ -2001,17 +2150,17 @@ def verify_batch(context: FeedbackContext, batch: FeedbackCollectionBatch) -> No
                 _require(
                     reason is None and normalized is not None,
                     f"原始反馈无法归一化为终态评分: "
-                    f"{cloud.feedback_id}/{reason}",
+                    f"{cloud.score_id}/{reason}",
                 )
                 _require(
                     normalized.model_dump(mode="json")
                     == attempt.feedback.model_dump(mode="json"),
                     f"评分尝试的归一化结果与原始反馈不一致: "
-                    f"{cloud.feedback_id}",
+                    f"{cloud.score_id}",
                 )
                 _require(
                     row is not None,
-                    f"评分尝试缺少投影行身份: {cloud.feedback_id}",
+                    f"评分尝试缺少投影行身份: {cloud.score_id}",
                 )
                 expected = _attempt(
                     context, checkpoint, binding, row, evidence.raw, normalized
@@ -2020,18 +2169,12 @@ def verify_batch(context: FeedbackContext, batch: FeedbackCollectionBatch) -> No
                     expected.model_dump(mode="json")
                     == attempt.model_dump(mode="json"),
                     f"评分尝试的来源或模型身份与原始反馈不一致: "
-                    f"{cloud.feedback_id}",
+                    f"{cloud.score_id}",
                 )
-                if attempt.feedback.status == "succeeded":
-                    _require(
-                        _type_safe_metadata(evidence.raw) is not None,
-                        f"成功评分缺少 feedback_source.metadata.typesafe: "
-                        f"{cloud.feedback_id}",
-                    )
             attempt_ids = {
-                attempt.cloud_feedback.feedback_id
+                attempt.cloud_score.score_id
                 for attempt in attempt_rows
-                if attempt.cloud_feedback is not None
+                if attempt.cloud_score is not None
             }
             _require(
                 len(attempt_rows) == len(expected_terminal)
@@ -2052,11 +2195,29 @@ def verify_batch(context: FeedbackContext, batch: FeedbackCollectionBatch) -> No
                             f"多终态反馈必须归档为待回收: {key}/{metric}",
                         )
                 else:
-                    _require(
-                        feedback.status == "pending",
-                        f"适用指标缺少原始反馈却归档为非待回收状态: "
-                        f"{key}/{metric}",
-                    )
+                    # 无 score 的终态只能来自网页裁判调试 observation 的失败依据。
+                    if feedback.status == "failed":
+                        _require(
+                            not any(
+                                item.score_name == binding.feedback_key
+                                for item in record.evidence
+                            ),
+                            f"失败反馈存在同 key 原始 score 证据: {key}/{metric}",
+                        )
+                        _require(
+                            any(
+                                diagnostic.code == "cloud_failure"
+                                and diagnostic.metric == metric
+                                for diagnostic in record.diagnostics
+                            ),
+                            f"失败反馈缺少网页裁判失败诊断: {key}/{metric}",
+                        )
+                    else:
+                        _require(
+                            feedback.status == "pending",
+                            f"适用指标缺少原始反馈却归档为非待回收状态: "
+                            f"{key}/{metric}",
+                        )
     _require(
         (batch.experiment is None) == (context.experiment is None),
         "回收批次的实验身份与当前源证据不一致",
@@ -2151,10 +2312,6 @@ def _persist_batch(
     return path, reused
 
 
-def _chunks(values: Sequence[str], size: int) -> list[Sequence[str]]:
-    return [values[index : index + size] for index in range(0, len(values), size)]
-
-
 def verify_receipt_runs(
     context: FeedbackContext, runs: Sequence[Any]
 ) -> dict[str, str]:
@@ -2163,7 +2320,7 @@ def verify_receipt_runs(
     experiment_id = context.experiment_receipt["experiment_id"]
     for run in runs:
         _require(
-            str(run.session_id) == experiment_id,
+            str(run.experiment_id) == experiment_id,
             f"远端运行不属于回执实验: {run.id}",
         )
     missing, mapping = _collect_external_runs(context.payload, runs)
@@ -2178,42 +2335,96 @@ def verify_receipt_runs(
     return mapping
 
 
-def group_run_feedback(
-    experiment_id: str,
+def group_score_feedback(
     run_ids: Sequence[str],
     items: Sequence[Any],
 ) -> dict[str, list[Any]]:
+    # Score 读回已按 experiment_id 过滤；这里再按 subject trace 归组到检查点行。
     feedback: dict[str, list[Any]] = {run_id: [] for run_id in run_ids}
     allowed = set(run_ids)
     for item in items:
-        run_id = getattr(item, "run_id", None)
+        raw = _raw_feedback(item)
+        score_id, trace_id, _ = _score_identity(raw)
         _require(
-            run_id is not None and str(run_id) in allowed,
-            f"返回了回执运行之外的反馈: {getattr(item, 'id', None)}",
+            trace_id in allowed,
+            f"返回了回执运行之外的反馈: {score_id}",
         )
-        session_id = getattr(item, "session_id", None)
-        _require(
-            session_id is None or str(session_id) == experiment_id,
-            f"反馈的会话身份不属于回执实验: {getattr(item, 'id', None)}",
-        )
-        feedback[str(run_id)].append(item)
+        feedback[trace_id].append(item)
     return feedback
+
+
+def _run_start_time(context: FeedbackContext) -> datetime:
+    return datetime.fromisoformat(context.evidence.document["started_at"])
+
+
+def _experiment_scores(client: Any, experiment_id: str) -> list[Any]:
+    items: list[Any] = []
+    cursor = None
+    while True:
+        response = client.api.scores.get_many(
+            experiment_id=experiment_id,
+            fields="details,subject",
+            limit=FEEDBACK_BATCH_SIZE,
+            cursor=cursor,
+        )
+        items.extend(response.data)
+        cursor = response.meta.cursor
+        if not cursor:
+            return items
+
+
+def _judge_failures(
+    client: Any, trace_ids: Sequence[str]
+) -> dict[str, list[dict[str, Any]]]:
+    # 仅按回执 trace 作用域查询网页裁判调试 observation；Langfuse 文档口径下
+    # 调试 trace 独立存在，查询为空时不推断云端失败。
+    failures: dict[str, list[dict[str, Any]]] = {}
+    for trace_id in sorted(set(trace_ids)):
+        observations: list[dict[str, Any]] = []
+        cursor = None
+        while True:
+            response = client.api.observations.get_many(
+                environment=WEB_JUDGE_ENVIRONMENT,
+                trace_id=trace_id,
+                limit=FEEDBACK_BATCH_SIZE,
+                cursor=cursor,
+            )
+            observations.extend(response.data)
+            cursor = response.meta.cursor
+            if not cursor:
+                break
+        sanitized = []
+        for observation in observations:
+            if observation.level != "ERROR":
+                continue
+            document = _sanitize_outbound(
+                _json_safe(observation.model_dump(mode="json"))
+            )
+            _assert_no_secret(document, "网页裁判调试证据")
+            sanitized.append(document)
+        failures[trace_id] = sanitized
+    return failures
+
+
+def _feedback_client(timeout_ms: int) -> Langfuse:
+    # SDK 5.0.4 读路径基于 Fern/httpx：无自动重试，单次请求失败即抛错；
+    # LangSmith Retry(total=0) 的对应实现即该单次请求语义，超时以秒下限 1 秒传入。
+    seconds = max(1, int(timeout_ms / 1000))
+    client = Langfuse(timeout=seconds)
+    _require(client.auth_check(), "Langfuse 凭据校验失败")
+    return client
 
 
 def read_remote_feedback(
     context: FeedbackContext, *, timeout_ms: int
-) -> tuple[dict[str, str], dict[str, list[Any]]]:
-    # SDK 自带分页与有限重试；这里显式关闭重试并把剩余时限压到单次请求超时。
-    client = Client(
-        auto_batch_tracing=False,
-        timeout_ms=timeout_ms,
-        retry_config=Retry(total=0),
-    )
+) -> tuple[dict[str, str], dict[str, list[Any]], dict[str, list[dict[str, Any]]]]:
     assert context.payload is not None
     assert context.experiment_receipt is not None
+    client = _feedback_client(timeout_ms)
     receipt = context.experiment_receipt
     dataset_id = receipt["dataset_id"]
     experiment_id = receipt["experiment_id"]
+    started_at = _run_start_time(context)
     _verify_remote_dataset(client, context.payload, dataset_id)
     _verify_experiment_project(
         client,
@@ -2221,13 +2432,18 @@ def read_remote_feedback(
         receipt["experiment_name"],
         dataset_id,
         _experiment_metadata(context.payload, dataset_id),
+        from_start_time=started_at,
     )
-    mapping = verify_receipt_runs(context, _root_runs(client, experiment_id))
-    run_ids = [receipt["runs"][row_id] for row_id in receipt["runs"]]
-    items: list[Any] = []
-    for batch in _chunks(run_ids, FEEDBACK_BATCH_SIZE):
-        items.extend(client.list_feedback(run_ids=list(batch)))
-    return mapping, group_run_feedback(experiment_id, run_ids, items)
+    mapping = verify_receipt_runs(
+        context, _root_runs(client, experiment_id, from_start_time=started_at)
+    )
+    items = _experiment_scores(client, experiment_id)
+    failures = _judge_failures(client, list(mapping.values()))
+    return (
+        mapping,
+        group_score_feedback(list(mapping.values()), items),
+        failures,
+    )
 
 
 def _awaitable(records: Sequence[CheckpointFeedbackRecord]) -> bool:
@@ -2235,8 +2451,7 @@ def _awaitable(records: Sequence[CheckpointFeedbackRecord]) -> bool:
         if record.status != "pending":
             continue
         if any(
-            diagnostic.code
-            in ("awaiting_feedback", "feedback_without_terminal_score")
+            diagnostic.code == "awaiting_feedback"
             for diagnostic in record.diagnostics
         ):
             return True
@@ -2249,7 +2464,12 @@ def _bounded_collect(
     history: FeedbackHistory | None,
     *,
     reader: Callable[
-        [FeedbackContext, int], tuple[dict[str, str], dict[str, list[Any]]]
+        [FeedbackContext, int],
+        tuple[
+            dict[str, str],
+            dict[str, list[Any]],
+            dict[str, list[dict[str, Any]]],
+        ],
     ] = None,
 ) -> tuple[FeedbackCollectionBatch, int]:
     read = read_remote_feedback if reader is None else reader
@@ -2264,10 +2484,13 @@ def _bounded_collect(
             if remaining <= 0:
                 break
             timeout_ms = max(100, int(remaining * 1000))
-        cloud_runs, feedback_by_run = read(context, timeout_ms)
+        cloud_runs, feedback_by_run, judge_failures = read(
+            context, timeout_ms
+        )
         reads += 1
         records = normalize_feedback(
-            context, cloud_runs, feedback_by_run, history
+            context, cloud_runs, feedback_by_run, history,
+            judge_failures=judge_failures,
         )
         batch = build_feedback_batch(context, records)
         if batch.status != "pending" or not _awaitable(records):
@@ -2422,8 +2645,10 @@ def collect_feedback(
         )
     load_dotenv(BACKEND / ".env", override=False)
     _require(
-        bool(os.environ.get("LANGSMITH_API_KEY")),
-        "请在 backend/.env 配置 LANGSMITH_API_KEY 后再执行云端回收",
+        bool((os.environ.get("LANGFUSE_PUBLIC_KEY") or "").strip())
+        and bool((os.environ.get("LANGFUSE_SECRET_KEY") or "").strip()),
+        "请在 backend/.env 配置 LANGFUSE_PUBLIC_KEY/LANGFUSE_SECRET_KEY "
+        "后再执行云端回收",
     )
     batch, reads = _bounded_collect(context, wait_seconds, history)
     path, reused = _persist_batch(context, batch, loaded)
@@ -2449,12 +2674,12 @@ def _wait_seconds(value: str) -> float:
 
 def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="LangSmith 外部裁判反馈回收；check 不访问网络"
+        description="Langfuse 外部裁判反馈回收；check 不访问网络"
     )
     commands = parser.add_subparsers(dest="command", required=True)
     for name, help_text in (
         ("check", "离线校验源绑定、绑定文件与已有回收产物"),
-        ("collect", "读取指定实验的云端反馈并保存版本化证据"),
+        ("collect", "读取指定实验的 Langfuse Score 并保存版本化证据"),
     ):
         command = commands.add_parser(name, help=help_text)
         command.add_argument("--source", type=Path, required=True)

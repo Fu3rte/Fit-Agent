@@ -4344,9 +4344,9 @@ async def _run_external_selected(
             "corpus_sha256": dataset.corpus_sha256,
         },
         "code": code_identity(),
-        # 裁判配置由 LangSmith 外部管理；实际 Evaluator 身份由后续上传与回收证据记录。
+        # 裁判配置由 Langfuse 外部管理；实际 Evaluator 身份由后续上传与回收证据记录。
         "judge": {
-            "ownership": "langsmith",
+            "ownership": "langfuse",
             "configuration": "external",
         },
     }
