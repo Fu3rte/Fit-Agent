@@ -37,6 +37,7 @@ Desktop.ini
 .pi/
 .commandcode/
 .workbuddy/
+!backend/.env.example
 
 AGENTS.md
 
