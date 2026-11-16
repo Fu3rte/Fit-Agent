@@ -534,26 +534,14 @@ def test_resolve_inputs_rejects_identity_drift(dataset, rows):
         )
 
 
-def test_judge_config_accepts_configured_model_and_fixed_endpoint(monkeypatch):
-    monkeypatch.setenv("FIT_AGENT_EVAL_JUDGE_MODEL", "qwen3.6-plus")
-    monkeypatch.setenv("FIT_AGENT_EVAL_JUDGE_BASE_URL", lf.JUDGE_BASE_URL)
-    monkeypatch.setenv("FIT_AGENT_EVAL_JUDGE_API_KEY", "test-only-credential")
+def test_judge_config_uses_saved_chat_configuration(tmp_path, monkeypatch):
+    from app import model_config
+
+    monkeypatch.setattr(model_config, "DATA_ROOT", tmp_path)
+    model_config.save_provider(api="openai-completions", base_url="https://example.invalid/v1", model="test-model", provider="test-provider", api_key="test-key")
+    saved = model_config.load_model_config()
     judge = lf.judge_config()
-    assert judge.model == "qwen3.6-plus"
-    assert judge.base_url == lf.JUDGE_BASE_URL
-    monkeypatch.setenv("FIT_AGENT_EVAL_JUDGE_MODEL", "step-5-preview")
-    assert lf.judge_config().model == "step-5-preview"
-    monkeypatch.setenv("FIT_AGENT_EVAL_JUDGE_MODEL", "   ")
-    with pytest.raises(lf.ScenarioSDKError, match="裁判模型"):
-        lf.judge_config()
-    monkeypatch.setenv("FIT_AGENT_EVAL_JUDGE_MODEL", "qwen3.6-plus")
-    monkeypatch.setenv("FIT_AGENT_EVAL_JUDGE_BASE_URL", "https://example.invalid/v1")
-    with pytest.raises(lf.ScenarioSDKError, match="裁判服务地址"):
-        lf.judge_config()
-    monkeypatch.setenv("FIT_AGENT_EVAL_JUDGE_BASE_URL", lf.JUDGE_BASE_URL)
-    monkeypatch.delenv("FIT_AGENT_EVAL_JUDGE_API_KEY")
-    with pytest.raises(lf.ScenarioSDKError, match="裁判凭据"):
-        lf.judge_config()
+    assert (judge.api, judge.provider, judge.model, judge.base_url, judge.api_key) == (saved.api, saved.provider, saved.model, saved.base_url, saved.api_key)
 
 
 def test_require_credentials_blocks_missing_keys(monkeypatch):
@@ -600,13 +588,6 @@ async def test_run_experiment_defaults_to_external_without_scoring_mode(
     dataset, tmp_path, monkeypatch
 ):
     monkeypatch.setattr(lf, "RUNS_ROOT", tmp_path / "runs")
-    # 隔离全部本地裁判环境变量：external 默认推进时不得读取任何 JUDGE_* 配置。
-    for name in (
-        "FIT_AGENT_EVAL_JUDGE_MODEL",
-        "FIT_AGENT_EVAL_JUDGE_BASE_URL",
-        "FIT_AGENT_EVAL_JUDGE_API_KEY",
-    ):
-        monkeypatch.delenv(name, raising=False)
     monkeypatch.setattr(lf, "judge_config", lambda: (_ for _ in ()).throw(
         AssertionError("external 默认不得读取本地裁判配置")
     ))
@@ -1381,15 +1362,17 @@ def test_experiment_metadata_roundtrip_and_drift_detection(dataset):
         selections=selections,
         model_identity={"model": "generation-model"},
         judge=JudgeConfig(
-            model="qwen3.6-plus", base_url=lf.JUDGE_BASE_URL, api_key="test-only"
+            model="qwen3.6-plus", base_url="https://example.invalid/v1", api_key="test-only", provider="test-provider"
         ),
         index_identity={"collection": "fit-agent-exercises"},
         code=code,
         scoring_mode="ragas",
     )
     assert ragas["judge"] == {
+        "api": "openai-completions",
+        "provider": "test-provider",
         "model": "qwen3.6-plus",
-        "endpoint_sha256": sha256_text(lf.JUDGE_BASE_URL),
+        "endpoint_sha256": sha256_text("https://example.invalid/v1"),
     }
     assert ragas["protocol_version"] == RAGAS_PROTOCOL_VERSION
 

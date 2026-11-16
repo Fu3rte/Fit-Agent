@@ -38,6 +38,7 @@ from app.infrastructure.persistence.sqlite.business_repository import (
 )
 from app.infrastructure.persistence.sqlite.database import open_database
 from app.infrastructure.persistence.sqlite.repository import SqliteSessionRepository
+from app.model_config import ModelConfig
 from test.regression_support import install_test_model_config, temporary_root
 
 FULL_PROFILE: JsonObject = {
@@ -231,7 +232,13 @@ async def check_loop(directory: Path) -> dict:
             assistant([TextContent(type="text", text="已整理完整画像，等待你的确认。")], "stop"),
         ]
         config = AgentLoopConfig(
-            model=install_test_model_config(),
+            model=install_test_model_config(model=ModelConfig(
+                api="openai-completions",
+                base_url="http://127.0.0.1:1",
+                model="test",
+                provider="openai",
+                api_key="test-key",
+            )),
             max_turns=8,
             request_budget=RequestBudget(),
             transform_context=transform_context,

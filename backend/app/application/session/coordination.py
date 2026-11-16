@@ -70,15 +70,21 @@ def retire(state: RunState) -> None:
 def publish_terminal(state: RunState, run, stop_reason: str | None) -> None:
     # 公开终态由已提交运行记录决定；仅终态持久化成功后调用。
     if run.status == "completed":
-        state.publish_terminal("done", {"status": "completed", "stop_reason": stop_reason})
+        state.publish_terminal(
+            "done", {"status": "completed", "stop_reason": stop_reason}
+        )
         return
     cancelled = run.status == "cancelled"
-    state.publish_terminal("error", {
-        "status": run.status,
-        "code": run.error_code or ("cancelled" if cancelled else "execution_failed"),
-        "message": run.error_message
-        or ("执行已取消。" if cancelled else "执行失败，请重新发起请求。"),
-    })
+    state.publish_terminal(
+        "error",
+        {
+            "status": run.status,
+            "code": run.error_code
+            or ("cancelled" if cancelled else "execution_failed"),
+            "message": run.error_message
+            or ("执行已取消。" if cancelled else "执行失败，请重新发起请求。"),
+        },
+    )
 
 
 def terminal_decision(
@@ -93,7 +99,11 @@ def terminal_decision(
         status, code = stop_terminal(stop_reason)
         message = STOP_REASON_MESSAGES.get(code)
         if message is None:
-            message = "执行已取消。" if status == "cancelled" else "执行失败，请重新发起请求。"
+            message = (
+                "执行已取消。"
+                if status == "cancelled"
+                else "执行失败，请重新发起请求。"
+            )
         return status, code, message
     if isinstance(failure, CompactionSummaryError):
         return "failed", "compaction_failed", COMPACTION_FAILED_MESSAGE
@@ -261,18 +271,37 @@ async def coordinate(
                 projection = await _bounded_read(
                     state,
                     queries.get_projection(session_id, run.request_entry_id),
-                    state.control.deadline.remaining() + CANCEL_COOPERATIVE_WAIT_SECONDS,
+                    state.control.deadline.remaining()
+                    + CANCEL_COOPERATIVE_WAIT_SECONDS,
                 )
                 if projection is READ_TIMEOUT:
                     state.control.request_cancel("run_timeout")
                     return await _fault_close(
-                        state, root, coordinator, runs, session_id, run.id,
-                        "terminal_persist_failed", None, None,
+                        state,
+                        root,
+                        coordinator,
+                        runs,
+                        session_id,
+                        run.id,
+                        "terminal_persist_failed",
+                        None,
+                        None,
                     )
                 branch = projection.context.messages
                 concurrent_future = executor.submit(
-                    execute, run, session_id, branch, tools, state, queries, entries, business,
-                    loop, model, secrets, root,
+                    execute,
+                    run,
+                    session_id,
+                    branch,
+                    tools,
+                    state,
+                    queries,
+                    entries,
+                    business,
+                    loop,
+                    model,
+                    secrets,
+                    root,
                     create_events=lambda guard, parents: create_events(
                         state.publish, guard, parents, root.record_first_text
                     ),
@@ -291,8 +320,15 @@ async def coordinate(
                         deadline = state.control.cooperative_deadline()
                         if deadline is not None and monotonic() >= deadline:
                             return await _fault_close(
-                                state, root, coordinator, runs, session_id, run.id,
-                                "worker_stuck", future, concurrent_future,
+                                state,
+                                root,
+                                coordinator,
+                                runs,
+                                session_id,
+                                run.id,
+                                "worker_stuck",
+                                future,
+                                concurrent_future,
                             )
                 try:
                     stop_reason = future.result()
@@ -301,8 +337,15 @@ async def coordinate(
 
             if not await _wait_tools(state):
                 return await _fault_close(
-                    state, root, coordinator, runs, session_id, run.id,
-                    "worker_stuck", future, concurrent_future,
+                    state,
+                    root,
+                    coordinator,
+                    runs,
+                    session_id,
+                    run.id,
+                    "worker_stuck",
+                    future,
+                    concurrent_future,
                 )
 
             cancelled = isinstance(failure, CancelledError) or state.cancel.is_set()
@@ -316,39 +359,75 @@ async def coordinate(
                 )
             except BaseException:
                 return await _fault_close(
-                    state, root, coordinator, runs, session_id, run.id,
-                    "terminal_persist_failed", future, concurrent_future,
+                    state,
+                    root,
+                    coordinator,
+                    runs,
+                    session_id,
+                    run.id,
+                    "terminal_persist_failed",
+                    future,
+                    concurrent_future,
                 )
             if current is READ_TIMEOUT:
                 return await _fault_close(
-                    state, root, coordinator, runs, session_id, run.id,
-                    "terminal_persist_failed", future, concurrent_future,
+                    state,
+                    root,
+                    coordinator,
+                    runs,
+                    session_id,
+                    run.id,
+                    "terminal_persist_failed",
+                    future,
+                    concurrent_future,
                 )
             if current.status in TERMINAL_RUN_STATUSES:
                 status, code, message = (
-                    current.status, current.error_code, current.error_message,
+                    current.status,
+                    current.error_code,
+                    current.error_message,
                 )
 
             # 终态持久化超时不回滚、不再次提交。
-            finish_task = asyncio.create_task(coordinator.finish(
-                session_id, run.id, status,
-                error_code=code, error_message=message, stop_reason=recorded_stop,
-            ))
+            finish_task = asyncio.create_task(
+                coordinator.finish(
+                    session_id,
+                    run.id,
+                    status,
+                    error_code=code,
+                    error_message=message,
+                    stop_reason=recorded_stop,
+                )
+            )
             done, _ = await asyncio.wait(
                 {finish_task}, timeout=TERMINAL_PERSIST_WAIT_SECONDS
             )
             if not done:
                 finish_task.add_done_callback(_consume_future)
                 return await _fault_close(
-                    state, root, coordinator, runs, session_id, run.id,
-                    "terminal_persist_failed", future, concurrent_future,
+                    state,
+                    root,
+                    coordinator,
+                    runs,
+                    session_id,
+                    run.id,
+                    "terminal_persist_failed",
+                    future,
+                    concurrent_future,
                 )
             try:
                 outcome = finish_task.result()
             except BaseException:
                 return await _fault_close(
-                    state, root, coordinator, runs, session_id, run.id,
-                    "terminal_persist_failed", future, concurrent_future,
+                    state,
+                    root,
+                    coordinator,
+                    runs,
+                    session_id,
+                    run.id,
+                    "terminal_persist_failed",
+                    future,
+                    concurrent_future,
                 )
             root_status = {"completed": "completed", "cancelled": "cancelled"}.get(
                 status, "failed"

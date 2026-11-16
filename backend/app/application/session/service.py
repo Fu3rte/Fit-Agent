@@ -78,9 +78,7 @@ class SessionService:
         *,
         credentials: Sequence[str] = (),
     ) -> tuple[bool, Session]:
-        reject_credentials(
-            {"session_id": session_id, "title": title}, credentials
-        )
+        reject_credentials({"session_id": session_id, "title": title}, credentials)
         now = now_ms()
         async with self._repository.transaction():
             existing = await self._repository.get_session(session_id)
@@ -119,14 +117,16 @@ class SessionService:
     ) -> OperationOutcome:
         request = command.request
         reject_credentials(command.model_dump(exclude_unset=True), credentials)
-        reject_credentials(
-            system_message.model_dump(exclude_unset=True), credentials
-        )
+        reject_credentials(system_message.model_dump(exclude_unset=True), credentials)
         async with self.attachments.attachment_transaction(
             command, "send", credentials
         ) as created:
             resolved = await self.operations.resolve_operation(
-                command.operation_id, command.session_id, "send", request, credentials=credentials
+                command.operation_id,
+                command.session_id,
+                "send",
+                request,
+                credentials=credentials,
             )
             if resolved is not None:
                 return resolved
@@ -138,7 +138,11 @@ class SessionService:
             )
             now = now_ms() if now is None else now
             attachments = await self.attachments.accept_attachments(
-                command.session_id, request.attachments, created, now, credentials,
+                command.session_id,
+                request.attachments,
+                created,
+                now,
+                credentials,
             )
             parent_id = session.active_leaf_id
             user_timestamp = now
@@ -171,11 +175,17 @@ class SessionService:
             run = new_run(command.session_id, user_entry.id, now)
             await self._repository.insert_entry(user_entry)
             await self._repository.bind_entry_attachments(
-                command.session_id, user_entry.id, [item.attachment_id for item in attachments],
+                command.session_id,
+                user_entry.id,
+                [item.attachment_id for item in attachments],
             )
             await self._repository.insert_run(run)
             operation = await self.operations.record_operation(
-                command.operation_id, command.session_id, "send", request, run.id,
+                command.operation_id,
+                command.session_id,
+                "send",
+                request,
+                run.id,
                 accepted_attachments=attachments,
             )
             await set_leaf(self._repository, session, user_entry.id, now)
@@ -196,7 +206,11 @@ class SessionService:
             command, "edit", credentials
         ) as created:
             resolved = await self.operations.resolve_operation(
-                command.operation_id, command.session_id, "edit", request, credentials=credentials
+                command.operation_id,
+                command.session_id,
+                "edit",
+                request,
+                credentials=credentials,
             )
             if resolved is not None:
                 return resolved
@@ -214,12 +228,22 @@ class SessionService:
             now = now_ms()
             inputs = request.attachments
             if "attachments" not in request.model_fields_set:
-                inputs = [AttachmentReference(kind="reference", attachment_id=item.attachment_id)
-                          for item in await self._repository.list_entry_attachments(command.session_id, target.id)]
+                inputs = [
+                    AttachmentReference(
+                        kind="reference", attachment_id=item.attachment_id
+                    )
+                    for item in await self._repository.list_entry_attachments(
+                        command.session_id, target.id
+                    )
+                ]
             if not inputs and not request.text.strip():
                 raise AttachmentError("invalid_request", "请求必须包含文字或附件")
             attachments = await self.attachments.accept_attachments(
-                command.session_id, inputs, created, now, credentials,
+                command.session_id,
+                inputs,
+                created,
+                now,
+                credentials,
             )
             await self.removal.remove_content(
                 command.session_id, target.id, entries, include_target=True
@@ -238,11 +262,17 @@ class SessionService:
             run = new_run(command.session_id, user_entry.id, now)
             await self._repository.insert_entry(user_entry)
             await self._repository.bind_entry_attachments(
-                command.session_id, user_entry.id, [item.attachment_id for item in attachments],
+                command.session_id,
+                user_entry.id,
+                [item.attachment_id for item in attachments],
             )
             await self._repository.insert_run(run)
             operation = await self.operations.record_operation(
-                command.operation_id, command.session_id, "edit", request, run.id,
+                command.operation_id,
+                command.session_id,
+                "edit",
+                request,
+                run.id,
                 accepted_attachments=attachments,
             )
             await set_leaf(self._repository, session, user_entry.id, now)
@@ -261,7 +291,11 @@ class SessionService:
         reject_credentials(command.model_dump(exclude_unset=True), credentials)
         async with self._repository.transaction():
             resolved = await self.operations.resolve_operation(
-                command.operation_id, command.session_id, "regenerate", request, credentials=credentials
+                command.operation_id,
+                command.session_id,
+                "regenerate",
+                request,
+                credentials=credentials,
             )
             if resolved is not None:
                 return resolved
@@ -277,8 +311,15 @@ class SessionService:
             reject_credentials(target.model_dump(), credentials)
             attachments = await self.attachments.accept_attachments(
                 command.session_id,
-                [AttachmentReference(kind="reference", attachment_id=item.attachment_id) for item in target.attachments],
-                [], now_ms(), credentials,
+                [
+                    AttachmentReference(
+                        kind="reference", attachment_id=item.attachment_id
+                    )
+                    for item in target.attachments
+                ],
+                [],
+                now_ms(),
+                credentials,
             )
             entries = await self._repository.list_entries(command.session_id)
             await self.queries.ensure_pairable(command.session_id, entries, target.id)
@@ -313,7 +354,11 @@ class SessionService:
             command, "steering", credentials
         ) as created:
             resolved = await self.operations.resolve_operation(
-                command.operation_id, command.session_id, "steering", request, credentials=credentials
+                command.operation_id,
+                command.session_id,
+                "steering",
+                request,
+                credentials=credentials,
             )
             if resolved is not None:
                 return resolved
@@ -325,15 +370,17 @@ class SessionService:
                 raise RunClosed("目标运行未在接受输入")
             now = now_ms()
             attachments = await self.attachments.accept_attachments(
-                command.session_id, request.attachments, created, now, credentials,
+                command.session_id,
+                request.attachments,
+                created,
+                now,
+                credentials,
             )
             steering = SteeringInput(
                 session_id=command.session_id,
                 id=new_id(),
                 run_id=run.id,
-                message=UserMessage(
-                    role="user", content=request.text, timestamp=now
-                ),
+                message=UserMessage(role="user", content=request.text, timestamp=now),
                 status="pending",
                 entry_id=None,
                 reason=None,
@@ -342,7 +389,9 @@ class SessionService:
             )
             await self._repository.insert_steering(steering)
             await self._repository.bind_steering_attachments(
-                command.session_id, steering.id, [item.attachment_id for item in attachments],
+                command.session_id,
+                steering.id,
+                [item.attachment_id for item in attachments],
             )
             operation = await self.operations.record_operation(
                 command.operation_id,

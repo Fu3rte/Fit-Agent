@@ -397,46 +397,49 @@ def read_trace_models(trace_path: Path) -> dict:
     return {"model_spans": len(rows), "by_call_kind": kinds, "trace_database_present": True}
 
 
+_MODEL_SNAPSHOT = None
+
+
+def model_snapshot():
+    global _MODEL_SNAPSHOT
+    if _MODEL_SNAPSHOT is None:
+        from app import model_config
+
+        original_root = model_config.DATA_ROOT
+        model_config.DATA_ROOT = BACKEND / "data"
+        try:
+            _MODEL_SNAPSHOT = model_config.load_model_config()
+        finally:
+            model_config.DATA_ROOT = original_root
+        if _MODEL_SNAPSHOT.api != "openai-completions":
+            raise RuntimeError("真实模型检查仅支持 openai-completions")
+    return _MODEL_SNAPSHOT
+
+
 def model_identity() -> dict:
     from app import model_config
-    from app.model_config import _stored_settings, effective_provider
 
-    environment = {
-        "api": os.environ.get("FIT_AGENT_TEST_MODEL_API") or "openai-completions",
-        "model": os.environ.get("FIT_AGENT_TEST_MODEL_ID"),
-        "provider": os.environ.get("FIT_AGENT_TEST_MODEL_PROVIDER"),
-        "base_url": os.environ.get("FIT_AGENT_TEST_MODEL_BASE_URL"),
-        "api_key": os.environ.get("FIT_AGENT_TEST_MODEL_API_KEY"),
-    }
-    missing = sorted(key for key in ("model", "base_url", "api_key") if not environment[key])
-    if missing:
-        raise RuntimeError("缺少测试模型环境变量: " + ", ".join(missing))
-    # 与用户当前已选配置逐项比对：只读默认目录的选择文件，凭据文件保持不访问。
+    snapshot = model_snapshot()
     original_root = model_config.DATA_ROOT
     model_config.DATA_ROOT = BACKEND / "data"
     try:
-        saved = _stored_settings()
+        saved = model_config.load_model_config()
     finally:
         model_config.DATA_ROOT = original_root
-    if saved is None:
-        raise RuntimeError("默认模型配置缺失，无法核对身份")
     return {
-        "api": environment["api"],
-        "model": environment["model"],
-        "provider": environment["provider"],
-        "base_url_sha256": sha256_text(environment["base_url"]),
+        "api": snapshot.api,
+        "model": snapshot.model,
+        "provider": snapshot.provider,
+        "base_url_sha256": sha256_text(snapshot.base_url),
         "endpoint_fingerprint": sha256_text(
-            "|".join((environment["api"], environment["base_url"], environment["model"]))
+            "|".join((snapshot.api, snapshot.base_url, snapshot.model))
         ),
         "matches_saved_selection": {
-            "api": environment["api"] == saved.api,
-            "model": environment["model"] == saved.model,
-            "provider": effective_provider(environment["api"], environment["provider"])
-            == effective_provider(saved.api, saved.provider),
-            "base_url": environment["base_url"] == saved.base_url,
+            key: getattr(snapshot, key) == getattr(saved, key)
+            for key in ("api", "model", "provider", "base_url")
         },
         "saved_base_url_sha256": sha256_text(saved.base_url),
-        "credential_file_access": "not_required",
+        "credential_file_access": "model_config",
     }
 
 
@@ -1112,8 +1115,9 @@ def prepare_environment(
 ) -> dict:
     from test import regression_support
 
+    model = model_snapshot()
     landing = install_isolation(namespace, database_path)
-    regression_support.install_test_model_config(root=BATCH / landing["model_config_root"])
+    regression_support.install_test_model_config(root=BATCH / landing["model_config_root"], model=model)
     # 文件工具的会话工作目录默认值在导入时绑定，必须在服务启动前改指到隔离目录。
     import app.agent.tools.files as file_tools
     from app.interfaces.http_api.routes import agent as agent_routes

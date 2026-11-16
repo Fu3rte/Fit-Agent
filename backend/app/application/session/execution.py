@@ -159,8 +159,12 @@ def execute(
         return {
             **tools,
             **bind_business_tools(
-                business, business_context(source_entry_id), call, prepared,
-                workout_prepared, plan_prepared
+                business,
+                business_context(source_entry_id),
+                call,
+                prepared,
+                workout_prepared,
+                plan_prepared,
             ),
         }
 
@@ -173,12 +177,24 @@ def execute(
         nodes = collect_message_nodes(
             model_visible_entries(projection.path, visible),
             BusinessBindings(
-                profile_confirmations=await business.profile.list_confirmation_bindings(session_id),
-                workout_confirmations=await business.workouts.list_workout_confirmation_bindings(session_id),
-                plan_confirmations=await business.plans.list_plan_confirmation_bindings(session_id),
-                profile_displays=await business.profile.list_display_bindings(session_id),
-                workout_displays=await business.workouts.list_workout_display_bindings(session_id),
-                plan_displays=await business.plans.list_plan_display_bindings(session_id),
+                profile_confirmations=await business.profile.list_confirmation_bindings(
+                    session_id
+                ),
+                workout_confirmations=await business.workouts.list_workout_confirmation_bindings(
+                    session_id
+                ),
+                plan_confirmations=await business.plans.list_plan_confirmation_bindings(
+                    session_id
+                ),
+                profile_displays=await business.profile.list_display_bindings(
+                    session_id
+                ),
+                workout_displays=await business.workouts.list_workout_display_bindings(
+                    session_id
+                ),
+                plan_displays=await business.plans.list_plan_display_bindings(
+                    session_id
+                ),
             ),
         )
         proposals = collect_pending_proposals(
@@ -257,20 +273,29 @@ def execute(
         position["id"] = node_id
         if (
             isinstance(message, ToolResultMessage)
-            and message.tool_name in {*PLAN_PREPARE_TOOLS, "prepare_profile_update", "prepare_workout"}
+            and message.tool_name
+            in {*PLAN_PREPARE_TOOLS, "prepare_profile_update", "prepare_workout"}
             and not message.is_error
         ):
             # 成功结果必须对应本批登记；关联缺失直接终止运行。
             if message.tool_name == "prepare_profile_update":
-                call(business.profile.bind_display_entry(prepared.pop(message.tool_call_id), node_id))
+                call(
+                    business.profile.bind_display_entry(
+                        prepared.pop(message.tool_call_id), node_id
+                    )
+                )
             elif message.tool_name == "prepare_workout":
-                call(business.workouts.bind_workout_display_entry(
-                    workout_prepared.pop(message.tool_call_id), node_id
-                ))
+                call(
+                    business.workouts.bind_workout_display_entry(
+                        workout_prepared.pop(message.tool_call_id), node_id
+                    )
+                )
             else:
-                call(business.plans.bind_plan_display_entry(
-                    plan_prepared.pop(message.tool_call_id), node_id
-                ))
+                call(
+                    business.plans.bind_plan_display_entry(
+                        plan_prepared.pop(message.tool_call_id), node_id
+                    )
+                )
 
     async def get_steering_messages() -> list[Message]:
         return call(coordinator.take(run.id))
@@ -325,12 +350,24 @@ def execute(
         nodes = collect_message_nodes(
             model_visible_entries([*path, entry], visible),
             BusinessBindings(
-                profile_confirmations=await business.profile.list_confirmation_bindings(session_id),
-                workout_confirmations=await business.workouts.list_workout_confirmation_bindings(session_id),
-                plan_confirmations=await business.plans.list_plan_confirmation_bindings(session_id),
-                profile_displays=await business.profile.list_display_bindings(session_id),
-                workout_displays=await business.workouts.list_workout_display_bindings(session_id),
-                plan_displays=await business.plans.list_plan_display_bindings(session_id),
+                profile_confirmations=await business.profile.list_confirmation_bindings(
+                    session_id
+                ),
+                workout_confirmations=await business.workouts.list_workout_confirmation_bindings(
+                    session_id
+                ),
+                plan_confirmations=await business.plans.list_plan_confirmation_bindings(
+                    session_id
+                ),
+                profile_displays=await business.profile.list_display_bindings(
+                    session_id
+                ),
+                workout_displays=await business.workouts.list_workout_display_bindings(
+                    session_id
+                ),
+                plan_displays=await business.plans.list_plan_display_bindings(
+                    session_id
+                ),
             ),
         )
         proposals = collect_pending_proposals(
@@ -366,10 +403,17 @@ def execute(
         tokens_before = estimate_context_tokens(request_messages()).tokens
         # 摘要 model 子 Span 挂在当前 Compaction 下，与检查点提交同属一次压缩操作。
         result = await generate_compaction_summary(
-            preparation, spec, api_key=secrets[0], settings=settings, signal=signal,
+            preparation,
+            spec,
+            api_key=secrets[0],
+            settings=settings,
+            signal=signal,
             deadline=state.control.deadline,
             run_control=state.control,
-            budget=budget, observation=observer, compaction_id=compaction_id, parent=span,
+            budget=budget,
+            observation=observer,
+            compaction_id=compaction_id,
+            parent=span,
         )
         check_cancelled(signal)
         system_state = get_current_system_message(projection.context.messages)
@@ -394,9 +438,11 @@ def execute(
             created_at=time_ns() // 1_000_000,
         )
         baseline = call(build_compaction_baseline(projection.path, entry))
-        outcome = call(entries.commit_compaction(
-            entry, baseline, prepared_position=entry.parent_id, credentials=secrets
-        ))
+        outcome = call(
+            entries.commit_compaction(
+                entry, baseline, prepared_position=entry.parent_id, credentials=secrets
+            )
+        )
         if outcome.credential_detected:
             raise CredentialDetectedError()
         parents[outcome.entry.id] = outcome.entry.parent_id
@@ -451,7 +497,8 @@ def execute(
     )
     check_cancelled(state.cancel)
     final_message = next(
-        message for message in reversed(messages)
+        message
+        for message in reversed(messages)
         if isinstance(message, AssistantMessage) and message.stop_reason == "stop"
     )
     return final_message.stop_reason

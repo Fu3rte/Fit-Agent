@@ -286,7 +286,9 @@ async def recover_context_overflow(
     # 检查点提交后按完整请求复核预算：合法切点只保证保留消息完整，不保证仍满足容量。
     tokens = await hooks.estimate_request()
     if should_compact(tokens, hooks.context_window, hooks.reserve_tokens):
-        raise ContextBudgetExceeded("恢复压缩未释放足够的上下文空间，无法满足当前请求预算")
+        raise ContextBudgetExceeded(
+            "恢复压缩未释放足够的上下文空间，无法满足当前请求预算"
+        )
 
 
 async def run_agent_loop(
@@ -510,8 +512,11 @@ async def run_loop(
             finally:
                 # 真实业务结局同时驱动公开事件与 Turn Span 状态；所有子操作已收尾后才结算。
                 turn_status = (
-                    "cancelled" if isinstance(exception(), (CancelledError, TaskCancelledError))
-                    else "completed" if turn_completed else "failed"
+                    "cancelled"
+                    if isinstance(exception(), (CancelledError, TaskCancelledError))
+                    else "completed"
+                    if turn_completed
+                    else "failed"
                 )
                 turn_span.set_status(turn_status)
                 try:
@@ -521,13 +526,19 @@ async def run_loop(
                         "turn_id": turn_id,
                         "status": turn_status,
                         "tool_prepare_started_at": (
-                            tool_timing.prepare_started_at if tool_timing is not None else None
+                            tool_timing.prepare_started_at
+                            if tool_timing is not None
+                            else None
                         ),
                         "tool_first_result_at": (
-                            tool_timing.first_result_at if tool_timing is not None else None
+                            tool_timing.first_result_at
+                            if tool_timing is not None
+                            else None
                         ),
                         "tool_finalized_at": (
-                            tool_timing.finalized_at if tool_timing is not None else None
+                            tool_timing.finalized_at
+                            if tool_timing is not None
+                            else None
                         ),
                     })
                 finally:
@@ -535,7 +546,8 @@ async def run_loop(
             check_cancelled(signal)
             get_steering = (
                 config.get_steering_messages_or_close
-                if not has_more_tool_calls and config.get_steering_messages_or_close is not None
+                if not has_more_tool_calls
+                and config.get_steering_messages_or_close is not None
                 else config.get_steering_messages
             )
             pending_messages = await get_steering() if get_steering is not None else []
@@ -546,7 +558,10 @@ async def run_loop(
             "type": "trace_end",
             "trace_id": trace_id,
             "status": (
-                "cancelled" if isinstance(exception(), (CancelledError, TaskCancelledError))
-                else "completed" if trace_completed else "failed"
+                "cancelled"
+                if isinstance(exception(), (CancelledError, TaskCancelledError))
+                else "completed"
+                if trace_completed
+                else "failed"
             ),
         })

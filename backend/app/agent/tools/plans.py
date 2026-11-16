@@ -37,16 +37,25 @@ def _tools(
 ) -> dict[str, AgentTool]:
     return {
         "get_current_plan": AgentTool(
-            "get_current_plan", "读取当前计划的id和完整content；没有当前计划时两者为null。",
-            EmptyPlanArguments, get_current_plan, max_output_chars=None,
+            "get_current_plan",
+            "读取当前计划的id和完整content；没有当前计划时两者为null。",
+            EmptyPlanArguments,
+            get_current_plan,
+            max_output_chars=None,
         ),
         "get_plan": AgentTool(
-            "get_plan", "按标准UUID读取完整计划版本，包含is_current和created_at。",
-            PlanGetArguments, get_plan, max_output_chars=None,
+            "get_plan",
+            "按标准UUID读取完整计划版本，包含is_current和created_at。",
+            PlanGetArguments,
+            get_plan,
+            max_output_chars=None,
         ),
         "list_plans": AgentTool(
-            "list_plans", "返回全部完整计划版本的直接数组，按created_at、id降序排列；没有版本时返回[]。",
-            EmptyPlanArguments, list_plans, max_output_chars=None,
+            "list_plans",
+            "返回全部完整计划版本的直接数组，按created_at、id降序排列；没有版本时返回[]。",
+            EmptyPlanArguments,
+            list_plans,
+            max_output_chars=None,
         ),
         "prepare_plan": AgentTool(
             "prepare_plan",
@@ -59,21 +68,29 @@ def _tools(
             "结果持久化后绑定真实展示节点，完整payload由结果展示，等待用户点击该快照的确认按钮。"
             "用户修改建议时创建新快照并重新展示确认；尚未采纳的生成建议经用户修改时，"
             "继续使用prepare_plan创建新快照。",
-            PlanProposalArguments, prepare_plan, execution_mode="sequential",
-            prepare_arguments=_prepare_plan_arguments, max_output_chars=None,
+            PlanProposalArguments,
+            prepare_plan,
+            execution_mode="sequential",
+            prepare_arguments=_prepare_plan_arguments,
+            max_output_chars=None,
         ),
         "get_plan_save_status": AgentTool(
             "get_plan_save_status",
             "按原proposal_id核对计划保存状态，返回proposal_id/status/result。"
             "状态为pending/processing/saved/invalidated/conflicted，仅saved携带完整固定结果。"
             "版本是否当前通过计划查询核对；结果未知时核对原操作。",
-            PlanStatusArguments, get_plan_save_status, max_output_chars=None,
+            PlanStatusArguments,
+            get_plan_save_status,
+            max_output_chars=None,
         ),
     }
 
 
 def plan_tool_declarations() -> list[ToolDeclaration]:
-    return [tool.definition() for tool in _tools(unbound, unbound, unbound, unbound, unbound).values()]
+    return [
+        tool.definition()
+        for tool in _tools(unbound, unbound, unbound, unbound, unbound).values()
+    ]
 
 
 def bind_plan_tools(
@@ -97,9 +114,17 @@ def bind_plan_tools(
         def register(proposal):
             prepared[tool_call_id] = proposal.proposal_id
 
-        return business_result(service.prepare_plan(context, params, signal), call, register)
+        return business_result(
+            service.prepare_plan(context, params, signal), call, register
+        )
 
-    def get_plan_save_status(tool_call_id, params: PlanStatusArguments, signal, on_update):
-        return business_result(service.get_plan_save_status(context, params.proposal_id, signal), call)
+    def get_plan_save_status(
+        tool_call_id, params: PlanStatusArguments, signal, on_update
+    ):
+        return business_result(
+            service.get_plan_save_status(context, params.proposal_id, signal), call
+        )
 
-    return _tools(get_current_plan, get_plan, list_plans, prepare_plan, get_plan_save_status)
+    return _tools(
+        get_current_plan, get_plan, list_plans, prepare_plan, get_plan_save_status
+    )

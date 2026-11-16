@@ -69,7 +69,7 @@ from app.infrastructure.persistence.sqlite.business_repository import (
 )
 from app.infrastructure.persistence.sqlite.database import open_database
 from app.infrastructure.persistence.sqlite.repository import SqliteSessionRepository
-from app.model_config import ModelNotConfigured, load_model_config
+from app.model_config import ModelConfig, ModelNotConfigured, load_model_config
 from evaluation.contracts import (
     GENERATION_METRICS,
     AnswerEvidence,
@@ -115,10 +115,8 @@ from evaluation.generation_scoring import (
     GenerationMetricEvidence,
     GenerationScoringSession,
     JudgeConfig,
-    JudgeConfigError,
     ScoringAttemptSnapshot,
     failed_outcome,
-    load_judge_model,
     run_judge_identity,
     validate_timeout,
 )
@@ -154,8 +152,6 @@ from evaluation.scenario_evidence import (
 SCENARIO_ROOT = BACKEND / "temp" / "evaluation-scenarios"
 DEFAULT_VERSION_DIR = BACKEND / "dataset" / "evaluation" / "rebuild-v3"
 DEFAULT_JUDGE_TIMEOUT = 300.0
-JUDGE_BASE_URL_VARIABLE = "FIT_AGENT_EVAL_JUDGE_BASE_URL"
-JUDGE_API_KEY_VARIABLE = "FIT_AGENT_EVAL_JUDGE_API_KEY"
 EVENT_TYPES = {"message", "confirm", "cancel", "session_switch", "restart"}
 
 # 运行协议显式选择：历史记录缺少字段时按 Ragas 协议解释。
@@ -3151,25 +3147,8 @@ def _attempt_snapshots(session, checkpoint) -> list[ScoringAttemptSnapshot]:
     return snapshots
 
 
-def _judge_config() -> tuple[JudgeConfig | None, float | None]:
-    try:
-        model_name = load_judge_model(os.environ)
-    except JudgeConfigError:
-        return None, None
-    base_url = (os.environ.get(JUDGE_BASE_URL_VARIABLE) or "").strip()
-    if not base_url:
-        return None, None
-    judge_api_key = (os.environ.get(JUDGE_API_KEY_VARIABLE) or "").strip()
-    if not judge_api_key:
-        return None, None
-    return (
-        JudgeConfig(
-            model=model_name,
-            base_url=base_url,
-            api_key=judge_api_key,
-        ),
-        DEFAULT_JUDGE_TIMEOUT,
-    )
+def _judge_config() -> tuple[JudgeConfig, float]:
+    return JudgeConfig.from_model_config(load_model_config()), DEFAULT_JUDGE_TIMEOUT
 
 
 async def _run_confirm_event(
@@ -3182,6 +3161,7 @@ async def _run_confirm_event(
     operation_by_ref: dict[str, str],
     repeated: set[str],
     now: int,
+    model: ModelConfig | None = None,
 ) -> EventCapture:
     before = await runtime.projection(session_ids)
     target = event["target"]
@@ -3215,8 +3195,7 @@ async def _run_confirm_event(
     )
     secrets = ()
     try:
-        model = load_model_config()
-        secrets = _active_secrets(model)
+        secrets = _active_secrets(model if model is not None else load_model_config())
     except Exception:
         secrets = ()
     operation = await runtime.confirmations.confirm(
@@ -3508,6 +3487,7 @@ def _require_execution_config(
     judge: JudgeConfig | None,
     judge_timeout: float | None,
     scoring_mode: ScoringMode = "ragas",
+    model: ModelConfig | None = None,
 ) -> None:
     if not enable_model:
         raise ScenarioModelUnavailable(
@@ -3518,7 +3498,7 @@ def _require_execution_config(
         event["type"] == "message" for event in scenario["events"]
     ) or any(row["role"] == "assistant" for row in prior_messages)
     model_available = True
-    if needs_model:
+    if needs_model and model is None:
         try:
             load_model_config()
         except ModelNotConfigured:
@@ -3546,6 +3526,7 @@ async def execute_scenario(
     run_id: str,
     root: Path,
     enable_model: bool,
+    model: ModelConfig | None = None,
 ) -> ScenarioExecution:
     if not enable_model:
         raise ScenarioModelUnavailable(
@@ -3649,15 +3630,13 @@ async def execute_scenario(
         needs_model = any(
             event["type"] == "message" for event in scenario["events"]
         ) or any(row["role"] == "assistant" for row in prior_messages)
-        if needs_model:
+        if needs_model and model is None:
             try:
                 model = load_model_config()
             except ModelNotConfigured as error:
                 raise ScenarioModelUnavailable(
                     scenario["scenario_id"], None, str(error)
                 ) from error
-        else:
-            model = None
         tools = create_file_tools(session_id, tmp_root=scenario_root / "tmp")
         await _seed_prior_messages(
             runtime,
@@ -3694,6 +3673,7 @@ async def execute_scenario(
                     session_id,
                     scenario["_session_ids"],
                     event_now,
+                    model=model,
                 )
                 entry_to_event[capture.request_entry_id] = event["event_id"]
             elif event_type == "confirm":
@@ -3713,6 +3693,7 @@ async def execute_scenario(
                     operation_by_ref,
                     repeated_confirms,
                     event_now,
+                    model=model,
                 )
             elif event_type == "cancel":
                 projection = await runtime.projection(
@@ -3859,6 +3840,7 @@ async def run_external_scenario(
     run_id: str,
     root: Path,
     enable_model: bool,
+    model: ModelConfig | None = None,
 ) -> ExternalScenarioOutcome:
     scenario_root = root / scenario["scenario_id"]
     try:
@@ -3868,6 +3850,7 @@ async def run_external_scenario(
             run_id=run_id,
             root=root,
             enable_model=enable_model,
+            model=model,
         )
     except ScenarioError as error:
         execution = getattr(error, "execution", None)
@@ -3926,14 +3909,21 @@ async def run_scenario(
     judge: JudgeConfig | None,
     judge_timeout: float | None,
     scoring_mode: ScoringMode = "ragas",
+    model: ModelConfig | None = None,
 ) -> ScenarioArtifact | ExternalScenarioScoring:
     scoring_protocol(scoring_mode)
+    if enable_model and scoring_mode == "ragas" and judge is not None:
+        if model is None:
+            model = load_model_config()
+        if judge != JudgeConfig.from_model_config(model):
+            raise ValueError("裁判配置与生成模型快照不一致")
     _require_execution_config(
         scenario,
         enable_model=enable_model,
         judge=judge,
         judge_timeout=judge_timeout,
         scoring_mode=scoring_mode,
+        model=model,
     )
     if scoring_mode == "external":
         outcome = await run_external_scenario(
@@ -3942,6 +3932,7 @@ async def run_scenario(
             run_id=run_id,
             root=root,
             enable_model=enable_model,
+            model=model,
         )
         return outcome.record
     scenario_root = root / scenario["scenario_id"]
@@ -3952,6 +3943,7 @@ async def run_scenario(
             run_id=run_id,
             root=root,
             enable_model=enable_model,
+            model=model,
         )
     except ScenarioError as error:
         execution = getattr(error, "execution", None)
@@ -4243,6 +4235,7 @@ async def _run_external_selected(
     enable_model: bool,
     plan: ExecutionPlan,
     started_at: str,
+    model: ModelConfig | None,
 ) -> ExternalRunSummary:
     blocked: list[str] = []
     failed: list[str] = []
@@ -4297,6 +4290,7 @@ async def _run_external_selected(
                 run_id=run_id,
                 root=run_root,
                 enable_model=enable_model,
+                model=model,
             )
             completed.append(scenario["scenario_id"])
             accumulate(outcome)
@@ -4354,7 +4348,6 @@ async def _run_external_selected(
     missing: list[str] = []
     if enable_model:
         try:
-            model = load_model_config()
             identity["generation"] = generation_identity(model)
         except Exception as error:
             identity["generation_error"] = sanitize_error_text(
@@ -4408,8 +4401,14 @@ async def run_selected(
     judge: JudgeConfig | None,
     judge_timeout: float | None,
     scoring_mode: ScoringMode = "ragas",
+    model: ModelConfig | None = None,
 ) -> RunSummary | ExternalRunSummary:
     scoring_protocol(scoring_mode)
+    if enable_model and model is None:
+        model = load_model_config()
+    if enable_model and scoring_mode == "ragas" and judge is not None:
+        if judge != JudgeConfig.from_model_config(model):
+            raise ValueError("裁判配置与生成模型快照不一致")
     run_root = root / run_id
     run_root.mkdir(parents=True, exist_ok=False)
     started_at = datetime.now(timezone.utc).isoformat()
@@ -4424,6 +4423,7 @@ async def run_selected(
             enable_model=enable_model,
             plan=plan,
             started_at=started_at,
+            model=model,
         )
     blocked: list[str] = []
     failed: list[str] = []
@@ -4440,6 +4440,7 @@ async def run_selected(
                 enable_model=enable_model,
                 judge=judge,
                 judge_timeout=judge_timeout,
+                model=model,
             )
             completed.append(scenario["scenario_id"])
             accumulate_artifact(aggregate, artifact)
@@ -4471,7 +4472,6 @@ async def run_selected(
     missing: list[str] = []
     if enable_model:
         try:
-            model = load_model_config()
             identity["generation"] = generation_identity(model)
         except Exception as error:
             identity["generation_error"] = sanitize_error_text(
@@ -4575,6 +4575,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     if not args.enable_model:
         print("未启用真实模型：仅加载、校验并展示执行计划。", file=sys.stderr)
         return 0
+    model = load_model_config()
     if args.scoring_mode == "external":
         summary = asyncio.run(run_selected(
             dataset,
@@ -4585,13 +4586,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             judge=None,
             judge_timeout=None,
             scoring_mode="external",
+            model=model,
         ))
         print(canonical_json(summary.model_dump(mode="json")))
         return (
             0 if summary.status == "awaiting_external_scoring" else 1
         )
     timeout = validate_timeout(args.judge_timeout)
-    judge, _ = _judge_config()
+    judge = JudgeConfig.from_model_config(model)
     summary = asyncio.run(run_selected(
         dataset,
         scenarios,
@@ -4601,6 +4603,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         judge=judge,
         judge_timeout=timeout,
         scoring_mode="ragas",
+        model=model,
     ))
     print(canonical_json(summary.model_dump(mode="json")))
     if (

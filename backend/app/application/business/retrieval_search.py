@@ -40,14 +40,34 @@ class SearchConditions:
             value = getattr(self, field)
             if value is not None:
                 allowed = {getattr(item, field) for item in catalog.all()}
-                require(isinstance(value, str) and value in allowed, f"非法字段值: {field}")
+                require(
+                    isinstance(value, str) and value in allowed, f"非法字段值: {field}"
+                )
                 terms.append(f"{field} == {json_text(value)}")
         if self.available_equipment is not None:
-            require(isinstance(self.available_equipment, (list, tuple, set, frozenset)), "有效器械集合必须为序列")
-            require(all(isinstance(value, str) and value in catalog.equipment for value in self.available_equipment), "有效器械集合包含非法值")
+            require(
+                isinstance(self.available_equipment, (list, tuple, set, frozenset)),
+                "有效器械集合必须为序列",
+            )
+            require(
+                all(
+                    isinstance(value, str) and value in catalog.equipment
+                    for value in self.available_equipment
+                ),
+                "有效器械集合包含非法值",
+            )
             terms.append("equipment in " + json_text(sorted(self.available_equipment)))
-        require(isinstance(self.excluded_ids, (list, tuple, set, frozenset)), "排除 ID 必须为序列")
-        require(all(isinstance(value, str) and value in catalog.exercise_ids for value in self.excluded_ids), "排除 ID 引用目录外动作")
+        require(
+            isinstance(self.excluded_ids, (list, tuple, set, frozenset)),
+            "排除 ID 必须为序列",
+        )
+        require(
+            all(
+                isinstance(value, str) and value in catalog.exercise_ids
+                for value in self.excluded_ids
+            ),
+            "排除 ID 引用目录外动作",
+        )
         require(len(self.excluded_ids) == len(set(self.excluded_ids)), "排除 ID 重复")
         if self.excluded_ids:
             terms.append("id not in " + json_text(sorted(self.excluded_ids)))
@@ -55,8 +75,15 @@ class SearchConditions:
 
     def matches(self, exercise) -> bool:
         return (
-            all(getattr(self, field) is None or getattr(exercise, field) == getattr(self, field) for field in rt.MAPPING_FIELDS)
-            and (self.available_equipment is None or exercise.equipment in self.available_equipment)
+            all(
+                getattr(self, field) is None
+                or getattr(exercise, field) == getattr(self, field)
+                for field in rt.MAPPING_FIELDS
+            )
+            and (
+                self.available_equipment is None
+                or exercise.equipment in self.available_equipment
+            )
             and exercise.id not in self.excluded_ids
         )
 
@@ -90,11 +117,22 @@ class SearchExecution:
     rerank_identity: "RerankIdentity"
 
 
-def validate_parameters(query: str, rrf_k: int, limit: int, bm25_depth: int, dense_depth: int) -> str:
+def validate_parameters(
+    query: str, rrf_k: int, limit: int, bm25_depth: int, dense_depth: int
+) -> str:
     require(isinstance(query, str) and bool(rt.normalize(query)), "查询文本不得为空")
     require(type(rrf_k) is int and 0 < rrf_k < 16384, "rrf_k 必须为 1..16383 的整数")
-    for name, value in (("limit", limit), ("bm25_depth", bm25_depth), ("dense_depth", dense_depth)):
-        require(not isinstance(value, bool) and isinstance(value, int) and 0 < value <= 16384, f"{name} 必须为 1..16384 的整数")
+    for name, value in (
+        ("limit", limit),
+        ("bm25_depth", bm25_depth),
+        ("dense_depth", dense_depth),
+    ):
+        require(
+            not isinstance(value, bool)
+            and isinstance(value, int)
+            and 0 < value <= 16384,
+            f"{name} 必须为 1..16384 的整数",
+        )
     return rt.normalize(query)
 
 
@@ -146,12 +184,45 @@ async def search_vectors(
     output = list(rt.MAPPING_FIELDS)
     if mode == "hybrid":
         requests = [
-            AnnSearchRequest(data=[query], anns_field="sparse", param={"metric_type": "BM25", "params": {}}, limit=bm25_depth, expr=expression),
-            AnnSearchRequest(data=[vector], anns_field="dense", param={"metric_type": "COSINE", "params": {}}, limit=dense_depth, expr=expression),
+            AnnSearchRequest(
+                data=[query],
+                anns_field="sparse",
+                param={"metric_type": "BM25", "params": {}},
+                limit=bm25_depth,
+                expr=expression,
+            ),
+            AnnSearchRequest(
+                data=[vector],
+                anns_field="dense",
+                param={"metric_type": "COSINE", "params": {}},
+                limit=dense_depth,
+                expr=expression,
+            ),
         ]
-        result = await db.call("hybrid_search", collection, reqs=requests, ranker=RRFRanker(k=rrf_k), limit=limit, output_fields=output, consistency_level="Strong")
+        result = await db.call(
+            "hybrid_search",
+            collection,
+            reqs=requests,
+            ranker=RRFRanker(k=rrf_k),
+            limit=limit,
+            output_fields=output,
+            consistency_level="Strong",
+        )
     else:
-        result = await db.call("search", collection, data=[query] if mode == "bm25" else [vector], anns_field="sparse" if mode == "bm25" else "dense", search_params={"metric_type": "BM25" if mode == "bm25" else "COSINE", "params": {}}, filter=expression, limit=limit, output_fields=output, consistency_level="Strong")
+        result = await db.call(
+            "search",
+            collection,
+            data=[query] if mode == "bm25" else [vector],
+            anns_field="sparse" if mode == "bm25" else "dense",
+            search_params={
+                "metric_type": "BM25" if mode == "bm25" else "COSINE",
+                "params": {},
+            },
+            filter=expression,
+            limit=limit,
+            output_fields=output,
+            consistency_level="Strong",
+        )
     require(len(result) == 1 and len(result[0]) <= limit, "检索结果数量不符")
     candidates = []
     seen = set()
@@ -159,27 +230,51 @@ async def search_vectors(
     for hit in result[0]:
         exercise_id = hit["id"]
         exercise = catalog.get(exercise_id) if isinstance(exercise_id, str) else None
-        require(exercise is not None and exercise_id not in seen, "候选目录身份错误或重复")
+        require(
+            exercise is not None and exercise_id not in seen, "候选目录身份错误或重复"
+        )
         require(conditions.matches(exercise), "候选违反硬约束")
-        require(all(hit["entity"][field] == getattr(exercise, field) for field in rt.MAPPING_FIELDS), "候选真实字段不符")
+        require(
+            all(
+                hit["entity"][field] == getattr(exercise, field)
+                for field in rt.MAPPING_FIELDS
+            ),
+            "候选真实字段不符",
+        )
         score = hit["distance"]
-        require(isinstance(score, (int, float)) and math.isfinite(score) and score <= previous, "候选分数或排序不符")
+        require(
+            isinstance(score, (int, float))
+            and math.isfinite(score)
+            and score <= previous,
+            "候选分数或排序不符",
+        )
         previous = score
         seen.add(exercise_id)
-        candidates.append(RetrievalCandidate(id=exercise_id, score=score, name=exercise.name, **{field: getattr(exercise, field) for field in rt.MAPPING_FIELDS}))
+        candidates.append(
+            RetrievalCandidate(
+                id=exercise_id,
+                score=score,
+                name=exercise.name,
+                **{field: getattr(exercise, field) for field in rt.MAPPING_FIELDS},
+            )
+        )
     return candidates
 
 
 class HybridRetriever:
     # T6 持有同循环的 EmbeddingClient 与 MilvusConnection 上下文；关闭前等待检索取消收尾。
     # 实例内记录已成功全量验证的集合身份，稳定集合查询跳过全量回读。
-    def __init__(self, db: MilvusConnection, corpus: RetrievalCorpus, embedding: EmbeddingClient) -> None:
+    def __init__(
+        self, db: MilvusConnection, corpus: RetrievalCorpus, embedding: EmbeddingClient
+    ) -> None:
         self.db, self.corpus, self.embedding = db, corpus, embedding
         self._validated: tuple[str, str] | None = None
         self._validation_lock = asyncio.Lock()
 
     @classmethod
-    async def open(cls, db: MilvusConnection, corpus: RetrievalCorpus, embedding: EmbeddingClient) -> "HybridRetriever":
+    async def open(
+        cls, db: MilvusConnection, corpus: RetrievalCorpus, embedding: EmbeddingClient
+    ) -> "HybridRetriever":
         retriever = cls(db, corpus, embedding)
         await retriever._validate_published()
         return retriever
@@ -187,7 +282,9 @@ class HybridRetriever:
     async def _manifest_identity(self, collection: str) -> tuple[tuple[str, str], dict]:
         # 轻量核验：源快照、服务/SDK/模型/维度/编码/索引兼容与清单格式身份；返回身份与期待配置。
         self.corpus.validate_sources()
-        expected = self.corpus.compatibility(self.embedding, await self.db.call("get_server_version"))
+        expected = self.corpus.compatibility(
+            self.embedding, await self.db.call("get_server_version")
+        )
         manifest = await validated_manifest(self.db, collection, expected)
         return (collection, json_text(manifest)), expected
 
@@ -234,8 +331,23 @@ class HybridRetriever:
         )
         check_cancelled(signal)
         if not has_eligible_exercises:
-            return SearchRecall(candidates=[], collection=collection, manifest_json=manifest_json)
+            return SearchRecall(
+                candidates=[], collection=collection, manifest_json=manifest_json
+            )
         vector = await _encode_cancellable(self.embedding, query, signal)
         check_cancelled(signal)
-        candidates = await search_vectors(self.db, collection, self.corpus.catalog, query, vector, conditions=conditions, rrf_k=rrf_k, bm25_depth=bm25_depth, dense_depth=dense_depth, limit=limit)
-        return SearchRecall(candidates=candidates, collection=collection, manifest_json=manifest_json)
+        candidates = await search_vectors(
+            self.db,
+            collection,
+            self.corpus.catalog,
+            query,
+            vector,
+            conditions=conditions,
+            rrf_k=rrf_k,
+            bm25_depth=bm25_depth,
+            dense_depth=dense_depth,
+            limit=limit,
+        )
+        return SearchRecall(
+            candidates=candidates, collection=collection, manifest_json=manifest_json
+        )

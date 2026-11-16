@@ -49,7 +49,6 @@ from evaluation.generation_scoring import (
     dependency_versions,
     ensure_ragas_tracking_disabled,
     failed_outcome,
-    load_judge_model,
     metric_parameters,
     prompt_digest,
     prompt_fingerprints,
@@ -281,25 +280,17 @@ def test_timeout_accepts_finite_positive_values():
     assert validate_timeout(0.25) == 0.25
 
 
-def test_judge_model_environment_value_accepts_configured_model():
-    for value in (
-        "decision-model-preview",
-        "step-5-preview",
-        "qwen3.6-flash",
-        "qwen3.6-plus",
-        "unknown-judge",
-    ):
-        assert (
-            load_judge_model({"FIT_AGENT_EVAL_JUDGE_MODEL": value}) == value
-        )
-    for value in (None, "", "   "):
-        source = (
-            {}
-            if value is None
-            else {"FIT_AGENT_EVAL_JUDGE_MODEL": value}
-        )
-        with pytest.raises(JudgeConfigError):
-            load_judge_model(source)
+def test_judge_config_uses_saved_model_snapshot(tmp_path, monkeypatch):
+    from app import model_config
+
+    monkeypatch.setattr(model_config, "DATA_ROOT", tmp_path)
+    model_config.save_provider(api="openai-completions", base_url="https://example.invalid/v1", model="test-model", provider="test-provider", api_key="test-key")
+    saved = model_config.load_model_config()
+    judge = JudgeConfig.from_model_config(saved)
+    assert (judge.api, judge.provider, judge.model, judge.base_url, judge.api_key) == (saved.api, saved.provider, saved.model, saved.base_url, saved.api_key)
+    model_config.save_provider(api="anthropic-messages", base_url="https://example.invalid/v1", model="test-model", provider="test-provider", api_key="test-key")
+    with pytest.raises(InvalidJudgeConfig, match="不支持协议"):
+        JudgeConfig.from_model_config(model_config.load_model_config())
 
 
 def test_judge_config_rejects_blank_model_and_invalid_endpoint():
@@ -343,21 +334,6 @@ def test_judge_config_rejects_blank_model_and_invalid_endpoint():
             model="decision-model-preview",
             base_url=" https://example.invalid/v1",
             api_key="x",
-        )
-
-
-def test_judge_config_from_environment_requires_model_variable():
-    config = JudgeConfig.from_environment(
-        base_url="https://example.invalid/v1",
-        api_key="x",
-        environ={"FIT_AGENT_EVAL_JUDGE_MODEL": "decision-model-preview"},
-    )
-    assert config.model == "decision-model-preview"
-    with pytest.raises(JudgeConfigError):
-        JudgeConfig.from_environment(
-            base_url="https://example.invalid/v1",
-            api_key="x",
-            environ={},
         )
 
 
@@ -858,10 +834,6 @@ def test_saved_judge_identity_keeps_historical_model_separate_from_config():
         api_key=JUDGE.api_key,
     )
     assert config.model == "qwen3.6-flash"
-    assert (
-        load_judge_model({"FIT_AGENT_EVAL_JUDGE_MODEL": "qwen3.6-flash"})
-        == "qwen3.6-flash"
-    )
 
 
 # 真实运行 20261020T011423Z-0d87c272 中 s-action-verification-01/cp1/faithfulness 的调用链身份。

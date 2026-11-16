@@ -90,12 +90,11 @@ def stage_tool(model: ModelServer, payload: dict) -> ModelServer:
 @contextmanager
 def running_app_with_key(model: ModelServer, api_key: str):
     database_path, trace_path = patch_runtime(TMP_ROOT)
-    os.environ["FIT_AGENT_TEST_MODEL_API"] = "openai-completions"
-    os.environ["FIT_AGENT_TEST_MODEL_BASE_URL"] = model.base_url
-    os.environ["FIT_AGENT_TEST_MODEL_ID"] = "test-model"
-    os.environ["FIT_AGENT_TEST_MODEL_API_KEY"] = api_key
-    os.environ["FIT_AGENT_TEST_MODEL_PROVIDER"] = "local"
-    install_test_model_config(root=TMP_ROOT / f"config-{uuid4().hex}")
+    from app.model_config import ModelConfig
+
+    config = ModelConfig(api="openai-completions", base_url=model.base_url,
+                         model="test-model", provider="local", api_key=api_key)
+    install_test_model_config(root=TMP_ROOT / f"config-{uuid4().hex}", model=config)
     with Server(http_module.app) as server:
         with client(server.base_url) as http:
             yield http, database_path, trace_path, server.base_url

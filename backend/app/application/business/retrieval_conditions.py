@@ -74,7 +74,8 @@ def _is_home_or_outdoor(environment: str | None) -> bool:
         return False
     normalized = rt.normalize(environment)
     return normalized in HOME_ENVIRONMENT_VALUES or any(
-        token in normalized for token in (*HOME_ENVIRONMENT_TOKENS, *OUTDOOR_ENVIRONMENT_TOKENS)
+        token in normalized
+        for token in (*HOME_ENVIRONMENT_TOKENS, *OUTDOOR_ENVIRONMENT_TOKENS)
     )
 
 
@@ -97,16 +98,22 @@ def evaluate_search_conditions(
     saved_forbidden = list(profile.forbidden_exercise_ids or []) if profile else []
 
     declared = (
-        _resolve_equipment_terms(arguments.available_equipment, catalog, mappings, "available_equipment")
+        _resolve_equipment_terms(
+            arguments.available_equipment, catalog, mappings, "available_equipment"
+        )
         if arguments.available_equipment is not None
         else set()
     )
     temporary_unavailable = (
-        _resolve_equipment_terms(arguments.unavailable_equipment, catalog, mappings, "unavailable_equipment")
+        _resolve_equipment_terms(
+            arguments.unavailable_equipment, catalog, mappings, "unavailable_equipment"
+        )
         if arguments.unavailable_equipment is not None
         else set()
     )
-    temporary_excluded = _require_catalog_ids(list(arguments.excluded_ids or []), catalog)
+    temporary_excluded = _require_catalog_ids(
+        list(arguments.excluded_ids or []), catalog
+    )
 
     notes: list[str] = []
     excluded: list[str] = []
@@ -132,7 +139,11 @@ def evaluate_search_conditions(
             raise EquipmentRestrictionConflict(
                 "available_equipment: 本次可用器械与已保存或临时不可用限制冲突。"
             )
-        default = {BODY_WEIGHT} if _is_home_or_outdoor(environment) else set(catalog.equipment)
+        default = (
+            {BODY_WEIGHT}
+            if _is_home_or_outdoor(environment)
+            else set(catalog.equipment)
+        )
         removed = saved_unavailable | temporary_unavailable
         available = (default | declared) - removed
         excluded = sorted(set(saved_forbidden) | set(temporary_excluded))

@@ -16,13 +16,13 @@ BACKEND = Path(__file__).resolve().parents[1]
 if str(BACKEND) not in sys.path:
     sys.path.insert(0, str(BACKEND))
 
+from app.model_config import load_model_config  # noqa: E402
 from evaluation.dataset import load_for_evaluation  # noqa: E402
-from evaluation.generation_scoring import validate_timeout  # noqa: E402
+from evaluation.generation_scoring import JudgeConfig, validate_timeout  # noqa: E402
 from evaluation.scenarios import (  # noqa: E402
     DEFAULT_JUDGE_TIMEOUT,
     DEFAULT_VERSION_DIR,
     SCENARIO_ROOT,
-    _judge_config,
     run_selected,
     select_scenarios,
 )
@@ -68,7 +68,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         + "-" + uuid4().hex[:8]
     )
     timeout = validate_timeout(args.judge_timeout)
-    judge, _ = _judge_config()
+    model = load_model_config()
+    judge = JudgeConfig.from_model_config(model)
     summary = asyncio.run(run_selected(
         dataset,
         scenarios,
@@ -77,6 +78,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         enable_model=True,
         judge=judge,
         judge_timeout=timeout,
+        model=model,
     ))
     print(json.dumps(
         summary.model_dump(mode="json"), ensure_ascii=False, indent=2

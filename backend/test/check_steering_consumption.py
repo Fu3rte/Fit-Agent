@@ -18,6 +18,7 @@ from app.ai.messages import (
 from app.ai.stream import AssistantResponse
 from app.application.session.service import SessionService
 from app.application.session.steering import SteeringCoordinator
+from app.model_config import ModelConfig
 from test.check_steering import open_service, start_run, steering_command
 from test.regression_support import install_test_model_config
 
@@ -217,7 +218,13 @@ async def scenario_no_model_after_failure(service: SessionService, path: Path) -
         await coordinator.consume(run_id, messages)
 
     config = AgentLoopConfig(
-        model=install_test_model_config(),
+        model=install_test_model_config(model=ModelConfig(
+            api="openai-completions",
+            base_url="http://127.0.0.1:1",
+            model="test",
+            provider="openai",
+            api_key="test-key",
+        )),
         max_turns=4,
         request_budget=RequestBudget(),
         get_steering_messages=get_steering,

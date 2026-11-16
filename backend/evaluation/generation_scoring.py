@@ -25,6 +25,7 @@ from ragas.metrics import FactualCorrectness, Faithfulness
 from ragas.run_config import RunConfig
 
 from app.agent.cache_observation import sanitize_endpoint
+from app.model_config import ModelConfig
 from evaluation.contracts import (
     GENERATION_METRICS,
     CheckpointResult,
@@ -40,9 +41,6 @@ from evaluation.contracts import (
     NonEmptyText,
     Sha256,
 )
-
-JUDGE_MODEL_VARIABLE = "FIT_AGENT_EVAL_JUDGE_MODEL"
-
 
 class GenerationScoringError(Exception):
     pass
@@ -88,8 +86,12 @@ class JudgeConfig:
     model: str
     base_url: str
     api_key: str = field(repr=False)
+    api: str = "openai-completions"
+    provider: str | None = None
 
     def __post_init__(self) -> None:
+        if self.api != "openai-completions":
+            raise InvalidJudgeConfig(f"Ragas 裁判不支持协议: {self.api}")
         if not self.model or self.model != self.model.strip():
             raise InvalidJudgeConfig("裁判模型必须为非空白内容")
         if not self.base_url or self.base_url != self.base_url.strip():
@@ -112,28 +114,9 @@ class JudgeConfig:
             raise InvalidJudgeConfig("裁判服务地址必须为 HTTP(S) URL")
 
     @classmethod
-    def from_environment(
-        cls,
-        *,
-        base_url: str,
-        api_key: str,
-        environ: Mapping[str, str] | None = None,
-    ) -> "JudgeConfig":
-        # 当前源码没有既定的裁判服务地址与凭据环境变量来源；
-        # 地址与密钥由调用者从受保护配置注入，不猜测变量名，也不借用其他服务凭据。
-        return cls(
-            model=load_judge_model(environ),
-            base_url=base_url,
-            api_key=api_key,
-        )
-
-
-def load_judge_model(environ: Mapping[str, str] | None = None) -> str:
-    source: Mapping[str, str] = os.environ if environ is None else environ
-    value = (source.get(JUDGE_MODEL_VARIABLE) or "").strip()
-    if not value:
-        raise JudgeConfigError(f"缺少裁判模型配置: {JUDGE_MODEL_VARIABLE}")
-    return value
+    def from_model_config(cls, config: ModelConfig) -> "JudgeConfig":
+        return cls(model=config.model, base_url=config.base_url, api_key=config.api_key,
+                   api=config.api, provider=config.provider)
 
 
 def validate_timeout(value: object) -> float:

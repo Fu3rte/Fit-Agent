@@ -1,5 +1,6 @@
 import argparse
 import asyncio
+import hashlib
 import json
 import os
 import sys
@@ -36,12 +37,11 @@ from evaluation.generation_scoring import (  # noqa: E402
     GenerationScoringSession,
     JudgeConfig,
     failed_outcome,
-    load_judge_model,
     score_checkpoint_with_evidence,
 )
 
 ENABLE_VARIABLE = "FIT_AGENT_GENERATION_SCORING_INTEGRATION"
-OUTPUT_ROOT = BACKEND / "temp" / "generation-scoring"
+OUTPUT_ROOT = BACKEND / "temp" / "recovery-langfuse" / "config-validation" / "generation-scoring"
 CATALOG_EXERCISE_ID = "0001"
 
 
@@ -111,19 +111,6 @@ def verify_catalog_sample(checkpoint: GenerationCheckpoint) -> dict[str, str]:
         "equipment": exercise.equipment,
         "target": exercise.target,
     }
-
-
-def load_judge_config() -> JudgeConfig:
-    load_dotenv(BACKEND / ".env", override=False)
-    model = load_judge_model(os.environ)
-    # 受保护模型配置提供当前模型服务的地址与凭据；裁判模型名由 FIT_AGENT_EVAL_JUDGE_MODEL 指定。
-    # 是否支持 step-5-preview 由本次真实调用验证，不在此处猜测或改写服务地址。
-    config = load_model_config()
-    return JudgeConfig(
-        model=model,
-        base_url=config.base_url,
-        api_key=config.api_key,
-    )
 
 
 def run_identity(checkpoint_id: str) -> RunIdentity:
@@ -215,7 +202,9 @@ async def main() -> int:
         print(f"设置 {ENABLE_VARIABLE}=1 后执行真实裁判集成检查")
         return 0
 
-    judge = load_judge_config()
+    load_dotenv(BACKEND / ".env", override=False)
+    model = load_model_config()
+    judge = JudgeConfig.from_model_config(model)
     checkpoint = build_checkpoint()
     catalog_identity = verify_catalog_sample(checkpoint)
     scored = await score_checkpoint_with_evidence(
@@ -250,6 +239,12 @@ async def main() -> int:
     )
     receipt = {
         "enabled": True,
+        "model": model.model,
+        "provider": model.provider,
+        "api": model.api,
+        "endpoint_sha256": hashlib.sha256(model.base_url.encode()).hexdigest(),
+        "judge_matches_snapshot": (judge.model, judge.provider, judge.api, judge.base_url, judge.api_key)
+        == (model.model, model.provider, model.api, model.base_url, model.api_key),
         "timeout_seconds": args.timeout,
         "catalog": catalog_identity,
         "statuses": statuses,

@@ -18,7 +18,7 @@ from langsmith.utils import LangSmithNotFoundError
 from app.application.business.retrieval_embedding import EmbeddingClient
 from app.application.business.retrieval_index import MilvusConnection, RetrievalCorpus
 from app.application.business.retrieval_search import HybridRetriever
-from app.model_config import load_model_config
+from app.model_config import ModelConfig, load_model_config
 from evaluation import retrieval_support as support
 from evaluation.contracts import GENERATION_METRICS, DatasetIdentity
 from evaluation.dataset import (
@@ -31,8 +31,6 @@ from evaluation.dataset import (
 )
 from evaluation.generation_scoring import (
     JudgeConfig,
-    JudgeConfigError,
-    load_judge_model,
 )
 from evaluation.scenario_evidence import canonical_json, sha256_text
 from evaluation.scenarios import (
@@ -40,8 +38,6 @@ from evaluation.scenarios import (
     DEFAULT_VERSION_DIR,
     EXTERNAL_PROTOCOL_VERSION,
     EXTERNAL_SCORING_FILENAME,
-    JUDGE_API_KEY_VARIABLE,
-    JUDGE_BASE_URL_VARIABLE,
     RAGAS_PROTOCOL_VERSION,
     ExecutionIdentityError,
     ExternalScenarioScoring,
@@ -79,9 +75,6 @@ DATASET_METADATA_EXTRA = frozenset({"runtime"})
 EXAMPLE_METADATA_EXTRA = frozenset({"dataset_split"})
 MAX_CONCURRENCY = 6
 NUM_REPETITIONS = 1
-JUDGE_BASE_URL = (
-    "https://ws-o2404joh7zvfydxz.cn-beijing.maas.aliyuncs.com/compatible-mode/v1"
-)
 REMOTE_SCORE_TOLERANCE = 5e-5
 REMOTE_VERIFY_TIMEOUT_SECONDS = 30.0
 SDK_ROOT = support.EVAL_ROOT.parent / "scenario-langsmith"
@@ -568,17 +561,8 @@ def select_formal_scenarios(dataset: EvaluationDataset) -> list[dict]:
     return scenarios
 
 
-def judge_config(environ: Mapping[str, str] | None = None) -> JudgeConfig:
-    source = os.environ if environ is None else environ
-    try:
-        model = load_judge_model(source)
-        base_url = (source.get(JUDGE_BASE_URL_VARIABLE) or "").strip()
-        _require(base_url == JUDGE_BASE_URL, "裁判服务地址与批准配置不一致")
-        api_key = (source.get(JUDGE_API_KEY_VARIABLE) or "").strip()
-        _require(bool(api_key), f"缺少裁判凭据: {JUDGE_API_KEY_VARIABLE}")
-        return JudgeConfig(model=model, base_url=base_url, api_key=api_key)
-    except JudgeConfigError as error:
-        raise ScenarioSDKError("裁判模型配置无效") from error
+def judge_config() -> JudgeConfig:
+    return JudgeConfig.from_model_config(load_model_config())
 
 
 async def preflight_index(dataset: EvaluationDataset) -> dict:
@@ -729,7 +713,9 @@ class ScenarioTarget:
         rows: dict[str, dict],
         run_id: str,
         run_dir: Path,
+        model: ModelConfig,
     ) -> None:
+        self.model = model
         self.dataset = dataset
         self.rows = rows
         self.run_id = run_id
@@ -750,6 +736,7 @@ class ScenarioTarget:
                     run_id=self.run_id,
                     root=self.run_dir / "scenarios" / example_id,
                     enable_model=True,
+                    model=self.model,
                 )
             except ScenarioBlocked as error:
                 execution = error.execution
@@ -1320,6 +1307,8 @@ def experiment_metadata(
         feedback_version = FEEDBACK_VERSION
         _require(judge is not None, "Ragas 模式缺少裁判配置")
         judge_metadata = {
+            "api": judge.api,
+            "provider": judge.provider,
             "model": judge.model,
             "endpoint_sha256": sha256_text(judge.base_url),
         }
@@ -1915,9 +1904,8 @@ async def run_experiment(args) -> dict:
         _require(
             bool(os.environ.get("LANGSMITH_API_KEY")), "缺少 LANGSMITH_API_KEY"
         )
-        # 外部模式的裁判由 LangSmith 管理，本地不读取任何裁判配置。
-        judge = judge_config() if scoring_mode == "ragas" else None
         model = load_model_config()
+        judge = JudgeConfig.from_model_config(model) if scoring_mode == "ragas" else None
         model_identity = generation_identity(model)
         index_identity = await preflight_index(dataset)
         code = code_identity()
@@ -1940,6 +1928,8 @@ async def run_experiment(args) -> dict:
                 }
                 if judge is None
                 else {
+                    "api": judge.api,
+                    "provider": judge.provider,
                     "model": judge.model,
                     "endpoint_sha256": sha256_text(judge.base_url),
                 }
@@ -1980,6 +1970,7 @@ async def run_experiment(args) -> dict:
             rows=rows,
             run_id=run_id,
             run_dir=run_dir,
+            model=model,
         )
         evaluator = make_evaluator(
             dataset=dataset,

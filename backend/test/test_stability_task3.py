@@ -295,12 +295,11 @@ def patch_runtime(tmp_path: Path) -> tuple[Path, Path]:
 @contextmanager
 def running_app(model: ModelServer, tmp_path: Path):
     database_path, _ = patch_runtime(tmp_path)
-    os.environ["FIT_AGENT_TEST_MODEL_API"] = "openai-completions"
-    os.environ["FIT_AGENT_TEST_MODEL_BASE_URL"] = model.base_url
-    os.environ["FIT_AGENT_TEST_MODEL_ID"] = "test-model"
-    os.environ["FIT_AGENT_TEST_MODEL_API_KEY"] = "test-key"
-    os.environ["FIT_AGENT_TEST_MODEL_PROVIDER"] = "local"
-    install_test_model_config(root=tmp_path / f"config-{uuid4().hex}")
+    from app.model_config import ModelConfig
+
+    config = ModelConfig(api="openai-completions", base_url=model.base_url,
+                         model="test-model", provider="local", api_key="test-key")
+    install_test_model_config(root=tmp_path / f"config-{uuid4().hex}", model=config)
     with Server(http_module.app) as server:
         with client(server.base_url) as http:
             yield http, database_path

@@ -19,7 +19,7 @@ ROOT = REPO / "tmp" / "action-retrieval-functional-final"
 EXECUTOR = os.environ.get("FUNCTIONAL_EXECUTOR_ID", "independent-executor")
 # 真实配置仅在内存注入，进程结束时按现有生命周期恢复。
 _RESTORERS: list = []
-SECRET_ENV = ("FIT_AGENT_TEST_MODEL_API_KEY", "DASHSCOPE_API_KEY", "FIT_AGENT_MILVUS_TOKEN")
+SECRET_ENV = ("DASHSCOPE_API_KEY", "FIT_AGENT_MILVUS_TOKEN")
 
 
 def now_iso() -> str:
@@ -81,33 +81,11 @@ def install_isolation(namespace: str, database_path: Path | None = None) -> dict
 
 
 def install_in_memory_model_config() -> dict:
-    # 真实模型配置仅在内存中使用：从测试环境变量构造 ModelConfig，接入 http 实际查找点，不落盘。
+    # 将聊天配置快照注入 HTTP 查找点，不落盘。
     import app.interfaces.http as http
     from app import model_config
 
-    api = os.environ.get("FIT_AGENT_TEST_MODEL_API", "openai-completions")
-    base_url = os.environ.get("FIT_AGENT_TEST_MODEL_BASE_URL")
-    identifier = os.environ.get("FIT_AGENT_TEST_MODEL_ID")
-    api_key = os.environ.get("FIT_AGENT_TEST_MODEL_API_KEY")
-    provider = os.environ.get("FIT_AGENT_TEST_MODEL_PROVIDER")
-    missing = [
-        name
-        for name, value in (
-            ("FIT_AGENT_TEST_MODEL_BASE_URL", base_url),
-            ("FIT_AGENT_TEST_MODEL_ID", identifier),
-            ("FIT_AGENT_TEST_MODEL_API_KEY", api_key),
-        )
-        if not value
-    ]
-    if missing:
-        raise RuntimeError("缺少测试模型环境变量: " + ", ".join(missing))
-    snapshot = model_config.ModelConfig(
-        api=api,
-        base_url=model_config.validate_http_url(base_url),
-        model=identifier,
-        provider=model_config.effective_provider(api, provider),
-        api_key=api_key,
-    )
+    snapshot = e2e.model_snapshot()
     status = model_config.ProviderStatus(
         api=snapshot.api,
         base_url=snapshot.base_url,
@@ -307,7 +285,7 @@ def selfcheck_mode(run: Path) -> tuple[list[dict], dict]:
     from app.interfaces.http_api.routes import agent as agent_routes
 
     snapshot = agent_routes.load_model_config()
-    live_key = os.environ.get("FIT_AGENT_TEST_MODEL_API_KEY")
+    live_key = snapshot.api_key
     detected = CredentialFilter(http.active_secrets()).contains("pre" + live_key + "post") \
         if live_key else False
     checks.append(check(
@@ -816,7 +794,7 @@ def confirm_path_mode(run: Path) -> tuple[list[dict], dict]:
     from app.interfaces.http import active_secrets, app
 
     evidence: dict = {"isolation": landing["landing"], "model_config": landing["model_config"]}
-    api_key = os.environ.get("FIT_AGENT_TEST_MODEL_API_KEY")
+    api_key = e2e.model_snapshot().api_key
     leaked = bool(api_key) and api_key in active_secrets()
     checks.append(check("live_credential_visible_to_active_secrets", leaked,
                         {"api_key_present": bool(api_key), "in_active_secrets": leaked}))
@@ -878,9 +856,11 @@ def evidence_scan(run: Path) -> dict:
         value = os.environ.get(name)
         if value and len(value) >= 8:
             needles[name] = value
-    base_url = os.environ.get("FIT_AGENT_TEST_MODEL_BASE_URL")
-    if base_url:
-        host = urlsplit(base_url).netloc
+    snapshot = e2e._MODEL_SNAPSHOT
+    if snapshot is not None:
+        if len(snapshot.api_key) >= 8:
+            needles["model_api_key"] = snapshot.api_key
+        host = urlsplit(snapshot.base_url).netloc
         if host:
             needles["model_endpoint_host"] = host
     files = [path for path in run.rglob("*") if path.is_file()]

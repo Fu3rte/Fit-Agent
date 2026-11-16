@@ -69,6 +69,8 @@ def capacity_probe(spec, api_key: str) -> dict:
 
 
 def check() -> None:
+    if load_model_config().api != "anthropic-messages":
+        raise RuntimeError("Anthropic 协议专项需要 anthropic-messages 配置")
     ROOT.mkdir(parents=True, exist_ok=True)
     install_test_model_config()
     config = load_model_config()

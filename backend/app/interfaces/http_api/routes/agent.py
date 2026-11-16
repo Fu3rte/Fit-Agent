@@ -74,10 +74,15 @@ async def resolve_existing(
     # 先按 operation_id 查重：已失效编号返回冲突，已受理操作返回持久化原结果。
     try:
         outcome = await operations.resolve_operation(
-            operation_id, session_id, kind, operation_request,
+            operation_id,
+            session_id,
+            kind,
+            operation_request,
             credentials=credentials(session_id),
         )
-        if outcome is not None and CredentialFilter(credentials(session_id)).contains(outcome.model_dump()):
+        if outcome is not None and CredentialFilter(credentials(session_id)).contains(
+            outcome.model_dump()
+        ):
             reject(422, "credential_detected", CREDENTIAL_SAFE_MESSAGE)
         return outcome
     except CredentialDetected:
@@ -101,7 +106,11 @@ async def launch_run(
 ):
     async def prepare():
         model = load_model_config()
-        secrets = tuple(secret for secret in (model.api_key, request.app.state.retrieval_secret()) if secret)
+        secrets = tuple(
+            secret
+            for secret in (model.api_key, request.app.state.retrieval_secret())
+            if secret
+        )
         tools = create_file_tools(session_id)
         return model, tools, secrets, await request.is_disconnected()
 
@@ -112,14 +121,20 @@ async def launch_run(
             entries=request.app.state.session_entries,
             operations=request.app.state.session_operations,
             run_lifecycle=request.app.state.session_runs,
-            session_id=session_id, operation_id=operation_id,
-            origin=origin, operation_request=operation_request,
-            credentials=request.app.state.active_secrets, prepare=prepare, accept=accept,
+            session_id=session_id,
+            operation_id=operation_id,
+            origin=origin,
+            operation_request=operation_request,
+            credentials=request.app.state.active_secrets,
+            prepare=prepare,
+            accept=accept,
             coordinator=request.app.state.steering,
-            business=request.app.state.business, executor=request.app.state.executor,
+            business=request.app.state.business,
+            executor=request.app.state.executor,
             trace_store=request.app.state.trace_store,
             cloud_trace=request.app.state.cloud_trace,
-            create_state=RunState, create_events=HttpRunEvents,
+            create_state=RunState,
+            create_events=HttpRunEvents,
         )
         if result.state is None:
             return JSONResponse(send_result(operation_id, result.outcome.run))
@@ -130,8 +145,12 @@ async def launch_run(
         if exc.reason == "closing":
             reject(409, "run_busy", "服务正在关闭，暂不接受新运行。")
         if exc.reason == "rate_limited":
-            reject(429, "rate_limited", "请求过于频繁，请稍后重试。",
-                   headers={"Retry-After": str(exc.retry_after)})
+            reject(
+                429,
+                "rate_limited",
+                "请求过于频繁，请稍后重试。",
+                headers={"Retry-After": str(exc.retry_after)},
+            )
         reject(503, "capacity_exceeded", "当前已有任务执行中，请稍后重试。")
     except OperationExpired:
         reject_operation_expired()
@@ -162,18 +181,27 @@ async def run(payload: RunRequest, request: Request):
 
     async def accept(svc: SessionService, tools: dict, secrets: tuple[str, ...]):
         system_message = SystemMessage(
-            role="system", content=build_system_prompt(),
-            tools_added=[tool.definition() for tool in tools.values()] + business_tool_declarations(),
+            role="system",
+            content=build_system_prompt(),
+            tools_added=[tool.definition() for tool in tools.values()]
+            + business_tool_declarations(),
             timestamp=time_ns() // 1_000_000,
         )
         return await svc.accept_send(
-            SendCommand(operation_id=operation_id, session_id=session_id, request=send_request),
-            system_message=system_message, credentials=secrets,
+            SendCommand(
+                operation_id=operation_id, session_id=session_id, request=send_request
+            ),
+            system_message=system_message,
+            credentials=secrets,
         )
 
     return await launch_run(
-        request, session_id=session_id, operation_id=operation_id,
-        origin="send", accept=accept, operation_request=send_request,
+        request,
+        session_id=session_id,
+        operation_id=operation_id,
+        origin="send",
+        accept=accept,
+        operation_request=send_request,
     )
 
 
@@ -183,8 +211,13 @@ async def edit(payload: EditPayload, request: Request):
     session_id = str(payload.session_id)
     operation_id = str(payload.operation_id)
     edit_request = EditRequest(
-        target_entry_id=str(payload.target_entry_id), text=payload.request,
-        **({"attachments": payload.attachments} if "attachments" in payload.model_fields_set else {}),
+        target_entry_id=str(payload.target_entry_id),
+        text=payload.request,
+        **(
+            {"attachments": payload.attachments}
+            if "attachments" in payload.model_fields_set
+            else {}
+        ),
     )
 
     async def accept(svc: SessionService, tools: dict, secrets: tuple[str, ...]):
@@ -192,13 +225,21 @@ async def edit(payload: EditPayload, request: Request):
         # 内容替换登记会话替换意图：确认提交在事务提交前检查该意图并让位。
         async with replacements.register(session_id):
             return await svc.accept_edit(
-                EditCommand(operation_id=operation_id, session_id=session_id, request=edit_request),
+                EditCommand(
+                    operation_id=operation_id,
+                    session_id=session_id,
+                    request=edit_request,
+                ),
                 credentials=secrets,
             )
 
     return await launch_run(
-        request, session_id=session_id, operation_id=operation_id,
-        origin="edit", accept=accept, operation_request=edit_request,
+        request,
+        session_id=session_id,
+        operation_id=operation_id,
+        origin="edit",
+        accept=accept,
+        operation_request=edit_request,
     )
 
 
@@ -213,13 +254,21 @@ async def regenerate(payload: RegeneratePayload, request: Request):
         replacements: ReplacementCoordinator = request.app.state.replacements
         async with replacements.register(session_id):
             return await svc.accept_regenerate(
-                RegenerateCommand(operation_id=operation_id, session_id=session_id, request=regenerate_request),
+                RegenerateCommand(
+                    operation_id=operation_id,
+                    session_id=session_id,
+                    request=regenerate_request,
+                ),
                 credentials=secrets,
             )
 
     return await launch_run(
-        request, session_id=session_id, operation_id=operation_id,
-        origin="regenerate", accept=accept, operation_request=regenerate_request,
+        request,
+        session_id=session_id,
+        operation_id=operation_id,
+        origin="regenerate",
+        accept=accept,
+        operation_request=regenerate_request,
     )
 
 
@@ -229,9 +278,15 @@ async def steering(run_id: PathUUID, payload: SteeringRequest, request: Request)
     coordinator: SteeringCoordinator = request.app.state.steering
     operations: SessionOperations = request.app.state.session_operations
     queries = request.app.state.session_queries
-    steering_request = SteeringParams(target_run_id=run_id, text=payload.message, attachments=payload.attachments)
+    steering_request = SteeringParams(
+        target_run_id=run_id, text=payload.message, attachments=payload.attachments
+    )
     existing = await resolve_existing(
-        operations, payload.operation_id, payload.session_id, "steering", steering_request,
+        operations,
+        payload.operation_id,
+        payload.session_id,
+        "steering",
+        steering_request,
         request.app.state.active_secrets,
     )
     if existing is None:
@@ -241,7 +296,8 @@ async def steering(run_id: PathUUID, payload: SteeringRequest, request: Request)
         created, steering_input = await coordinator.accept(
             str(run_id),
             SteeringCommand(
-                operation_id=str(payload.operation_id), session_id=str(payload.session_id),
+                operation_id=str(payload.operation_id),
+                session_id=str(payload.session_id),
                 request=steering_request,
             ),
             credentials=credentials,
@@ -261,20 +317,28 @@ async def steering(run_id: PathUUID, payload: SteeringRequest, request: Request)
     if CredentialFilter(credentials).contains(steering_input.model_dump()):
         reject(422, "credential_detected", CREDENTIAL_SAFE_MESSAGE)
     return {
-        "operation_id": str(payload.operation_id), "session_id": str(payload.session_id),
-        "run_id": str(run_id), "steering_id": steering_input.id, "created": created,
+        "operation_id": str(payload.operation_id),
+        "session_id": str(payload.session_id),
+        "run_id": str(run_id),
+        "steering_id": steering_input.id,
+        "created": created,
         "status": "accepted" if created else steering_input.status,
-        "entry_id": steering_input.entry_id, "reason": steering_input.reason,
+        "entry_id": steering_input.entry_id,
+        "reason": steering_input.reason,
     }
 
 
 @router.post("/api/agent/runs/{run_id}/steering/{steering_id}/withdraw")
-async def withdraw(run_id: PathUUID, steering_id: PathUUID, payload: WithdrawRequest, request: Request):
+async def withdraw(
+    run_id: PathUUID, steering_id: PathUUID, payload: WithdrawRequest, request: Request
+):
     check_workout_query(request, set())
     coordinator: SteeringCoordinator = request.app.state.steering
     await require_run(request.app.state.session_queries, run_id, payload.session_id)
     try:
-        withdrawal = await coordinator.withdraw(str(run_id), str(payload.session_id), str(steering_id))
+        withdrawal = await coordinator.withdraw(
+            str(run_id), str(payload.session_id), str(steering_id)
+        )
     except SteeringConsumptionConflict:
         reject(409, "steering_consumption_conflict", "目标输入消费已开始。")
     except SessionMismatch:
@@ -282,10 +346,15 @@ async def withdraw(run_id: PathUUID, steering_id: PathUUID, payload: WithdrawReq
     except SessionNotFound:
         reject(404, "steering_not_found", "输入不存在。")
     steering_input = withdrawal.steering
-    if CredentialFilter(request.app.state.active_secrets(str(payload.session_id))).contains(steering_input.model_dump()):
+    if CredentialFilter(
+        request.app.state.active_secrets(str(payload.session_id))
+    ).contains(steering_input.model_dump()):
         reject(422, "credential_detected", CREDENTIAL_SAFE_MESSAGE)
     return {
-        "session_id": str(payload.session_id), "run_id": str(run_id),
-        "steering_id": steering_input.id, "status": steering_input.status,
-        "entry_id": steering_input.entry_id, "reason": steering_input.reason,
+        "session_id": str(payload.session_id),
+        "run_id": str(run_id),
+        "steering_id": steering_input.id,
+        "status": steering_input.status,
+        "entry_id": steering_input.entry_id,
+        "reason": steering_input.reason,
     }

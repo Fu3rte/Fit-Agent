@@ -324,26 +324,14 @@ def test_resolve_inputs_rejects_identity_drift(dataset, rows):
         )
 
 
-def test_judge_config_accepts_configured_model_and_fixed_endpoint(monkeypatch):
-    monkeypatch.setenv("FIT_AGENT_EVAL_JUDGE_MODEL", "qwen3.6-plus")
-    monkeypatch.setenv("FIT_AGENT_EVAL_JUDGE_BASE_URL", ls.JUDGE_BASE_URL)
-    monkeypatch.setenv("FIT_AGENT_EVAL_JUDGE_API_KEY", "test-only-credential")
+def test_judge_config_uses_saved_chat_configuration(tmp_path, monkeypatch):
+    from app import model_config
+
+    monkeypatch.setattr(model_config, "DATA_ROOT", tmp_path)
+    model_config.save_provider(api="openai-completions", base_url="https://example.invalid/v1", model="test-model", provider="test-provider", api_key="test-key")
+    saved = model_config.load_model_config()
     judge = ls.judge_config()
-    assert judge.model == "qwen3.6-plus"
-    assert judge.base_url == ls.JUDGE_BASE_URL
-    monkeypatch.setenv("FIT_AGENT_EVAL_JUDGE_MODEL", "step-5-preview")
-    assert ls.judge_config().model == "step-5-preview"
-    monkeypatch.setenv("FIT_AGENT_EVAL_JUDGE_MODEL", "   ")
-    with pytest.raises(ls.ScenarioSDKError, match="裁判模型"):
-        ls.judge_config()
-    monkeypatch.setenv("FIT_AGENT_EVAL_JUDGE_MODEL", "qwen3.6-plus")
-    monkeypatch.setenv("FIT_AGENT_EVAL_JUDGE_BASE_URL", "https://example.invalid/v1")
-    with pytest.raises(ls.ScenarioSDKError, match="裁判服务地址"):
-        ls.judge_config()
-    monkeypatch.setenv("FIT_AGENT_EVAL_JUDGE_BASE_URL", ls.JUDGE_BASE_URL)
-    monkeypatch.delenv("FIT_AGENT_EVAL_JUDGE_API_KEY")
-    with pytest.raises(ls.ScenarioSDKError, match="裁判凭据"):
-        ls.judge_config()
+    assert (judge.api, judge.provider, judge.model, judge.base_url, judge.api_key) == (saved.api, saved.provider, saved.model, saved.base_url, saved.api_key)
 
 
 def test_execution_summary_keeps_relative_evidence():

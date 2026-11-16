@@ -108,7 +108,7 @@ uv run --env-file .env python -m test.check_retrieval_index build
 
 ### 评测配置
 
-- 裁判模型：`FIT_AGENT_EVAL_JUDGE_MODEL`、`FIT_AGENT_EVAL_JUDGE_BASE_URL`、`FIT_AGENT_EVAL_JUDGE_API_KEY`。
+- 本地 Ragas 裁判读取聊天中已保存的完整模型配置，支持 `openai-completions` 协议。
 - Langfuse：`LANGFUSE_PUBLIC_KEY`、`LANGFUSE_SECRET_KEY`，可选 `LANGFUSE_BASE_URL`（Cloud 默认 `https://cloud.langfuse.com`）；当前评测平台配置。
 - LangSmith：`LANGSMITH_API_KEY`、`LANGSMITH_ENDPOINT`；历史平台配置，langsmith 包经传递依赖保留，历史链路可读。
 

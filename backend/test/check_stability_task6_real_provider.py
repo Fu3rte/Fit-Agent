@@ -144,6 +144,11 @@ def main() -> int:
     parser.add_argument("--max-real-requests", type=int, default=14)
     args = parser.parse_args()
 
+    from app.model_config import load_model_config
+
+    model = load_model_config()
+    if any(api != model.api for api in API_KINDS):
+        raise RuntimeError("双协议专项需要分别配置对应协议，当前统一聊天配置无法覆盖")
     api_key = read_api_key(Path(args.auth_file))
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)

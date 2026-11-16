@@ -1,0 +1,19 @@
+{
+  "source": "backend/temp/scenario-langfuse/runs/20261025T064301Z-9f370396/scenarios/1ed2b9a4-bd64-50ce-8283-b9c2a6fc4e8b/s-confirmation-cancellation-state-07/execution.json:events[e01].tool_calls[get_current_plan]，仅保留该调用",
+  "event": {
+    "run_id": "0d946532-33f3-438c-95c9-951f89c94c0b",
+    "scenario_id": "s-confirmation-cancellation-state-07",
+    "event_id": "e01",
+    "session_id": "69c76b36-529e-4b67-8cde-99e39f02b817"
+  },
+  "tool_call": {
+    "tool_call_id": "call_123c6de4d51243f198d8fda7",
+    "tool_name": "get_current_plan",
+    "arguments": {},
+    "content": "{\"id\": null, \"content\": null}",
+    "is_error": false,
+    "entry_id": "cf01b7ac-5e7d-431e-8190-a0b1c9eeb14c",
+    "parent_entry_id": "3e7390d8-bfe7-428a-b5da-549947f25909",
+    "duration_ms": 1759.8739999957616
+  }
+}

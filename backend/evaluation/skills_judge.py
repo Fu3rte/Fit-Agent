@@ -1,13 +1,8 @@
-import argparse
 import json
-import os
 import re
 from datetime import datetime
 from pathlib import Path
 
-from openai import OpenAI
-
-from evaluation.langfuse_scenarios import make_client, require_credentials
 from evaluation.skills_generation import identity_digest
 from evaluation.skills_scoring import (
     EVALUATORS,
@@ -23,8 +18,6 @@ from evaluation.skills_scoring import (
     scoring_dir,
 )
 
-# 端点与模型来自已核验的网页Evaluator配置（glm-5.3-flash / OpenAI 兼容），非本地臆造。
-BASE_URL = "https://open.bigmodel.cn/api/coding/paas/v4"
 CATEGORIES = {key: tuple(EVALUATORS[key]["categories"]) for key in KEYS}
 KEY_RE = re.compile(r"\{\{(\w+)\}\}")
 SCORE_PAGE_LIMIT = 100
@@ -122,27 +115,3 @@ def run_judge(*, source: Path, group: str | None, limit: int,
         processed += 1
     return {"rows_in_scope": len(rows), "scored_this_run": processed,
             "already_complete": skipped}
-
-
-def main(argv=None) -> int:
-    parser = argparse.ArgumentParser(description="程序化运行已配置GLM Evaluator对真实回答打分并写回 Langfuse score")
-    parser.add_argument("--source", type=Path, required=True)
-    parser.add_argument("--group")
-    parser.add_argument("--limit", type=int, default=30)
-    parser.add_argument("--enable-judge", action="store_true")
-    args = parser.parse_args(argv)
-    if not args.enable_judge:
-        raise ValueError("必须显式--enable-judge；此操作调用真实GLM")
-    key_value = os.environ.get("GLM_API_KEY")
-    if not key_value:
-        raise ValueError("缺少环境变量 GLM_API_KEY（bigmodel.cn 智谱密钥）；禁止以其它模型替代")
-    require_credentials()
-    result = run_judge(source=args.source, group=args.group, limit=args.limit,
-                       langfuse_client=make_client(),
-                       openai_client=OpenAI(api_key=key_value, base_url=BASE_URL))
-    print(json.dumps(result, ensure_ascii=False))
-    return 0
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())

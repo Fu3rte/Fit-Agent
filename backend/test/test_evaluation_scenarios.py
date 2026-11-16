@@ -82,7 +82,6 @@ from evaluation.deterministic_assertions import (
 )
 from evaluation.generation_scoring import (
     JudgeConfig,
-    load_judge_model,
     run_judge_identity,
 )
 from evaluation.scenario_evidence import (
@@ -1438,12 +1437,6 @@ def test_identity_endpoints_are_sanitized():
 
 
 def test_judge_model_accepts_configured_model():
-    for model in ("decision-model-preview", "qwen3.6-plus", "unknown-judge"):
-        assert load_judge_model({
-            "FIT_AGENT_EVAL_JUDGE_MODEL": model
-        }) == model
-    with pytest.raises(Exception):
-        load_judge_model({"FIT_AGENT_EVAL_JUDGE_MODEL": "   "})
     config = JudgeConfig(
         model="qwen3.6-plus",
         base_url="https://example.invalid/v1",
@@ -1470,65 +1463,47 @@ def test_judge_model_accepts_configured_model():
     assert identity.model == "decision-model-preview"
 
 
-def _forbid_generation_model_config(monkeypatch):
-    def fail_load_model_config():
-        raise AssertionError("裁判配置不得读取生成模型配置")
+def test_judge_config_reads_saved_chat_configuration(tmp_path, monkeypatch):
+    from app import model_config
 
-    monkeypatch.setattr(
-        "evaluation.scenarios.load_model_config", fail_load_model_config
-    )
-
-
-def test_judge_config_reads_all_fields_from_environment(monkeypatch):
-    _forbid_generation_model_config(monkeypatch)
-    monkeypatch.setenv("FIT_AGENT_EVAL_JUDGE_MODEL", "decision-model-preview")
-    monkeypatch.setenv(
-        "FIT_AGENT_EVAL_JUDGE_BASE_URL",
-        "https://judge.example.invalid/compatible-mode/v1",
-    )
-    monkeypatch.setenv("FIT_AGENT_EVAL_JUDGE_API_KEY", "judge-synthetic-key")
+    monkeypatch.setattr(model_config, "DATA_ROOT", tmp_path)
+    model_config.save_provider(api="openai-completions", base_url="https://example.invalid/v1", model="test-model", provider="test-provider", api_key="test-key")
+    saved = model_config.load_model_config()
     judge, timeout = _judge_config()
-    assert judge is not None
-    assert judge.model == "decision-model-preview"
-    assert judge.base_url == "https://judge.example.invalid/compatible-mode/v1"
-    assert judge.api_key == "judge-synthetic-key"
+    assert (judge.api, judge.provider, judge.model, judge.base_url, judge.api_key) == (saved.api, saved.provider, saved.model, saved.base_url, saved.api_key)
     assert timeout == DEFAULT_JUDGE_TIMEOUT
 
 
-def test_judge_config_requires_dedicated_base_url(monkeypatch):
-    _forbid_generation_model_config(monkeypatch)
-    monkeypatch.setenv("FIT_AGENT_EVAL_JUDGE_API_KEY", "judge-synthetic-key")
-    monkeypatch.setenv("FIT_AGENT_EVAL_JUDGE_MODEL", "decision-model-preview")
-    monkeypatch.delenv("FIT_AGENT_EVAL_JUDGE_BASE_URL", raising=False)
-    assert _judge_config() == (None, None)
-    for blank in ("", "   "):
-        monkeypatch.setenv("FIT_AGENT_EVAL_JUDGE_BASE_URL", blank)
-        assert _judge_config() == (None, None)
-    monkeypatch.setenv("FIT_AGENT_EVAL_JUDGE_BASE_URL", "https://judge.example.invalid/v1")
-    monkeypatch.delenv("FIT_AGENT_EVAL_JUDGE_MODEL", raising=False)
-    assert _judge_config() == (None, None)
-    monkeypatch.setenv("FIT_AGENT_EVAL_JUDGE_MODEL", "qwen3.6-plus")
-    judge, _ = _judge_config()
-    assert judge is not None
-    assert judge.model == "qwen3.6-plus"
+async def test_run_selected_keeps_saved_model_snapshot_after_configuration_change(dataset, tmp_path, monkeypatch):
+    from app import model_config
+
+    monkeypatch.setattr(model_config, "DATA_ROOT", tmp_path / "config")
+    model_config.save_provider(api="openai-completions", base_url="https://first.invalid/v1", model="first", provider="first-provider", api_key="first-key")
+    snapshot = model_config.load_model_config()
+    judge = JudgeConfig.from_model_config(snapshot)
+    model_config.save_provider(api="openai-completions", base_url="https://second.invalid/v1", model="second", provider="second-provider", api_key="second-key")
+    summary = await run_selected(dataset, [], run_id="snapshot", root=tmp_path / "runs", enable_model=True, judge=judge, judge_timeout=10, model=snapshot)
+    identity = json.loads(summary.identity["generation"]["model"])
+    assert (identity["model"], identity["provider"], identity["base_url"]) == (snapshot.model, snapshot.provider, snapshot.base_url)
+    assert (judge.model, judge.provider, judge.base_url, judge.api_key) == (snapshot.model, snapshot.provider, snapshot.base_url, snapshot.api_key)
+    changed = model_config.load_model_config()
+    assert changed.model == "second"
+    with pytest.raises(ValueError, match="裁判配置与生成模型快照不一致"):
+        await run_selected(dataset, [], run_id="mismatch", root=tmp_path / "runs", enable_model=True, judge=JudgeConfig.from_model_config(changed), judge_timeout=10, model=snapshot)
 
 
-def test_judge_config_requires_dedicated_api_key(monkeypatch):
-    _forbid_generation_model_config(monkeypatch)
-    monkeypatch.setenv("FIT_AGENT_EVAL_JUDGE_MODEL", "decision-model-preview")
-    monkeypatch.setenv(
-        "FIT_AGENT_EVAL_JUDGE_BASE_URL",
-        "https://judge.example.invalid/compatible-mode/v1",
-    )
-    monkeypatch.delenv("FIT_AGENT_EVAL_JUDGE_API_KEY", raising=False)
-    assert _judge_config() == (None, None)
-    for blank in ("", "   "):
-        monkeypatch.setenv("FIT_AGENT_EVAL_JUDGE_API_KEY", blank)
-        assert _judge_config() == (None, None)
-    monkeypatch.setenv("FIT_AGENT_EVAL_JUDGE_API_KEY", "judge-synthetic-key")
-    judge, _ = _judge_config()
-    assert judge is not None
-    assert judge.api_key == "judge-synthetic-key"
+def test_install_test_model_config_uses_saved_snapshot_without_test_environment(tmp_path, monkeypatch):
+    from app import model_config
+    from test.regression_support import install_test_model_config
+
+    monkeypatch.setattr(model_config, "DATA_ROOT", tmp_path / "source")
+    model_config.save_provider(api="openai-completions", base_url="https://source.invalid/v1", model="source", provider="source-provider", api_key="source-key")
+    source = model_config.load_model_config()
+    monkeypatch.setenv("FIT_AGENT_TEST_MODEL_ID", "unrelated")
+    monkeypatch.setenv("FIT_AGENT_TEST_MODEL_API_KEY", "unrelated")
+    installed = install_test_model_config(root=tmp_path / "isolated")
+    assert installed == source
+    assert model_config.load_model_config() == source
 
 
 def test_hidden_candidate_identity_is_rejected_from_public_response():

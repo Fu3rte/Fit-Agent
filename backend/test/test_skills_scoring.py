@@ -824,15 +824,6 @@ class StubOpenAI:
         self.chat = SimpleNamespace(completions=completions)
 
 
-def test_skills_judge_gates_require_explicit_confirmation(completed_skills_run,
-                                                          monkeypatch):
-    with pytest.raises(ValueError, match="--enable-judge"):
-        skills_judge.main(["--source", str(completed_skills_run)])
-    monkeypatch.delenv("GLM_API_KEY", raising=False)
-    with pytest.raises(ValueError, match="GLM_API_KEY"):
-        skills_judge.main(["--source", str(completed_skills_run), "--enable-judge"])
-
-
 def test_skills_judge_writes_langfuse_scores_and_skips_completed(completed_skills_run):
     client = MemoryClient()
     _, receipt = sync_and_submit(completed_skills_run, client)

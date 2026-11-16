@@ -265,8 +265,12 @@ async def prepare_tool_call(
     declaration = declared.get(call_name)
     if declaration is None:
         return _finalized(
-            index, tool_call, f"工具未授权或已被移除：{call_name}", timestamp,
-            tool=tool, error_code="tool_not_authorized",
+            index,
+            tool_call,
+            f"工具未授权或已被移除：{call_name}",
+            timestamp,
+            tool=tool,
+            error_code="tool_not_authorized",
             contains_credentials=contains_credentials,
         )
     expected = tool.definition()
@@ -283,7 +287,10 @@ async def prepare_tool_call(
         if tool.format_error is not None:
             _reject_error_credentials(contains_credentials, str(error))
         return _finalized(
-            index, tool_call, f"参数预处理失败：{error}", timestamp,
+            index,
+            tool_call,
+            f"参数预处理失败：{error}",
+            timestamp,
             tool=None if isinstance(error, FuturesCancelled) else tool,
             error_code="argument_preparation_failed",
             contains_credentials=contains_credentials,
@@ -293,17 +300,22 @@ async def prepare_tool_call(
     except ValidationError as error:
         if tool.format_error is not None:
             _reject_error_credentials(
-                contains_credentials, json.dumps(tool_call.arguments, ensure_ascii=False)
+                contains_credentials,
+                json.dumps(tool_call.arguments, ensure_ascii=False),
             )
         return _finalized(
             index,
             tool_call,
             "参数校验失败"
             if tool.format_error is not None
-            else _validation_message(call_name, tool_call.arguments, error, declaration.parameters),
+            else _validation_message(
+                call_name, tool_call.arguments, error, declaration.parameters
+            ),
             timestamp,
             tool=tool,
-            error_code=_validation_error_code(tool, error) if tool.format_error is not None else "invalid_arguments",
+            error_code=_validation_error_code(tool, error)
+            if tool.format_error is not None
+            else "invalid_arguments",
             contains_credentials=contains_credentials,
         )
     if before_tool_call is not None:
@@ -322,25 +334,36 @@ async def prepare_tool_call(
             if tool.format_error is not None:
                 _reject_error_credentials(contains_credentials, str(error))
             return _finalized(
-                index, tool_call, f"权限检查失败：{error}", timestamp,
+                index,
+                tool_call,
+                f"权限检查失败：{error}",
+                timestamp,
                 tool=None if isinstance(error, FuturesCancelled) else tool,
                 error_code="permission_check_failed",
                 contains_credentials=contains_credentials,
             )
         if _cancelled(signal):
-            return _finalized(index, tool_call, "Operation aborted", timestamp, cancelled=True)
+            return _finalized(
+                index, tool_call, "Operation aborted", timestamp, cancelled=True
+            )
         if decision is not None and decision.block:
             if tool.format_error is not None:
                 _reject_error_credentials(
                     contains_credentials, decision.reason or "工具执行被拒绝"
                 )
             return _finalized(
-                index, tool_call, decision.reason or "工具执行被拒绝", timestamp,
-                tool=tool, error_code="tool_blocked",
+                index,
+                tool_call,
+                decision.reason or "工具执行被拒绝",
+                timestamp,
+                tool=tool,
+                error_code="tool_blocked",
                 contains_credentials=contains_credentials,
             )
     if _cancelled(signal):
-        return _finalized(index, tool_call, "Operation aborted", timestamp, cancelled=True)
+        return _finalized(
+            index, tool_call, "Operation aborted", timestamp, cancelled=True
+        )
     return PreparedToolCall(index, tool_call, tool, arguments, timestamp)
 
 
@@ -404,7 +427,13 @@ async def execute_prepared_tool_call(
             result = AgentToolResult([], is_error=True)
         _validate_result(result)
         result = AgentToolResult(
-            [*result.content, TextContent(type="text", text="Operation aborted；工具执行已收尾，副作用可能已发生，请核对原操作。")],
+            [
+                *result.content,
+                TextContent(
+                    type="text",
+                    text="Operation aborted；工具执行已收尾，副作用可能已发生，请核对原操作。",
+                ),
+            ],
             is_error=True,
         )
     except Exception as error:
@@ -519,7 +548,9 @@ async def run_tool_call(
         contains_credentials=contains_credentials,
     )
     if isinstance(outcome, FinalizedToolCall):
-        _reject_credentials(contains_credentials, AgentToolResult(outcome.message.content, True))
+        _reject_credentials(
+            contains_credentials, AgentToolResult(outcome.message.content, True)
+        )
         return outcome.message
 
     def update(result: AgentToolResult) -> None:
@@ -532,7 +563,9 @@ async def run_tool_call(
         outcome,
         after_tool_call=after_tool_call,
         signal=signal,
-        on_update=update if on_update is not None or contains_credentials is not None else None,
+        on_update=update
+        if on_update is not None or contains_credentials is not None
+        else None,
         contains_credentials=contains_credentials,
         deadline=deadline,
         run_control=run_control,
@@ -709,9 +742,9 @@ async def run_tool_batch(
                 stop()
                 break
     else:
-        placements: list[PreparedToolCall | FinalizedToolCall | None] = [
-            None
-        ] * len(tool_calls)
+        placements: list[PreparedToolCall | FinalizedToolCall | None] = [None] * len(
+            tool_calls
+        )
         for index, call in enumerate(tool_calls):
             if _cancelled(signal):
                 break
@@ -846,7 +879,11 @@ async def _execute_with_cancel(
     # 协程 execute 直接在当前事件循环执行；同步 execute 放入线程池，两者共用取消收尾。
     budget = timeout if deadline is None else deadline.effective(timeout)
     if budget <= 0:
-        reason = "run_timeout" if deadline is not None and deadline.expired() else "tool_timeout"
+        reason = (
+            "run_timeout"
+            if deadline is not None and deadline.expired()
+            else "tool_timeout"
+        )
         _record_tool_stop(run_control, reason)
         if signal is not None:
             signal.set()
@@ -861,6 +898,7 @@ async def _execute_with_cancel(
         tracker.add(handle)
 
     if handle.kind == "async":
+
         async def invoke():
             try:
                 return await tool.execute(tool_call_id, arguments, signal, on_update)
@@ -870,6 +908,7 @@ async def _execute_with_cancel(
         pending: asyncio.Future = asyncio.ensure_future(invoke())
         handle.task = pending
     else:
+
         def invoke():
             handle.thread = current_thread()
             try:
@@ -893,7 +932,11 @@ async def _execute_with_cancel(
             if pending.done():
                 try:
                     result = pending.result()
-                except (CredentialDetectedError, _ResultProtocolError, _UpdatePublicationError):
+                except (
+                    CredentialDetectedError,
+                    _ResultProtocolError,
+                    _UpdatePublicationError,
+                ):
                     raise
                 except Exception as error:
                     handle.error = error
@@ -963,13 +1006,18 @@ async def _execute_with_cancel(
         if pending.done():
             try:
                 result = pending.result()
-            except (CredentialDetectedError, _ResultProtocolError, _UpdatePublicationError):
+            except (
+                CredentialDetectedError,
+                _ResultProtocolError,
+                _UpdatePublicationError,
+            ):
                 raise
             except asyncio.CancelledError:
                 result = None
             except Exception as error:
                 result = AgentToolResult(
-                    [TextContent(type="text", text=f"工具执行失败：{error}")], is_error=True
+                    [TextContent(type="text", text=f"工具执行失败：{error}")],
+                    is_error=True,
                 )
             raise _CancelledExecution(result)
         # 真实线程/任务仍未退出：句柄保留在 tracker，禁止标为已结束或丢弃。
@@ -996,7 +1044,9 @@ def _reject_credentials(
 
 
 def _reject_error_credentials(check: CredentialCheck | None, text: str) -> None:
-    _reject_credentials(check, AgentToolResult([TextContent(type="text", text=text)], True))
+    _reject_credentials(
+        check, AgentToolResult([TextContent(type="text", text=text)], True)
+    )
 
 
 def _cancelled(signal: Event | None) -> bool:
@@ -1058,7 +1108,10 @@ def _finalized(
 
 
 def _validation_message(
-    call_name: str, arguments: JsonObject, error: ValidationError, parameters: JsonObject
+    call_name: str,
+    arguments: JsonObject,
+    error: ValidationError,
+    parameters: JsonObject,
 ) -> str:
     constraints = {}
     properties = parameters.get("properties", {})
