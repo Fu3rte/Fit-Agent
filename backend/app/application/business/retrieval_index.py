@@ -14,7 +14,7 @@ from pymilvus import DataType, Function, FunctionType, MilvusClient
 
 from app.application.business import retrieval_text as rt
 from app.application.business.catalog import DEFAULT_ACTIONS_PATH, Catalog
-from app.application.business.retrieval_embedding import EmbeddingClient
+from app.application.business.retrieval_embedding import MAX_BATCH_SIZE, EmbeddingClient
 
 PUBLISHED_ALIAS = "fit_agent_actions_current"
 BUILD_PREFIX = "fit_agent_actions_build_"
@@ -353,8 +353,8 @@ async def build_index(db: MilvusConnection, corpus: RetrievalCorpus, embedding: 
     started = time.monotonic()
     before = embedding.usage
     encoding_seconds = 0.0
-    for start in range(0, len(corpus.records), 20):
-        batch = corpus.records[start:start + 20]
+    for start in range(0, len(corpus.records), MAX_BATCH_SIZE):
+        batch = corpus.records[start:start + MAX_BATCH_SIZE]
         encoding_started = time.monotonic()
         vectors = await embedding.encode_batch([record["text"] for record in batch])
         encoding_seconds += time.monotonic() - encoding_started

@@ -799,6 +799,42 @@ def test_verify_group_requires_every_item_and_score(dataset, reviewed):
     assert "target failed" in samples[0]["error"]
 
 
+def test_verify_group_decodes_json_string_output(dataset, reviewed):
+    row = lf.example_rows(dataset)[0]
+    query_id = row["inputs"]["query_id"]
+    identity = lf.dataset_binding(dataset)
+    positives = [
+        item["exercise_id"]
+        for item in row["outputs"]["labels"]
+        if item["grade"] >= 1
+    ]
+    outputs = target_outputs(
+        query_id=query_id, identity=identity, pool=positives[:2], final=positives[:1]
+    )
+    expected = lf.expected_feedback(
+        "hybrid", row["inputs"], outputs, row["outputs"], identity, reviewed
+    )
+    item = experiment_item(
+        row["id"],
+        output=json.dumps(outputs, ensure_ascii=False),
+        scores=[score_v3(name, value) for name, value in expected.items()],
+    )
+    samples, coverage = lf.verify_group(
+        verify_client([item]),
+        group="hybrid",
+        dataset_identity=identity,
+        reviewed=reviewed,
+        rows={row["id"]: row},
+        selected_example_ids=[row["id"]],
+        experiment_id="experiment-1",
+        from_start_time=now_utc(),
+    )
+    assert coverage["status"] == "complete"
+    assert samples[0]["status"] == "complete"
+    assert samples[0]["outputs"] == outputs
+    assert samples[0]["feedback"] == pytest.approx(expected)
+
+
 def test_verify_group_marks_review_blocked_evidence(dataset, reviewed):
     row = lf.example_rows(dataset)[0]
     query_id = row["inputs"]["query_id"]
@@ -912,6 +948,76 @@ def test_run_experiment_executes_task_and_evaluator_and_registers_scores(
             {"local_run_id": "run", "group": "hybrid"},
             now_utc(),
         )
+
+
+def test_verify_experiment_metadata_accepts_flattened_cloud_metadata():
+    client = MemoryLangfuse()
+    stamp = now_utc()
+    expected = {
+        "local_run_id": "run-cloud",
+        "group": "hybrid",
+        "purpose": "formal",
+        "dataset": {
+            "version": "rebuild-v4",
+            "source": {"catalog": {"count": 1321}},
+            "nested": {"enabled": True, "archived": False},
+        },
+        "parameters": {"rrf_k": 60, "threshold": 0.0},
+        "max_concurrency": 6,
+        "sample_scope": {
+            "query_ids": ["q-lookup-001", "q-lookup-002"],
+            "count": 2,
+        },
+    }
+    flattened = {
+        "local_run_id": "run-cloud",
+        "group": "hybrid",
+        "purpose": "formal",
+        "dataset.version": "rebuild-v4",
+        "dataset.source.catalog.count": "1321",
+        "dataset.nested.enabled": "true",
+        "dataset.nested.archived": "false",
+        "parameters.rrf_k": "60",
+        "parameters.threshold": "0",
+        "max_concurrency": "6",
+        "sample_scope.query_ids": '["q-lookup-001","q-lookup-002"]',
+        "sample_scope.count": "2",
+    }
+    experiment_id = "exp-cloud-flat"
+    client.experiments[experiment_id] = Experiment(
+        id=experiment_id,
+        name="run-cloud-hybrid-formal",
+        start_time=stamp,
+        end_time=stamp,
+        item_count=2,
+        dataset_id="ds-1",
+        metadata=flattened,
+    )
+    lf.verify_experiment_metadata(client, experiment_id, expected, stamp)
+    client.experiments[experiment_id] = client.experiments[experiment_id].model_copy(
+        update={"metadata": {**flattened, "parameters.threshold": "0.0"}}
+    )
+    lf.verify_experiment_metadata(client, experiment_id, expected, stamp)
+
+    for bad_key, bad_value in (
+        ("parameters.threshold", "0.1"),
+        ("dataset.nested.enabled", "false"),
+        ("sample_scope.query_ids", '["q-lookup-001"]'),
+        ("max_concurrency", "5"),
+    ):
+        client.experiments[experiment_id] = client.experiments[experiment_id].model_copy(
+            update={"metadata": {**flattened, bad_key: bad_value}}
+        )
+        with pytest.raises(ValueError, match=f"远端实验 metadata 不符: {bad_key}"):
+            lf.verify_experiment_metadata(client, experiment_id, expected, stamp)
+
+    without_leaf = dict(flattened)
+    del without_leaf["dataset.version"]
+    client.experiments[experiment_id] = client.experiments[experiment_id].model_copy(
+        update={"metadata": without_leaf}
+    )
+    with pytest.raises(ValueError, match="远端实验 metadata 不符: dataset.version"):
+        lf.verify_experiment_metadata(client, experiment_id, expected, stamp)
 
 
 def test_verify_group_until_complete_recovers_after_delayed_persist(

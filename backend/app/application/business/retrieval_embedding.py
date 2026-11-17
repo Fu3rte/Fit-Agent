@@ -13,7 +13,7 @@ from app.application.business.retrieval_config import (
 from app.application.business.retrieval_text import normalize
 
 # 契约约定的单次请求批量上限；超出时按固定顺序简单分批，不引入并发队列。
-MAX_BATCH_SIZE = 20
+MAX_BATCH_SIZE = 10
 
 
 class EmbeddingResponseError(Exception):

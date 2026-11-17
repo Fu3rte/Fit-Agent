@@ -1,6 +1,7 @@
 import argparse
 import asyncio
 import json
+import math
 import time
 from copy import deepcopy
 from dataclasses import asdict, replace
@@ -9,7 +10,7 @@ from uuid import uuid4
 
 from pymilvus import MilvusException
 
-from app.application.business.retrieval_embedding import EmbeddingClient
+from app.application.business.retrieval_embedding import MAX_BATCH_SIZE, EmbeddingClient
 from app.application.business.retrieval_index import (
     BUILD_PREFIX,
     COLLECTION_DESCRIPTION_MAX_BYTES,
@@ -203,7 +204,7 @@ async def build(corpus: RetrievalCorpus) -> None:
             report = await build_index(db, corpus, embedding)
         finally:
             save("directory-encoding-usage.json", {"usage": asdict(embedding.usage), "elapsed_seconds": time.monotonic() - started})
-        assert report["encoding_usage"]["requests"] == 67
+        assert report["encoding_usage"]["requests"] == math.ceil(len(corpus.records) / MAX_BATCH_SIZE)
         save("build-result.json", report)
 
 

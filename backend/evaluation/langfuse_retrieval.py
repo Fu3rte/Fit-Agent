@@ -3,6 +3,7 @@ import asyncio
 import json
 import math
 import os
+import random
 import threading
 import time
 from collections import defaultdict
@@ -53,7 +54,7 @@ PURPOSES = ("lookup", "generation", "replacement")
 MAX_CONCURRENCY = 6
 NUM_REPETITIONS = 1
 REMOTE_SCORE_TOLERANCE = 5e-5
-REMOTE_VERIFY_TIMEOUT_SECONDS = 30.0
+REMOTE_VERIFY_TIMEOUT_SECONDS = 120.0
 REMOTE_VERIFY_POLL_SECONDS = 1.5
 SDK_ROOT = support.EVAL_ROOT.parent / "retrieval-langfuse"
 DATASET_ROOT = SDK_ROOT / "datasets"
@@ -988,6 +989,19 @@ def verify_group(
             continue
         item = matched[0]
         outputs = item.output
+        if item.level == ObservationLevel.ERROR:
+            samples.append(
+                {
+                    "query_id": query_id,
+                    "example_id": example_id,
+                    "trace_id": item.trace_id,
+                    "status": "failed",
+                    "error": outputs if isinstance(outputs, str) else "实验条目标记为 ERROR",
+                }
+            )
+            continue
+        if isinstance(outputs, str) and outputs.lstrip().startswith("{"):
+            outputs = json.loads(outputs)
         candidate_pool = (
             outputs.get("candidate_pool") if isinstance(outputs, dict) else None
         )
@@ -1009,17 +1023,6 @@ def verify_group(
                     "error": f"{query_id} 存在未审阅候选: {', '.join(unknown)}",
                     "run_start_time": item.start_time.isoformat() if item.start_time else None,
                     "run_end_time": item.end_time.isoformat() if item.end_time else None,
-                }
-            )
-            continue
-        if item.level == ObservationLevel.ERROR:
-            samples.append(
-                {
-                    "query_id": query_id,
-                    "example_id": example_id,
-                    "trace_id": item.trace_id,
-                    "status": "failed",
-                    "error": outputs if isinstance(outputs, str) else "实验条目标记为 ERROR",
                 }
             )
             continue
@@ -1228,6 +1231,54 @@ def read_experiment(client: Any, experiment_id: str, from_start_time) -> Any:
     return matched[0]
 
 
+def _flatten_metadata(prefix: str, value: Any) -> list[tuple[str, Any]]:
+    if isinstance(value, Mapping):
+        if not value:
+            return [(prefix, {})]
+        items: list[tuple[str, Any]] = []
+        for sub_key, sub_value in value.items():
+            items.extend(_flatten_metadata(f"{prefix}.{sub_key}", sub_value))
+        return items
+    return [(prefix, value)]
+
+
+def _flattened_leaf_matches(actual: Any, expected: Any) -> bool:
+    if isinstance(expected, bool):
+        if isinstance(actual, bool):
+            return actual is expected
+        if isinstance(actual, str):
+            return actual == ("true" if expected else "false")
+        return False
+    if isinstance(expected, int):
+        if isinstance(actual, bool):
+            return False
+        if isinstance(actual, int):
+            return actual == expected
+        if isinstance(actual, str):
+            return actual == str(expected)
+        return False
+    if isinstance(expected, float):
+        if isinstance(actual, bool):
+            return False
+        if isinstance(actual, (int, float)):
+            return actual == expected
+        if isinstance(actual, str):
+            allowed = {str(expected)}
+            if math.isfinite(expected) and expected.is_integer():
+                allowed.add(str(int(expected)))
+            return actual in allowed
+        return False
+    if isinstance(expected, (list, tuple)):
+        if actual == expected:
+            return True
+        if isinstance(actual, str):
+            return actual == json.dumps(
+                list(expected), separators=(",", ":"), ensure_ascii=False
+            )
+        return False
+    return actual == expected
+
+
 def verify_experiment_metadata(
     client: Any, experiment_id: str, expected: dict, from_start_time
 ) -> None:
@@ -1236,10 +1287,20 @@ def verify_experiment_metadata(
     for key in EXPERIMENT_METADATA_KEYS:
         if key not in expected:
             continue
-        require(
-            metadata.get(key) == expected[key],
-            f"远端实验 metadata 不符: {key}",
-        )
+        expected_value = expected[key]
+        if isinstance(expected_value, Mapping) and key in metadata:
+            actual_value = metadata[key]
+            require(
+                isinstance(actual_value, Mapping) and actual_value == expected_value,
+                f"远端实验 metadata 不符: {key}",
+            )
+            continue
+        for leaf_key, leaf_value in _flatten_metadata(key, expected_value):
+            require(leaf_key in metadata, f"远端实验 metadata 不符: {leaf_key}")
+            require(
+                _flattened_leaf_matches(metadata[leaf_key], leaf_value),
+                f"远端实验 metadata 不符: {leaf_key}",
+            )
 
 
 def verify_uploaded_experiment(
@@ -1339,6 +1400,8 @@ def run_group(
         )
         if engine.rerank_public is not None:
             metadata["rerank_identity"] = engine.rerank_public
+        # mteb 导入与任务初始化会将全局 random 重置为固定种子，运行前恢复系统熵以免 OTEL ID 跨次碰撞。
+        random.seed()
         results = client.run_experiment(
             name=f"{run_id}-{group}-{purpose}",
             run_name=f"{run_id}-{group}-{purpose}",
@@ -1526,6 +1589,7 @@ def make_client() -> Langfuse:
         public_key=os.environ["LANGFUSE_PUBLIC_KEY"],
         secret_key=os.environ["LANGFUSE_SECRET_KEY"],
         base_url=os.environ.get("LANGFUSE_BASE_URL"),
+        timeout=int(os.environ.get("LANGFUSE_TIMEOUT", "30")),
     )
     client.auth_check()
     return client
