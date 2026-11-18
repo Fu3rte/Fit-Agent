@@ -19,6 +19,13 @@ OUTDOOR_ENVIRONMENT_TOKENS = ("户外", "室外")
 
 
 @dataclass(frozen=True)
+class RetrievalProfile:
+    environment: str | None
+    unavailable_equipment: list[str] | None
+    forbidden_exercise_ids: list[str] | None
+
+
+@dataclass(frozen=True)
 class EvaluatedConditions:
     # 求值结果：检索过滤条件、显式筛选字段与有效条件说明，供结果再次核验与说明渲染。
     conditions: SearchConditions
@@ -81,7 +88,7 @@ def _is_home_or_outdoor(environment: str | None) -> bool:
 
 def evaluate_search_conditions(
     arguments: CatalogSearchArguments,
-    profile: ProfileContent | None,
+    profile: ProfileContent | RetrievalProfile | None,
     catalog: Catalog,
     mappings: dict,
 ) -> EvaluatedConditions:

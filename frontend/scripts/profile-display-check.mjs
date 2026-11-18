@@ -1,6 +1,6 @@
 // 运行：node scripts/profile-display-check.mjs
 // 画像展示口径（contract §11.9、PRODUCT.md §3.1–3.2）：个人画像页与对话画像快照共用 ProfileFields，
-// 展示文本字段、不可用器械与禁用动作列表。取值按真实组件节点读取：字段以 Field 节点为单位，
+// 展示文本字段、身高体重、测量日期与限制列表。取值按真实组件节点读取：字段以 Field 节点为单位，
 // FieldTitle 节点整段文本相等才算命中，取值取该字段其余节点的文本内容，条目按 Badge 节点核对。
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
@@ -31,7 +31,9 @@ const childNodes = (node) =>
   );
 /** 节点子树的文本内容，与 DOM ``textContent`` 同口径 */
 const textOf = (node) =>
-  typeof node === "string" ? node : childNodes(node).map(textOf).join("");
+  typeof node === "string" || typeof node === "number"
+    ? String(node)
+    : childNodes(node).map(textOf).join("");
 
 const fieldsOf = (content) =>
   childNodes(ProfileFields({ content }))
@@ -65,7 +67,7 @@ const badgeItems = (content, label) => {
   });
 };
 
-// 展示字段与顺序按节点读取：六个文本字段、不可用器械、禁用动作。
+// 展示字段与顺序按节点读取。
 const LABELS = [
   "训练目标",
   "训练经验",
@@ -73,6 +75,9 @@ const LABELS = [
   "可用时间与频率",
   "伤病与不适",
   "动作限制",
+  "身高",
+  "体重",
+  "体重测量日期",
   "不可用器械",
   "禁用动作",
 ];
@@ -87,12 +92,15 @@ const content = {
   movement_restrictions: "避免过顶推举",
   unavailable_equipment: ["barbell"],
   forbidden_exercise_ids: ["0001"],
+  height_cm: 175.5,
+  body_weight_kg: 70.25,
+  body_weight_measured_on: "2024-02-29",
 };
 
 assert.deepEqual(
   fieldsOf(content).map((item) => textOf(item.title)),
   LABELS,
-  "画像字段集合与顺序固定为八",
+  "画像字段集合与顺序固定为十一",
 );
 
 // 文本字段有值时展示自身取值，null 保持未知语义。
@@ -109,6 +117,14 @@ assert.equal(
   fieldValue({ ...content, movement_restrictions: null }, "动作限制"),
   "未知",
   "文本字段 null 展示未知",
+);
+
+assert.equal(fieldValue(content, "身高"), "175.5 cm");
+assert.equal(fieldValue(content, "体重"), "70.25 kg");
+assert.equal(fieldValue(content, "体重测量日期"), "2024-02-29");
+assert.equal(
+  fieldValue({ ...content, body_weight_measured_on: null }, "体重测量日期"),
+  "未知",
 );
 
 // 不可用器械三种状态各自成立：null→未知、[]→无、非空→按原顺序完整展示实际条目。

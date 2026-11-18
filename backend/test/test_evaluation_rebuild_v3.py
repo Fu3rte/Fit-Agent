@@ -13,7 +13,6 @@ from evaluation import langfuse_scenarios as ls
 from evaluation.dataset import (
     BACKEND,
     REBUILD_V3_SCENARIO_CATEGORIES,
-    load_for_evaluation,
     load_for_review,
     release_digest,
     scenario_baseline,
@@ -51,7 +50,7 @@ RETAINED = (
 
 @pytest.fixture(scope="module")
 def dataset():
-    return load_for_evaluation(V3)
+    return load_for_review(V3)
 
 
 def _read_jsonl(path: Path) -> list[dict]:
@@ -85,14 +84,15 @@ def _copy_version(tmp_path: Path) -> Path:
     return target
 
 
-def test_default_entry_points_use_rebuild_v3():
-    assert DEFAULT_VERSION_DIR == V3
-    assert _parse_args([]).version_dir == V3
-    assert df._parse_args(["check", "--source", "x"]).dataset == V3
-    assert gu._parse_args(["external-review", "--source", "x"]).dataset == V3
+def test_default_entry_points_use_rebuild_v6():
+    current = DATA_ROOT / "rebuild-v6"
+    assert DEFAULT_VERSION_DIR == current
+    assert _parse_args([]).version_dir == current
+    assert df._parse_args(["check", "--source", "x"]).dataset == current
+    assert gu._parse_args(["external-review", "--source", "x"]).dataset == current
 
 
-def test_langfuse_cli_defaults_use_rebuild_v3(monkeypatch):
+def test_langfuse_cli_defaults_use_rebuild_v6(monkeypatch):
     seen = {}
 
     def fake_sync(args):
@@ -116,7 +116,7 @@ def test_langfuse_cli_defaults_use_rebuild_v3(monkeypatch):
     monkeypatch.setattr(sys, "argv", ["langfuse_scenarios", "run"])
     ls.main()
 
-    assert seen == {"sync": V3, "run": V3}
+    assert seen == {"sync": DEFAULT_VERSION_DIR, "run": DEFAULT_VERSION_DIR}
 
 
 def test_rebuild_v3_exact_scenario_set_and_quota(dataset):
@@ -236,7 +236,7 @@ def test_category_quota_drift_is_rejected(tmp_path):
 
 def test_legacy_versions_still_select_full_eighty():
     for path in (V1, V2):
-        legacy = load_for_evaluation(path)
+        legacy = load_for_review(path)
         assert scenario_baseline(legacy.version)[0] == 80
         assert len(select_scenarios(legacy, None)) == 80
         assert len(ls.select_formal_scenarios(legacy)) == 80

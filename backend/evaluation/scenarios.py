@@ -92,8 +92,10 @@ from evaluation.contracts import (
 )
 from evaluation.dataset import (
     BACKEND,
+    DatasetError,
     EvaluationDataset,
     load_for_evaluation,
+    scenario_digest,
 )
 from evaluation.deterministic_assertions import (
     AssertionEvidence,
@@ -150,7 +152,7 @@ from evaluation.scenario_evidence import (
 )
 
 SCENARIO_ROOT = BACKEND / "temp" / "evaluation-scenarios"
-DEFAULT_VERSION_DIR = BACKEND / "dataset" / "evaluation" / "rebuild-v3"
+DEFAULT_VERSION_DIR = BACKEND / "dataset" / "evaluation" / "rebuild-v6"
 DEFAULT_JUDGE_TIMEOUT = 300.0
 EVENT_TYPES = {"message", "confirm", "cancel", "session_switch", "restart"}
 
@@ -3519,7 +3521,39 @@ def _require_execution_config(
         validate_timeout(judge_timeout)
 
 
+def require_current_scenario_dataset(dataset: EvaluationDataset) -> None:
+    if dataset.version != "rebuild-v6":
+        raise DatasetError("当前业务场景执行要求 rebuild-v6")
+
+
+def require_frozen_scenario(dataset: EvaluationDataset, scenario: dict) -> None:
+    require_current_scenario_dataset(dataset)
+    registered = next(
+        (item for item in dataset.scenarios if item["scenario_id"] == scenario["scenario_id"]),
+        None,
+    )
+    if registered is None or frozen_scenario_sha256(scenario) != frozen_scenario_sha256(registered):
+        raise DatasetError("场景身份或内容与批准数据不一致")
+    if scenario_digest(scenario, dataset.attachment_hashes(scenario)) != registered["review"]["content_sha256"]:
+        raise DatasetError("场景或附件摘要与批准数据不一致")
+
+
 async def execute_scenario(
+    dataset: EvaluationDataset,
+    scenario: dict,
+    *,
+    run_id: str,
+    root: Path,
+    enable_model: bool,
+    model: ModelConfig | None = None,
+) -> ScenarioExecution:
+    require_frozen_scenario(dataset, scenario)
+    return await _execute_scenario(
+        dataset, scenario, run_id=run_id, root=root, enable_model=enable_model, model=model
+    )
+
+
+async def _execute_scenario(
     dataset: EvaluationDataset,
     scenario: dict,
     *,
@@ -3842,9 +3876,24 @@ async def run_external_scenario(
     enable_model: bool,
     model: ModelConfig | None = None,
 ) -> ExternalScenarioOutcome:
+    require_frozen_scenario(dataset, scenario)
+    return await _run_external_scenario(
+        dataset, scenario, run_id=run_id, root=root, enable_model=enable_model, model=model
+    )
+
+
+async def _run_external_scenario(
+    dataset: EvaluationDataset,
+    scenario: dict,
+    *,
+    run_id: str,
+    root: Path,
+    enable_model: bool,
+    model: ModelConfig | None = None,
+) -> ExternalScenarioOutcome:
     scenario_root = root / scenario["scenario_id"]
     try:
-        execution = await execute_scenario(
+        execution = await _execute_scenario(
             dataset,
             scenario,
             run_id=run_id,
@@ -3911,6 +3960,25 @@ async def run_scenario(
     scoring_mode: ScoringMode = "ragas",
     model: ModelConfig | None = None,
 ) -> ScenarioArtifact | ExternalScenarioScoring:
+    require_frozen_scenario(dataset, scenario)
+    return await _run_scenario(
+        dataset, scenario, run_id=run_id, root=root, enable_model=enable_model,
+        judge=judge, judge_timeout=judge_timeout, scoring_mode=scoring_mode, model=model,
+    )
+
+
+async def _run_scenario(
+    dataset: EvaluationDataset,
+    scenario: dict,
+    *,
+    run_id: str,
+    root: Path,
+    enable_model: bool,
+    judge: JudgeConfig | None,
+    judge_timeout: float | None,
+    scoring_mode: ScoringMode = "ragas",
+    model: ModelConfig | None = None,
+) -> ScenarioArtifact | ExternalScenarioScoring:
     scoring_protocol(scoring_mode)
     if enable_model and scoring_mode == "ragas" and judge is not None:
         if model is None:
@@ -3926,7 +3994,7 @@ async def run_scenario(
         model=model,
     )
     if scoring_mode == "external":
-        outcome = await run_external_scenario(
+        outcome = await _run_external_scenario(
             dataset,
             scenario,
             run_id=run_id,
@@ -3937,7 +4005,7 @@ async def run_scenario(
         return outcome.record
     scenario_root = root / scenario["scenario_id"]
     try:
-        execution = await execute_scenario(
+        execution = await _execute_scenario(
             dataset,
             scenario,
             run_id=run_id,
@@ -4403,6 +4471,9 @@ async def run_selected(
     scoring_mode: ScoringMode = "ragas",
     model: ModelConfig | None = None,
 ) -> RunSummary | ExternalRunSummary:
+    require_current_scenario_dataset(dataset)
+    for scenario in scenarios:
+        require_frozen_scenario(dataset, scenario)
     scoring_protocol(scoring_mode)
     if enable_model and model is None:
         model = load_model_config()
@@ -4530,7 +4601,9 @@ async def run_selected(
 
 
 def _dataset(version_dir: Path) -> EvaluationDataset:
-    return load_for_evaluation(version_dir)
+    dataset = load_for_evaluation(version_dir)
+    require_current_scenario_dataset(dataset)
+    return dataset
 
 
 def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:

@@ -16,6 +16,8 @@ const { applyReActEvent } = await server.ssrLoadModule(
 const { historyToRounds, mergeHistoryRounds } = await server.ssrLoadModule(
   "/src/features/chat/utils/sessionHistory.ts",
 );
+const { parseProfileContent, parseProfileResponse, parseProfileProposalArguments } =
+  await server.ssrLoadModule("/src/lib/business.ts");
 await server.close();
 
 const u = (n) => `${n.toString(16).padStart(8, "0")}-0000-4000-8000-000000000000`;
@@ -37,7 +39,49 @@ const payload = {
   movement_restrictions: null,
   unavailable_equipment: null,
   forbidden_exercise_ids: [],
+  height_cm: 175.5,
+  body_weight_kg: 70.25,
+  body_weight_measured_on: null,
 };
+
+assert.deepEqual(parseProfileContent(payload), payload);
+assert.deepEqual(parseProfileResponse({ version: null, content: null }), {
+  version: null,
+  content: null,
+});
+for (const key of ["height_cm", "body_weight_kg", "body_weight_measured_on"]) {
+  const missing = { ...payload };
+  delete missing[key];
+  assert.throws(() => parseProfileContent(missing), `${key} 缺失须拒绝`);
+}
+for (const key of ["height_cm", "body_weight_kg"]) {
+  for (const invalid of [null, true, "70", 0, -1, NaN, Infinity, -Infinity]) {
+    assert.throws(
+      () => parseProfileContent({ ...payload, [key]: invalid }),
+      `${key} 非法值须拒绝`,
+    );
+  }
+}
+for (const invalid of ["2025-02-29", "2024-13-01", "0000-01-01", "2024-2-01", 20240229]) {
+  assert.throws(() =>
+    parseProfileContent({ ...payload, body_weight_measured_on: invalid }),
+  );
+}
+for (const date of ["0001-01-01", "0099-12-31", "2024-02-29"]) {
+  assert.equal(
+    parseProfileContent({ ...payload, body_weight_measured_on: date }).body_weight_measured_on,
+    date,
+  );
+}
+assert.throws(() => parseProfileContent({ ...payload, extra: 1 }));
+assert.throws(() =>
+  parseProfileProposalArguments({
+    profile_id: 1,
+    base_profile_version: null,
+    payload: { ...payload, height_cm: null },
+  }),
+);
+
 const prepareArguments = { profile_id: 1, base_profile_version: 2, payload };
 const prepared = JSON.stringify({
   proposal_id: proposalId,

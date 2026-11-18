@@ -7,6 +7,7 @@ from pathlib import Path
 from uuid import uuid4
 
 import pytest
+from pydantic import ValidationError
 
 from app.agent.compaction_summary import (
     COMPACTION_SUMMARY_PREFIX,
@@ -156,7 +157,7 @@ def test_judge_timeout_default_and_override():
 
 @pytest.fixture(scope="module")
 def dataset():
-    return load_for_evaluation(BACKEND / "dataset" / "evaluation" / "rebuild-v2")
+    return load_for_evaluation(BACKEND / "dataset" / "evaluation" / "rebuild-v6")
 
 
 @pytest.fixture
@@ -182,9 +183,9 @@ async def open_runtime(root: Path):
 def test_frozen_dataset_plan_has_full_coverage(dataset):
     scenarios = select_scenarios(dataset, None)
     plan = build_execution_plan(dataset, scenarios, "run")
-    assert plan.expected_scenarios == 80
-    assert plan.expected_events == 134
-    assert plan.expected_checkpoints == 127
+    assert plan.expected_scenarios == 40
+    assert plan.expected_events == 70
+    assert plan.expected_checkpoints == 66
     assert {item.scenario_id for item in plan.scenarios} == {
         scenario["scenario_id"] for scenario in dataset.scenarios
     }
@@ -241,7 +242,25 @@ async def test_message_event_binds_admission_signature(dataset, root):
             )
 
 
-async def test_initial_state_distinguishes_missing_and_empty_profile(dataset, root):
+async def test_rebuild_v6_all_scenario_initial_states_round_trip(dataset, root):
+    for scenario in dataset.scenarios:
+        scenario_root = root / scenario["scenario_id"]
+        scenario_root.mkdir()
+        async with open_runtime(scenario_root) as runtime:
+            session_id = str(uuid4())
+            await runtime.service.create_session_result(session_id, scenario["scenario_id"])
+            state = scenario["initial_state"]
+            await _seed_initial_state(runtime, state, 1_760_000_000_000)
+            projection = await read_business_projection(
+                runtime.business_repository, [session_id]
+            )
+            verified = _verify_initial_projection(projection, state)
+            assert verified["profile_present"] == (state["profile"] is not None)
+            assert verified["current_plan_id"] == state["current_plan_id"]
+    assert len(dataset.scenarios) == 40
+
+
+async def test_initial_state_rejects_empty_profile_and_accepts_missing(dataset, root):
     scenario = next(
         item for item in dataset.scenarios
         if item["scenario_id"] == "s-profile-update-01"
@@ -276,15 +295,15 @@ async def test_initial_state_distinguishes_missing_and_empty_profile(dataset, ro
     async with open_runtime(empty_root) as runtime:
         session_id = str(uuid4())
         await runtime.service.create_session_result(session_id, "empty")
-        await _seed_initial_state(runtime, state, 1_760_000_000_000)
+        with pytest.raises(ValidationError) as error:
+            await _seed_initial_state(runtime, state, 1_760_000_000_000)
+        assert {item["loc"] for item in error.value.errors()} == {
+            ("height_cm",), ("body_weight_kg",), ("body_weight_measured_on",)
+        }
         projection = await read_business_projection(
             runtime.business_repository, [session_id]
         )
-        assert projection.profile is not None
-        assert projection.profile.version == 1
-        assert projection.profile.content.is_empty() is True
-        verified = _verify_initial_projection(projection, state)
-        assert verified["profile_present"] is True
+        assert projection.profile is None
 
 
 async def test_projection_covers_all_workout_pages(root):
@@ -327,6 +346,9 @@ async def test_projection_covers_all_workout_pages(root):
 
 async def test_initial_plan_and_workout_versions_are_preserved(root):
     profile = ProfileContent(
+        height_cm=170,
+        body_weight_kg=70,
+        body_weight_measured_on=None,
         goal="增肌",
         experience="中级",
         environment="健身房",
@@ -449,6 +471,9 @@ def test_binding_ambiguity_is_rejected():
         proposal_id=str(uuid4()),
         status="pending",
         payload=ProfileContent(
+            height_cm=170,
+            body_weight_kg=70,
+            body_weight_measured_on=None,
             goal="增肌",
             experience=None,
             environment=None,
@@ -571,6 +596,9 @@ async def seed_profile_proposal(runtime: RuntimeHandle, goal: str):
     proposal_id = str(uuid4())
     tool_call_id = str(uuid4())
     payload = ProfileContent(
+        height_cm=170,
+        body_weight_kg=70,
+        body_weight_measured_on=None,
         goal=goal,
         experience=None,
         environment=None,
@@ -2672,6 +2700,9 @@ async def append_profile_proposal(runtime, session_id, goal, parent_id, now):
         str(uuid4()) for _ in range(5)
     ]
     payload = ProfileContent(
+        height_cm=170,
+        body_weight_kg=70,
+        body_weight_measured_on=None,
         goal=goal,
         experience=None,
         environment=None,

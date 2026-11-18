@@ -39,6 +39,9 @@ const profileContent = {
   movement_restrictions: null,
   unavailable_equipment: [],
   forbidden_exercise_ids: null,
+  height_cm: 175,
+  body_weight_kg: 70,
+  body_weight_measured_on: null,
 };
 const profileResult = {
   proposal_id: profileProposal,

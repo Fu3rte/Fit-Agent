@@ -10,6 +10,7 @@ from app.application.business import retrieval_text as rt
 from app.application.business.catalog import DEFAULT_ACTIONS_PATH, Catalog
 from app.application.business.retrieval_conditions import (
     EvaluatedConditions,
+    RetrievalProfile,
     evaluate_search_conditions,
 )
 from app.application.business.retrieval_config import (
@@ -40,7 +41,7 @@ from app.application.business.retrieval_response import (
     encoded_length,
 )
 from app.application.business.retrieval_search import HybridRetriever, search_vectors
-from app.domain.business.models import CatalogSearchArguments, ProfileContent
+from app.domain.business.models import CatalogSearchArguments
 from evaluation.contracts import (
     ModelVisibleSearch,
     RerankEvidence,
@@ -192,9 +193,8 @@ def dataset_conditions(query: dict, catalog: Catalog, mappings: dict) -> Evaluat
         excluded_ids=conditions["excluded_ids"] or None,
     )
     saved = conditions["saved_profile"]
-    profile = ProfileContent(
-        goal=None, experience=None, environment=None, availability=None, health_notes=None,
-        movement_restrictions=None,
+    profile = RetrievalProfile(
+        environment=None,
         unavailable_equipment=saved["unavailable_equipment"] or None,
         forbidden_exercise_ids=saved["forbidden_exercise_ids"] or None,
     )
@@ -208,9 +208,8 @@ def effective_conditions(query: dict, catalog: Catalog, mappings: dict, purpose:
         unavailable_equipment=temporary.get("unavailable_equipment") or None,
         excluded_ids=temporary.get("excluded_ids") or None,
     )
-    profile = ProfileContent(
-        goal=None, experience=None, environment=None, availability=None, health_notes=None,
-        movement_restrictions=None,
+    profile = RetrievalProfile(
+        environment=None,
         unavailable_equipment=query["saved_profile_restrictions"]["unavailable_equipment"] or None,
         forbidden_exercise_ids=query["saved_profile_restrictions"]["forbidden_exercise_ids"] or None,
     )

@@ -73,6 +73,7 @@ FULL_PROFILE = {
     "availability": "每周四次",
     "health_notes": None,
     "movement_restrictions": "避免肩部过顶",
+    "height_cm": 175.5, "body_weight_kg": 70.5, "body_weight_measured_on": "2026-01-02",
     "unavailable_equipment": [],
     "forbidden_exercise_ids": [],
 }

@@ -18,7 +18,7 @@ const LIST_FIELDS = [
 ] as const;
 
 /**
- * 画像展示：文本字段、不可用器械与禁用动作列表（§11.9）。
+ * 画像展示：文本、身高体重、测量日期与限制列表（§11.9）。
  * null 保持未知语义，限制列表的 null 与 [] 分别展示；个人画像页与对话中的画像展示共用同一口径。
  */
 export default function ProfileFields({
@@ -36,6 +36,18 @@ export default function ProfileFields({
           </p>
         </Field>
       ))}
+      <Field className="gap-2">
+        <FieldTitle>身高</FieldTitle>
+        <p className="text-sm">{content.height_cm} cm</p>
+      </Field>
+      <Field className="gap-2">
+        <FieldTitle>体重</FieldTitle>
+        <p className="text-sm">{content.body_weight_kg} kg</p>
+      </Field>
+      <Field className="gap-2">
+        <FieldTitle>体重测量日期</FieldTitle>
+        <p className="text-sm">{content.body_weight_measured_on ?? "未知"}</p>
+      </Field>
       {LIST_FIELDS.map(({ key, label, unknown }) => {
         const items = content[key];
         return (

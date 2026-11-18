@@ -64,6 +64,9 @@ const profilePayload = {
   movement_restrictions: null,
   unavailable_equipment: null,
   forbidden_exercise_ids: null,
+  height_cm: 175,
+  body_weight_kg: 70,
+  body_weight_measured_on: null,
 };
 const proposalId = u(0x801);
 const displayEntryId = u(0x802);

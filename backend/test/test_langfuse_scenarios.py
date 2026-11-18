@@ -39,11 +39,11 @@ from evaluation.scenarios import (
     AssertionCheckpointArtifact,
     GenerationCheckpointArtifact,
     ScenarioArtifact,
-    execute_scenario,
+    _execute_scenario,
     frozen_scenario_sha256,
 )
 
-DATASET_PATH = BACKEND / "dataset" / "evaluation" / "rebuild-v2"
+DATASET_PATH = BACKEND / "dataset" / "evaluation" / "rebuild-v6"
 VERIFY_STAMP = datetime(2026, 1, 1, tzinfo=UTC)
 
 
@@ -366,8 +366,8 @@ def test_platform_constants_and_legacy_protocol_bindings():
 
 
 def test_example_rows_cover_all_scenarios_without_reference_in_inputs(dataset, rows):
-    assert len(rows) == 80
-    assert len({row["id"] for row in rows}) == 80
+    assert len(rows) == 40
+    assert len({row["id"] for row in rows}) == 40
     scenarios = {scenario["scenario_id"]: scenario for scenario in dataset.scenarios}
     assert {row["inputs"]["scenario_id"] for row in rows} == set(scenarios)
     for row in rows:
@@ -413,7 +413,7 @@ def test_example_ids_and_validation_selection_are_stable(dataset, rows):
     assert [item["scenario_id"] for item in scenarios] == [
         "s-action-verification-01",
         "s-clarification-authorization-medical-risk-02",
-        "s-confirmation-cancellation-state-01",
+        "s-confirmation-cancellation-state-03",
         "s-confirmation-cancellation-state-05",
         "s-confirmation-cancellation-state-07",
         "s-confirmation-cancellation-state-08",
@@ -436,18 +436,18 @@ def test_sync_is_idempotent_and_completes_missing_examples(
     first = lf.sync_dataset(client, dataset)
     assert first["dataset_status"] == "created"
     assert first["schema"] == lf.SCHEMA
-    assert len(client.datasets[first["dataset_name"]].items_by_id) == 80
+    assert len(client.datasets[first["dataset_name"]].items_by_id) == 40
     second = lf.sync_dataset(client, dataset)
     assert second["dataset_status"] == "reused"
     assert second["dataset_id"] == first["dataset_id"]
     assert second["example_ids"] == first["example_ids"]
-    assert len(client.datasets[first["dataset_name"]].items_by_id) == 80
+    assert len(client.datasets[first["dataset_name"]].items_by_id) == 40
     removed = next(iter(client.datasets[first["dataset_name"]].items_by_id))
     client.datasets[first["dataset_name"]].items_by_id.pop(removed)
     third = lf.sync_dataset(client, dataset)
     assert third["dataset_status"] == "reused"
     assert removed in client.datasets[first["dataset_name"]].items_by_id
-    assert len(client.datasets[first["dataset_name"]].items_by_id) == 80
+    assert len(client.datasets[first["dataset_name"]].items_by_id) == 40
 
 
 def test_sync_blocks_conflicting_metadata_and_examples(dataset, isolated_receipts):
@@ -660,7 +660,7 @@ def test_execution_summary_keeps_relative_evidence():
 
 
 async def _execute(dataset, scenario, example_id, run_dir):
-    execution = await execute_scenario(
+    execution = await _execute_scenario(
         dataset,
         scenario,
         run_id="run-sdk-offline",
@@ -957,7 +957,7 @@ async def test_six_scenario_units_execute_in_isolated_directories(
     ]
 
     async def one(scenario, example_id):
-        return await execute_scenario(
+        return await _execute_scenario(
             dataset,
             scenario,
             run_id="run-sdk-offline",

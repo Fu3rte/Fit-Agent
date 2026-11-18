@@ -26,7 +26,9 @@ PROFILE_TEXT_FIELDS = (
     "movement_restrictions",
 )
 PROFILE_LIST_FIELDS = ("unavailable_equipment", "forbidden_exercise_ids")
-PROFILE_FIELDS = PROFILE_TEXT_FIELDS + PROFILE_LIST_FIELDS
+PROFILE_FIELDS = PROFILE_TEXT_FIELDS + PROFILE_LIST_FIELDS + (
+    "height_cm", "body_weight_kg", "body_weight_measured_on",
+)
 
 LoadConvention: TypeAlias = Literal[
     "per_implement",
@@ -58,6 +60,16 @@ class ProfileContent(BusinessModel):
     movement_restrictions: str | None
     unavailable_equipment: list[str] | None
     forbidden_exercise_ids: list[str] | None
+    height_cm: float = Field(gt=0)
+    body_weight_kg: float = Field(gt=0)
+    body_weight_measured_on: str | None = Field(pattern=r"^\d{4}-\d{2}-\d{2}$")
+
+    @field_validator("body_weight_measured_on")
+    @classmethod
+    def validate_measurement_date(cls, value: str | None) -> str | None:
+        if value is not None:
+            date.fromisoformat(value)
+        return value
 
     @field_validator(*PROFILE_TEXT_FIELDS)
     @classmethod
@@ -98,13 +110,6 @@ class ProfileProposalArguments(BusinessModel):
     profile_id: ProfileTargetId
     base_profile_version: int | None = Field(gt=0)
     payload: ProfileContent
-
-    @model_validator(mode="after")
-    def validate_first_build(self) -> Self:
-        # 首次建档至少有一个字段非 null；空限制列表也算有效信息（DATABASE §2）。
-        if self.base_profile_version is None and self.payload.is_empty():
-            raise ValueError("首次建档画像至少需要一个非空字段。")
-        return self
 
 
 class ProfileProposal(ProfileProposalArguments):
@@ -510,9 +515,9 @@ class PlanSnapshot(PlanImportArguments):
 
 
     @model_validator(mode="after")
-    def validate_generation_basis(self) -> Self:
-        if self.preparation_kind == "generation" and self.base_profile_version is None:
-            raise ValueError("生成快照必须有已保存画像版本。")
+    def validate_profile_basis(self) -> Self:
+        if self.preparation_kind in {"generation", "adjustment"} and self.base_profile_version is None:
+            raise ValueError("生成和调整快照必须有已保存画像版本。")
         return self
 
 

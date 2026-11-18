@@ -520,6 +520,9 @@ def baseline_plan() -> PlanRecord:
 
 def baseline_profile() -> ProfileContent:
     return ProfileContent(
+        height_cm=170,
+        body_weight_kg=70,
+        body_weight_measured_on=None,
         goal="增肌与一般力量提升",
         experience="力量训练新手，系统训练约三个月",
         environment="普通商业健身房",

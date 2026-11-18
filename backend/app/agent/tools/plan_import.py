@@ -29,7 +29,7 @@ def _tools(
 ) -> dict[str, AgentTool]:
     basis = (
         "全部字段必填，未知值保持JSON null，未知动作详情保持空数组。"
-        "base_profile_version取实时画像版本，无画像传null；base_plan_id取实时当前计划id，"
+        "base_profile_version取实时画像版本；纯录入无画像时传null；base_plan_id取实时当前计划id，"
         "无当前计划传null，上传计划调整同样使用该依据。准备类型由后端决定。"
         '两依据字段未知时写JSON null字面量，禁止字符串"null"、空字符串、数字0或省略；'
         '参数预处理仅将两依据字段精确字符串"None"转为null，其他字段和值保持原样。'
@@ -50,7 +50,8 @@ def _tools(
         ),
         "prepare_plan_adjustment": AgentTool(
             "prepare_plan_adjustment",
-            "按用户本次任务准备完整最终payload，支持调整当前计划及直接调整上传计划。"
+            "按用户本次任务准备完整最终payload，支持调整当前计划及直接调整上传计划；"
+            "须有已确认保存且包含身高体重的画像，base_profile_version使用其真实版本，禁止以录入绕过。"
             "准备前get_profile读取真实画像状态与版本，get_current_plan读取真实当前计划ID与完整内容；"
             "明确调整对象、目标、训练日及动作位置，对象或位置歧义时询问，无待调整内容时索取。"
             "固定查询list_workouts(date_from=null, date_to=business_context.business_date, page=1, page_size=10)，"

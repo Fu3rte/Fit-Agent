@@ -1587,7 +1587,7 @@ def _saved_counts(projection: BusinessProjection, business_kind: str) -> tuple[i
         profile = projection.profile
         if profile is None:
             return 0, "profile=null"
-        return 1, f"profile.version={profile.version} empty={profile.content.is_empty()}"
+        return 1, f"profile.version={profile.version}"
     if business_kind == "plan":
         return len(projection.plans), "plan_ids=" + ",".join(
             plan.id for plan in projection.plans

@@ -47,10 +47,10 @@ from test.check_profile_confirmation import (
 from test.check_workout_service_http import assistant
 from test.check_workout_storage import make_record, raw, seed_legacy
 
-ROOT = Path(__file__).resolve().parents[2] / "tmp/backend-plan-import/checks" / uuid4().hex
+ROOT = Path(__file__).resolve().parents[1] / "temp/plan-import/checks" / uuid4().hex
 ROOT.mkdir(parents=True)
 # 调整计划后端专项独立证据目录，与已有录入专项证据分离。
-EVIDENCE_ROOT = Path(__file__).resolve().parents[2] / "tmp/backend-plan-adjustment-verification" / uuid4().hex
+EVIDENCE_ROOT = Path(__file__).resolve().parents[1] / "temp/plan-adjustment-verification" / uuid4().hex
 EVIDENCE_ROOT.mkdir(parents=True)
 INCOMPLETE = {"repeat": None, "days": [
     {"kind": "training", "focus": "推", "exercises": [], "notes": None},
@@ -154,24 +154,27 @@ async def check_business():
         await f.repository.insert_workout(workout)
         partial = copy.deepcopy(CONTENT)
         partial["days"][0]["exercises"][0].update(sets=None, reps=None)
-        c2, a2 = await prepare(f, session, "adjustment", base=first.id, content=partial)
+        await assert_rejected("无画像调整", prepare(f, session, "adjustment", base=first.id, content=partial),
+                              "profile_required")
+        await profile(f, session)
+        c2, a2 = await prepare(f, session, "adjustment", version=1, base=first.id, content=partial)
         second = await f.business.plans.save_plan(c2, a2)
         assert second.content.model_dump() == partial
         assert await f.repository.get_workout(workout.id) == workout
-        oldc, olda = await prepare(f, session, base=second.id)
-        newc, newa = await prepare(f, session, "adjustment", base=second.id)
+        oldc, olda = await prepare(f, session, version=1, base=second.id)
+        newc, newa = await prepare(f, session, "adjustment", version=1, base=second.id)
         await assert_rejected("失效", f.business.plans.save_plan(oldc, olda), "plan_proposal_invalidated")
         await assert_rejected("跨计划确认", f.business.plans.save_plan(newc, newa.model_copy(update={
             "confirmation_entry_id": a.confirmation_entry_id})), "plan_confirmation_invalid")
         invalid = copy.deepcopy(partial)
         invalid["days"][0]["exercises"][0]["exercise_id"] = "unknown"
-        await assert_rejected("准备失败保留pending", prepare(f, session, base=second.id, content=invalid),
+        await assert_rejected("准备失败保留pending", prepare(f, session, version=1, base=second.id, content=invalid),
                               "invalid_business_payload")
         assert (await f.business.plans.get_plan_save_status(newc, newa.proposal_id)).status == "pending"
-        profile_proposal, _ = await profile(f, session)
+        profile_proposal, _ = await profile(f, session, 1, health_notes="已补充")
         await assert_rejected("跨业务确认", f.business.plans.save_plan(newc, newa.model_copy(update={
             "confirmation_entry_id": profile_proposal["confirmation"]})), "plan_confirmation_invalid")
-        await assert_rejected("null画像变为已保存", f.business.plans.save_plan(newc, newa), "profile_version_conflict")
+        await assert_rejected("画像版本变化", f.business.plans.save_plan(newc, newa), "profile_version_conflict")
         await assert_rejected("已存在画像null依据", prepare(f, session, base=second.id), "profile_version_conflict")
         assert await f.business.plans.save_plan(c, a) == first
         assert (await f.business.plans.get_plan_save_status(c, a.proposal_id)).result == first
@@ -260,7 +263,7 @@ async def check_migration():
         for kind in ("generation", "import", "adjustment"):
             values = {**snapshots[0], "proposal_id": new_id(), "confirmation_entry_id": None,
                       "status": "pending", "preparation_kind": kind,
-                      "base_profile_version": 1 if kind == "generation" else None}
+                      "base_profile_version": 1 if kind in ("generation", "adjustment") else None}
             snapshot = PlanSnapshot.model_validate({**values, "payload": json.loads(values["payload"])})
             await repo.insert_plan_snapshot(snapshot)
             assert await repo.get_plan_snapshot(snapshot.proposal_id) == snapshot
@@ -540,7 +543,8 @@ async def check_payload_consistency():
         session = await f.session("调整payload一致性")
         content = copy.deepcopy(CONTENT)
         content["notes"] = "调整说明：第三组重量提升；依据2026-06-01训练记录第3组8次"
-        context, save = await prepare(f, session, "adjustment", base=None, content=content)
+        await profile(f, session)
+        context, save = await prepare(f, session, "adjustment", version=1, base=None, content=content)
         snapshot = await f.repository.get_plan_snapshot(save.proposal_id)
         display = await f.service.queries.get_entry(session, save.display_entry_id)
         displayed = json.loads(display.messages[0].content[0].text)

@@ -205,7 +205,7 @@ class PlanService:
         version: int | None,
         preparation_kind: PlanPreparationKind,
     ) -> BusinessError | None:
-        if profile is None and preparation_kind == "generation":
+        if profile is None and preparation_kind in {"generation", "adjustment"}:
             return ProfileRequired()
         if (None if profile is None else profile.version) != version:
             return ProfileVersionConflict()

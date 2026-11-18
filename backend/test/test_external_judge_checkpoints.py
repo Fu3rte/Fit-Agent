@@ -2068,9 +2068,14 @@ def test_cli_exposes_external_commands_and_cost_gate(tmp_path):
 def test_real_production_execution_evidence_projection():
     # 使用生产运行目录中真实封存的执行证据；不构造外部运行摘要，也不写源证据。
     candidates = sorted(
-        (BACKEND / "temp" / "scenario-langsmith" / "runs").glob(
-            "*/scenarios/*/*/execution.json"
-        )
+        [
+            *(BACKEND / "temp" / "evaluation-scenarios").glob(
+                "task5-v6-batch*/*/execution.json"
+            ),
+            *(BACKEND / "temp" / "scenario-langsmith" / "runs").glob(
+                "*/scenarios/*/*/execution.json"
+            ),
+        ]
     )
     if not candidates:
         pytest.skip("缺少真实生产执行证据")

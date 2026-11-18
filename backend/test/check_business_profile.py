@@ -304,7 +304,9 @@ async def check_payload_errors(root: Path) -> dict:
                 prepare_arguments(None, dict.fromkeys(payload()))
             )
         except ValidationError as error:
-            assert "首次建档" in str(error)
+            assert {tuple(item["loc"]) for item in error.errors()} == {
+                ("payload", "height_cm"), ("payload", "body_weight_kg")
+            }
         else:
             raise AssertionError("全空画像参数未被拒绝")
 

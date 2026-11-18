@@ -92,6 +92,7 @@ SEEDED_PROFILE = {
     "availability": "每周三次，每次约四十五分钟",
     "health_notes": "无伤病或不适",
     "movement_restrictions": None,
+    "height_cm": 175.0, "body_weight_kg": 70.0, "body_weight_measured_on": None,
     "unavailable_equipment": [],
     "forbidden_exercise_ids": [],
 }

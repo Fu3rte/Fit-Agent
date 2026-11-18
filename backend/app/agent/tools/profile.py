@@ -23,6 +23,8 @@ GET_PROFILE_DESCRIPTION = (
 )
 PREPARE_PROFILE_UPDATE_DESCRIPTION = (
     "整理完整画像并创建待确认快照；传入 profile_id=1、base_profile_version 与完整 payload，"
+    "payload 必须包含 height_cm、body_weight_kg 两个有限正数及 body_weight_measured_on 日期或 null，"
+    "连同其余字段共十一键；身高体重由用户提供，更新体重时未提供本次测量日期则日期为 null。"
     "返回 proposal_id、profile_id、base_profile_version 及 payload。"
     "base_profile_version 必须是 get_profile 返回的 version 原值：已建档时为正整数，"
     '未建档时该键必须存在且值为 JSON null；参数预处理仅将该字段的精确字符串 "None" 转为 null，'

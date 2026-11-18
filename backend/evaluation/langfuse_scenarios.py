@@ -49,6 +49,7 @@ from evaluation.scenarios import (
     generation_identity,
     load_execution,
     load_external_scoring,
+    require_current_scenario_dataset,
     scenario_plan,
     score_execution,
     score_execution_external,
@@ -2057,6 +2058,7 @@ async def run_experiment(args) -> dict:
     scoring_mode = getattr(args, "scoring_mode", "external")
     _require(scoring_mode in ("ragas", "external"), "scoring_mode 非法")
     dataset = load_for_evaluation(Path(args.dataset))
+    require_current_scenario_dataset(dataset)
     if args.purpose == "validation":
         scenarios, selections = select_validation_scenarios(
             dataset, args.scenario_id

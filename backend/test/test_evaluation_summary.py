@@ -91,7 +91,7 @@ from evaluation.summary import (
 )
 
 DATASET = load_for_evaluation(
-    BACKEND / "dataset" / "evaluation" / "rebuild-v1"
+    BACKEND / "dataset" / "evaluation" / "rebuild-v6"
 )
 MODEL = type("SummaryModel", (), {
     "api": "openai-completions",
@@ -787,7 +787,7 @@ def _incomplete_items(artifact: ScenarioArtifact) -> list[str]:
 @pytest.fixture(scope="module")
 def formal_run():
     TEST_ROOT.mkdir(parents=True, exist_ok=True)
-    root = build_run(TEST_ROOT, attachment_paths={"s-plan-import-file-01"})
+    root = build_run(TEST_ROOT, attachment_paths={"s-plan-import-file-02"})
     try:
         yield root
     finally:
@@ -848,7 +848,7 @@ def test_valid_formal_run_is_release_ready(formal_run):
     assert summary["formal_scope"] is True
     assert summary["release"]["effective"] is True
     assert summary["release"]["blocking_issues"] == []
-    assert summary["coverage"]["observed_scenarios"] == 80
+    assert summary["coverage"]["observed_scenarios"] == 40
     assert summary["coverage"]["failed_metrics"] == 0
     assert summary["coverage"]["applicable_metrics"] == 0
     assert summary["coverage"]["missing_metrics"] == []
@@ -944,7 +944,7 @@ def test_zero_failed_not_applicable_and_applicable_are_distinct():
 def test_applicable_and_unexecuted_metrics_block_release():
     scenario = next(
         scenario for scenario in DATASET.scenarios
-        if scenario["scenario_id"] == "s-profile-update-02"
+        if scenario["scenario_id"] == "s-profile-update-04"
     )
     checkpoints = list(scenario_plan(scenario).generation_metrics)
     TEST_ROOT.mkdir(parents=True, exist_ok=True)
@@ -1432,7 +1432,7 @@ def test_outbound_text_replaces_local_references():
 def test_upload_payload_binds_sanitized_attachment_references(formal_run):
     payload, _, _ = build_upload_payload(formal_run)
     artifact = json.loads(
-        (formal_run / "s-plan-import-file-01" / "scenario.json").read_text(
+        (formal_run / "s-plan-import-file-02" / "scenario.json").read_text(
             encoding="utf-8"
         )
     )
@@ -1447,7 +1447,7 @@ def test_upload_payload_binds_sanitized_attachment_references(formal_run):
     uploaded = [
         item
         for row in payload["results"]
-        if row["inputs"]["scenario_id"] == "s-plan-import-file-01"
+        if row["inputs"]["scenario_id"] == "s-plan-import-file-02"
         for item in row["inputs"]["model_input"]["items"]
     ]
     token = f"attachment:{sha256_text(ATTACHMENT_REF)[:12]}"
@@ -1462,7 +1462,7 @@ def test_upload_payload_binds_sanitized_attachment_references(formal_run):
 def test_upload_payload_whitelist_and_offline_check(formal_run):
     payload, summary, _ = build_upload_payload(formal_run)
     assert summary["release"]["effective"] is True
-    assert payload["dataset_name"].startswith("fit-agent-generation-rebuild-v1-")
+    assert payload["dataset_name"].startswith("fit-agent-generation-rebuild-v6-")
     assert payload["results"]
     text = json.dumps(payload, ensure_ascii=False)
     for forbidden in (

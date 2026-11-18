@@ -161,11 +161,22 @@ const TEXT_KEYS = [
 ] as const;
 const LIST_KEYS = ["unavailable_equipment", "forbidden_exercise_ids"] as const;
 
-/** 完整画像：八个字段全部必填；限制列表拒绝空白项与重复项（§11.9、DATABASE §2） */
+/** 完整画像：十一个字段全部必填；限制列表拒绝空白项与重复项（§11.9、DATABASE §2） */
 export function parseProfileContent(value: unknown): ProfileContentWire {
   if (!isObject(value)) throw new Error("画像内容无效。");
-  exactKeys(value, [...TEXT_KEYS, ...LIST_KEYS], "画像");
-  const content: Partial<ProfileContentWire> = {};
+  exactKeys(
+    value,
+    [...TEXT_KEYS, ...LIST_KEYS, "height_cm", "body_weight_kg", "body_weight_measured_on"],
+    "画像",
+  );
+  const content: Partial<ProfileContentWire> = {
+    height_cm: requirePositiveNumber(value.height_cm, "height_cm"),
+    body_weight_kg: requirePositiveNumber(value.body_weight_kg, "body_weight_kg"),
+    body_weight_measured_on:
+      value.body_weight_measured_on === null
+        ? null
+        : requireDate(value.body_weight_measured_on, "body_weight_measured_on"),
+  };
   for (const key of TEXT_KEYS)
     content[key] =
       value[key] === null ? null : requireNonBlank(value[key], key);
@@ -347,8 +358,10 @@ function requireDate(value: unknown, field: string): string {
   if (typeof value !== "string" || !DATE_PATTERN.test(value))
     throw new Error(`${field} 无效。`);
   const [year, month, day] = value.split("-").map(Number);
-  const date = new Date(Date.UTC(year, month - 1, day));
+  const date = new Date(0);
+  date.setUTCFullYear(year, month - 1, day);
   if (
+    year < 1 ||
     date.getUTCFullYear() !== year ||
     date.getUTCMonth() !== month - 1 ||
     date.getUTCDate() !== day
@@ -364,7 +377,7 @@ function requireNonNegative(value: unknown, field: string): number {
   return value;
 }
 
-/** 正有限数值（时长秒）：允许小数秒，拒绝 0 与负值 */
+/** 正有限数值：允许小数，拒绝 0 与负值 */
 function requirePositiveNumber(value: unknown, field: string): number {
   if (typeof value !== "number" || !Number.isFinite(value) || value <= 0)
     throw new Error(`${field} 无效。`);

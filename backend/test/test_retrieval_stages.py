@@ -4,6 +4,7 @@ from app.application.business import retrieval_text as rt
 from app.application.business.catalog import Catalog
 from app.application.business.retrieval_conditions import (
     EvaluatedConditions,
+    RetrievalProfile,
     evaluate_search_conditions,
 )
 from app.application.business.retrieval_response import (
@@ -145,6 +146,9 @@ def test_lookup_ignores_saved_restrictions_but_generation_applies_them():
         movement_restrictions=None,
         unavailable_equipment=[equipment],
         forbidden_exercise_ids=[forbidden],
+        height_cm=175,
+        body_weight_kg=70,
+        body_weight_measured_on=None,
     )
     lookup = evaluate_search_conditions(
         CatalogSearchArguments(purpose="lookup", name="卧推"),
@@ -162,3 +166,13 @@ def test_lookup_ignores_saved_restrictions_but_generation_applies_them():
     assert forbidden not in lookup.conditions.excluded_ids
     assert equipment not in generation.conditions.available_equipment
     assert forbidden in generation.conditions.excluded_ids
+    projection = RetrievalProfile(
+        environment=None,
+        unavailable_equipment=[equipment],
+        forbidden_exercise_ids=[forbidden],
+    )
+    for purpose in ("lookup", "generation", "replacement"):
+        arguments = CatalogSearchArguments(purpose=purpose, name="卧推")
+        assert evaluate_search_conditions(arguments, projection, catalog, mappings) == (
+            evaluate_search_conditions(arguments, profile, catalog, mappings)
+        )

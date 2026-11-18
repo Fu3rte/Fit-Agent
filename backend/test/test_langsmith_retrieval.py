@@ -11,7 +11,7 @@ from evaluation.contracts import RelevanceLabel, RetrievalInput
 from evaluation.dataset import load_for_evaluation
 from evaluation.retrieval_metrics import evaluate
 
-DATASET_PATH = support.BACKEND / "dataset/evaluation/rebuild-v1"
+DATASET_PATH = support.BACKEND / "dataset/evaluation/rebuild-v6"
 
 
 @pytest.fixture(scope="module")

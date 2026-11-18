@@ -506,7 +506,7 @@ def test_schema_hash_and_release_gates(tmp_path):
     document = manifest(version_dir)
     document["release"]["reviewer_type"] = "assistant"
     save_manifest(version_dir, document)
-    with pytest.raises(DatasetError, match="审阅者必须为用户"):
+    with pytest.raises(DatasetError, match="审阅者类型与授权不符"):
         load_for_evaluation(version_dir)
     document = manifest(version_dir)
     document["release"]["reviewer_type"] = "user"

@@ -1,0 +1,148 @@
+{
+  "dataset_version": "rebuild-v6",
+  "schema_version": "evaluation-dataset-1",
+  "created_at": "2026-11-17T14:14:18Z",
+  "source": {
+    "catalog": {
+      "path": "backend/dataset/actions.agent.json",
+      "sha256": "e6c3781611f4b9cda4b1646445f934200189d33f227c7a46c2b46890ce1bec26",
+      "count": 1321
+    },
+    "supplements": {
+      "path": "backend/dataset/action-supplements.published.json",
+      "sha256": "ea568653cdc9ab3eac8d0a7dd440a236f8860e054537f16f28a5714565988e46",
+      "version": "2026-10-26.3"
+    },
+    "mappings": {
+      "path": "backend/dataset/action-field-mappings.json",
+      "sha256": "67c1192f3c32040910cf2f48f62d92e198bcc9c58f19314efe48de7bd08f3b67"
+    },
+    "encoding_rule_version": "retrieval-text-2026-10-14.2"
+  },
+  "schemas": {
+    "defs": {
+      "path": "backend/dataset/evaluation/schemas/rebuild-v6/defs.schema.json",
+      "sha256": "0fc1f6cdea8e6a89893e591f52394c7d0bca8670e326b6f735526ac38169fb09"
+    },
+    "manifest": {
+      "path": "backend/dataset/evaluation/schemas/rebuild-v6/manifest.schema.json",
+      "sha256": "9df97c526ea7e23f35e0dfa363942860267ce8f7e96ff2dd5170f858b1d20f47"
+    },
+    "corpus": {
+      "path": "backend/dataset/evaluation/schemas/corpus.schema.json",
+      "sha256": "3269d81a5ac85f01512db377c8c5c91056e19c7bff39b3082637020d7df89b26"
+    },
+    "queries": {
+      "path": "backend/dataset/evaluation/schemas/queries.schema.json",
+      "sha256": "d049b3456c97bdbc266048157050a03e192d11a4a76d95f6b5ac57686be7ea83"
+    },
+    "qrels": {
+      "path": "backend/dataset/evaluation/schemas/qrels.schema.json",
+      "sha256": "2e839d7693d4a241b0c385a4083811a92c0670febd0a04f65bbd5fd7495120a9"
+    },
+    "scenarios": {
+      "path": "backend/dataset/evaluation/schemas/rebuild-v6/scenarios.schema.json",
+      "sha256": "d9eb332515f6762c5190008d5412bf38bc67171a6c04af78bc63f1c98252cdfa"
+    }
+  },
+  "files": {
+    "corpus": {
+      "path": "corpus.jsonl",
+      "sha256": "7888cce0d5af7f85e0e1e7c057fd183cc285893fbd6d0908e12ba8f5d7e11482"
+    },
+    "queries": {
+      "path": "queries.jsonl",
+      "sha256": "18e8f4b0617d862048dbe2c45ff47878a92ee99d1cf699e8aa6c7f5b1b237fd5"
+    },
+    "qrels": {
+      "path": "qrels.jsonl",
+      "sha256": "a8dddf7b06bc8a0958bd93885bead1375ade47c6a90243bd31ea7016b90be902"
+    },
+    "scenarios": {
+      "path": "scenarios.jsonl",
+      "sha256": "a35554a2c890cf20319180ba00e7dba822a3fdf93b41ef9faf4a0232b5e51c1f"
+    }
+  },
+  "assets": [
+    {
+      "asset_id": "plan-attachment-instruction",
+      "path": "assets/plan-attachment-instruction.md",
+      "sha256": "63d4957e67c702472d19ff82b1c43a12a552c5c8fe38acbeb3e2cfa2304e5cfe"
+    },
+    {
+      "asset_id": "plan-cycle-only",
+      "path": "assets/plan-cycle-only.txt",
+      "sha256": "a357194b3cddd7dfdb2054b98ab51d1a9a0de39e04edb0c5b6cd822c10d239a5"
+    },
+    {
+      "asset_id": "plan-five-day-split",
+      "path": "assets/plan-five-day-split.md",
+      "sha256": "6b2c0a117ffff6e98e389f574ced0e4981d203f1ec0cde537badb056939e695e"
+    },
+    {
+      "asset_id": "plan-home-dumbbell",
+      "path": "assets/plan-home-dumbbell.md",
+      "sha256": "ad426ad1ef0534484ad4a59a3e8146f1dc0d8d76d848a44b9846e361182d5b46"
+    },
+    {
+      "asset_id": "plan-push-pull-legs",
+      "path": "assets/plan-push-pull-legs.md",
+      "sha256": "6b83e41a9f0c849d200412b21c7a2fa8433daae2ebdd05fc335986b8ca68c3fc"
+    },
+    {
+      "asset_id": "plan-upper-lower",
+      "path": "assets/plan-upper-lower.txt",
+      "sha256": "f4109c254dc6a796971e13fa9480c4fe1aad5353e4ccfc431cc408f36de0b4fc"
+    },
+    {
+      "asset_id": "workout-log-october",
+      "path": "assets/workout-log-october.txt",
+      "sha256": "dcd060ef0828fa32941cd69d3eb5a04f63ffd284bf28f5f0adc1b66c67a2ef03"
+    },
+    {
+      "asset_id": "workout-log-short",
+      "path": "assets/workout-log-short.txt",
+      "sha256": "28ee80d51e91cd7ce80c145ceaf6af4e0d5f0842ffb6a958bc146e122124ca77"
+    }
+  ],
+  "counts": {
+    "corpus": 1321,
+    "queries": 150,
+    "qrels": 3679,
+    "scenarios": 40,
+    "assets": 8
+  },
+  "quotas": {
+    "purposes": {
+      "lookup": 60,
+      "generation": 45,
+      "replacement": 45
+    },
+    "expect_empty": {
+      "lookup": 10,
+      "generation": 10,
+      "replacement": 10
+    },
+    "scenario_categories": {
+      "action_verification": 8,
+      "profile_update": 5,
+      "plan_import_file": 4,
+      "incomplete_plan_structure": 2,
+      "plan_generation": 4,
+      "replacement_constraints": 3,
+      "performance_adjustment": 3,
+      "workout_logging_query": 3,
+      "confirmation_cancellation_state": 5,
+      "clarification_authorization_medical_risk": 3
+    }
+  },
+  "release": {
+    "status": "approved",
+    "reviewer": "Worker",
+    "reviewer_type": "assistant",
+    "reviewed_at": "2026-11-17T14:14:18Z",
+    "comment": "用户授权从rebuild-v5派生，Worker逐项适配并审阅；测量值为合成测试事实。",
+    "decision_ref": "optimization/evaluation-rebuild-v6-provenance.md#授权与审阅",
+    "content_sha256": "db317e695603b3e7a0b2726749c4f71dc138af9b82aba43def4daa7d176f18ee"
+  }
+}

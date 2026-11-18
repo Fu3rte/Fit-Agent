@@ -15,9 +15,9 @@ from evaluation.scenarios import (
     ScenarioExecution,
     ScenarioModelUnavailable,
     ScoringResultExists,
-    execute_scenario,
+    _execute_scenario,
+    _run_scenario,
     load_execution,
-    run_scenario,
     score_execution,
     write_scoring_result,
 )
@@ -82,7 +82,7 @@ def make_scenario(
 
 
 async def execute(root, dataset, scenario, run_id="run-task2"):
-    return await execute_scenario(
+    return await _execute_scenario(
         dataset,
         scenario,
         run_id=run_id,
@@ -208,7 +208,7 @@ async def test_run_scenario_composes_execution_and_scoring(dataset, root):
         {"event_id": "e01", "type": "session_switch"},
         {"event_id": "e02", "type": "restart"},
     ])
-    artifact = await run_scenario(
+    artifact = await _run_scenario(
         dataset,
         scenario,
         run_id="run-task2",
@@ -292,7 +292,7 @@ async def test_applicable_metrics_require_judge_before_execution(dataset, root):
         ],
     )
     with pytest.raises(ScenarioModelUnavailable):
-        await run_scenario(
+        await _run_scenario(
             dataset,
             scenario,
             run_id="run-task2",
@@ -310,7 +310,7 @@ async def test_blocked_run_scenario_preserves_partial_artifact(dataset, root):
         {"event_id": "e02", "type": "bogus"},
     ])
     with pytest.raises(ScenarioBlocked) as raised:
-        await run_scenario(
+        await _run_scenario(
             dataset,
             scenario,
             run_id="run-task2",

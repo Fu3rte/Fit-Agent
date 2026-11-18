@@ -68,6 +68,9 @@ def profile_content(**overrides):
         "movement_restrictions": None,
         "unavailable_equipment": None,
         "forbidden_exercise_ids": None,
+        "height_cm": 175.0,
+        "body_weight_kg": 70.0,
+        "body_weight_measured_on": None,
     }
     values.update(overrides)
     return ProfileContent(**values)
@@ -436,13 +439,14 @@ def test_search_response_evidence_requires_exact_correspondence():
         )
 
 
-def test_missing_record_and_empty_content_are_distinct():
+def test_missing_record_and_measurements_only_profile_are_distinct():
     missing = SavedBusinessData()
-    empty = SavedBusinessData(profile=profile_record())
+    saved = SavedBusinessData(profile=profile_record())
     assert missing.profile is None
-    assert empty.profile is not None
-    assert empty.profile.content.is_empty()
-    assert missing.model_dump() != empty.model_dump()
+    assert saved.profile is not None
+    assert saved.profile.content.height_cm == 175.0
+    assert saved.profile.content.body_weight_kg == 70.0
+    assert missing.model_dump() != saved.model_dump()
 
 
 def test_saved_data_and_full_projection_scopes_are_distinct():

@@ -125,6 +125,7 @@ def profile(**overrides):
         "availability": "每周四次",
         "health_notes": None,
         "movement_restrictions": None,
+        "height_cm": 175.0, "body_weight_kg": 70.0, "body_weight_measured_on": None,
         "unavailable_equipment": None,
         "forbidden_exercise_ids": None,
     }
@@ -2479,14 +2480,14 @@ def test_ranking_rejects_duplicate_sources():
         )
 
 
-def test_no_saved_state_distinguishes_missing_and_empty_profile():
+def test_no_saved_state_distinguishes_missing_and_measurements_only_profile():
     missing = evaluate_assertion(
         definition("no_saved_state", business_kind="profile"),
         evidence(after=projection()),
     )
     assert missing.passed
 
-    empty_profile = profile(
+    measurements_only = profile(
         goal=None,
         experience=None,
         environment=None,
@@ -2496,12 +2497,12 @@ def test_no_saved_state_distinguishes_missing_and_empty_profile():
         unavailable_equipment=None,
         forbidden_exercise_ids=None,
     )
-    empty_record = evaluate_assertion(
+    saved_record = evaluate_assertion(
         definition("no_saved_state", business_kind="profile"),
-        evidence(after=projection(profile_value=profile_record(content=empty_profile))),
+        evidence(after=projection(profile_value=profile_record(content=measurements_only))),
     )
-    assert not empty_record.passed
-    assert "empty=True" in empty_record.evidence
+    assert not saved_record.passed
+    assert "profile.version=1" in saved_record.evidence
 
     plan_present = evaluate_assertion(
         definition("no_saved_state", business_kind="plan"),

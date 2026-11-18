@@ -27,6 +27,7 @@ from test.check_plan_import_tools import (
     invocation,
 )
 from test.check_profile_confirmation import Fixture, count_rows
+from test.check_plan_core import profile
 
 MARKER = "PLAN-HARNESS-CREDENTIAL-314159"
 GUARD = CredentialFilter((MARKER,)).contains
@@ -196,7 +197,8 @@ async def check():
     f = await Fixture(ROOT / "harness.db").seeded()
     try:
         session = await f.session("工具生命周期")
-        args = {"base_profile_version": None, "base_plan_id": None, "payload": copy.deepcopy(INCOMPLETE)}
+        await profile(f, session)
+        args = {"base_profile_version": 1, "base_plan_id": None, "payload": copy.deepcopy(INCOMPLETE)}
         calls = [invocation("prepare_plan_import", args), invocation("prepare_plan_adjustment", args)]
         run, _, tools, registrations = await binding(f, session, calls)
         name = calls[0].name

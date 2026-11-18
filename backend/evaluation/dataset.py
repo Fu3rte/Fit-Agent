@@ -13,7 +13,7 @@ from referencing import Registry, Resource
 from referencing.jsonschema import DRAFT202012
 
 from app.application.business import retrieval_text as rt
-from app.application.business.retrieval_conditions import evaluate_search_conditions
+from app.application.business.retrieval_conditions import RetrievalProfile, evaluate_search_conditions
 from app.application.business.retrieval_index import RetrievalCorpus
 from app.domain.business.models import (
     CatalogSearchArguments,
@@ -77,6 +77,7 @@ SCENARIO_BASELINES = {
     "rebuild-v3": (REBUILD_V3_SCENARIO_COUNT, REBUILD_V3_SCENARIO_CATEGORIES),
     "rebuild-v4": (REBUILD_V3_SCENARIO_COUNT, REBUILD_V3_SCENARIO_CATEGORIES),
     "rebuild-v5": (REBUILD_V3_SCENARIO_COUNT, REBUILD_V3_SCENARIO_CATEGORIES),
+    "rebuild-v6": (REBUILD_V3_SCENARIO_COUNT, REBUILD_V3_SCENARIO_CATEGORIES),
 }
 METRICS = ("faithfulness", "factual_correctness", "deterministic_rules")
 PROPOSAL_KINDS = ("profile", "plan", "workout")
@@ -96,6 +97,7 @@ ASSERTION_KINDS = (
 SAVED_STATUS = "saved"
 INVALIDATED_STATUS = "invalidated"
 MESSAGE_ANSWER_MIN_CHARS = 8
+V6_DECISION_REF = "optimization/evaluation-rebuild-v6-provenance.md#授权与审阅"
 
 
 def scenario_baseline(version: str) -> tuple[int, dict[str, int]]:
@@ -160,18 +162,32 @@ def _read_json_file(path: Path) -> Any:
     return _strict_json(text, str(path))
 
 
-def _load_schemas() -> tuple[dict[str, dict], Registry]:
+def _schema_paths(version: str) -> dict[str, str]:
+    paths = dict(SCHEMA_PATHS)
+    if version == "rebuild-v6":
+        for name in ("defs", "manifest", "scenarios"):
+            paths[name] = f"backend/dataset/evaluation/schemas/rebuild-v6/{name}.schema.json"
+    return paths
+
+
+def _load_schemas(version: str) -> tuple[dict[str, dict], Registry]:
     schemas = {}
     resources = []
-    for name, relative in SCHEMA_PATHS.items():
+    for name, relative in _schema_paths(version).items():
         path = REPO / relative
         if path.is_symlink() or not path.is_file():
             _fail("固定本地 Schema 缺失", relative)
         document = _read_json_file(path)
-        if not isinstance(document, dict) or document.get("$id") != SCHEMA_IDS[name]:
-            _fail(f"Schema 身份不符，期望 {SCHEMA_IDS[name]}", relative)
+        expected_id = SCHEMA_IDS[name]
+        if version == "rebuild-v6" and name in ("defs", "manifest", "scenarios"):
+            expected_id = expected_id.replace("/evaluation/", "/evaluation/rebuild-v6/")
+        if not isinstance(document, dict) or document.get("$id") != expected_id:
+            _fail(f"Schema 身份不符，期望 {expected_id}", relative)
         schemas[name] = document
         resources.append((document["$id"], Resource.from_contents(document, default_specification=DRAFT202012)))
+    if version == "rebuild-v6":
+        historical_defs = _read_json_file(REPO / SCHEMA_PATHS["defs"])
+        resources.append((historical_defs["$id"], Resource.from_contents(historical_defs, default_specification=DRAFT202012)))
     return schemas, Registry().with_resources(resources)
 
 
@@ -432,14 +448,14 @@ class EvaluationDataset:
         }
 
 
-def _review_issues(review: dict, where: str, digest: str) -> list[str]:
+def _review_issues(review: dict, where: str, digest: str, *, delegated: bool = False) -> list[str]:
     issues = []
     status = review["status"]
     if status != "approved":
         issues.append(f"{where}: 审阅状态为 {status}")
         return issues
-    if review["reviewer_type"] != "user":
-        issues.append(f"{where}: 审阅者必须为用户")
+    if review["reviewer_type"] != ("assistant" if delegated else "user"):
+        issues.append(f"{where}: 审阅者类型与授权不符")
     if not review["reviewer"]:
         issues.append(f"{where}: 缺少审阅者")
     if not review["decision_ref"]:
@@ -479,7 +495,7 @@ def _validate_manifest(
     if manifest["dataset_version"] != version_dir.name:
         _fail("dataset_version 必须与版本目录名一致", "manifest.json:dataset_version")
     _strict_iso(manifest["created_at"], "manifest.json:created_at")
-    for name, expected_path in SCHEMA_PATHS.items():
+    for name, expected_path in _schema_paths(manifest["dataset_version"]).items():
         declared = manifest["schemas"][name]
         if declared["path"] != expected_path:
             _fail(f"Schema 路径必须为固定本地资源 {expected_path}", "manifest.json:schemas")
@@ -653,7 +669,7 @@ def _validate_assertion_timing(
                 )
 
 
-def _validate_scenarios(rows: list[dict], assets: dict[str, Path]) -> None:
+def _validate_scenarios(rows: list[dict], assets: dict[str, Path], *, current_profile: bool = True) -> None:
     seen = set()
     for index, scenario in enumerate(rows, 1):
         where = f"scenarios.jsonl:{index}:{scenario.get('scenario_id', '<unknown>')}"
@@ -662,7 +678,7 @@ def _validate_scenarios(rows: list[dict], assets: dict[str, Path]) -> None:
             _fail("scenario_id 重复", where)
         seen.add(scenario_id)
         state = scenario["initial_state"]
-        if state["profile"] is not None:
+        if current_profile and state["profile"] is not None:
             ProfileContent.model_validate(state["profile"])
         plan_ids = []
         current = []
@@ -845,15 +861,10 @@ def _validate_scenarios(rows: list[dict], assets: dict[str, Path]) -> None:
             _fail("场景必须且只能包含一个主要业务类别标签", where)
 
 
-def _query_profile(query: dict) -> ProfileContent:
+def _query_profile(query: dict) -> RetrievalProfile:
     saved = query["conditions"]["saved_profile"]
-    return ProfileContent(
-        goal=None,
-        experience=None,
+    return RetrievalProfile(
         environment=None,
-        availability=None,
-        health_notes=None,
-        movement_restrictions=None,
         unavailable_equipment=saved["unavailable_equipment"] or None,
         forbidden_exercise_ids=saved["forbidden_exercise_ids"] or None,
     )
@@ -1005,6 +1016,11 @@ def _approval_report(
             )
         )
     for scenario in scenarios:
+        if manifest["dataset_version"] == "rebuild-v6" and (
+            scenario["review"]["reviewer"] != "Worker"
+            or scenario["review"]["decision_ref"] != V6_DECISION_REF
+        ):
+            issues.append(f"scenarios.jsonl:{scenario['scenario_id']}: 委托审阅来源不符")
         asset_hashes = {
             asset_id: _sha256_file(assets[asset_id])
             for asset_id in sorted(_scenario_asset_ids(scenario))
@@ -1014,14 +1030,20 @@ def _approval_report(
                 scenario["review"],
                 f"scenarios.jsonl:{scenario['scenario_id']}",
                 scenario_digest(scenario, asset_hashes),
+                delegated=manifest["dataset_version"] == "rebuild-v6",
             )
         )
     release = manifest["release"]
+    if manifest["dataset_version"] == "rebuild-v6" and (
+        release["reviewer"] != "Worker" or release["decision_ref"] != V6_DECISION_REF
+    ):
+        issues.append("manifest.json:release 委托审阅来源不符")
     if release["status"] != "approved":
         issues.append(f"manifest.json:release 状态为 {release['status']}")
     else:
-        if release["reviewer_type"] != "user":
-            issues.append("manifest.json:release 审阅者必须为用户")
+        expected_reviewer_type = "assistant" if manifest["dataset_version"] == "rebuild-v6" else "user"
+        if release["reviewer_type"] != expected_reviewer_type:
+            issues.append("manifest.json:release 审阅者类型与授权不符")
         if not release["reviewer"] or not release["decision_ref"] or release["reviewed_at"] is None:
             issues.append("manifest.json:release 批准记录不完整")
         if release["content_sha256"] is None or release["content_sha256"] != release_digest(manifest):
@@ -1040,7 +1062,7 @@ def _load(version_dir: Path) -> EvaluationDataset:
     manifest = _read_json_file(manifest_path)
     if not isinstance(manifest, dict):
         _fail("manifest 必须为 JSON 对象", str(manifest_path))
-    schemas, registry = _load_schemas()
+    schemas, registry = _load_schemas(manifest["dataset_version"])
     files, assets, _ = _validate_manifest(version_dir, manifest, schemas, registry)
     corpus_rows = _read_jsonl(files["corpus"], _validator(schemas["corpus"], registry), "corpus")
     query_rows = _read_jsonl(files["queries"], _validator(schemas["queries"], registry), "queries")
@@ -1056,7 +1078,7 @@ def _load(version_dir: Path) -> EvaluationDataset:
         _fail(f"真实检索语料未通过批准校验: {exc}", "corpus.jsonl")
     _validate_corpus(corpus_rows, manifest, corpus)
     mappings = rt.load_mappings(REPO / SOURCE_PATHS["mappings"])
-    _validate_scenarios(scenario_rows, assets)
+    _validate_scenarios(scenario_rows, assets, current_profile=manifest["dataset_version"] == "rebuild-v6")
     scenario_ids = {scenario["scenario_id"] for scenario in scenario_rows}
     evaluated = _validate_queries(query_rows, manifest, corpus.catalog, mappings, scenario_ids)
     _validate_qrels(

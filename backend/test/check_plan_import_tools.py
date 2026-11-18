@@ -20,7 +20,7 @@ from test.check_plan_core import CONTENT, profile
 from test.check_profile_confirmation import SYSTEM, Fixture, count_rows, new_id
 from test.check_workout_service_http import assistant
 
-ROOT = Path(__file__).resolve().parents[2] / "tmp/backend-plan-import/checks/plan-import-tools" / uuid4().hex
+ROOT = Path(__file__).resolve().parents[1] / "temp/plan-import/checks/plan-import-tools" / uuid4().hex
 ROOT.mkdir(parents=True)
 NAMES = ["prepare_plan_import", "prepare_plan_adjustment"]
 DECLARED = {item.name: item for item in plan_import_tool_declarations()}
@@ -203,15 +203,26 @@ async def check():
     f = await Fixture(ROOT / "tools.db").seeded()
     try:
         session = await f.session("录入调整工具")
+        imported_saved = await saved_chain(f, await f.session("无画像录入保存链"), "prepare_plan_import",
+            {"base_profile_version": None, "base_plan_id": None, "payload": copy.deepcopy(INCOMPLETE)})
+        messages, registrations = await batch(f, session, [invocation("prepare_plan_adjustment",
+            {"base_profile_version": None, "base_plan_id": imported_saved["id"], "payload": copy.deepcopy(INCOMPLETE)})])
+        assert messages[0].is_error and body(messages[0])["code"] == "profile_required" and not registrations
+        await profile(f, session)
+        adjusted_saved = await saved_chain(f, await f.session("有画像调整保存链"), "prepare_plan_adjustment",
+            {"base_profile_version": 1, "base_plan_id": imported_saved["id"], "payload": copy.deepcopy(INCOMPLETE)})
+        assert adjusted_saved["id"] != imported_saved["id"]
+        assert (await f.business.plans.get_current_plan()).id == adjusted_saved["id"]
+        assert await count_rows(f.database, "plans") == 2
         for name, model, kind in zip(NAMES, (PlanImportProposal, PlanAdjustmentProposal), ("import", "adjustment")):
-            args = {"base_profile_version": None, "base_plan_id": None, "payload": copy.deepcopy(INCOMPLETE)}
+            args = {"base_profile_version": 1, "base_plan_id": adjusted_saved["id"], "payload": copy.deepcopy(INCOMPLETE)}
             args["payload"]["notes"] = "用户提供的完整依据；" * 10000
             messages, registrations = await batch(f, session, [invocation(name, args)])
             message = messages[0]
             assert not message.is_error and len(message.content[0].text) > 50000
             proposal = model.model_validate_json(message.content[0].text)
             assert proposal.preparation_kind == kind and proposal.payload.model_dump() == args["payload"]
-            assert proposal.base_profile_version is None and proposal.base_plan_id is None
+            assert proposal.base_profile_version == 1 and proposal.base_plan_id == adjusted_saved["id"]
             assert len(registrations) == 1
             schema = DECLARED[name].parameters
             assert schema["additionalProperties"] is False
@@ -237,12 +248,11 @@ async def check():
             messages, registrations = await batch(f, session, [invocation(name, value) for value in invalid])
             assert all(message.is_error and "参数校验失败" in message.content[0].text for message in messages)
             assert not registrations and await count_rows(f.database, "plan_snapshots") == before
-            # 两依据字段的精确字符串 "None" 经预处理成为 null 依据，创建成功且登记快照。
+            # 两依据字段的精确字符串 "None" 转换为 null，并接受版本门禁校验。
             messages, registrations = await batch(f, session,
                 [invocation(name, {**args, "base_profile_version": "None", "base_plan_id": "None"})])
-            prepared = body(messages[0])
-            assert not messages[0].is_error and prepared["base_profile_version"] is None
-            assert prepared["base_plan_id"] is None and registrations == {messages[0].tool_call_id: prepared["proposal_id"]}
+            assert messages[0].is_error and body(messages[0])["code"] == "profile_version_conflict"
+            assert not registrations
             unknown = copy.deepcopy(partial)
             unknown["days"][0]["exercises"][0].update(sets=None, reps=None)
             messages, _ = await batch(f, session, [invocation(name, {**args, "payload": unknown})])
@@ -254,16 +264,6 @@ async def check():
             assert detail["code"] == "invalid_business_payload"
             assert set(detail) == {"code", "message", "errors"}
             assert detail["errors"] == [{"path": "/payload/days/0/exercises/0/exercise_id", "message": "动作 ID 必须存在于动作目录中。"}]
-        # 无画像依据的不完整计划可录入并保存：null 依据要求保存时画像仍不存在。
-        imported_saved = await saved_chain(f, await f.session("无画像录入保存链"), "prepare_plan_import",
-            {"base_profile_version": None, "base_plan_id": None, "payload": copy.deepcopy(INCOMPLETE)})
-        adjusted_saved = await saved_chain(f, await f.session("无画像调整保存链"), "prepare_plan_adjustment",
-            {"base_profile_version": None, "base_plan_id": imported_saved["id"],
-             "payload": copy.deepcopy(INCOMPLETE)})
-        assert adjusted_saved["id"] != imported_saved["id"]
-        assert (await f.business.plans.get_current_plan()).id == adjusted_saved["id"]
-        assert await count_rows(f.database, "plans") == 2
-        await profile(f, session)
         for name in NAMES:
             args = {"base_profile_version": None, "base_plan_id": None, "payload": INCOMPLETE}
             messages, registrations = await batch(f, session, [invocation(name, args)])

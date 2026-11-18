@@ -9,7 +9,7 @@ from jsonpointer import resolve_pointer
 from evaluation.dataset import (
     BACKEND,
     REBUILD_V3_SCENARIO_CATEGORIES,
-    load_for_evaluation,
+    load_for_review,
     qrel_digest,
     query_digest,
     release_digest,
@@ -30,7 +30,7 @@ def rows(path):
 
 @pytest.fixture(scope="module")
 def dataset():
-    return load_for_evaluation(VERSION)
+    return load_for_review(VERSION)
 
 
 def test_rebuild_v4_inherits_frozen_files_and_original_qrels():

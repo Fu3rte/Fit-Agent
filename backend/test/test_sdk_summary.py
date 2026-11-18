@@ -36,7 +36,7 @@ from evaluation.scenarios import (
     code_identity as scenario_code_identity,
 )
 
-DATASET = load_for_evaluation(BACKEND / "dataset" / "evaluation" / "rebuild-v1")
+DATASET = load_for_evaluation(BACKEND / "dataset" / "evaluation" / "rebuild-v6")
 SCENARIOS = {scenario["scenario_id"]: scenario for scenario in DATASET.scenarios}
 # 历史布局用例沿用 langsmith 模块别名；langfuse 布局用例显式传入对应平台模块。
 ls = lss
@@ -670,7 +670,10 @@ def test_unreviewed_candidates_block_retrieval_summary(tmp_path):
     retrieval_root = _retrieval_run(tmp_path)
     document = json.loads((retrieval_root / "run.json").read_text(encoding="utf-8"))
     query_id = "q-lookup-001"
-    unreviewed = "0022"
+    unreviewed = next(
+        item["corpus_id"] for item in DATASET.corpus
+        if item["corpus_id"] not in DATASET.reviewed_corpus_ids()[query_id]
+    )
     row = next(
         item
         for item in lr.example_rows(DATASET)

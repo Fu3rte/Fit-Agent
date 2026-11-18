@@ -23,12 +23,12 @@ from app.application.business.retrieval_rerank import (
 from app.application.business.retrieval_search import RetrievalCandidate
 from evaluation import langfuse_retrieval as lr
 from evaluation import retrieval_support as support
-from evaluation.dataset import load_for_evaluation
+from evaluation.dataset import load_for_evaluation, load_for_review
 from evaluation.retrieval import validate_group
 
-DATASET_PATH = support.BACKEND / "dataset/evaluation/rebuild-v1"
+DATASET_PATH = support.BACKEND / "dataset/evaluation/rebuild-v6"
 QUERY_ID = "q-lookup-001"
-UNREVIEWED = "0022"
+UNREVIEWED = "0023"
 ARTIFACT = (
     support.BACKEND
     / "temp/retrieval-mteb/20261020T120245Z-c7542e56/evaluation.json"
@@ -259,8 +259,8 @@ def test_reviewed_grade_zero_candidate_does_not_block(dataset, reviewed, row):
 
 
 def test_fully_reviewed_query_scores_unchanged(dataset, reviewed, row):
-    pool = sorted(reviewed[QUERY_ID])
     final = positives(row)[:5]
+    pool = positives(row) + sorted(reviewed[QUERY_ID] - set(positives(row)))[:20 - len(positives(row))]
     payload = outputs(
         query_id=QUERY_ID,
         identity=lr.dataset_binding(dataset),
@@ -469,9 +469,12 @@ def test_same_pool_baseline_and_rerank_block_identically(dataset, reviewed, row)
     assert baseline_error.value.missing == rerank_error.value.missing == (UNREVIEWED,)
 
 
-def test_local_artifact_reproduction_blocks_same_candidates(dataset, reviewed):
+def test_local_artifact_reproduction_blocks_same_candidates():
     if not ARTIFACT.is_file():
         pytest.skip("本地复现产物不存在")
+    dataset = load_for_review(support.BACKEND / "dataset/evaluation/rebuild-v1")
+    assert dataset.review["ready"] is True
+    reviewed = dataset.reviewed_corpus_ids()
     document = json.loads(ARTIFACT.read_text(encoding="utf-8"))
     group = document["groups"]["hybrid"]
     projection_row = group["projections"][QUERY_ID]

@@ -40,12 +40,12 @@ from evaluation.scenarios import (
     ScenarioExecution,
     ScoringResultExists,
     SearchStageRecord,
+    _execute_scenario,
     _parse_args,
+    _run_scenario,
     _seal_execution,
-    execute_scenario,
     load_execution,
     load_external_scoring,
-    run_scenario,
     score_execution_external,
     write_external_scoring_result,
 )
@@ -332,7 +332,7 @@ async def test_external_run_skips_ragas_and_writes_local_result(
     monkeypatch.setattr("evaluation.scenarios._score_generation_entries", forbidden)
     monkeypatch.setattr("evaluation.scenarios.GenerationScoringSession", forbidden)
 
-    record = await run_scenario(
+    record = await _run_scenario(
         dataset,
         scenario,
         run_id="run-ext",
@@ -380,7 +380,7 @@ async def test_external_run_keeps_failed_assertion_real(dataset, root):
             }
         ],
     )
-    record = await run_scenario(
+    record = await _run_scenario(
         dataset,
         scenario,
         run_id="run-ext",
@@ -409,7 +409,7 @@ async def test_external_run_keeps_binding_error(dataset, root):
             }
         ],
     )
-    record = await run_scenario(
+    record = await _run_scenario(
         dataset,
         scenario,
         run_id="run-ext",
@@ -433,7 +433,7 @@ async def test_external_blocked_execution_is_not_scoring_success(dataset, root):
         ]
     )
     with pytest.raises(ScenarioBlocked) as raised:
-        await run_scenario(
+        await _run_scenario(
             dataset,
             scenario,
             run_id="run-ext",
@@ -503,7 +503,7 @@ def test_external_scoring_preserves_sealed_execution_evidence(dataset, tmp_path)
 
 async def _execute_layout(dataset, run_dir, scenario):
     example_id = str(uuid5(NAMESPACE_URL, f"external-{uuid4().hex}"))
-    execution = await execute_scenario(
+    execution = await _execute_scenario(
         dataset,
         scenario,
         run_id="run-sdk-offline",

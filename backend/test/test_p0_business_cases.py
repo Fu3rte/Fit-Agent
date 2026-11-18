@@ -260,6 +260,7 @@ def test_evaluate_detects_wrong_state(monkeypatch):
             "availability": "每周三次",
             "health_notes": None,
             "movement_restrictions": None,
+            "height_cm": 175.0, "body_weight_kg": 70.0, "body_weight_measured_on": None,
             "unavailable_equipment": [],
             "forbidden_exercise_ids": [],
         }
@@ -373,6 +374,7 @@ def test_real_profile_chain_then_evaluate_passes(monkeypatch):
             "availability": "每周三次，每次约四十五分钟",
             "health_notes": None,
             "movement_restrictions": None,
+            "height_cm": 175.0, "body_weight_kg": 70.0, "body_weight_measured_on": None,
             "unavailable_equipment": [],
             "forbidden_exercise_ids": [],
         }

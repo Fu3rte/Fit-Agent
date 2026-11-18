@@ -59,7 +59,7 @@ def _tools(
         ),
         "prepare_plan": AgentTool(
             "prepare_plan",
-            "创建完整训练计划待确认快照。base_profile_version使用已保存画像的版本，"
+            "创建完整训练计划待确认快照。须有已确认保存且包含身高体重的画像，base_profile_version使用该画像的真实版本，"
             "base_plan_id使用当前计划id原值，无当前计划时传JSON null；payload是完整内容。"
             '参数预处理仅将base_plan_id精确字符串"None"转为JSON null，其他字段和值原样严格校验。'
             "训练日必须包含具体动作，每个动作sets有值，reps或duration_seconds至少一个有值。"

@@ -30,7 +30,7 @@ from evaluation.scenarios import (  # noqa: E402
 ENABLE_VARIABLE = "FIT_AGENT_EVALUATION_SCENARIOS_INTEGRATION"
 VALIDATION_SCENARIOS = (
     "s-plan-generation-01",
-    "s-plan-import-file-01",
+    "s-incomplete-plan-structure-01",
     "s-plan-import-file-02",
     "s-profile-update-01",
     "s-profile-update-08",

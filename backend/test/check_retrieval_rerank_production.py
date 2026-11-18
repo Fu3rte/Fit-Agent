@@ -298,6 +298,9 @@ async def run() -> dict:
         async with fixture.repository.transaction():
             await fixture.repository.save_profile(
                 ProfileContent(
+                    height_cm=170,
+                    body_weight_kg=70,
+                    body_weight_measured_on=None,
                     goal=None,
                     experience=None,
                     environment=None,

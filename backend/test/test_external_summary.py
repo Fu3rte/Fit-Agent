@@ -13,7 +13,7 @@ from evaluation.contracts import (
     EXTERNAL_JUDGE_METRICS,
     ExternalJudgeApplicability,
 )
-from evaluation.dataset import BACKEND, load_for_evaluation
+from evaluation.dataset import BACKEND, load_for_evaluation, load_for_review
 from evaluation.decision_feedback import (
     _history_from_batches,
     _load_collection,
@@ -65,7 +65,7 @@ from test.test_external_judge_checkpoints import (
 )
 from test.test_sdk_summary import _retrieval_run, _write_scenario_run
 
-DATASET_DIR = BACKEND / "dataset" / "evaluation" / "rebuild-v1"
+DATASET_DIR = BACKEND / "dataset" / "evaluation" / "rebuild-v6"
 DATASET = load_for_evaluation(DATASET_DIR)
 
 
@@ -1272,7 +1272,9 @@ def test_archived_external_run_is_read_only(tmp_path):
         *sorted((run_dir / "external-judge").glob("*.json")),
     ]
     before = _file_hashes(files)
-    summary = _summary(run_dir)
+    historical = load_for_review(BACKEND / "dataset" / "evaluation" / "rebuild-v1")
+    assert historical.review["ready"] is True
+    summary = es.build_summary(es.load_external_scenario_source(run_dir, historical))
     # 历史 LangSmith 布局按 schema/protocol 字段分发读取，不按未知布局拒绝。
     assert summary["platform"] == es.LANGSMITH_PLATFORM
     assert summary["protocol_version"] == EXTERNAL_PROTOCOL_VERSION

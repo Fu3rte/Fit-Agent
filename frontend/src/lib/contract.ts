@@ -302,7 +302,7 @@ export interface HistorySteeringWire {
 
 /* ===== 画像查询（backend-http-sse-contract §11.9）===== */
 
-/** 画像八个必填字段：文本字段 null 表示未知；限制列表 null 表示未知，[] 表示明确没有限制 */
+/** 画像十一个必填字段：文本和测量日期的 null 表示未知；限制列表 null 表示未知，[] 表示明确没有限制 */
 export interface ProfileContentWire {
   goal: string | null;
   experience: string | null;
@@ -312,6 +312,9 @@ export interface ProfileContentWire {
   movement_restrictions: string | null;
   unavailable_equipment: string[] | null;
   forbidden_exercise_ids: string[] | null;
+  height_cm: number;
+  body_weight_kg: number;
+  body_weight_measured_on: string | null;
 }
 
 /** GET /api/profile：未建档时 ``version`` 与 ``content`` 同时为 null */

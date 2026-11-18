@@ -26,9 +26,9 @@ from evaluation.retrieval import (
 )
 from evaluation.retrieval_metrics import evaluate_staged
 from evaluation.scenarios import SearchStageRecord, executed_index_identity
-from test.evaluation_fixtures import build_dataset, make_document
+from test.evaluation_fixtures import make_document
 
-DATASET_PATH = support.BACKEND / "dataset/evaluation/rebuild-v1"
+DATASET_PATH = support.BACKEND / "dataset/evaluation/rebuild-v6"
 ENDPOINT = (
     "https://ws-example.cn-beijing.maas.aliyuncs.com"
     "/api/v1/services/rerank/text-rerank/text-rerank"
@@ -338,9 +338,8 @@ def rerank_document(version_dir: Path):
 
 
 @pytest.fixture(scope="module")
-def evaluated_document(tmp_path_factory):
-    version_dir = build_dataset(tmp_path_factory.mktemp("rerank-document"))
-    return rerank_document(version_dir)
+def evaluated_document():
+    return rerank_document(DATASET_PATH)
 
 
 def test_document_replays_without_models_or_database(evaluated_document, monkeypatch):

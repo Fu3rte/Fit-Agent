@@ -206,6 +206,12 @@ assert.throws(() => business.parseWorkoutList({ items: [], page: 1, page_size: 1
 assert.throws(() => business.parseWorkoutList({ items: [record], page: 1, page_size: 10, total: -1 }), /total 无效/, "负数总数被拒绝");
 assert.throws(() => business.parseWorkoutList({ items: [record], page: 1, page_size: 10 }), /缺少必填字段/, "缺少总数的响应被拒绝");
 assert.deepEqual(business.parseWorkoutRecord(record), record, "完整记录通过校验并保留全部字段");
+for (const performed_on of ["0001-01-01", "0099-12-31", "2024-02-29"]) {
+  assert.equal(business.parseWorkoutRecord({ ...record, performed_on }).performed_on, performed_on, "有效训练日期保持原值");
+}
+for (const performed_on of ["0000-01-01", "0099-02-29", "2025-02-29"]) {
+  assert.throws(() => business.parseWorkoutRecord({ ...record, performed_on }), /performed_on 无效/, "非法训练日期被拒绝");
+}
 assert.throws(() => business.parseWorkoutRecord({ ...record, version: 0 }), /version 无效/, "非正整数版本被拒绝");
 
 /** 6. 记录页浏览状态：日期筛选边界就地阻断、选中项按当前结果保持有效、组数摘要标注未知语义 */

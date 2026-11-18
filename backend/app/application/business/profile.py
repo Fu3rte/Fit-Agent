@@ -570,6 +570,8 @@ class ProfileService:
         return await require_branch(self._sessions, session_id)
 
     def _validate_profile(self, payload: object) -> ProfileContent:
+        if isinstance(payload, ProfileContent):
+            payload = payload.model_dump()
         content = validate_content(ProfileContent, payload)
         failures: list[BusinessFieldError] = []
         if content.unavailable_equipment is not None:

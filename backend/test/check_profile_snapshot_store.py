@@ -66,6 +66,7 @@ FULL_PROFILE = {
     "availability": "每周四次",
     "health_notes": None,
     "movement_restrictions": "避免肩部过顶",
+    "height_cm": 175.5, "body_weight_kg": 70.5, "body_weight_measured_on": "2026-01-02",
     "unavailable_equipment": [],
     "forbidden_exercise_ids": [],
 }
@@ -688,7 +689,7 @@ def schema_cases() -> list[tuple[str, object, dict, bool]]:
     return [
         ("prepare_arguments", ProfileProposalArguments, proposal, True),
         ("prepare_arguments", ProfileProposalArguments, {**proposal, "base_profile_version": 3}, True),
-        ("prepare_arguments", ProfileProposalArguments, {**proposal, "base_profile_version": 2, "payload": NULL_PROFILE}, True),
+        ("prepare_arguments", ProfileProposalArguments, {**proposal, "base_profile_version": 2, "payload": NULL_PROFILE}, False),
         ("prepare_arguments", ProfileProposalArguments, {**proposal, "payload": NULL_PROFILE}, False),
         ("prepare_arguments", ProfileProposalArguments, {"profile_id": 1, "base_profile_version": None}, False),
         ("prepare_arguments", ProfileProposalArguments, {**proposal, "session_id": entry_id}, False),

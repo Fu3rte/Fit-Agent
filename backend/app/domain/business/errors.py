@@ -163,7 +163,7 @@ class PlanVersionConflict(BusinessError):
 class ProfileRequired(BusinessError):
     code = "profile_required"
     http_status = 409
-    message = "生成计划需要已保存画像。"
+    message = "生成和调整计划需要已确认保存且包含身高体重的画像。"
 
 
 class PlanConfirmationInvalid(BusinessError):

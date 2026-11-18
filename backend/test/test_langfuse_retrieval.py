@@ -35,10 +35,9 @@ from evaluation.contracts import RelevanceLabel, RetrievalInput
 from evaluation.dataset import load_for_evaluation
 from evaluation.retrieval import upload_payload
 from evaluation.retrieval_metrics import evaluate
-from test.evaluation_fixtures import build_dataset
 from test.test_retrieval_rerank_evaluation import rerank_document
 
-DATASET_PATH = support.BACKEND / "dataset/evaluation/rebuild-v1"
+DATASET_PATH = support.BACKEND / "dataset/evaluation/rebuild-v6"
 PROJECT_ID = "memory-project"
 ENVIRONMENT = "default"
 
@@ -1464,9 +1463,8 @@ def test_submit_resume_with_complete_experiment_skips_task(isolated_root, monkey
 
 
 @pytest.fixture(scope="module")
-def same_pool_document(tmp_path_factory):
-    version_dir = build_dataset(tmp_path_factory.mktemp("langfuse-same-pool"))
-    return rerank_document(version_dir)
+def same_pool_document():
+    return rerank_document(DATASET_PATH)
 
 
 def test_same_pool_groups_share_dataset_with_independent_experiments(
